@@ -81,6 +81,7 @@ from sidepulse.providers import (
     HOOK_PROVIDERS,
     PROVIDER_REGISTRY,
     detect_devin_config,
+    detect_log_path,
     detect_grok_config,
     default_log_path,
     default_state_dir,
@@ -189,6 +190,44 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertTrue(detected.hooks_enabled)
             self.assertIn("PreToolUse", detected.hook_events)
             self.assertIn(log, detected.log_paths)
+
+    def test_detect_devin_config_ignores_unrelated_log_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / ".config" / "devin" / "config.json"
+            unrelated_log = Path("/private/tmp/agent-deck-debug.jsonl")
+            sidepulse_log = home / ".local" / "state" / "sidepulse" / "agent-monitor" / "devin.jsonl"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": f"bun agent-deck-hook --log {unrelated_log};",
+                                        },
+                                        {
+                                            "type": "command",
+                                            "command": (
+                                                "python hook_entry.py --provider devin "
+                                                f"--log {sidepulse_log};"
+                                            ),
+                                        },
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+
+            detected = detect_devin_config(home)
+
+            self.assertEqual(detected.log_paths, (sidepulse_log,))
+            self.assertEqual(detect_log_path("devin", home), sidepulse_log)
 
     def test_detect_devin_config_normalizes_post_compaction_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

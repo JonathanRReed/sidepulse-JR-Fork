@@ -202,6 +202,7 @@ def detect_json_hook_config(
     provider: str,
     config_path: Path,
     allowed_events: tuple[str, ...],
+    command_filter: Callable[[str], bool] | None = None,
 ) -> ProviderConfig:
     if not config_path.exists():
         return ProviderConfig(provider, config_path, False, False, (), ())
@@ -224,7 +225,7 @@ def detect_json_hook_config(
             ) or not isinstance(entries, list):
                 continue
             hook_events.append(canonical)
-            paths.extend(_paths_from_hook_entries(entries))
+            paths.extend(_paths_from_hook_entries(entries, command_filter))
 
     return ProviderConfig(
         provider,
@@ -249,7 +250,10 @@ def default_devin_config_path(home: Path | None = None) -> Path:
 
 def detect_devin_config(home: Path | None = None) -> ProviderConfig:
     return detect_json_hook_config(
-        "devin", default_devin_config_path(home), DEVIN_EVENTS
+        "devin",
+        default_devin_config_path(home),
+        DEVIN_EVENTS,
+        is_sidepulse_devin_command,
     )
 
 
@@ -427,7 +431,10 @@ def _copy_alias(data: dict[str, Any], source: str, target: str) -> None:
         data[target] = data[source]
 
 
-def _paths_from_hook_entries(entries: list[Any]) -> list[Path]:
+def _paths_from_hook_entries(
+    entries: list[Any],
+    command_filter: Callable[[str], bool] | None = None,
+) -> list[Path]:
     paths: list[Path] = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -436,9 +443,28 @@ def _paths_from_hook_entries(entries: list[Any]) -> list[Path]:
             if not isinstance(hook, dict):
                 continue
             command = hook.get("command")
-            if isinstance(command, str):
+            if isinstance(command, str) and (command_filter is None or command_filter(command)):
                 paths.extend(extract_log_paths_from_command(command))
     return paths
+
+
+def is_sidepulse_devin_command(command: str) -> bool:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+
+    has_devin_provider = any(
+        part == "--provider" and index + 1 < len(parts) and parts[index + 1] == "devin"
+        or part == "--provider=devin"
+        for index, part in enumerate(parts)
+    )
+    if not has_devin_provider:
+        return False
+
+    return any(Path(part).name == "hook_entry.py" for part in parts) or (
+        "agent-monitor" in parts and "hook-log" in parts
+    )
 
 
 def extract_log_paths_from_command(command: str) -> list[Path]:
@@ -454,9 +480,9 @@ def extract_log_paths_from_command(command: str) -> list[Path]:
 
     for index, part in enumerate(parts):
         if part == "--log" and index + 1 < len(parts):
-            paths.append(Path(parts[index + 1]).expanduser())
+            paths.append(Path(parts[index + 1].rstrip(";")).expanduser())
         elif part.startswith("--log="):
-            paths.append(Path(part.split("=", 1)[1]).expanduser())
+            paths.append(Path(part.split("=", 1)[1].rstrip(";")).expanduser())
 
     return _dedupe_paths(paths)
 
