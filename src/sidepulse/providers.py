@@ -224,8 +224,11 @@ def detect_json_hook_config(
                 and canonical not in allowed_events
             ) or not isinstance(entries, list):
                 continue
+            event_paths = _paths_from_hook_entries(entries, command_filter)
+            if command_filter is not None and not event_paths:
+                continue
             hook_events.append(canonical)
-            paths.extend(_paths_from_hook_entries(entries, command_filter))
+            paths.extend(event_paths)
 
     return ProviderConfig(
         provider,
