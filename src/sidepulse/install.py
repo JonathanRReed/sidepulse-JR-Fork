@@ -59,11 +59,14 @@ def install_codex_hooks(
     target_log = (log_path or detect_log_path("codex")).expanduser()
     original = config.read_text() if config.exists() else ""
 
-    text = strip_managed_block(original)
-    text = remove_codex_hook_blocks_for_log(text, target_log)
-    text = ensure_codex_hooks_feature(text)
     block = codex_hook_block(target_log, python_executable)
-    new_text = _ensure_trailing_newline(text) + "\n" + block
+    if ensure_codex_hooks_feature(original) == original and original.count(block) == 1:
+        new_text = original
+    else:
+        text = strip_managed_block(original)
+        text = remove_codex_hook_blocks_for_log(text, target_log)
+        text = ensure_codex_hooks_feature(text)
+        new_text = _ensure_trailing_newline(text) + "\n" + block
     changed = new_text != original
 
     backup = None

@@ -1419,6 +1419,65 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertIn(str(log), text)
             self.assertNotIn("echo old", text)
 
+    def test_codex_installer_repeat_preserves_managed_block_before_trust_state(self) -> None:
+        """An installed Codex config must not be rewritten only to move hook tables."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.toml"
+            log = base / "codex.jsonl"
+            events = (
+                "SessionStart",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "PermissionRequest",
+                "PreCompact",
+                "PostCompact",
+                "SubagentStart",
+                "SubagentStop",
+                "Stop",
+            )
+            lines = [
+                "[features]",
+                "hooks = true",
+                "",
+                "# >>> agent-monitor hooks >>>",
+                "# Provider-neutral status collection. Do not edit inside this block.",
+            ]
+            for event in events:
+                lines.extend(
+                    [
+                        f"[[hooks.{event}]]",
+                        'matcher = "*"',
+                        f"[[hooks.{event}.hooks]]",
+                        'type = "command"',
+                        "command = '''fixture-codex-hook-command'''",
+                        "",
+                    ]
+                )
+            lines.extend(
+                [
+                    "# <<< agent-monitor hooks <<<",
+                    "",
+                    "[hooks.state]",
+                    'source = "preserve-me"',
+                    "",
+                    '[hooks.state."fixture:pre_tool_use:0:0"]',
+                    'trusted_hash = "fixture-trusted-hash"',
+                    "",
+                ]
+            )
+            config.write_text("\n".join(lines))
+            original = config.read_bytes()
+
+            with patch("sidepulse.install.hook_command", return_value="fixture-codex-hook-command"):
+                result = install_codex_hooks(log_path=log, config_path=config)
+
+            self.assertFalse(result.changed)
+            self.assertIsNone(result.backup_path)
+            self.assertEqual(config.read_bytes(), original)
+            self.assertEqual(list(base.glob("config.toml.bak.*")), [])
+
     def test_codex_installer_refreshes_managed_hook_trust_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
