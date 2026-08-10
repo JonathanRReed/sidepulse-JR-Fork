@@ -155,11 +155,12 @@ configuration is written, SidePulse creates a timestamped backup beside it.
 Use `sidepulse agent-monitor uninstall <provider>` to remove only SidePulse
 hooks, or restore that backup if you need to roll back the complete file.
 
-To add a future provider, register a `ProviderSpec` with its provider identity,
-supported event set, configuration detector, and installer/uninstaller adapter.
-The detector reports the config and log paths to `doctor`; the adapter is
-responsible for preserving unrelated configuration while adding and removing
-only SidePulse hooks.
+To add a future provider, add a `ProviderSpec` for its identity, supported
+event set, and configuration detector; add its adapter functions to both
+`INSTALLERS` and `UNINSTALLERS`; and add preservation, detection, and CLI
+coverage. The detector reports the config and log paths to `doctor`; the
+adapter must preserve unrelated configuration while adding and removing only
+SidePulse hooks.
 
 #### Local reply classifier (Apple Silicon)
 
