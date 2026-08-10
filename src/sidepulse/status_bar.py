@@ -79,12 +79,8 @@ from .device_writer import (
 from .keep_awake import KEEPALIVE_FILE_NAME, KeepAwakeController
 from .ipc import HookEventServer, default_event_socket_path, default_latest_state_path
 from .install import (
-    install_claude_hooks,
-    install_codex_hooks,
-    install_grok_hooks,
-    uninstall_claude_hooks,
-    uninstall_codex_hooks,
-    uninstall_grok_hooks,
+    install_provider_hooks,
+    uninstall_provider_hooks,
 )
 from .led_status import (
     AgentLedController,
@@ -104,15 +100,14 @@ from .lid_sleep import (
     sleep_helper_install_command,
     sleep_helper_installed,
 )
-from .models import AgentMode, AgentStatus, provider_label
+from .models import AgentMode, AgentStatus
 from .providers import (
+    HOOK_PROVIDERS,
     ProviderConfig,
-    detect_claude_config,
-    detect_codex_config,
-    detect_grok_config,
     detect_log_path,
     default_state_dir,
     parse_log_line,
+    provider_spec,
 )
 from .sd_eject_guard_launch import (
     SD_EJECT_GUARD_DISPLAY_NAME,
@@ -210,7 +205,7 @@ def state_for_mode(mode: AgentMode) -> StatusBarState:
 def replay_recent_debug_logs(
     monitor: LiveAgentMonitor,
     *,
-    providers: tuple[str, ...] = ("codex", "claude", "grok"),
+    providers: tuple[str, ...] = HOOK_PROVIDERS,
     max_lines: int = STATUS_BAR_STARTUP_REPLAY_LINES,
 ) -> int:
     replayed = 0
@@ -478,6 +473,14 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def uninstallClaudeHooks_(self, _sender):
         self.update_hooks("claude", install=False)
+
+    @objc.IBAction
+    def installDevinHooks_(self, _sender):
+        self.update_hooks("devin", install=True)
+
+    @objc.IBAction
+    def uninstallDevinHooks_(self, _sender):
+        self.update_hooks("devin", install=False)
 
     @objc.IBAction
     def installGrokHooks_(self, _sender):
@@ -782,21 +785,11 @@ class StatusBarController(NSObject):
         if self.settings_window is None:
             return
 
-        codex = detect_codex_config()
-        claude = detect_claude_config()
-        grok = detect_grok_config()
-        set_field_value(
-            self.settings_fields.get("codex_hook_status"),
-            hook_status_text(codex),
-        )
-        set_field_value(
-            self.settings_fields.get("claude_hook_status"),
-            hook_status_text(claude),
-        )
-        set_field_value(
-            self.settings_fields.get("grok_hook_status"),
-            hook_status_text(grok),
-        )
+        for provider in HOOK_PROVIDERS:
+            set_field_value(
+                self.settings_fields.get(f"{provider}_hook_status"),
+                hook_status_text(provider_spec(provider).detector(None)),
+            )
         set_field_value(
             self.settings_fields.get("settings_path"),
             f"Settings: {default_settings_path()}",
@@ -821,7 +814,7 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("battery_power_preview"),
             self.settings.battery_show_on_power_change,
         )
-        for provider in ("codex", "claude", "grok"):
+        for provider in HOOK_PROVIDERS:
             popup = self.settings_fields.get(f"{provider}_session_opener")
             if popup is not None:
                 select_popup_action(
@@ -877,18 +870,11 @@ class StatusBarController(NSObject):
 
     def update_hooks(self, provider: str, *, install: bool) -> None:
         try:
-            if provider == "codex" and install:
-                result = install_codex_hooks()
-            elif provider == "codex":
-                result = uninstall_codex_hooks()
-            elif provider == "claude" and install:
-                result = install_claude_hooks()
-            elif provider == "claude":
-                result = uninstall_claude_hooks()
-            elif install:
-                result = install_grok_hooks()
-            else:
-                result = uninstall_grok_hooks()
+            result = (
+                install_provider_hooks(provider)
+                if install
+                else uninstall_provider_hooks(provider)
+            )
         except Exception as exc:
             self.set_settings_message(f"{provider.title()} hooks failed: {exc}")
             self.refresh_settings_window()
@@ -2044,7 +2030,7 @@ def format_byte_count(size: int) -> str:
 
 def build_settings_window(target: StatusBarController) -> NSWindow:
     width = 680
-    height = 980
+    height = 1022
     style = (
         NSWindowStyleMaskTitled
         | NSWindowStyleMaskClosable
@@ -2061,21 +2047,16 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     window.center()
     content = window.contentView()
 
-    add_label(content, "Agent Hooks", 24, 932, 200, 24)
-    add_label(content, "Codex", 32, 890, 80, 22)
-    codex_status = add_label(content, "", 112, 890, 270, 22)
-    add_button(content, "Install", 432, 886, 90, 28, target, "installCodexHooks:")
-    add_button(content, "Uninstall", 532, 886, 100, 28, target, "uninstallCodexHooks:")
-
-    add_label(content, "Claude", 32, 848, 80, 22)
-    claude_status = add_label(content, "", 112, 848, 270, 22)
-    add_button(content, "Install", 432, 844, 90, 28, target, "installClaudeHooks:")
-    add_button(content, "Uninstall", 532, 844, 100, 28, target, "uninstallClaudeHooks:")
-
-    add_label(content, "Grok", 32, 806, 80, 22)
-    grok_status = add_label(content, "", 112, 806, 270, 22)
-    add_button(content, "Install", 432, 802, 90, 28, target, "installGrokHooks:")
-    add_button(content, "Uninstall", 532, 802, 100, 28, target, "uninstallGrokHooks:")
+    add_label(content, "Agent Hooks", 24, 974, 200, 24)
+    hook_statuses = {}
+    for index, provider in enumerate(HOOK_PROVIDERS):
+        y = 932 - index * 42
+        label = provider_spec(provider).label
+        add_label(content, label, 32, y, 80, 22)
+        hook_statuses[provider] = add_label(content, "", 112, y, 270, 22)
+        selector = provider.title()
+        add_button(content, "Install", 432, y - 4, 90, 28, target, f"install{selector}Hooks:")
+        add_button(content, "Uninstall", 532, y - 4, 100, 28, target, f"uninstall{selector}Hooks:")
 
     add_separator(content, 24, 776, width - 48)
     add_label(content, "Transcript Monitoring", 24, 742, 240, 24)
@@ -2157,9 +2138,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     settings_path = add_label(content, "", 24, 4, width - 48, 18)
 
     target.settings_fields = {
-        "codex_hook_status": codex_status,
-        "claude_hook_status": claude_status,
-        "grok_hook_status": grok_status,
+        **{f"{provider}_hook_status": status for provider, status in hook_statuses.items()},
         "debug_log_status": debug_log_status,
         "codex_session_opener": codex_opener,
         "claude_session_opener": claude_opener,

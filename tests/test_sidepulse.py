@@ -378,6 +378,15 @@ class AgentMonitorTests(unittest.TestCase):
             "Claude Code CLI",
         )
 
+    def test_origin_process_detection_identifies_devin_cli(self) -> None:
+        origin = origin_from_processes(
+            "devin",
+            (ProcessInfo(pid=100, ppid=1, comm="/Users/me/.local/bin/devin", command="devin"),),
+        )
+
+        self.assertIsNotNone(origin)
+        self.assertEqual(origin.label, "Devin CLI")
+
     def test_grok_log_line_normalizes_camel_case_payload(self) -> None:
         record = parse_log_line(
             "grok",
@@ -1733,6 +1742,18 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertEqual(grok_hook_log.provider, "grok")
         self.assertIn("sidepulse agent-monitor", parser.format_usage())
 
+    def test_devin_cli_install_and_log_arguments_are_available(self) -> None:
+        parser = build_parser(prog="sidepulse agent-monitor")
+
+        install = parser.parse_args(["install", "devin", "--devin-log", "/tmp/devin.jsonl"])
+        hook_log = parser.parse_args(
+            ["hook-log", "--provider", "devin", "--log", "/tmp/devin.jsonl"]
+        )
+
+        self.assertEqual(install.provider, "devin")
+        self.assertEqual(install.devin_log, Path("/tmp/devin.jsonl"))
+        self.assertEqual(hook_log.provider, "devin")
+
     def test_sidepulse_entrypoint_dispatches_to_sidepulse(self) -> None:
         with patch.object(cli_module, "main", return_value=17) as main:
             result = cli_module.sidepulse_main(["agent-monitor", "live"])
@@ -1915,6 +1936,13 @@ class AgentMonitorTests(unittest.TestCase):
             changed=False,
             backup_path=None,
         )
+        devin_result = SimpleNamespace(
+            provider="devin",
+            config_path=Path("/tmp/devin-config.json"),
+            log_path=Path("/tmp/devin.jsonl"),
+            changed=True,
+            backup_path=None,
+        )
         grok_result = SimpleNamespace(
             provider="grok",
             config_path=Path("/tmp/grok-hook.json"),
@@ -1939,9 +1967,11 @@ class AgentMonitorTests(unittest.TestCase):
         )
 
         with (
-            patch.object(cli_module, "install_codex_hooks", return_value=codex_result) as codex,
-            patch.object(cli_module, "install_claude_hooks", return_value=claude_result) as claude,
-            patch.object(cli_module, "install_grok_hooks", return_value=grok_result) as grok,
+            patch.object(
+                cli_module,
+                "install_provider_hooks",
+                side_effect=(codex_result, claude_result, devin_result, grok_result),
+            ) as install,
             patch(
                 "sidepulse.sd_eject_guard_launch.install_sd_eject_guard",
                 return_value=guard_result,
@@ -1954,9 +1984,10 @@ class AgentMonitorTests(unittest.TestCase):
             result = cli_module.cmd_sidepulse_setup(args)
 
         self.assertEqual(result, 0)
-        codex.assert_called_once()
-        claude.assert_called_once()
-        grok.assert_called_once()
+        self.assertEqual(
+            [call.args[0] for call in install.call_args_list],
+            ["codex", "claude", "devin", "grok"],
+        )
         guard.assert_called_once_with(scope="auto", dry_run=False)
         launch.assert_called_once_with(start=True)
 
@@ -2616,6 +2647,15 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertIn("grok", providers)
         self.assertNotIn("codex-transcripts", providers)
         self.assertNotIn("claude-transcripts", providers)
+
+    def test_default_sources_include_registered_hook_providers(self) -> None:
+        with patch("sidepulse.collector.load_settings", return_value=AgentMonitorSettings()):
+            sources = default_sources()
+
+        providers = tuple(
+            source.provider for source in sources if not source.provider.endswith("-transcript")
+        )
+        self.assertEqual(providers, HOOK_PROVIDERS)
 
     def test_settings_round_trip_remembered_device_display_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

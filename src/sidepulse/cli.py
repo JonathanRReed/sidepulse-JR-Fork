@@ -20,12 +20,8 @@ from .collector import AgentMonitor, SourceSpec, default_sources
 from .device_writer import DEFAULT_FILE_NAME, DeviceWriteError, write_led_program
 from .hook import hook_log_main
 from .install import (
-    install_claude_hooks,
-    install_codex_hooks,
-    install_grok_hooks,
-    uninstall_claude_hooks,
-    uninstall_codex_hooks,
-    uninstall_grok_hooks,
+    install_provider_hooks,
+    uninstall_provider_hooks,
 )
 from .led_status import AgentLedController, LedStatusWrite
 from .lid_sleep import (
@@ -37,11 +33,9 @@ from .lid_sleep import (
 from .models import AgentStatus
 from .providers import (
     HOOK_PROVIDERS,
-    detect_claude_config,
-    detect_codex_config,
-    detect_grok_config,
-    detect_log_path,
+    detect_provider_configs,
     default_log_path,
+    provider_spec,
 )
 from .settings import (
     LED_DISPLAY_BATTERY,
@@ -93,9 +87,7 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
         help="Agent hooks to install. Default: all.",
     )
     setup.add_argument("--log-dir", type=Path, help="Directory for provider JSONL files.")
-    setup.add_argument("--codex-log", type=Path, help="Codex JSONL log path.")
-    setup.add_argument("--claude-log", type=Path, help="Claude JSONL log path.")
-    setup.add_argument("--grok-log", type=Path, help="Grok JSONL log path.")
+    add_provider_log_arguments(setup)
     setup.add_argument("--dry-run", action="store_true", help="Show what would change.")
     setup.add_argument(
         "--sd-eject-guard-scope",
@@ -628,17 +620,13 @@ def build_parser(prog: str = "agent-monitor") -> argparse.ArgumentParser:
     install = subparsers.add_parser("install", help="Install Codex, Claude, and/or Grok monitor hooks.")
     install.add_argument("provider", choices=("all", *HOOK_PROVIDERS), nargs="?", default="all")
     install.add_argument("--log-dir", type=Path, help="Directory for provider JSONL files.")
-    install.add_argument("--codex-log", type=Path, help="Codex JSONL log path.")
-    install.add_argument("--claude-log", type=Path, help="Claude JSONL log path.")
-    install.add_argument("--grok-log", type=Path, help="Grok JSONL log path.")
+    add_provider_log_arguments(install)
     install.add_argument("--dry-run", action="store_true", help="Show what would change.")
     install.set_defaults(func=cmd_install)
 
     uninstall = subparsers.add_parser("uninstall", help="Remove Codex, Claude, and/or Grok monitor hooks.")
     uninstall.add_argument("provider", choices=("all", *HOOK_PROVIDERS), nargs="?", default="all")
-    uninstall.add_argument("--codex-log", type=Path, help="Codex JSONL log path.")
-    uninstall.add_argument("--claude-log", type=Path, help="Claude JSONL log path.")
-    uninstall.add_argument("--grok-log", type=Path, help="Grok JSONL log path.")
+    add_provider_log_arguments(uninstall)
     uninstall.add_argument("--dry-run", action="store_true", help="Show what would change.")
     uninstall.set_defaults(func=cmd_uninstall)
 
@@ -680,13 +668,20 @@ def add_status_args(parser: argparse.ArgumentParser, include_json: bool = True) 
         help="Seconds before an unmatched Tool Running event is treated as stale; 0 disables this.",
     )
     parser.add_argument("--max-lines", type=int, default=5000, help="Recent JSONL lines to scan per source.")
-    parser.add_argument("--codex-log", type=Path, help="Codex JSONL log path.")
-    parser.add_argument("--claude-log", type=Path, help="Claude JSONL log path.")
-    parser.add_argument("--grok-log", type=Path, help="Grok JSONL log path.")
+    add_provider_log_arguments(parser)
+
+
+def add_provider_log_arguments(parser: argparse.ArgumentParser) -> None:
+    for provider in HOOK_PROVIDERS:
+        parser.add_argument(
+            f"--{provider}-log",
+            type=Path,
+            help=f"{provider_spec(provider).label} JSONL log path.",
+        )
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    configs = [detect_codex_config(), detect_claude_config(), detect_grok_config()]
+    configs = detect_provider_configs()
     payload = {"providers": [config.to_dict() for config in configs]}
     if args.json:
         print(json.dumps(payload, indent=2))
@@ -801,12 +796,7 @@ def install_hook_results(args: argparse.Namespace):
     results = []
     for provider in providers:
         log_path = install_log_path(provider, args)
-        if provider == "codex":
-            results.append(install_codex_hooks(log_path=log_path, dry_run=args.dry_run))
-        elif provider == "claude":
-            results.append(install_claude_hooks(log_path=log_path, dry_run=args.dry_run))
-        else:
-            results.append(install_grok_hooks(log_path=log_path, dry_run=args.dry_run))
+        results.append(install_provider_hooks(provider, log_path=log_path, dry_run=args.dry_run))
     return results
 
 
@@ -827,12 +817,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     results = []
     for provider in providers:
         log_path = uninstall_log_path(provider, args)
-        if provider == "codex":
-            results.append(uninstall_codex_hooks(log_path=log_path, dry_run=args.dry_run))
-        elif provider == "claude":
-            results.append(uninstall_claude_hooks(log_path=log_path, dry_run=args.dry_run))
-        else:
-            results.append(uninstall_grok_hooks(log_path=log_path, dry_run=args.dry_run))
+        results.append(uninstall_provider_hooks(provider, log_path=log_path, dry_run=args.dry_run))
 
     for result in results:
         action = "would remove" if args.dry_run and result.changed else "removed"

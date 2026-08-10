@@ -126,6 +126,8 @@ def origin_from_processes(
             return surface_origin(provider, "cli", "process:codex")
         if provider == "claude" and basename in {"claude", "claude-code"}:
             return surface_origin(provider, "cli", "process:claude")
+        if provider == "devin" and basename == "devin":
+            return surface_origin(provider, "cli", "process:devin")
         if provider == "grok" and basename == "grok":
             return surface_origin(provider, "cli", "process:grok")
 
@@ -146,6 +148,10 @@ def surface_origin(provider: str, surface: str, source: str) -> AgentOrigin:
         ("claude", "cursor"): "Claude in Cursor",
         ("claude", "windsurf"): "Claude in Windsurf",
         ("claude", "transcript"): "Claude Transcript",
+        ("devin", "cli"): "Devin CLI",
+        ("devin", "vscode"): "Devin in VS Code",
+        ("devin", "cursor"): "Devin in Cursor",
+        ("devin", "windsurf"): "Devin in Windsurf",
         ("grok", "app"): "Grok App",
         ("grok", "cli"): "Grok CLI",
         ("grok", "vscode"): "Grok in VS Code",
