@@ -49,9 +49,11 @@ from sidepulse.install import (
     hook_command,
     install_claude_hooks,
     install_codex_hooks,
+    install_devin_hooks,
     install_grok_hooks,
     uninstall_claude_hooks,
     uninstall_codex_hooks,
+    uninstall_devin_hooks,
     uninstall_grok_hooks,
     update_codex_trusted_hashes,
 )
@@ -1513,6 +1515,74 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertFalse(any(command.startswith("jq -c") for command in pre_tool_commands))
             self.assertIn("matcher", data["hooks"]["PreToolUse"][-1])
             self.assertNotIn("matcher", data["hooks"]["SessionStart"][-1])
+
+    def test_devin_installer_preserves_agent_deck_hooks_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.json"
+            log = base / "devin.jsonl"
+            agent_deck = "/opt/homebrew/bin/bun /tmp/agent-deck-hook.ts"
+            config.write_text(
+                json.dumps(
+                    {
+                        "theme_mode": "dark",
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "matcher": "^exec$",
+                                    "hooks": [{"type": "command", "command": agent_deck}],
+                                }
+                            ],
+                        },
+                    }
+                )
+            )
+
+            first = install_devin_hooks(log, config, python_executable="python3")
+            first_text = config.read_text()
+            second = install_devin_hooks(log, config, python_executable="python3")
+
+            data = json.loads(config.read_text())
+            commands = [
+                hook["command"]
+                for entry in data["hooks"]["PreToolUse"]
+                for hook in entry["hooks"]
+            ]
+            self.assertTrue(first.changed)
+            self.assertIsNotNone(first.backup_path)
+            self.assertFalse(second.changed)
+            self.assertEqual(config.read_text(), first_text)
+            self.assertEqual(commands.count(agent_deck), 1)
+            self.assertEqual(sum("--provider devin" in command for command in commands), 1)
+            self.assertEqual(data["theme_mode"], "dark")
+
+    def test_devin_uninstaller_removes_only_sidepulse_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.json"
+            log = base / "devin.jsonl"
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "Stop": [
+                                {
+                                    "hooks": [
+                                        {"type": "command", "command": "echo keep-agent-deck"}
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            install_devin_hooks(log, config, python_executable="python3")
+
+            result = uninstall_devin_hooks(log, config)
+
+            self.assertTrue(result.changed)
+            self.assertIn("keep-agent-deck", config.read_text())
+            self.assertNotIn("--provider devin", config.read_text())
 
     def test_codex_uninstaller_removes_monitor_hooks_and_preserves_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

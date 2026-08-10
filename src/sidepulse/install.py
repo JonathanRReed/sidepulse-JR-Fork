@@ -18,7 +18,9 @@ from typing import Any
 from .providers import (
     CLAUDE_EVENTS,
     CODEX_EVENTS,
+    DEVIN_EVENTS,
     GROK_EVENTS,
+    default_devin_config_path,
     default_grok_hook_config_path,
     detect_log_path,
 )
@@ -160,6 +162,41 @@ def install_grok_hooks(
     return InstallResult("grok", config, target_log, changed, backup, dry_run)
 
 
+def install_devin_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+    python_executable: str | None = None,
+) -> InstallResult:
+    config = config_path or default_devin_config_path()
+    target_log = (log_path or detect_log_path("devin")).expanduser()
+    data = read_json_config(config)
+
+    original = json.dumps(data, sort_keys=True)
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError(f"Expected hooks object in {config}")
+    command = hook_command("devin", target_log, python_executable)
+    for event_name in DEVIN_EVENTS:
+        entries = hooks.get(event_name, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"Expected hooks.{event_name} array in {config}")
+        cleaned = remove_json_command_hooks_for_log(entries, target_log)
+        cleaned.append({"hooks": [{"type": "command", "command": command}]})
+        hooks[event_name] = cleaned
+
+    changed = json.dumps(data, sort_keys=True) != original
+    backup = None
+    if changed and not dry_run:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        backup = backup_file(config)
+        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+        target_log.parent.mkdir(parents=True, exist_ok=True)
+        target_log.touch(exist_ok=True)
+
+    return InstallResult("devin", config, target_log, changed, backup, dry_run)
+
+
 def uninstall_codex_hooks(
     log_path: Path | None = None,
     config_path: Path | None = None,
@@ -263,6 +300,65 @@ def uninstall_grok_hooks(
                 pass
 
     return InstallResult("grok", config, target_log, changed, backup, dry_run)
+
+
+def uninstall_devin_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+) -> InstallResult:
+    config = config_path or default_devin_config_path()
+    target_log = (log_path or detect_log_path("devin")).expanduser()
+    data = read_json_config(config)
+
+    original = json.dumps(data, sort_keys=True)
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        for event_name in list(hooks):
+            entries = hooks.get(event_name)
+            if event_name not in DEVIN_EVENTS or not isinstance(entries, list):
+                continue
+
+            cleaned = remove_json_command_hooks_for_log(entries, target_log)
+            if cleaned:
+                hooks[event_name] = cleaned
+            else:
+                hooks.pop(event_name, None)
+
+        if not hooks:
+            data.pop("hooks", None)
+
+    changed = json.dumps(data, sort_keys=True) != original
+    backup = None
+    if changed and not dry_run:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        backup = backup_file(config)
+        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+
+    return InstallResult("devin", config, target_log, changed, backup, dry_run)
+
+
+INSTALLERS = {
+    "codex": install_codex_hooks,
+    "claude": install_claude_hooks,
+    "devin": install_devin_hooks,
+    "grok": install_grok_hooks,
+}
+
+UNINSTALLERS = {
+    "codex": uninstall_codex_hooks,
+    "claude": uninstall_claude_hooks,
+    "devin": uninstall_devin_hooks,
+    "grok": uninstall_grok_hooks,
+}
+
+
+def install_provider_hooks(provider: str, **kwargs: Any) -> InstallResult:
+    return INSTALLERS[provider](**kwargs)
+
+
+def uninstall_provider_hooks(provider: str, **kwargs: Any) -> InstallResult:
+    return UNINSTALLERS[provider](**kwargs)
 
 
 def hook_command(
