@@ -187,6 +187,36 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertIn("PreToolUse", detected.hook_events)
             self.assertIn(log, detected.log_paths)
 
+    def test_detect_devin_config_normalizes_post_compaction_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / ".config" / "devin" / "config.json"
+            log = home / "state" / "devin-post-compaction.jsonl"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PostCompaction": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": f"python hook_entry.py --provider devin --log {log}",
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    }
+                )
+            )
+
+            detected = detect_devin_config(home)
+
+            self.assertIn("PostCompact", detected.hook_events)
+            self.assertIn(log, detected.log_paths)
+
     def test_devin_post_compaction_and_prompt_id_are_normalized(self) -> None:
         record = parse_log_line(
             "devin",

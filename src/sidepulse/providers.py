@@ -218,7 +218,10 @@ def detect_json_hook_config(
     if isinstance(hooks, dict):
         for event_name, entries in hooks.items():
             canonical = canonical_event_name(event_name)
-            if canonical not in allowed_events or not isinstance(entries, list):
+            if (
+                event_name not in allowed_events
+                and canonical not in allowed_events
+            ) or not isinstance(entries, list):
                 continue
             hook_events.append(canonical)
             paths.extend(_paths_from_hook_entries(entries))
