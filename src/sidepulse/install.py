@@ -60,7 +60,7 @@ def install_codex_hooks(
     original = config.read_text() if config.exists() else ""
 
     block = codex_hook_block(target_log, python_executable)
-    if ensure_codex_hooks_feature(original) == original and original.count(block) == 1:
+    if is_pristine_codex_hook_install(original, block, target_log):
         new_text = original
     else:
         text = strip_managed_block(original)
@@ -666,6 +666,13 @@ def remove_codex_hook_blocks_for_log(text: str, log_path: Path) -> str:
         index += 1
 
     return "".join(out)
+
+
+def is_pristine_codex_hook_install(text: str, block: str, log_path: Path) -> bool:
+    if ensure_codex_hooks_feature(text) != text or text.count(block) != 1:
+        return False
+    unmanaged_text = text.replace(block, "", 1)
+    return remove_codex_hook_blocks_for_log(unmanaged_text, log_path) == unmanaged_text
 
 
 def remove_claude_hooks_for_log(entries: list[Any], log_path: Path) -> list[dict[str, Any]]:

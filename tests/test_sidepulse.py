@@ -229,6 +229,70 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(detected.log_paths, (sidepulse_log,))
             self.assertEqual(detect_log_path("devin", home), sidepulse_log)
 
+    def test_detect_devin_config_ignores_unrelated_only_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / ".config" / "devin" / "config.json"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": "bun agent-deck-hook --log /private/tmp/debug.jsonl",
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+
+            detected = detect_devin_config(home)
+
+            self.assertFalse(detected.hooks_enabled)
+            self.assertEqual(detected.hook_events, ())
+            self.assertEqual(detected.log_paths, ())
+
+    def test_detect_devin_config_reads_packaged_hook_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / ".config" / "devin" / "config.json"
+            log = home / "state" / "devin.jsonl"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "Stop": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": (
+                                                "agent-monitor hook-log --provider devin "
+                                                f"--log {log}"
+                                            ),
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+
+            detected = detect_devin_config(home)
+
+            self.assertTrue(detected.hooks_enabled)
+            self.assertEqual(detected.hook_events, ("Stop",))
+            self.assertEqual(detected.log_paths, (log,))
+
     def test_detect_devin_config_normalizes_post_compaction_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -1425,6 +1489,7 @@ class AgentMonitorTests(unittest.TestCase):
             base = Path(tmp)
             config = base / "config.toml"
             log = base / "codex.jsonl"
+            current_command = f"fixture hook_entry.py --provider codex --log {log}"
             events = (
                 "SessionStart",
                 "UserPromptSubmit",
@@ -1451,7 +1516,7 @@ class AgentMonitorTests(unittest.TestCase):
                         'matcher = "*"',
                         f"[[hooks.{event}.hooks]]",
                         'type = "command"',
-                        "command = '''fixture-codex-hook-command'''",
+                        f"command = '''{current_command}'''",
                         "",
                     ]
                 )
@@ -1470,13 +1535,91 @@ class AgentMonitorTests(unittest.TestCase):
             config.write_text("\n".join(lines))
             original = config.read_bytes()
 
-            with patch("sidepulse.install.hook_command", return_value="fixture-codex-hook-command"):
+            with patch("sidepulse.install.hook_command", return_value=current_command):
                 result = install_codex_hooks(log_path=log, config_path=config)
 
             self.assertFalse(result.changed)
             self.assertIsNone(result.backup_path)
             self.assertEqual(config.read_bytes(), original)
             self.assertEqual(list(base.glob("config.toml.bak.*")), [])
+
+    def test_codex_installer_replaces_stale_hook_alongside_exact_managed_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.toml"
+            log = base / "codex.jsonl"
+            current_command = f"fixture hook_entry.py --provider codex --log {log}"
+            events = (
+                "SessionStart",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "PermissionRequest",
+                "PreCompact",
+                "PostCompact",
+                "SubagentStart",
+                "SubagentStop",
+                "Stop",
+            )
+            lines = [
+                "[features]",
+                "hooks = true",
+                "",
+                "# >>> agent-monitor hooks >>>",
+                "# Provider-neutral status collection. Do not edit inside this block.",
+            ]
+            for event in events:
+                lines.extend(
+                    [
+                        f"[[hooks.{event}]]",
+                        'matcher = "*"',
+                        f"[[hooks.{event}.hooks]]",
+                        'type = "command"',
+                        f"command = '''{current_command}'''",
+                        "",
+                    ]
+                )
+            lines.extend(
+                [
+                    "# <<< agent-monitor hooks <<<",
+                    "",
+                    "[[hooks.PreToolUse]]",
+                    'matcher = "*"',
+                    "[[hooks.PreToolUse.hooks]]",
+                    'type = "command"',
+                    "command = '''legacy hook_entry.py --provider codex'''",
+                    "",
+                    "[[hooks.PreToolUse]]",
+                    'matcher = "*"',
+                    "[[hooks.PreToolUse.hooks]]",
+                    'type = "command"',
+                    "command = '''echo preserve-unrelated-hook'''",
+                    "",
+                    "[hooks.state]",
+                    'source = "preserve-me"',
+                    "",
+                ]
+            )
+            config.write_text("\n".join(lines))
+
+            with patch("sidepulse.install.hook_command", return_value=current_command):
+                result = install_codex_hooks(log_path=log, config_path=config)
+
+            self.assertTrue(result.changed)
+            text = config.read_text()
+            self.assertNotIn("legacy hook_entry.py", text)
+            self.assertIn("echo preserve-unrelated-hook", text)
+            self.assertEqual(text.count(current_command), len(events))
+            self.assertEqual(text.count("# >>> agent-monitor hooks >>>"), 1)
+            self.assertEqual(text.count("# <<< agent-monitor hooks <<<"), 1)
+
+            first_update = config.read_bytes()
+            with patch("sidepulse.install.hook_command", return_value=current_command):
+                repeat = install_codex_hooks(log_path=log, config_path=config)
+
+            self.assertFalse(repeat.changed)
+            self.assertIsNone(repeat.backup_path)
+            self.assertEqual(config.read_bytes(), first_update)
 
     def test_codex_installer_refreshes_managed_hook_trust_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
