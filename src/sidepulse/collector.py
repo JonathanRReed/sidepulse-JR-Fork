@@ -19,7 +19,7 @@ from .models import (
     provider_label,
 )
 from .origin import origin_label_from_payload
-from .providers import detect_log_path, parse_log_line
+from .providers import HOOK_PROVIDERS, detect_log_path, parse_log_line
 from .settings import AgentMonitorSettings, load_settings
 
 
@@ -476,15 +476,13 @@ class LiveAgentMonitor:
 
 def default_sources(settings: AgentMonitorSettings | None = None) -> tuple[SourceSpec, ...]:
     active_settings = load_settings() if settings is None else settings
-    sources = [
-        SourceSpec("codex", detect_log_path("codex")),
-    ]
-    if active_settings.codex_transcripts_enabled:
-        sources.append(SourceSpec(CODEX_TRANSCRIPT_PROVIDER, Path.home() / ".codex" / "sessions"))
-    sources.append(SourceSpec("claude", detect_log_path("claude")))
-    if active_settings.claude_transcripts_enabled:
-        sources.append(SourceSpec(CLAUDE_TRANSCRIPT_PROVIDER, Path.home() / ".claude" / "projects"))
-    sources.append(SourceSpec("grok", detect_log_path("grok")))
+    sources: list[SourceSpec] = []
+    for provider in HOOK_PROVIDERS:
+        sources.append(SourceSpec(provider, detect_log_path(provider)))
+        if provider == "codex" and active_settings.codex_transcripts_enabled:
+            sources.append(SourceSpec(CODEX_TRANSCRIPT_PROVIDER, Path.home() / ".codex" / "sessions"))
+        if provider == "claude" and active_settings.claude_transcripts_enabled:
+            sources.append(SourceSpec(CLAUDE_TRANSCRIPT_PROVIDER, Path.home() / ".claude" / "projects"))
     return unique_sources(sources)
 
 

@@ -6,6 +6,7 @@ import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from .models import HookEvent, parse_datetime
@@ -61,8 +62,16 @@ GROK_EVENTS = (
     "SessionEnd",
 )
 
-HOOK_PROVIDERS = ("codex", "claude", "grok")
-KNOWN_EVENTS = tuple(dict.fromkeys(CODEX_EVENTS + CLAUDE_EVENTS + GROK_EVENTS))
+DEVIN_EVENTS = (
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PermissionRequest",
+    "PostCompaction",
+    "Stop",
+    "SessionEnd",
+)
 
 
 @dataclass(frozen=True)
@@ -85,6 +94,16 @@ class ProviderConfig:
         }
 
 
+@dataclass(frozen=True)
+class ProviderSpec:
+    provider: str
+    label: str
+    events: tuple[str, ...]
+    config_kind: str
+    config_path: Callable[[Path | None], Path]
+    detector: Callable[[Path | None], ProviderConfig]
+
+
 def default_state_dir(home: Path | None = None) -> Path:
     if home is None:
         xdg_state_home = os.environ.get("XDG_STATE_HOME")
@@ -100,13 +119,13 @@ def default_log_path(provider: str, home: Path | None = None) -> Path:
     return default_state_dir(home) / f"{provider}.{suffix}"
 
 
-def detect_provider_configs(home: Path | None = None) -> list[ProviderConfig]:
-    return [detect_codex_config(home), detect_claude_config(home), detect_grok_config(home)]
+def default_codex_config_path(home: Path | None = None) -> Path:
+    base = home or Path.home()
+    return base / ".codex" / "config.toml"
 
 
 def detect_codex_config(home: Path | None = None) -> ProviderConfig:
-    base = home or Path.home()
-    config_path = base / ".codex" / "config.toml"
+    config_path = default_codex_config_path(home)
     if not config_path.exists():
         return ProviderConfig("codex", config_path, False, False, (), ())
 
@@ -174,16 +193,24 @@ def codex_hooks_feature_enabled(text: str) -> bool:
     return bool(re.search(r"^\s*hooks\s*=\s*true\s*$", match.group(1), re.MULTILINE))
 
 
-def detect_claude_config(home: Path | None = None) -> ProviderConfig:
+def default_claude_config_path(home: Path | None = None) -> Path:
     base = home or Path.home()
-    config_path = base / ".claude" / "settings.json"
+    return base / ".claude" / "settings.json"
+
+
+def detect_json_hook_config(
+    provider: str,
+    config_path: Path,
+    allowed_events: tuple[str, ...],
+    command_filter: Callable[[str], bool] | None = None,
+) -> ProviderConfig:
     if not config_path.exists():
-        return ProviderConfig("claude", config_path, False, False, (), ())
+        return ProviderConfig(provider, config_path, False, False, (), ())
 
     try:
         data = json.loads(config_path.read_text())
     except Exception:
-        return ProviderConfig("claude", config_path, True, False, (), ())
+        return ProviderConfig(provider, config_path, True, False, (), ())
 
     hooks = data.get("hooks") or {}
     hook_events: list[str] = []
@@ -191,18 +218,45 @@ def detect_claude_config(home: Path | None = None) -> ProviderConfig:
 
     if isinstance(hooks, dict):
         for event_name, entries in hooks.items():
-            if event_name not in CLAUDE_EVENTS or not isinstance(entries, list):
+            canonical = canonical_event_name(event_name)
+            if (
+                event_name not in allowed_events
+                and canonical not in allowed_events
+            ) or not isinstance(entries, list):
                 continue
-            hook_events.append(event_name)
-            paths.extend(_paths_from_hook_entries(entries))
+            event_paths = _paths_from_hook_entries(entries, command_filter)
+            if command_filter is not None and not event_paths:
+                continue
+            hook_events.append(canonical)
+            paths.extend(event_paths)
 
     return ProviderConfig(
-        "claude",
+        provider,
         config_path,
         True,
         bool(hook_events),
         tuple(sorted(set(hook_events))),
         _dedupe_paths(paths),
+    )
+
+
+def detect_claude_config(home: Path | None = None) -> ProviderConfig:
+    return detect_json_hook_config(
+        "claude", default_claude_config_path(home), CLAUDE_EVENTS
+    )
+
+
+def default_devin_config_path(home: Path | None = None) -> Path:
+    base = home or Path.home()
+    return base / ".config" / "devin" / "config.json"
+
+
+def detect_devin_config(home: Path | None = None) -> ProviderConfig:
+    return detect_json_hook_config(
+        "devin",
+        default_devin_config_path(home),
+        DEVIN_EVENTS,
+        is_sidepulse_devin_command,
     )
 
 
@@ -213,44 +267,37 @@ def default_grok_hook_config_path(home: Path | None = None) -> Path:
 
 def detect_grok_config(home: Path | None = None) -> ProviderConfig:
     config_path = default_grok_hook_config_path(home)
-    if not config_path.exists():
-        return ProviderConfig("grok", config_path, False, False, (), ())
+    return detect_json_hook_config("grok", config_path, GROK_EVENTS)
 
+
+PROVIDER_SPECS = (
+    ProviderSpec("codex", "Codex", CODEX_EVENTS, "codex-toml", default_codex_config_path, detect_codex_config),
+    ProviderSpec("claude", "Claude", CLAUDE_EVENTS, "claude-json", default_claude_config_path, detect_claude_config),
+    ProviderSpec("devin", "Devin", DEVIN_EVENTS, "devin-json", default_devin_config_path, detect_devin_config),
+    ProviderSpec("grok", "Grok", GROK_EVENTS, "grok-json", default_grok_hook_config_path, detect_grok_config),
+)
+PROVIDER_REGISTRY = {spec.provider: spec for spec in PROVIDER_SPECS}
+HOOK_PROVIDERS = tuple(PROVIDER_REGISTRY)
+KNOWN_EVENTS = tuple(
+    dict.fromkeys(event for spec in PROVIDER_SPECS for event in spec.events)
+)
+
+
+def provider_spec(provider: str) -> ProviderSpec:
     try:
-        data = json.loads(config_path.read_text())
-    except Exception:
-        return ProviderConfig("grok", config_path, True, False, (), ())
+        return PROVIDER_REGISTRY[provider]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported hook provider: {provider}") from exc
 
-    hooks = data.get("hooks") or {}
-    hook_events: list[str] = []
-    paths: list[Path] = []
 
-    if isinstance(hooks, dict):
-        for event_name, entries in hooks.items():
-            canonical = canonical_event_name(event_name)
-            if canonical not in GROK_EVENTS or not isinstance(entries, list):
-                continue
-            hook_events.append(canonical)
-            paths.extend(_paths_from_hook_entries(entries))
-
-    return ProviderConfig(
-        "grok",
-        config_path,
-        True,
-        bool(hook_events),
-        tuple(sorted(set(hook_events))),
-        _dedupe_paths(paths),
-    )
+def detect_provider_configs(home: Path | None = None) -> list[ProviderConfig]:
+    return [spec.detector(home) for spec in PROVIDER_SPECS]
 
 
 def detect_log_path(provider: str, home: Path | None = None) -> Path:
-    if provider == "codex":
-        config = detect_codex_config(home)
-    elif provider == "claude":
-        config = detect_claude_config(home)
-    elif provider == "grok":
-        config = detect_grok_config(home)
-    else:
+    try:
+        config = provider_spec(provider).detector(home)
+    except ValueError:
         config = ProviderConfig(provider, default_log_path(provider, home), False, False, (), ())
     if config.log_paths:
         return config.log_paths[0]
@@ -325,6 +372,8 @@ def canonical_event_name(value: Any) -> str | None:
     text = value.strip()
     if not text:
         return None
+    if text == "PostCompaction":
+        return "PostCompact"
     if text in KNOWN_EVENTS:
         return text
 
@@ -347,6 +396,7 @@ def canonical_event_name(value: Any) -> str | None:
             "subagent_end": "SubagentStop",
             "pre_compact": "PreCompact",
             "post_compact": "PostCompact",
+            "post_compaction": "PostCompact",
             "stop_failure": "StopFailure",
         }
     )
@@ -361,6 +411,7 @@ def normalize_event_payload(raw: dict[str, Any], event_name: str, logged_at: Any
 
     _copy_alias(normalized, "sessionId", "session_id")
     _copy_alias(normalized, "turnId", "turn_id")
+    _copy_alias(normalized, "prompt_id", "turn_id")
     _copy_alias(normalized, "agentId", "agent_id")
     _copy_alias(normalized, "workspaceRoot", "cwd")
     _copy_alias(normalized, "toolName", "tool_name")
@@ -383,7 +434,10 @@ def _copy_alias(data: dict[str, Any], source: str, target: str) -> None:
         data[target] = data[source]
 
 
-def _paths_from_hook_entries(entries: list[Any]) -> list[Path]:
+def _paths_from_hook_entries(
+    entries: list[Any],
+    command_filter: Callable[[str], bool] | None = None,
+) -> list[Path]:
     paths: list[Path] = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -392,9 +446,28 @@ def _paths_from_hook_entries(entries: list[Any]) -> list[Path]:
             if not isinstance(hook, dict):
                 continue
             command = hook.get("command")
-            if isinstance(command, str):
+            if isinstance(command, str) and (command_filter is None or command_filter(command)):
                 paths.extend(extract_log_paths_from_command(command))
     return paths
+
+
+def is_sidepulse_devin_command(command: str) -> bool:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+
+    has_devin_provider = any(
+        part == "--provider" and index + 1 < len(parts) and parts[index + 1] == "devin"
+        or part == "--provider=devin"
+        for index, part in enumerate(parts)
+    )
+    if not has_devin_provider:
+        return False
+
+    return any(Path(part).name == "hook_entry.py" for part in parts) or (
+        "agent-monitor" in parts and "hook-log" in parts
+    )
 
 
 def extract_log_paths_from_command(command: str) -> list[Path]:
@@ -410,9 +483,9 @@ def extract_log_paths_from_command(command: str) -> list[Path]:
 
     for index, part in enumerate(parts):
         if part == "--log" and index + 1 < len(parts):
-            paths.append(Path(parts[index + 1]).expanduser())
+            paths.append(Path(parts[index + 1].rstrip(";")).expanduser())
         elif part.startswith("--log="):
-            paths.append(Path(part.split("=", 1)[1]).expanduser())
+            paths.append(Path(part.split("=", 1)[1].rstrip(";")).expanduser())
 
     return _dedupe_paths(paths)
 

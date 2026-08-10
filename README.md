@@ -86,7 +86,7 @@ SidePulse Pro and SidePulse Dot.
 
 #### AI Agent Monitoring
 
-SidePulse can monitor AI agents such as Codex, Claude, and Grok through hooks, then
+SidePulse can monitor AI agents such as Claude, Devin, Codex, and Grok through hooks, then
 translate the current agent state into a small, glanceable LED status.
 
 Agent status modes:
@@ -146,7 +146,21 @@ The monitor currently supports:
 | --- | --- | --- |
 | Codex | `~/.codex/config.toml` | `${XDG_STATE_HOME:-~/.local/state}/sidepulse/agent-monitor/codex.jsonl` |
 | Claude | `~/.claude/settings.json` | `${XDG_STATE_HOME:-~/.local/state}/sidepulse/agent-monitor/claude.jsonl` |
+| Devin | `~/.config/devin/config.json` | `${XDG_STATE_HOME:-~/.local/state}/sidepulse/agent-monitor/devin.jsonl` |
 | Grok | `~/.grok/hooks/sidepulse.json` | `${XDG_STATE_HOME:-~/.local/state}/sidepulse/agent-monitor/grok.jsonl` |
+
+Each provider adapter only adds SidePulse's own hook commands. Existing hook
+entries, including Agent Deck entries, stay in place. Before a changed existing
+configuration is written, SidePulse creates a timestamped backup beside it.
+Use `sidepulse agent-monitor uninstall <provider>` to remove only SidePulse
+hooks, or restore that backup if you need to roll back the complete file.
+
+To add a future provider, add a `ProviderSpec` for its identity, supported
+event set, and configuration detector; add its adapter functions to both
+`INSTALLERS` and `UNINSTALLERS`; and add preservation, detection, and CLI
+coverage. The detector reports the config and log paths to `doctor`; the
+adapter must preserve unrelated configuration while adding and removing only
+SidePulse hooks.
 
 #### Local reply classifier (Apple Silicon)
 
@@ -211,11 +225,13 @@ Set up this Mac explicitly after package install:
 sidepulse setup
 ```
 
-`sidepulse setup` installs or refreshes Codex, Claude, and Grok hooks, installs
+`sidepulse setup` installs or refreshes Claude, Devin, Codex, and Grok hooks, installs
 SidePulse Pro Eject Prevention, writes the status-bar LaunchAgent, starts both helpers
 immediately, and enables them at login. This is intentionally an explicit
 command instead of a `pip install` side effect. To set up only one provider, use
-`sidepulse setup codex`, `sidepulse setup claude`, or `sidepulse setup grok`.
+`sidepulse setup codex`, `sidepulse setup claude`, `sidepulse setup devin`, or
+`sidepulse setup grok`. Existing hook entries are preserved for every setup
+command.
 To skip the status-bar app but still install hooks and SidePulse Pro Eject Prevention, use
 `sidepulse setup --no-status-bar`.
 
@@ -271,6 +287,7 @@ Install or refresh the monitor hooks:
 sidepulse agent-monitor install
 sidepulse agent-monitor install codex
 sidepulse agent-monitor install claude
+sidepulse agent-monitor install devin
 sidepulse agent-monitor install grok
 ```
 
@@ -338,7 +355,7 @@ Codex `PermissionRequest` events are treated as Ask and remain sticky until the
 matching tool command finishes. This prevents unrelated same-session activity
 from hiding an approval prompt that is still waiting on the user.
 
-For Codex, Claude, or Grok projects that should report this reliably, add
+For Claude, Devin, Codex, or Grok projects that should report this reliably, add
 guidance like this to the relevant agent instructions:
 
 ```text
@@ -372,6 +389,7 @@ Remove monitor hooks:
 sidepulse agent-monitor uninstall
 sidepulse agent-monitor uninstall codex
 sidepulse agent-monitor uninstall claude
+sidepulse agent-monitor uninstall devin
 sidepulse agent-monitor uninstall grok
 ```
 
@@ -435,7 +453,7 @@ firmware/websim `sdled.wasm` engine, then AppKit only draws the returned RGB
 frames.
 
 Open `Settings...` from the dropdown to manage agent integrations. The settings
-window can install or uninstall Codex, Claude, and Grok hooks. The transcript
+window can install or uninstall Claude, Devin, Codex, and Grok hooks. The transcript
 checkboxes control the file-based CLI/debug fallback; the status-bar app gets
 live updates from the local hook event socket. Settings are stored at
 `${XDG_CONFIG_HOME:-~/.config}/sidepulse/agent-monitor/settings.json`.

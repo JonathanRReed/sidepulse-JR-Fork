@@ -49,9 +49,11 @@ from sidepulse.install import (
     hook_command,
     install_claude_hooks,
     install_codex_hooks,
+    install_devin_hooks,
     install_grok_hooks,
     uninstall_claude_hooks,
     uninstall_codex_hooks,
+    uninstall_devin_hooks,
     uninstall_grok_hooks,
     update_codex_trusted_hashes,
 )
@@ -75,10 +77,16 @@ from sidepulse.lid_sleep import (
 from sidepulse.models import AgentMode, AgentStatus, AggregateStatus
 from sidepulse.origin import ProcessInfo, origin_from_processes
 from sidepulse.providers import (
+    DEVIN_EVENTS,
+    HOOK_PROVIDERS,
+    PROVIDER_REGISTRY,
+    detect_devin_config,
+    detect_log_path,
     detect_grok_config,
     default_log_path,
     default_state_dir,
     parse_log_line,
+    provider_spec,
 )
 from sidepulse.sd_eject_guard_launch import (
     SD_EJECT_GUARD_BINARY_NAME,
@@ -97,6 +105,7 @@ from sidepulse.session_actions import (
     SESSION_OPEN_TERMINAL,
     SESSION_OPEN_VSCODE,
     default_session_open_action,
+    provider_session_opener_providers,
     session_deep_link,
     session_open_target,
     session_resume_command,
@@ -143,6 +152,195 @@ class FakeProcess:
 
 
 class AgentMonitorTests(unittest.TestCase):
+    def test_provider_registry_includes_devin_as_first_class_provider(self) -> None:
+        self.assertEqual(HOOK_PROVIDERS, ("codex", "claude", "devin", "grok"))
+        self.assertEqual(provider_spec("devin").label, "Devin")
+        self.assertEqual(provider_spec("devin").config_kind, "devin-json")
+        self.assertEqual(provider_spec("devin").events, DEVIN_EVENTS)
+        self.assertIs(PROVIDER_REGISTRY["devin"], provider_spec("devin"))
+
+    def test_detect_devin_config_reads_global_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / ".config" / "devin" / "config.json"
+            log = home / "state" / "devin.jsonl"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": f"python hook_entry.py --provider devin --log {log}",
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    }
+                )
+            )
+
+            detected = detect_devin_config(home)
+
+            self.assertEqual(detected.provider, "devin")
+            self.assertTrue(detected.hooks_enabled)
+            self.assertIn("PreToolUse", detected.hook_events)
+            self.assertIn(log, detected.log_paths)
+
+    def test_detect_devin_config_ignores_unrelated_log_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / ".config" / "devin" / "config.json"
+            unrelated_log = Path("/private/tmp/agent-deck-debug.jsonl")
+            sidepulse_log = home / ".local" / "state" / "sidepulse" / "agent-monitor" / "devin.jsonl"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": f"bun agent-deck-hook --log {unrelated_log};",
+                                        },
+                                        {
+                                            "type": "command",
+                                            "command": (
+                                                "python hook_entry.py --provider devin "
+                                                f"--log {sidepulse_log};"
+                                            ),
+                                        },
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+
+            detected = detect_devin_config(home)
+
+            self.assertEqual(detected.log_paths, (sidepulse_log,))
+            self.assertEqual(detect_log_path("devin", home), sidepulse_log)
+
+    def test_detect_devin_config_ignores_unrelated_only_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / ".config" / "devin" / "config.json"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": "bun agent-deck-hook --log /private/tmp/debug.jsonl",
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+
+            detected = detect_devin_config(home)
+
+            self.assertFalse(detected.hooks_enabled)
+            self.assertEqual(detected.hook_events, ())
+            self.assertEqual(detected.log_paths, ())
+
+    def test_detect_devin_config_reads_packaged_hook_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / ".config" / "devin" / "config.json"
+            log = home / "state" / "devin.jsonl"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "Stop": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": (
+                                                "agent-monitor hook-log --provider devin "
+                                                f"--log {log}"
+                                            ),
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+
+            detected = detect_devin_config(home)
+
+            self.assertTrue(detected.hooks_enabled)
+            self.assertEqual(detected.hook_events, ("Stop",))
+            self.assertEqual(detected.log_paths, (log,))
+
+    def test_detect_devin_config_normalizes_post_compaction_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / ".config" / "devin" / "config.json"
+            log = home / "state" / "devin-post-compaction.jsonl"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PostCompaction": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": f"python hook_entry.py --provider devin --log {log}",
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    }
+                )
+            )
+
+            detected = detect_devin_config(home)
+
+            self.assertIn("PostCompact", detected.hook_events)
+            self.assertIn(log, detected.log_paths)
+
+    def test_devin_post_compaction_and_prompt_id_are_normalized(self) -> None:
+        record = parse_log_line(
+            "devin",
+            json.dumps(
+                {
+                    "hook_event_name": "PostCompaction",
+                    "session_id": "devin-session",
+                    "prompt_id": "devin-turn",
+                    "summary": "compacted",
+                }
+            ),
+        )
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record.provider, "devin")
+        self.assertEqual(record.event_name, "PostCompact")
+        self.assertEqual(record.turn_id, "devin-turn")
+
     def test_aggregates_highest_priority_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -283,6 +481,15 @@ class AgentMonitorTests(unittest.TestCase):
             ).label,
             "Claude Code CLI",
         )
+
+    def test_origin_process_detection_identifies_devin_cli(self) -> None:
+        origin = origin_from_processes(
+            "devin",
+            (ProcessInfo(pid=100, ppid=1, comm="/Users/me/.local/bin/devin", command="devin"),),
+        )
+
+        self.assertIsNotNone(origin)
+        self.assertEqual(origin.label, "Devin CLI")
 
     def test_grok_log_line_normalizes_camel_case_payload(self) -> None:
         record = parse_log_line(
@@ -1105,6 +1312,7 @@ class AgentMonitorTests(unittest.TestCase):
 
         self.assertEqual(window.title(), "SidePulse Agent Monitor Settings")
         self.assertIn("debug_log_status", target.settings_fields)
+        self.assertIn("devin_session_opener", target.settings_fields)
         self.assertIn("closed_animation_program", target.settings_fields)
         self.assertIn("closed_animation_duration", target.settings_fields)
         self.assertIn("open_animation_program", target.settings_fields)
@@ -1275,6 +1483,144 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertIn(str(log), text)
             self.assertNotIn("echo old", text)
 
+    def test_codex_installer_repeat_preserves_managed_block_before_trust_state(self) -> None:
+        """An installed Codex config must not be rewritten only to move hook tables."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.toml"
+            log = base / "codex.jsonl"
+            current_command = f"fixture hook_entry.py --provider codex --log {log}"
+            events = (
+                "SessionStart",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "PermissionRequest",
+                "PreCompact",
+                "PostCompact",
+                "SubagentStart",
+                "SubagentStop",
+                "Stop",
+            )
+            lines = [
+                "[features]",
+                "hooks = true",
+                "",
+                "# >>> agent-monitor hooks >>>",
+                "# Provider-neutral status collection. Do not edit inside this block.",
+            ]
+            for event in events:
+                lines.extend(
+                    [
+                        f"[[hooks.{event}]]",
+                        'matcher = "*"',
+                        f"[[hooks.{event}.hooks]]",
+                        'type = "command"',
+                        f"command = '''{current_command}'''",
+                        "",
+                    ]
+                )
+            lines.extend(
+                [
+                    "# <<< agent-monitor hooks <<<",
+                    "",
+                    "[hooks.state]",
+                    'source = "preserve-me"',
+                    "",
+                    '[hooks.state."fixture:pre_tool_use:0:0"]',
+                    'trusted_hash = "fixture-trusted-hash"',
+                    "",
+                ]
+            )
+            config.write_text("\n".join(lines))
+            original = config.read_bytes()
+
+            with patch("sidepulse.install.hook_command", return_value=current_command):
+                result = install_codex_hooks(log_path=log, config_path=config)
+
+            self.assertFalse(result.changed)
+            self.assertIsNone(result.backup_path)
+            self.assertEqual(config.read_bytes(), original)
+            self.assertEqual(list(base.glob("config.toml.bak.*")), [])
+
+    def test_codex_installer_replaces_stale_hook_alongside_exact_managed_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.toml"
+            log = base / "codex.jsonl"
+            current_command = f"fixture hook_entry.py --provider codex --log {log}"
+            events = (
+                "SessionStart",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "PermissionRequest",
+                "PreCompact",
+                "PostCompact",
+                "SubagentStart",
+                "SubagentStop",
+                "Stop",
+            )
+            lines = [
+                "[features]",
+                "hooks = true",
+                "",
+                "# >>> agent-monitor hooks >>>",
+                "# Provider-neutral status collection. Do not edit inside this block.",
+            ]
+            for event in events:
+                lines.extend(
+                    [
+                        f"[[hooks.{event}]]",
+                        'matcher = "*"',
+                        f"[[hooks.{event}.hooks]]",
+                        'type = "command"',
+                        f"command = '''{current_command}'''",
+                        "",
+                    ]
+                )
+            lines.extend(
+                [
+                    "# <<< agent-monitor hooks <<<",
+                    "",
+                    "[[hooks.PreToolUse]]",
+                    'matcher = "*"',
+                    "[[hooks.PreToolUse.hooks]]",
+                    'type = "command"',
+                    "command = '''legacy hook_entry.py --provider codex'''",
+                    "",
+                    "[[hooks.PreToolUse]]",
+                    'matcher = "*"',
+                    "[[hooks.PreToolUse.hooks]]",
+                    'type = "command"',
+                    "command = '''echo preserve-unrelated-hook'''",
+                    "",
+                    "[hooks.state]",
+                    'source = "preserve-me"',
+                    "",
+                ]
+            )
+            config.write_text("\n".join(lines))
+
+            with patch("sidepulse.install.hook_command", return_value=current_command):
+                result = install_codex_hooks(log_path=log, config_path=config)
+
+            self.assertTrue(result.changed)
+            text = config.read_text()
+            self.assertNotIn("legacy hook_entry.py", text)
+            self.assertIn("echo preserve-unrelated-hook", text)
+            self.assertEqual(text.count(current_command), len(events))
+            self.assertEqual(text.count("# >>> agent-monitor hooks >>>"), 1)
+            self.assertEqual(text.count("# <<< agent-monitor hooks <<<"), 1)
+
+            first_update = config.read_bytes()
+            with patch("sidepulse.install.hook_command", return_value=current_command):
+                repeat = install_codex_hooks(log_path=log, config_path=config)
+
+            self.assertFalse(repeat.changed)
+            self.assertIsNone(repeat.backup_path)
+            self.assertEqual(config.read_bytes(), first_update)
+
     def test_codex_installer_refreshes_managed_hook_trust_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -1325,7 +1671,7 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertIn('trusted_hash = "sha256:stop"', updated)
         self.assertNotIn("sha256:old", updated)
 
-    def test_claude_installer_replaces_target_hook_and_preserves_other_hooks(self) -> None:
+    def test_claude_installer_replaces_sidepulse_hook_and_preserves_same_log_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             config = base / "settings.json"
@@ -1342,6 +1688,12 @@ class AgentMonitorTests(unittest.TestCase):
                                         {
                                             "type": "command",
                                             "command": f"jq -c . >> {log}",
+                                        },
+                                        {
+                                            "type": "command",
+                                            "command": (
+                                                f"python hook_entry.py --provider claude --log {log}"
+                                            ),
                                         },
                                         {
                                             "type": "command",
@@ -1369,8 +1721,9 @@ class AgentMonitorTests(unittest.TestCase):
                 for hook in entry["hooks"]
             ]
             self.assertIn("echo keep >> /tmp/other.log", commands)
+            self.assertIn(f"jq -c . >> {log}", commands)
             self.assertTrue(any("hook_entry.py" in command for command in commands))
-            self.assertFalse(any(command.startswith("jq -c") for command in commands))
+            self.assertEqual(sum("--provider claude" in command for command in commands), 1)
             self.assertEqual(data["permissions"]["allow"], ["Bash(date)"])
 
     def test_grok_installer_writes_global_hook_file_without_lifecycle_matchers(self) -> None:
@@ -1395,6 +1748,13 @@ class AgentMonitorTests(unittest.TestCase):
                                             "type": "command",
                                             "command": f"jq -c . >> {log}",
                                         },
+                                        {
+                                            "type": "command",
+                                            "command": (
+                                                "agent-monitor hook-log --provider grok "
+                                                f"--log {log}"
+                                            ),
+                                        },
                                     ],
                                 }
                             ]
@@ -1417,10 +1777,169 @@ class AgentMonitorTests(unittest.TestCase):
                 for hook in entry["hooks"]
             ]
             self.assertIn("echo keep >> /tmp/other.log", pre_tool_commands)
+            self.assertIn(f"jq -c . >> {log}", pre_tool_commands)
             self.assertTrue(any("--provider grok" in command for command in pre_tool_commands))
-            self.assertFalse(any(command.startswith("jq -c") for command in pre_tool_commands))
+            self.assertEqual(sum("--provider grok" in command for command in pre_tool_commands), 1)
             self.assertIn("matcher", data["hooks"]["PreToolUse"][-1])
             self.assertNotIn("matcher", data["hooks"]["SessionStart"][-1])
+
+    def test_devin_installer_preserves_agent_deck_hooks_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.json"
+            log = base / "devin.jsonl"
+            agent_deck = "/opt/homebrew/bin/bun /tmp/agent-deck-hook.ts"
+            config.write_text(
+                json.dumps(
+                    {
+                        "theme_mode": "dark",
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "matcher": "^exec$",
+                                    "hooks": [{"type": "command", "command": agent_deck}],
+                                }
+                            ],
+                        },
+                    }
+                )
+            )
+
+            first = install_devin_hooks(log, config, python_executable="python3")
+            first_text = config.read_text()
+            second = install_devin_hooks(log, config, python_executable="python3")
+
+            data = json.loads(config.read_text())
+            commands = [
+                hook["command"]
+                for entry in data["hooks"]["PreToolUse"]
+                for hook in entry["hooks"]
+            ]
+            self.assertTrue(first.changed)
+            self.assertIsNotNone(first.backup_path)
+            self.assertFalse(second.changed)
+            self.assertEqual(config.read_text(), first_text)
+            self.assertEqual(commands.count(agent_deck), 1)
+            self.assertEqual(sum("--provider devin" in command for command in commands), 1)
+            self.assertEqual(data["theme_mode"], "dark")
+
+    def test_devin_installer_preserves_same_log_agent_deck_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.json"
+            log = base / "devin.jsonl"
+            agent_deck_commands = {
+                event: f"bun /tmp/agent-deck-hook.ts --log {log} --event {event}"
+                for event in DEVIN_EVENTS
+            }
+            source_command = f"python hook_entry.py --provider devin --log {log}"
+            packaged_command = f"agent-monitor hook-log --provider devin --log {log}"
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            event: [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": agent_deck_commands[event],
+                                        }
+                                    ]
+                                }
+                            ]
+                            for event in DEVIN_EVENTS
+                        }
+                    }
+                )
+            )
+            data = json.loads(config.read_text())
+            data["hooks"]["PreToolUse"][0]["hooks"].extend(
+                [
+                    {"type": "command", "command": source_command},
+                    {"type": "command", "command": packaged_command},
+                ]
+            )
+            config.write_text(json.dumps(data))
+
+            install_devin_hooks(log, config, python_executable="python3")
+
+            commands = [
+                hook["command"]
+                for entries in json.loads(config.read_text())["hooks"].values()
+                for entry in entries
+                for hook in entry["hooks"]
+            ]
+            for command in agent_deck_commands.values():
+                self.assertEqual(commands.count(command), 1)
+            self.assertNotIn(source_command, commands)
+            self.assertNotIn(packaged_command, commands)
+            self.assertEqual(sum("--provider devin" in command for command in commands), len(DEVIN_EVENTS))
+
+    def test_devin_uninstaller_preserves_same_log_agent_deck_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.json"
+            log = base / "devin.jsonl"
+            agent_deck = f"bun /tmp/agent-deck-hook.ts --log {log}"
+            source_command = f"python hook_entry.py --provider devin --log {log}"
+            packaged_command = f"agent-monitor hook-log --provider devin --log {log}"
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "Stop": [
+                                {
+                                    "hooks": [
+                                        {"type": "command", "command": agent_deck},
+                                        {"type": "command", "command": source_command},
+                                        {"type": "command", "command": packaged_command},
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+
+            result = uninstall_devin_hooks(log, config)
+
+            data = json.loads(config.read_text())
+            commands = [
+                hook["command"]
+                for entry in data.get("hooks", {}).get("Stop", [])
+                for hook in entry["hooks"]
+            ]
+            self.assertTrue(result.changed)
+            self.assertEqual(commands, [agent_deck])
+
+    def test_devin_uninstaller_removes_only_sidepulse_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.json"
+            log = base / "devin.jsonl"
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "Stop": [
+                                {
+                                    "hooks": [
+                                        {"type": "command", "command": "echo keep-agent-deck"}
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            install_devin_hooks(log, config, python_executable="python3")
+
+            result = uninstall_devin_hooks(log, config)
+
+            self.assertTrue(result.changed)
+            self.assertIn("keep-agent-deck", config.read_text())
+            self.assertNotIn("--provider devin", config.read_text())
 
     def test_codex_uninstaller_removes_monitor_hooks_and_preserves_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1570,6 +2089,18 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertTrue(status_bar_foreground.foreground)
         self.assertEqual(grok_hook_log.provider, "grok")
         self.assertIn("sidepulse agent-monitor", parser.format_usage())
+
+    def test_devin_cli_install_and_log_arguments_are_available(self) -> None:
+        parser = build_parser(prog="sidepulse agent-monitor")
+
+        install = parser.parse_args(["install", "devin", "--devin-log", "/tmp/devin.jsonl"])
+        hook_log = parser.parse_args(
+            ["hook-log", "--provider", "devin", "--log", "/tmp/devin.jsonl"]
+        )
+
+        self.assertEqual(install.provider, "devin")
+        self.assertEqual(install.devin_log, Path("/tmp/devin.jsonl"))
+        self.assertEqual(hook_log.provider, "devin")
 
     def test_sidepulse_entrypoint_dispatches_to_sidepulse(self) -> None:
         with patch.object(cli_module, "main", return_value=17) as main:
@@ -1753,6 +2284,13 @@ class AgentMonitorTests(unittest.TestCase):
             changed=False,
             backup_path=None,
         )
+        devin_result = SimpleNamespace(
+            provider="devin",
+            config_path=Path("/tmp/devin-config.json"),
+            log_path=Path("/tmp/devin.jsonl"),
+            changed=True,
+            backup_path=None,
+        )
         grok_result = SimpleNamespace(
             provider="grok",
             config_path=Path("/tmp/grok-hook.json"),
@@ -1777,9 +2315,11 @@ class AgentMonitorTests(unittest.TestCase):
         )
 
         with (
-            patch.object(cli_module, "install_codex_hooks", return_value=codex_result) as codex,
-            patch.object(cli_module, "install_claude_hooks", return_value=claude_result) as claude,
-            patch.object(cli_module, "install_grok_hooks", return_value=grok_result) as grok,
+            patch.object(
+                cli_module,
+                "install_provider_hooks",
+                side_effect=(codex_result, claude_result, devin_result, grok_result),
+            ) as install,
             patch(
                 "sidepulse.sd_eject_guard_launch.install_sd_eject_guard",
                 return_value=guard_result,
@@ -1792,9 +2332,10 @@ class AgentMonitorTests(unittest.TestCase):
             result = cli_module.cmd_sidepulse_setup(args)
 
         self.assertEqual(result, 0)
-        codex.assert_called_once()
-        claude.assert_called_once()
-        grok.assert_called_once()
+        self.assertEqual(
+            [call.args[0] for call in install.call_args_list],
+            ["codex", "claude", "devin", "grok"],
+        )
         guard.assert_called_once_with(scope="auto", dry_run=False)
         launch.assert_called_once_with(start=True)
 
@@ -2454,6 +2995,15 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertIn("grok", providers)
         self.assertNotIn("codex-transcripts", providers)
         self.assertNotIn("claude-transcripts", providers)
+
+    def test_default_sources_include_registered_hook_providers(self) -> None:
+        with patch("sidepulse.collector.load_settings", return_value=AgentMonitorSettings()):
+            sources = default_sources()
+
+        providers = tuple(
+            source.provider for source in sources if not source.provider.endswith("-transcript")
+        )
+        self.assertEqual(providers, HOOK_PROVIDERS)
 
     def test_settings_round_trip_remembered_device_display_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4474,6 +5024,25 @@ team id YOUR_TEAM_ID, push key '/path/to/AuthKey_YOUR_KEY_ID.p8'
                 "vscode://anthropic.claude-code/open?session=1ca4348e-2aec-4147-9e81-d7d56364d257",
             ),
         )
+
+    def test_devin_session_actions_build_terminal_resume_command(self) -> None:
+        status = AgentStatus(
+            provider="devin",
+            agent_id="devin:session:abc",
+            display_name="Devin abc",
+            mode=AgentMode.WORKING,
+            updated_at=datetime.now(timezone.utc),
+            event_name="PreToolUse",
+            session_id="devin-session-123",
+            cwd="/tmp/project with spaces",
+        )
+
+        command = "cd '/tmp/project with spaces' && devin --resume devin-session-123"
+        self.assertEqual(session_resume_command(status), command)
+        self.assertEqual(session_open_target(status, SESSION_OPEN_TERMINAL), ("terminal", command))
+
+    def test_session_opener_providers_follow_hook_registry(self) -> None:
+        self.assertEqual(provider_session_opener_providers(), HOOK_PROVIDERS)
 
 
 if __name__ == "__main__":

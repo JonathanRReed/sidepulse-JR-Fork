@@ -157,5 +157,6 @@ def provider_label(provider: str) -> str:
     return {
         "codex": "Codex",
         "claude": "Claude",
+        "devin": "Devin",
         "grok": "Grok",
     }.get(provider, provider.title())

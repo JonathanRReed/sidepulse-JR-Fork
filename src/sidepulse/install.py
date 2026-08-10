@@ -18,7 +18,9 @@ from typing import Any
 from .providers import (
     CLAUDE_EVENTS,
     CODEX_EVENTS,
+    DEVIN_EVENTS,
     GROK_EVENTS,
+    default_devin_config_path,
     default_grok_hook_config_path,
     detect_log_path,
 )
@@ -57,11 +59,14 @@ def install_codex_hooks(
     target_log = (log_path or detect_log_path("codex")).expanduser()
     original = config.read_text() if config.exists() else ""
 
-    text = strip_managed_block(original)
-    text = remove_codex_hook_blocks_for_log(text, target_log)
-    text = ensure_codex_hooks_feature(text)
     block = codex_hook_block(target_log, python_executable)
-    new_text = _ensure_trailing_newline(text) + "\n" + block
+    if is_pristine_codex_hook_install(original, block, target_log):
+        new_text = original
+    else:
+        text = strip_managed_block(original)
+        text = remove_codex_hook_blocks_for_log(text, target_log)
+        text = ensure_codex_hooks_feature(text)
+        new_text = _ensure_trailing_newline(text) + "\n" + block
     changed = new_text != original
 
     backup = None
@@ -144,7 +149,7 @@ def install_grok_hooks(
         entries = hooks.get(event_name, [])
         if not isinstance(entries, list):
             entries = []
-        cleaned = remove_json_command_hooks_for_log(entries, target_log)
+        cleaned = remove_json_command_hooks_for_log(entries, target_log, "grok")
         cleaned.append(grok_hook_entry(event_name, command))
         hooks[event_name] = cleaned
 
@@ -158,6 +163,41 @@ def install_grok_hooks(
         target_log.touch(exist_ok=True)
 
     return InstallResult("grok", config, target_log, changed, backup, dry_run)
+
+
+def install_devin_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+    python_executable: str | None = None,
+) -> InstallResult:
+    config = config_path or default_devin_config_path()
+    target_log = (log_path or detect_log_path("devin")).expanduser()
+    data = read_json_config(config)
+
+    original = json.dumps(data, sort_keys=True)
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError(f"Expected hooks object in {config}")
+    command = hook_command("devin", target_log, python_executable)
+    for event_name in DEVIN_EVENTS:
+        entries = hooks.get(event_name, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"Expected hooks.{event_name} array in {config}")
+        cleaned = remove_json_command_hooks_for_log(entries, target_log, "devin")
+        cleaned.append({"hooks": [{"type": "command", "command": command}]})
+        hooks[event_name] = cleaned
+
+    changed = json.dumps(data, sort_keys=True) != original
+    backup = None
+    if changed and not dry_run:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        backup = backup_file(config)
+        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+        target_log.parent.mkdir(parents=True, exist_ok=True)
+        target_log.touch(exist_ok=True)
+
+    return InstallResult("devin", config, target_log, changed, backup, dry_run)
 
 
 def uninstall_codex_hooks(
@@ -240,7 +280,7 @@ def uninstall_grok_hooks(
             if event_name not in GROK_EVENTS or not isinstance(entries, list):
                 continue
 
-            cleaned = remove_json_command_hooks_for_log(entries, target_log)
+            cleaned = remove_json_command_hooks_for_log(entries, target_log, "grok")
             if cleaned:
                 hooks[event_name] = cleaned
             else:
@@ -263,6 +303,65 @@ def uninstall_grok_hooks(
                 pass
 
     return InstallResult("grok", config, target_log, changed, backup, dry_run)
+
+
+def uninstall_devin_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+) -> InstallResult:
+    config = config_path or default_devin_config_path()
+    target_log = (log_path or detect_log_path("devin")).expanduser()
+    data = read_json_config(config)
+
+    original = json.dumps(data, sort_keys=True)
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        for event_name in list(hooks):
+            entries = hooks.get(event_name)
+            if event_name not in DEVIN_EVENTS or not isinstance(entries, list):
+                continue
+
+            cleaned = remove_json_command_hooks_for_log(entries, target_log, "devin")
+            if cleaned:
+                hooks[event_name] = cleaned
+            else:
+                hooks.pop(event_name, None)
+
+        if not hooks:
+            data.pop("hooks", None)
+
+    changed = json.dumps(data, sort_keys=True) != original
+    backup = None
+    if changed and not dry_run:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        backup = backup_file(config)
+        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+
+    return InstallResult("devin", config, target_log, changed, backup, dry_run)
+
+
+INSTALLERS = {
+    "codex": install_codex_hooks,
+    "claude": install_claude_hooks,
+    "devin": install_devin_hooks,
+    "grok": install_grok_hooks,
+}
+
+UNINSTALLERS = {
+    "codex": uninstall_codex_hooks,
+    "claude": uninstall_claude_hooks,
+    "devin": uninstall_devin_hooks,
+    "grok": uninstall_grok_hooks,
+}
+
+
+def install_provider_hooks(provider: str, **kwargs: Any) -> InstallResult:
+    return INSTALLERS[provider](**kwargs)
+
+
+def uninstall_provider_hooks(provider: str, **kwargs: Any) -> InstallResult:
+    return UNINSTALLERS[provider](**kwargs)
 
 
 def hook_command(
@@ -569,12 +668,22 @@ def remove_codex_hook_blocks_for_log(text: str, log_path: Path) -> str:
     return "".join(out)
 
 
+def is_pristine_codex_hook_install(text: str, block: str, log_path: Path) -> bool:
+    if ensure_codex_hooks_feature(text) != text or text.count(block) != 1:
+        return False
+    unmanaged_text = text.replace(block, "", 1)
+    return remove_codex_hook_blocks_for_log(unmanaged_text, log_path) == unmanaged_text
+
+
 def remove_claude_hooks_for_log(entries: list[Any], log_path: Path) -> list[dict[str, Any]]:
-    return remove_json_command_hooks_for_log(entries, log_path)
+    return remove_json_command_hooks_for_log(entries, log_path, "claude")
 
 
-def remove_json_command_hooks_for_log(entries: list[Any], log_path: Path) -> list[dict[str, Any]]:
-    target = str(log_path)
+def remove_json_command_hooks_for_log(
+    entries: list[Any],
+    log_path: Path,
+    provider: str,
+) -> list[dict[str, Any]]:
     cleaned_entries: list[dict[str, Any]] = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -586,8 +695,8 @@ def remove_json_command_hooks_for_log(entries: list[Any], log_path: Path) -> lis
         for hook in hooks:
             if not isinstance(hook, dict):
                 continue
-            command = hook.get("command", "")
-            if target in command or "sidepulse hook-log" in command or "hook_entry.py" in command:
+            command = hook.get("command")
+            if is_sidepulse_json_hook_command(command, log_path, provider):
                 continue
             cleaned_hooks.append(hook)
         if cleaned_hooks:
@@ -595,6 +704,41 @@ def remove_json_command_hooks_for_log(entries: list[Any], log_path: Path) -> lis
             kept["hooks"] = cleaned_hooks
             cleaned_entries.append(kept)
     return cleaned_entries
+
+
+def is_sidepulse_json_hook_command(
+    command: Any,
+    log_path: Path,
+    provider: str,
+) -> bool:
+    if not isinstance(command, str):
+        return False
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return False
+
+    if _command_option(arguments, "--provider") != provider:
+        return False
+    if _command_option(arguments, "--log") != str(log_path.expanduser()):
+        return False
+
+    source_entrypoint = any(Path(argument).name == "hook_entry.py" for argument in arguments)
+    packaged_entrypoint = (
+        any(Path(argument).name == "agent-monitor" for argument in arguments)
+        and "hook-log" in arguments
+    )
+    return source_entrypoint or packaged_entrypoint
+
+
+def _command_option(arguments: list[str], option: str) -> str | None:
+    for index, argument in enumerate(arguments):
+        if argument == option and index + 1 < len(arguments):
+            return arguments[index + 1]
+        prefix = f"{option}="
+        if argument.startswith(prefix):
+            return argument.removeprefix(prefix)
+    return None
 
 
 def ensure_codex_hooks_feature(text: str) -> str:

@@ -5,7 +5,7 @@ import html
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .models import AgentStatus, HookEvent
 from .providers import default_state_dir
