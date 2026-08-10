@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from .models import AgentStatus
+from .providers import HOOK_PROVIDERS
 
 SESSION_OPEN_APP = "app"
 SESSION_OPEN_TERMINAL = "terminal"
@@ -47,9 +48,15 @@ def session_resume_command(status: AgentStatus) -> str | None:
         return f"cd {cwd} && codex resume {session_id}"
     if provider == "claude":
         return f"cd {cwd} && claude --resume {session_id}"
+    if provider == "devin":
+        return f"cd {cwd} && devin --resume {session_id}"
     if provider == "grok":
         return f"cd {cwd} && grok --resume {session_id}"
     return None
+
+
+def provider_session_opener_providers() -> tuple[str, ...]:
+    return HOOK_PROVIDERS
 
 
 def default_session_open_action(status: AgentStatus) -> str:

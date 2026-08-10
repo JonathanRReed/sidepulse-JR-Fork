@@ -617,14 +617,14 @@ def build_parser(prog: str = "agent-monitor") -> argparse.ArgumentParser:
     )
     status_bar.set_defaults(func=cmd_status_bar)
 
-    install = subparsers.add_parser("install", help="Install Codex, Claude, and/or Grok monitor hooks.")
+    install = subparsers.add_parser("install", help="Install selected agent-monitor hooks.")
     install.add_argument("provider", choices=("all", *HOOK_PROVIDERS), nargs="?", default="all")
     install.add_argument("--log-dir", type=Path, help="Directory for provider JSONL files.")
     add_provider_log_arguments(install)
     install.add_argument("--dry-run", action="store_true", help="Show what would change.")
     install.set_defaults(func=cmd_install)
 
-    uninstall = subparsers.add_parser("uninstall", help="Remove Codex, Claude, and/or Grok monitor hooks.")
+    uninstall = subparsers.add_parser("uninstall", help="Remove selected agent-monitor hooks.")
     uninstall.add_argument("provider", choices=("all", *HOOK_PROVIDERS), nargs="?", default="all")
     add_provider_log_arguments(uninstall)
     uninstall.add_argument("--dry-run", action="store_true", help="Show what would change.")

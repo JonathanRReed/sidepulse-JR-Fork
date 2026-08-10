@@ -104,6 +104,7 @@ from sidepulse.session_actions import (
     SESSION_OPEN_TERMINAL,
     SESSION_OPEN_VSCODE,
     default_session_open_action,
+    provider_session_opener_providers,
     session_deep_link,
     session_open_target,
     session_resume_command,
@@ -1208,6 +1209,7 @@ class AgentMonitorTests(unittest.TestCase):
 
         self.assertEqual(window.title(), "SidePulse Agent Monitor Settings")
         self.assertIn("debug_log_status", target.settings_fields)
+        self.assertIn("devin_session_opener", target.settings_fields)
         self.assertIn("closed_animation_program", target.settings_fields)
         self.assertIn("closed_animation_duration", target.settings_fields)
         self.assertIn("open_animation_program", target.settings_fields)
@@ -4676,6 +4678,25 @@ team id YOUR_TEAM_ID, push key '/path/to/AuthKey_YOUR_KEY_ID.p8'
                 "vscode://anthropic.claude-code/open?session=1ca4348e-2aec-4147-9e81-d7d56364d257",
             ),
         )
+
+    def test_devin_session_actions_build_terminal_resume_command(self) -> None:
+        status = AgentStatus(
+            provider="devin",
+            agent_id="devin:session:abc",
+            display_name="Devin abc",
+            mode=AgentMode.WORKING,
+            updated_at=datetime.now(timezone.utc),
+            event_name="PreToolUse",
+            session_id="devin-session-123",
+            cwd="/tmp/project with spaces",
+        )
+
+        command = "cd '/tmp/project with spaces' && devin --resume devin-session-123"
+        self.assertEqual(session_resume_command(status), command)
+        self.assertEqual(session_open_target(status, SESSION_OPEN_TERMINAL), ("terminal", command))
+
+    def test_session_opener_providers_follow_hook_registry(self) -> None:
+        self.assertEqual(provider_session_opener_providers(), HOOK_PROVIDERS)
 
 
 if __name__ == "__main__":

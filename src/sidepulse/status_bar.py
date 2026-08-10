@@ -121,6 +121,7 @@ from .session_actions import (
     SESSION_OPEN_VSCODE,
     available_session_open_actions,
     default_session_open_action,
+    provider_session_opener_providers,
     session_open_action_label,
     session_open_target,
 )
@@ -2030,7 +2031,7 @@ def format_byte_count(size: int) -> str:
 
 def build_settings_window(target: StatusBarController) -> NSWindow:
     width = 680
-    height = 1022
+    height = 1054
     style = (
         NSWindowStyleMaskTitled
         | NSWindowStyleMaskClosable
@@ -2047,10 +2048,10 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     window.center()
     content = window.contentView()
 
-    add_label(content, "Agent Hooks", 24, 974, 200, 24)
+    add_label(content, "Agent Hooks", 24, 1006, 200, 24)
     hook_statuses = {}
     for index, provider in enumerate(HOOK_PROVIDERS):
-        y = 932 - index * 42
+        y = 964 - index * 42
         label = provider_spec(provider).label
         add_label(content, label, 32, y, 80, 22)
         hook_statuses[provider] = add_label(content, "", 112, y, 270, 22)
@@ -2058,14 +2059,14 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         add_button(content, "Install", 432, y - 4, 90, 28, target, f"install{selector}Hooks:")
         add_button(content, "Uninstall", 532, y - 4, 100, 28, target, f"uninstall{selector}Hooks:")
 
-    add_separator(content, 24, 776, width - 48)
-    add_label(content, "Transcript Monitoring", 24, 742, 240, 24)
-    add_label(content, "Open Sessions With", 352, 742, 240, 24)
+    add_separator(content, 24, 808, width - 48)
+    add_label(content, "Transcript Monitoring", 24, 774, 240, 24)
+    add_label(content, "Open Sessions With", 352, 774, 240, 24)
     codex_transcripts = add_checkbox(
         content,
         "CLI fallback: Codex transcripts",
         32,
-        708,
+        740,
         260,
         24,
         target,
@@ -2075,20 +2076,19 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         content,
         "CLI fallback: Claude transcripts",
         32,
-        676,
+        708,
         260,
         24,
         target,
         "toggleClaudeTranscripts:",
     )
-    add_label(content, "Codex", 360, 714, 62, 22)
-    codex_opener = add_provider_opener_popup(content, "codex", 424, 712, target)
-    add_label(content, "Claude", 360, 686, 62, 22)
-    claude_opener = add_provider_opener_popup(content, "claude", 424, 684, target)
-    add_label(content, "Grok", 360, 658, 62, 22)
-    grok_opener = add_provider_opener_popup(content, "grok", 424, 658, target)
+    provider_openers = {}
+    for index, provider in enumerate(provider_session_opener_providers()):
+        y = 746 - index * 28
+        add_label(content, provider_spec(provider).label, 360, y + 2, 62, 22)
+        provider_openers[provider] = add_provider_opener_popup(content, provider, 424, y, target)
 
-    add_separator(content, 24, 656, width - 48)
+    add_separator(content, 24, 660, width - 48)
     add_label(content, "Debug Log", 24, 622, 240, 24)
     debug_log_status = add_label(content, "", 32, 592, 606, 22)
     add_button(content, "Export CSV", 32, 554, 110, 28, target, "exportDebugCsv:")
@@ -2140,9 +2140,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     target.settings_fields = {
         **{f"{provider}_hook_status": status for provider, status in hook_statuses.items()},
         "debug_log_status": debug_log_status,
-        "codex_session_opener": codex_opener,
-        "claude_session_opener": claude_opener,
-        "grok_session_opener": grok_opener,
+        **{f"{provider}_session_opener": popup for provider, popup in provider_openers.items()},
         "closed_animation_program": closed_program,
         "closed_animation_duration": closed_duration,
         "open_animation_program": open_program,
