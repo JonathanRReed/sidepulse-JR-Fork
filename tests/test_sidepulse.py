@@ -75,10 +75,15 @@ from sidepulse.lid_sleep import (
 from sidepulse.models import AgentMode, AgentStatus, AggregateStatus
 from sidepulse.origin import ProcessInfo, origin_from_processes
 from sidepulse.providers import (
+    DEVIN_EVENTS,
+    HOOK_PROVIDERS,
+    PROVIDER_REGISTRY,
+    detect_devin_config,
     detect_grok_config,
     default_log_path,
     default_state_dir,
     parse_log_line,
+    provider_spec,
 )
 from sidepulse.sd_eject_guard_launch import (
     SD_EJECT_GUARD_BINARY_NAME,
@@ -143,6 +148,63 @@ class FakeProcess:
 
 
 class AgentMonitorTests(unittest.TestCase):
+    def test_provider_registry_includes_devin_as_first_class_provider(self) -> None:
+        self.assertEqual(HOOK_PROVIDERS, ("codex", "claude", "devin", "grok"))
+        self.assertEqual(provider_spec("devin").label, "Devin")
+        self.assertEqual(provider_spec("devin").config_kind, "devin-json")
+        self.assertEqual(provider_spec("devin").events, DEVIN_EVENTS)
+        self.assertIs(PROVIDER_REGISTRY["devin"], provider_spec("devin"))
+
+    def test_detect_devin_config_reads_global_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / ".config" / "devin" / "config.json"
+            log = home / "state" / "devin.jsonl"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": f"python hook_entry.py --provider devin --log {log}",
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    }
+                )
+            )
+
+            detected = detect_devin_config(home)
+
+            self.assertEqual(detected.provider, "devin")
+            self.assertTrue(detected.hooks_enabled)
+            self.assertIn("PreToolUse", detected.hook_events)
+            self.assertIn(log, detected.log_paths)
+
+    def test_devin_post_compaction_and_prompt_id_are_normalized(self) -> None:
+        record = parse_log_line(
+            "devin",
+            json.dumps(
+                {
+                    "hook_event_name": "PostCompaction",
+                    "session_id": "devin-session",
+                    "prompt_id": "devin-turn",
+                    "summary": "compacted",
+                }
+            ),
+        )
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record.provider, "devin")
+        self.assertEqual(record.event_name, "PostCompact")
+        self.assertEqual(record.turn_id, "devin-turn")
+
     def test_aggregates_highest_priority_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
