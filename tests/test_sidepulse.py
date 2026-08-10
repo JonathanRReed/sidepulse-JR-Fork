@@ -1671,7 +1671,7 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertIn('trusted_hash = "sha256:stop"', updated)
         self.assertNotIn("sha256:old", updated)
 
-    def test_claude_installer_replaces_target_hook_and_preserves_other_hooks(self) -> None:
+    def test_claude_installer_replaces_sidepulse_hook_and_preserves_same_log_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             config = base / "settings.json"
@@ -1688,6 +1688,12 @@ class AgentMonitorTests(unittest.TestCase):
                                         {
                                             "type": "command",
                                             "command": f"jq -c . >> {log}",
+                                        },
+                                        {
+                                            "type": "command",
+                                            "command": (
+                                                f"python hook_entry.py --provider claude --log {log}"
+                                            ),
                                         },
                                         {
                                             "type": "command",
@@ -1715,8 +1721,9 @@ class AgentMonitorTests(unittest.TestCase):
                 for hook in entry["hooks"]
             ]
             self.assertIn("echo keep >> /tmp/other.log", commands)
+            self.assertIn(f"jq -c . >> {log}", commands)
             self.assertTrue(any("hook_entry.py" in command for command in commands))
-            self.assertFalse(any(command.startswith("jq -c") for command in commands))
+            self.assertEqual(sum("--provider claude" in command for command in commands), 1)
             self.assertEqual(data["permissions"]["allow"], ["Bash(date)"])
 
     def test_grok_installer_writes_global_hook_file_without_lifecycle_matchers(self) -> None:
@@ -1741,6 +1748,13 @@ class AgentMonitorTests(unittest.TestCase):
                                             "type": "command",
                                             "command": f"jq -c . >> {log}",
                                         },
+                                        {
+                                            "type": "command",
+                                            "command": (
+                                                "agent-monitor hook-log --provider grok "
+                                                f"--log {log}"
+                                            ),
+                                        },
                                     ],
                                 }
                             ]
@@ -1763,8 +1777,9 @@ class AgentMonitorTests(unittest.TestCase):
                 for hook in entry["hooks"]
             ]
             self.assertIn("echo keep >> /tmp/other.log", pre_tool_commands)
+            self.assertIn(f"jq -c . >> {log}", pre_tool_commands)
             self.assertTrue(any("--provider grok" in command for command in pre_tool_commands))
-            self.assertFalse(any(command.startswith("jq -c") for command in pre_tool_commands))
+            self.assertEqual(sum("--provider grok" in command for command in pre_tool_commands), 1)
             self.assertIn("matcher", data["hooks"]["PreToolUse"][-1])
             self.assertNotIn("matcher", data["hooks"]["SessionStart"][-1])
 
@@ -1807,6 +1822,96 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(commands.count(agent_deck), 1)
             self.assertEqual(sum("--provider devin" in command for command in commands), 1)
             self.assertEqual(data["theme_mode"], "dark")
+
+    def test_devin_installer_preserves_same_log_agent_deck_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.json"
+            log = base / "devin.jsonl"
+            agent_deck_commands = {
+                event: f"bun /tmp/agent-deck-hook.ts --log {log} --event {event}"
+                for event in DEVIN_EVENTS
+            }
+            source_command = f"python hook_entry.py --provider devin --log {log}"
+            packaged_command = f"agent-monitor hook-log --provider devin --log {log}"
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            event: [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": agent_deck_commands[event],
+                                        }
+                                    ]
+                                }
+                            ]
+                            for event in DEVIN_EVENTS
+                        }
+                    }
+                )
+            )
+            data = json.loads(config.read_text())
+            data["hooks"]["PreToolUse"][0]["hooks"].extend(
+                [
+                    {"type": "command", "command": source_command},
+                    {"type": "command", "command": packaged_command},
+                ]
+            )
+            config.write_text(json.dumps(data))
+
+            install_devin_hooks(log, config, python_executable="python3")
+
+            commands = [
+                hook["command"]
+                for entries in json.loads(config.read_text())["hooks"].values()
+                for entry in entries
+                for hook in entry["hooks"]
+            ]
+            for command in agent_deck_commands.values():
+                self.assertEqual(commands.count(command), 1)
+            self.assertNotIn(source_command, commands)
+            self.assertNotIn(packaged_command, commands)
+            self.assertEqual(sum("--provider devin" in command for command in commands), len(DEVIN_EVENTS))
+
+    def test_devin_uninstaller_preserves_same_log_agent_deck_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.json"
+            log = base / "devin.jsonl"
+            agent_deck = f"bun /tmp/agent-deck-hook.ts --log {log}"
+            source_command = f"python hook_entry.py --provider devin --log {log}"
+            packaged_command = f"agent-monitor hook-log --provider devin --log {log}"
+            config.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "Stop": [
+                                {
+                                    "hooks": [
+                                        {"type": "command", "command": agent_deck},
+                                        {"type": "command", "command": source_command},
+                                        {"type": "command", "command": packaged_command},
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+
+            result = uninstall_devin_hooks(log, config)
+
+            data = json.loads(config.read_text())
+            commands = [
+                hook["command"]
+                for entry in data.get("hooks", {}).get("Stop", [])
+                for hook in entry["hooks"]
+            ]
+            self.assertTrue(result.changed)
+            self.assertEqual(commands, [agent_deck])
 
     def test_devin_uninstaller_removes_only_sidepulse_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

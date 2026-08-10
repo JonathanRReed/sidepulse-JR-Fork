@@ -149,7 +149,7 @@ def install_grok_hooks(
         entries = hooks.get(event_name, [])
         if not isinstance(entries, list):
             entries = []
-        cleaned = remove_json_command_hooks_for_log(entries, target_log)
+        cleaned = remove_json_command_hooks_for_log(entries, target_log, "grok")
         cleaned.append(grok_hook_entry(event_name, command))
         hooks[event_name] = cleaned
 
@@ -184,7 +184,7 @@ def install_devin_hooks(
         entries = hooks.get(event_name, [])
         if not isinstance(entries, list):
             raise ValueError(f"Expected hooks.{event_name} array in {config}")
-        cleaned = remove_json_command_hooks_for_log(entries, target_log)
+        cleaned = remove_json_command_hooks_for_log(entries, target_log, "devin")
         cleaned.append({"hooks": [{"type": "command", "command": command}]})
         hooks[event_name] = cleaned
 
@@ -280,7 +280,7 @@ def uninstall_grok_hooks(
             if event_name not in GROK_EVENTS or not isinstance(entries, list):
                 continue
 
-            cleaned = remove_json_command_hooks_for_log(entries, target_log)
+            cleaned = remove_json_command_hooks_for_log(entries, target_log, "grok")
             if cleaned:
                 hooks[event_name] = cleaned
             else:
@@ -322,7 +322,7 @@ def uninstall_devin_hooks(
             if event_name not in DEVIN_EVENTS or not isinstance(entries, list):
                 continue
 
-            cleaned = remove_json_command_hooks_for_log(entries, target_log)
+            cleaned = remove_json_command_hooks_for_log(entries, target_log, "devin")
             if cleaned:
                 hooks[event_name] = cleaned
             else:
@@ -676,11 +676,14 @@ def is_pristine_codex_hook_install(text: str, block: str, log_path: Path) -> boo
 
 
 def remove_claude_hooks_for_log(entries: list[Any], log_path: Path) -> list[dict[str, Any]]:
-    return remove_json_command_hooks_for_log(entries, log_path)
+    return remove_json_command_hooks_for_log(entries, log_path, "claude")
 
 
-def remove_json_command_hooks_for_log(entries: list[Any], log_path: Path) -> list[dict[str, Any]]:
-    target = str(log_path)
+def remove_json_command_hooks_for_log(
+    entries: list[Any],
+    log_path: Path,
+    provider: str,
+) -> list[dict[str, Any]]:
     cleaned_entries: list[dict[str, Any]] = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -692,8 +695,8 @@ def remove_json_command_hooks_for_log(entries: list[Any], log_path: Path) -> lis
         for hook in hooks:
             if not isinstance(hook, dict):
                 continue
-            command = hook.get("command", "")
-            if target in command or "sidepulse hook-log" in command or "hook_entry.py" in command:
+            command = hook.get("command")
+            if is_sidepulse_json_hook_command(command, log_path, provider):
                 continue
             cleaned_hooks.append(hook)
         if cleaned_hooks:
@@ -701,6 +704,41 @@ def remove_json_command_hooks_for_log(entries: list[Any], log_path: Path) -> lis
             kept["hooks"] = cleaned_hooks
             cleaned_entries.append(kept)
     return cleaned_entries
+
+
+def is_sidepulse_json_hook_command(
+    command: Any,
+    log_path: Path,
+    provider: str,
+) -> bool:
+    if not isinstance(command, str):
+        return False
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return False
+
+    if _command_option(arguments, "--provider") != provider:
+        return False
+    if _command_option(arguments, "--log") != str(log_path.expanduser()):
+        return False
+
+    source_entrypoint = any(Path(argument).name == "hook_entry.py" for argument in arguments)
+    packaged_entrypoint = (
+        any(Path(argument).name == "agent-monitor" for argument in arguments)
+        and "hook-log" in arguments
+    )
+    return source_entrypoint or packaged_entrypoint
+
+
+def _command_option(arguments: list[str], option: str) -> str | None:
+    for index, argument in enumerate(arguments):
+        if argument == option and index + 1 < len(arguments):
+            return arguments[index + 1]
+        prefix = f"{option}="
+        if argument.startswith(prefix):
+            return argument.removeprefix(prefix)
+    return None
 
 
 def ensure_codex_hooks_feature(text: str) -> str:
