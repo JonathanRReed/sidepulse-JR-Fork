@@ -3834,7 +3834,10 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertTrue(plist["RunAtLoad"])
         self.assertEqual(plist["StandardOutPath"], "/tmp/sidepulse.out.log")
         self.assertEqual(plist["StandardErrorPath"], "/tmp/sidepulse.err.log")
-        self.assertNotIn("KeepAlive", plist)
+        # Unconditional KeepAlive: a TCC grant quits the app with exit 0
+        # (a SuccessfulExit condition would leave it dead); Quit boots
+        # the job out instead of relying on exit codes.
+        self.assertIs(plist["KeepAlive"], True)
 
     def test_status_bar_launch_agent_installed_checks_plist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8170,8 +8173,10 @@ if __name__ == "__main__":
 class AppBundleTests(unittest.TestCase):
     def test_bundle_wraps_the_venv_and_is_idempotent(self) -> None:
         # The wrapper must run as "SidePulse", resolve the venv's
-        # packages, and rebuild only when something actually changed --
-        # this is what puts SidePulse by name in the Privacy list.
+        # packages through its environment, carry a VALID sealed
+        # signature (TCC silently ignores grants for apps whose
+        # signature fails to verify), and rebuild only when something
+        # actually changed.
         try:
             from sidepulse import app_bundle
         except (ImportError, SystemExit) as exc:
@@ -8180,17 +8185,57 @@ class AppBundleTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp) / "SidePulse.app"
-            first = app_bundle.build_app_bundle(bundle, venv_python=sys.executable)
+            boot = Path(tmp) / "bundle-boot"
+            first = app_bundle.build_app_bundle(
+                bundle, venv_python=sys.executable, boot_dir=boot
+            )
             self.assertTrue(first.changed)
             self.assertEqual(first.executable_path.name, "SidePulse")
-            second = app_bundle.build_app_bundle(bundle, venv_python=sys.executable)
+            second = app_bundle.build_app_bundle(
+                bundle, venv_python=sys.executable, boot_dir=boot
+            )
             self.assertFalse(second.changed)
 
+            # Nothing loose in Contents/ -- codesign refuses to seal a
+            # bundle with stray files, which is how the first layout
+            # ended up with an invalid signature and a dead FDA grant.
+            self.assertFalse((bundle / "Contents" / "pyvenv.cfg").exists())
+            self.assertFalse((bundle / "Contents" / "lib").exists())
+            verify = sp.run(
+                ["codesign", "--verify", "--strict", str(bundle)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(verify.returncode, 0, verify.stderr)
+            identity = sp.run(
+                ["codesign", "-dv", str(bundle)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertIn("Identifier=io.sidepulse.app", identity.stderr)
+
+            # The boot shim exists outside the sealed bundle and stays
+            # inert for non-bundle interpreters.
+            self.assertTrue((boot / "sitecustomize.py").exists())
+
+            # Launched the way launchd launches it, the interpreter
+            # runs from inside the bundle and resolves the venv's
+            # packages via the environment.
+            env = {**os.environ, **first.environment}
+            env.pop("__PYVENV_LAUNCHER__", None)
             result = sp.run(
-                [str(first.executable_path), "-c", "import sys, sidepulse; print(sys.prefix)"],
+                [
+                    str(first.executable_path),
+                    "-c",
+                    "import sys, sidepulse; print(sys.executable); print(sidepulse.__file__)",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=30,
+                env=env,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("SidePulse.app/Contents", result.stdout)
+            self.assertIn("SidePulse.app/Contents/MacOS/SidePulse", result.stdout)
+            self.assertIn("site-packages", result.stdout)

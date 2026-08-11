@@ -45,13 +45,18 @@ def build_launch_agent_plist(
     stdout_path: Path | None = None,
     stderr_path: Path | None = None,
 ) -> dict[str, Any]:
+    bundle_environment: dict[str, str] = {}
     if python_executable is None and not getattr(sys, "frozen", False):
         # Run inside the SidePulse.app wrapper so macOS Privacy lists
         # show "SidePulse" by name and TCC grants stick to the app --
         # see app_bundle.py for why a bare venv process can't get there.
         from .app_bundle import build_app_bundle
 
-        python_executable = build_app_bundle().executable_path
+        bundle = build_app_bundle()
+        python_executable = bundle.executable_path
+        # The sealed bundle carries no pyvenv.cfg; the interpreter's
+        # home and site-packages come from these variables instead.
+        bundle_environment = bundle.environment
     executable = str(python_executable or sys.executable or "python3")
     state_dir = default_state_dir()
     stdout = stdout_path or state_dir / "status-bar.out.log"
@@ -72,12 +77,20 @@ def build_launch_agent_plist(
         "Label": LAUNCH_AGENT_LABEL,
         "ProgramArguments": program_arguments,
         "RunAtLoad": True,
+        # Unconditional: granting a TCC permission quits the app with a
+        # CLEAN exit (observed: last exit code 0), so a SuccessfulExit
+        # condition would have left it dead -- exactly the "I granted
+        # Full Disk Access and SidePulse never came back" failure. The
+        # Quit menu item boots the job out instead of just exiting, so
+        # quitting still sticks (see quit_ in status_bar.py).
+        "KeepAlive": True,
         "StandardOutPath": str(stdout),
         "StandardErrorPath": str(stderr),
         "WorkingDirectory": str(Path.home()),
         "EnvironmentVariables": {
             "PYTHONUNBUFFERED": "1",
             "PATH": launch_agent_path_env(executable),
+            **bundle_environment,
         },
     }
     return plist

@@ -195,7 +195,11 @@ from .settings import (
     normalize_animation_duration,
     save_settings,
 )
-from .status_bar_launch import install_launch_agent, launch_agent_installed
+from .status_bar_launch import (
+    LAUNCH_AGENT_LABEL,
+    install_launch_agent,
+    launch_agent_installed,
+)
 
 
 @dataclass(frozen=True)
@@ -1002,7 +1006,23 @@ class StatusBarController(NSObject):
     def quit_(self, _sender):
         self.closed_lid_awake.release()
         self.keep_awake.release()
-        NSApp.terminate_(self)
+        # Under launchd (parent pid 1) the job has KeepAlive, so a plain
+        # terminate would be resurrected instantly; boot the job out
+        # instead -- launchd stops us and stays stopped until the next
+        # login or explicit start. Anywhere else (dev --foreground run),
+        # a normal terminate is correct.
+        if os.getppid() == 1:
+            subprocess.Popen(
+                [
+                    "launchctl",
+                    "bootout",
+                    f"gui/{os.getuid()}/{LAUNCH_AGENT_LABEL}",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            NSApp.terminate_(self)
 
     def applicationWillTerminate_(self, _notification):
         self.stop_event_server()
@@ -4046,8 +4066,10 @@ def _build_led_behavior_pane(target: StatusBarController):
             grant_target = str(default_app_bundle_path())
             grant_instructions = (
                 "In Privacy Settings, click +, and pick SidePulse from your "
-                "Applications folder. This pane fills with your Focus modes "
-                "once granted."
+                "Applications folder. If SidePulse is already listed, remove "
+                "it with − first, then add it again — macOS only "
+                "re-checks the app when it's re-added. This pane fills with "
+                "your Focus modes once granted."
             )
         else:
             # Not yet running inside the app bundle: macOS attributes file
