@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1251,6 +1252,104 @@ class AgentMonitorTests(unittest.TestCase):
         # Must not raise -- exercises the wing-riser pass (only reached
         # when wing_offset > 0) on top of the existing notch/wing passes.
         view.drawRect_(view.bounds())
+
+    def test_alcove_gap_measured_from_its_menu_bar_window(self) -> None:
+        # In Automatic size with Alcove running, the bracket's gap must
+        # follow Alcove's own overlay window -- its live-activity capsule
+        # is wider than the hardware notch, and a hardware-sized bracket
+        # landed ON TOP of it ("the wings aren't properly sized").
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        def window(owner, x, y, width):
+            return {
+                "kCGWindowOwnerName": owner,
+                "kCGWindowBounds": {"X": x, "Y": y, "Width": width, "Height": 320},
+            }
+
+        screen_x, screen_width = 0.0, 1512.0
+        gap = virtual_device.alcove_gap_from_windows(
+            [
+                window("Alcove", 444.0, 0.0, 624.0),
+                window("Alcove", 444.0, 0.0, 624.0),  # its second, identical layer
+                window("Finder", 0.0, 0.0, 1512.0),
+            ],
+            screen_x,
+            screen_width,
+        )
+        self.assertEqual(gap, 624.0 + 2.0 * virtual_device.ALCOVE_GAP_MARGIN)
+
+        # Full-width Alcove states (expanded HUD) must NOT balloon the bar.
+        self.assertIsNone(
+            virtual_device.alcove_gap_from_windows(
+                [window("Alcove", 0.0, 0.0, 1512.0)], screen_x, screen_width
+            )
+        )
+        # Windows outside the menu-bar strip or missing the notch don't count.
+        self.assertIsNone(
+            virtual_device.alcove_gap_from_windows(
+                [window("Alcove", 444.0, 200.0, 624.0), window("Alcove", 0.0, 0.0, 200.0)],
+                screen_x,
+                screen_width,
+            )
+        )
+        # No Alcove windows at all -> None (caller falls back to hardware).
+        self.assertIsNone(
+            virtual_device.alcove_gap_from_windows([], screen_x, screen_width)
+        )
+
+    def test_auto_wing_backs_off_when_the_gap_is_wider_than_the_notch(self) -> None:
+        # A measured (or user-set) gap wider than the hardware slot eats
+        # each side's free room; the auto wing must shrink by the same
+        # overhang or it draws over app menus and status icons.
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        class Area:
+            def __init__(self, x, width):
+                self.origin = types.SimpleNamespace(x=x, y=0.0)
+                self.size = types.SimpleNamespace(width=width, height=24.0)
+
+        class Screen:
+            def auxiliaryTopLeftArea(self):
+                return Area(0.0, 160.0)
+
+            def auxiliaryTopRightArea(self):
+                return Area(360.0, 160.0)
+
+        # Hardware slot = 360 - 160 = 200pt; each side has 160pt of room.
+        screen = Screen()
+        at_notch = virtual_device.wing_width_for_screen(screen, 200.0)
+        widened = virtual_device.wing_width_for_screen(screen, 400.0)
+        self.assertGreater(at_notch, 0.0)
+        # 200pt of widening = 100pt of overhang per side: 160 - 28 - 100
+        # = 32pt of room left, versus 110 (capped) at the notch.
+        self.assertAlmostEqual(widened, 32.0, delta=0.5)
+        self.assertLess(widened, at_notch)
+        # Widen past all the room and the wing collapses to zero.
+        self.assertEqual(virtual_device.wing_width_for_screen(screen, 520.0), 0.0)
+
+    def test_bracket_identity_color_survives_a_single_lit_led(self) -> None:
+        # The Alcove bracket/accent paints ONE identity color -- with a
+        # spatial per-LED render, one working agent lit 1 of 8 LEDs and
+        # the bracket was 7/8 black with an invisible right riser.
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (400.0, 37.0)))
+        one_lit = [(0.2, 0.5, 1.0, 1.0)] + [(0.0, 0.0, 0.0, 0.0)] * 7
+        red, green, blue, alpha = view._bar_identity_color(one_lit)
+        self.assertAlmostEqual(red, 0.2, places=5)
+        self.assertAlmostEqual(blue, 1.0, places=5)
+        self.assertEqual(alpha, 1.0)
+        self.assertEqual(
+            view._bar_identity_color([(0.0, 0.0, 0.0, 0.0)] * 8), (0.0, 0.0, 0.0, 0.0)
+        )
 
     def test_wings_only_mode_renders_without_raising(self) -> None:
         # The Alcove-aware wrap draws just the bracket (wings + risers)

@@ -84,6 +84,8 @@ LED_HOTLINE_BOOST = 1.46
 LED_GAMMA = 0.86
 FRAME_RATE = 60.0
 FRAME_INTERVAL = 1.0 / FRAME_RATE
+# Re-run reposition (Alcove tracking, churn-guarded) about every 2s.
+REPOSITION_EVERY_N_FRAMES = int(FRAME_RATE * 2)
 
 
 def monotonic_ms() -> int:
@@ -129,9 +131,16 @@ def wing_width_for_screen(screen, notch_width: float) -> float:
     # consumes the middle, so it's not double counted here -- this reads
     # each area's own remaining width after backing off a safety margin
     # from its outer edge, where a menu extra or status icon is most
-    # likely to start.
-    left_room = left.size.width - WING_SAFETY_MARGIN
-    right_room = right.size.width - WING_SAFETY_MARGIN
+    # likely to start. When the requested gap is WIDER than the hardware
+    # slot (Alcove-measured or user-set), the widening eats into each
+    # side's room symmetrically -- without subtracting that overhang,
+    # the auto wing extended over app menus and status icons.
+    hardware_slot = right.origin.x - (left.origin.x + left.size.width)
+    overhang = 0.0
+    if hardware_slot > 0.0 and float(notch_width) > hardware_slot:
+        overhang = (float(notch_width) - hardware_slot) / 2.0
+    left_room = left.size.width - WING_SAFETY_MARGIN - overhang
+    right_room = right.size.width - WING_SAFETY_MARGIN - overhang
     room = min(left_room, right_room)
     if room < WING_MIN_USABLE:
         return 0.0
@@ -197,6 +206,70 @@ def is_alcove_running() -> bool:
         # Fail safe to "not running" -- the caller falls back to the normal
         # full-width layout, never to a crash.
         return False
+
+
+# The bracket's uprights sit this far outside Alcove's overlay window.
+ALCOVE_GAP_MARGIN = 6.0
+# An Alcove window wider than this fraction of the screen is one of its
+# transient full-width states (expanded dropdown/HUD), not the
+# menu-bar overlay -- sizing the bracket to one of those put the wings
+# at the screen edges.
+ALCOVE_MAX_GAP_FRACTION = 0.6
+
+
+def alcove_gap_from_windows(
+    windows, screen_x: float, screen_width: float
+) -> float | None:
+    """The gap the bracket should leave for Alcove, from a CGWindowList
+    snapshot: the widest Alcove-owned window that sits in the menu-bar
+    strip (y = 0), spans the screen's horizontal center (where the
+    notch is), and is not one of Alcove's full-width states. Window
+    bounds -- not the drawn capsule, which pixel-reading can't separate
+    from a near-black menu bar -- so the bracket is a LOOSE fit that
+    nothing Alcove draws can ever stick out of. Returns None when no
+    qualifying window exists (caller falls back to hardware geometry).
+    Pure and testable; ``measure_alcove_gap_width`` feeds it live data.
+    """
+    center = screen_x + screen_width / 2.0
+    best = None
+    for info in windows or []:
+        try:
+            owner = str(info.get("kCGWindowOwnerName", "") or "")
+            bounds = info.get("kCGWindowBounds") or {}
+            x = float(bounds.get("X", 0.0))
+            y = float(bounds.get("Y", 1e9))
+            width = float(bounds.get("Width", 0.0))
+        except Exception:
+            continue
+        if owner.strip().lower() != "alcove":
+            continue
+        if y > 1.0 or width <= 0.0:
+            continue
+        if not (x <= center <= x + width):
+            continue
+        if width > screen_width * ALCOVE_MAX_GAP_FRACTION:
+            continue
+        if best is None or width > best:
+            best = width
+    if best is None:
+        return None
+    return best + 2.0 * ALCOVE_GAP_MARGIN
+
+
+def measure_alcove_gap_width(screen) -> float | None:
+    """Live wrapper around alcove_gap_from_windows -- see its docstring."""
+    try:
+        import Quartz
+
+        infos = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID
+        )
+    except Exception:
+        return None
+    frame = screen.frame()
+    return alcove_gap_from_windows(
+        infos, float(frame.origin.x), float(frame.size.width)
+    )
 
 
 
@@ -627,6 +700,28 @@ class VirtualLedView(NSView):
                 (1.0, 1.0, 1.0, 0.055),
             )
 
+    def _bar_identity_color(self, colors):
+        """ONE color representing the whole strip: the alpha-weighted
+        blend of the lit LEDs, at the brightest lit LED's intensity.
+        The bracket and accent renders are a status OUTLINE, not a
+        spatial LED map -- with one agent lit out of 8 LEDs, a spatial
+        render left 7/8 of the bracket black and the right riser
+        sampling a dark LED: an invisible bar that read as broken.
+        Animation still flows through: these colors are recomputed
+        every frame, so breathing/attention phases move the whole
+        bracket together."""
+        lit = [c for c in colors if max(c[0], c[1], c[2], c[3]) > 0.004]
+        if not lit:
+            return (0.0, 0.0, 0.0, 0.0)
+        total = sum(c[3] for c in lit)
+        if total <= 0.0:
+            return (0.0, 0.0, 0.0, 0.0)
+        red = sum(c[0] * c[3] for c in lit) / total
+        green = sum(c[1] * c[3] for c in lit) / total
+        blue = sum(c[2] * c[3] for c in lit) / total
+        alpha = max(c[3] for c in lit)
+        return (red, green, blue, alpha)
+
     def _draw_wings_only(self):
         """The Alcove coexistence render: a continuous, unmissable LED
         underline across the WHOLE bar -- through the gap, over the
@@ -635,8 +730,10 @@ class VirtualLedView(NSView):
         in the gap and left only faint wing stubs; over Alcove's huge
         dark backdrop that read as "the app disappeared". The underline
         is the bar's identity now: always visible, colored by the live
-        agent state, and the risers turn it into the |____| bracket."""
-        colors = self._colors_for_draw()
+        agent state, and the risers turn it into the |____| bracket.
+        Painted in the single identity color (_bar_identity_color), not
+        the spatial per-LED layout."""
+        colors = [self._bar_identity_color(self._colors_for_draw())] * LED_COUNT
         width = self.bounds().size.width
         height = self.bounds().size.height
         notch_width, wing_offset = self._notch_geometry()
@@ -800,8 +897,10 @@ class VirtualLedView(NSView):
         own black shape, don't draw a second competing black backdrop --
         just a clean, thin colored line at the same position the normal
         bar would use, reading as a status accent rather than a floating
-        widget. No body fill, no glow layers, no edge highlights."""
-        colors = self._colors_for_draw()
+        widget. No body fill, no glow layers, no edge highlights.
+        Painted in the single identity color -- see _bar_identity_color
+        for why a spatial per-LED accent was mostly invisible."""
+        colors = [self._bar_identity_color(self._colors_for_draw())] * LED_COUNT
         width = self.bounds().size.width
         cg_context = current_cg_context()
         notch_width, wing_offset = self._notch_geometry()
@@ -890,31 +989,46 @@ class VirtualStatusDevice(NSObject):
         # while Alcove runs, SidePulse always rides one level above it,
         # drawing the bracket (wings + risers) when wrap is on or a thin
         # accent underline when it's off; without Alcove, the normal full
-        # render at the normal status level. The bar keeps hardware-notch
-        # geometry by default (measuring Alcove's window was tried and is
-        # unstable -- live activities balloon it) and the user's Bar Size
-        # sliders override it precisely.
+        # render at the normal status level. In Automatic size, the gap
+        # follows Alcove's own overlay window (its live-activity capsule
+        # is wider than the hardware notch, and a hardware-sized bracket
+        # landed ON TOP of it); the user's Bar Size sliders still
+        # override everything precisely.
         alcove_active = is_alcove_running()
         wings_only = alcove_active and self.wraps_menu_bar
         compact = alcove_active and not self.wraps_menu_bar
 
         gap_override = getattr(self, "gap_width_override", None)
         wing_override = getattr(self, "wing_length_override", None)
+        effective_gap = gap_override
+        if alcove_active and gap_override is None:
+            measured = measure_alcove_gap_width(screen)
+            if measured is not None:
+                effective_gap = max(measured, slot_width_for_screen(screen))
         window_frame = virtual_window_frame_for_screen(
             screen,
             wrap_menu_bar=self.wraps_menu_bar,
-            gap_width=gap_override,
+            gap_width=effective_gap,
             wing_length=wing_override,
         )
-        self.window.setFrame_display_(window_frame, True)
+        current = self.window.frame()
+        frame_changed = (
+            abs(current.origin.x - window_frame[0][0]) > 0.5
+            or abs(current.origin.y - window_frame[0][1]) > 0.5
+            or abs(current.size.width - window_frame[1][0]) > 0.5
+            or abs(current.size.height - window_frame[1][1]) > 0.5
+        )
+        if frame_changed:
+            self.window.setFrame_display_(window_frame, True)
         self.window.setLevel_(ABOVE_ALCOVE_WINDOW_LEVEL if alcove_active else STATUS_WINDOW_LEVEL)
         if self.view is not None:
             self.view.setHasNotch_(screen_has_notch(screen))
             self.view.setCompactMode_(compact)
             self.view.setWingsOnlyMode_(wings_only)
-            self.view.setFrame_(((0, 0), window_frame[1]))
+            if frame_changed:
+                self.view.setFrame_(((0, 0), window_frame[1]))
             if self.wraps_menu_bar:
-                notch_width = float(gap_override) if gap_override else slot_width_for_screen(screen)
+                notch_width = float(effective_gap) if effective_gap else slot_width_for_screen(screen)
             else:
                 notch_width = None
             self.view.setNotchWidth_(notch_width)
@@ -942,3 +1056,10 @@ class VirtualStatusDevice(NSObject):
     def redraw_(self, _sender):
         if self.view is not None:
             self.view.setNeedsDisplay_(True)
+        # Alcove's overlay resizes as live activities come and go; track
+        # it by re-running the (cheap, churn-guarded) reposition about
+        # every two seconds rather than only on screen changes.
+        self._reposition_tick = getattr(self, "_reposition_tick", 0) + 1
+        if self._reposition_tick >= REPOSITION_EVERY_N_FRAMES:
+            self._reposition_tick = 0
+            self.reposition()
