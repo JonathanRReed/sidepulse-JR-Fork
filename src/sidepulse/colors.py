@@ -22,6 +22,7 @@ from typing import Any
 
 from .device_writer import MAX_LED_BYTES, MAX_LED_LINES
 from .led_status import (
+    ANIMATION_STYLE_BLINK,
     ANIMATION_STYLE_CHOICES,
     ANIMATION_STYLE_PULSE,
     ANIMATION_STYLE_ROLL,
@@ -635,6 +636,70 @@ class ColorSettings:
 
 
 # --- Urgency weighting -----------------------------------------------------
+
+
+PRESET_CUSTOM = "custom"
+PRESET_CALM = "calm"
+PRESET_INFORMATIVE = "informative"
+PRESET_EVERYTHING = "everything"
+PRESET_CHOICES: tuple[str, ...] = (PRESET_CALM, PRESET_INFORMATIVE, PRESET_EVERYTHING)
+PRESET_LABELS: dict[str, str] = {
+    PRESET_CUSTOM: "Custom",
+    PRESET_CALM: "Calm",
+    PRESET_INFORMATIVE: "Informative",
+    PRESET_EVERYTHING: "Everything",
+}
+PRESET_DESCRIPTIONS: dict[str, str] = {
+    PRESET_CALM: "One quiet aggregate light. Peripheral, never busy.",
+    PRESET_INFORMATIVE: "Every agent visible, breathing together.",
+    PRESET_EVERYTHING: "Full show: spotlight relay, motion, celebrations.",
+}
+
+
+def apply_preset(colors: "ColorSettings", preset: str) -> "ColorSettings":
+    """One-click personalities for the whole display engine -- each sets
+    blend mode, animation styles, speed, fade range, and event toggles as
+    a coherent package. Agent identity colors are deliberately untouched:
+    a preset changes how the light BEHAVES, never whose color it is.
+    """
+    if preset == PRESET_CALM:
+        result = colors.with_blend_mode(BLEND_MODE_CLASSIC).with_cycle_speed(2.4)
+        for key in ANIMATION_MODE_KEYS:
+            result = result.with_mode_animation(key, ANIMATION_STYLE_PULSE)
+        for key in FADE_MODE_KEYS:
+            result = result.with_fade_floor(key, 0.01).with_fade_ceiling(key, 0.35)
+        return result.with_round_robin_urgency_alert(True).with_done_celebration_enabled(False)
+    if preset == PRESET_INFORMATIVE:
+        result = colors.with_blend_mode(BLEND_MODE_ROUND_ROBIN).with_cycle_speed(1.6)
+        result = (
+            result.with_mode_animation(MODE_IDLE, ANIMATION_STYLE_PULSE)
+            .with_mode_animation(MODE_WORKING, ANIMATION_STYLE_PULSE)
+            .with_mode_animation(MODE_ASK, ANIMATION_STYLE_BLINK)
+        )
+        for key in FADE_MODE_KEYS:
+            result = result.with_fade_floor(key, 0.01).with_fade_ceiling(key, 0.5)
+        return result.with_round_robin_urgency_alert(True).with_done_celebration_enabled(True)
+    if preset == PRESET_EVERYTHING:
+        result = colors.with_blend_mode(BLEND_MODE_RELAY).with_cycle_speed(1.2)
+        result = (
+            result.with_mode_animation(MODE_IDLE, ANIMATION_STYLE_PULSE)
+            .with_mode_animation(MODE_WORKING, ANIMATION_STYLE_ROLL)
+            .with_mode_animation(MODE_ASK, ANIMATION_STYLE_BLINK)
+        )
+        for key in FADE_MODE_KEYS:
+            result = result.with_fade_floor(key, 0.02).with_fade_ceiling(key, 0.7)
+        return result.with_round_robin_urgency_alert(True).with_done_celebration_enabled(True)
+    raise ValueError(f"Unknown preset: {preset}")
+
+
+def matching_preset(colors: "ColorSettings") -> str:
+    """Which preset the current settings exactly correspond to, or
+    PRESET_CUSTOM -- so the preset picker can honestly show "Custom" the
+    moment any manual tweak diverges from a package."""
+    for preset in PRESET_CHOICES:
+        if apply_preset(colors, preset) == colors:
+            return preset
+    return PRESET_CUSTOM
 
 
 def urgency_weight(mode: AgentMode) -> int:

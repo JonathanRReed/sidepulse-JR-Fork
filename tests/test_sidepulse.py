@@ -6130,6 +6130,24 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         ]
         self.assertEqual(preview, expected)
 
+    def test_every_preset_applies_cleanly_and_round_trips_detection(self) -> None:
+        base = ColorSettings.defaults().with_agent_color("claude", "#123456")
+        for preset in colors_module.PRESET_CHOICES:
+            applied = colors_module.apply_preset(base, preset)
+            # Detection is exact: applying a preset means matching it...
+            self.assertEqual(colors_module.matching_preset(applied), preset)
+            # ...agent identity colors are never touched by a preset...
+            self.assertEqual(applied.agent_color("claude"), "#123456")
+            # ...and any manual tweak honestly reads as Custom again.
+            tweaked = applied.with_cycle_speed(applied.effective_speed_seconds(applied.blend_mode) + 0.3)
+            self.assertEqual(colors_module.matching_preset(tweaked), colors_module.PRESET_CUSTOM)
+
+    def test_presets_disagree_with_each_other(self) -> None:
+        base = ColorSettings.defaults()
+        applied = [colors_module.apply_preset(base, p) for p in colors_module.PRESET_CHOICES]
+        blends = [a.blend_mode for a in applied]
+        self.assertEqual(len(blends), len(set(blends)))
+
     def test_attention_takeover_double_flashes_when_any_agent_asks(self) -> None:
         # A per-slot color swap is not an alert: it pulses at the same
         # rhythm/brightness as working neighbors, and the Ask color can

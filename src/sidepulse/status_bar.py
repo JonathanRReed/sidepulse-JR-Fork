@@ -120,7 +120,13 @@ from .colors import (
     CURATED_PALETTE,
     FADE_MODE_KEYS,
     MODE_COLOR_KEYS,
+    PRESET_CHOICES,
+    PRESET_CUSTOM,
+    PRESET_DESCRIPTIONS,
+    PRESET_LABELS,
     ColorSettings,
+    apply_preset,
+    matching_preset,
     program_for_snapshot,
 )
 from .virtual_device import (
@@ -1277,6 +1283,27 @@ class StatusBarController(NSObject):
             return
         self.color_preview_scenario = scenario
         self.refresh_colors_preview()
+
+    @objc.IBAction
+    def setColorPreset_(self, sender):
+        payload = sender.selectedItem().representedObject() if sender.selectedItem() else None
+        if not payload or payload.get("preset") in (None, PRESET_CUSTOM):
+            # Custom isn't a package to apply -- it's the honest label for
+            # "you've tweaked things yourself".
+            refresh_blend_and_speed_fields(self)
+            return
+        try:
+            colors = apply_preset(self.settings.colors, payload["preset"])
+        except ValueError:
+            return
+        self.settings = self.settings.with_colors(colors)
+        save_settings(self.settings)
+        refresh_blend_and_speed_fields(self)
+        self.refresh_colors_preview()
+        if self.color_preview_enabled:
+            self.push_colors_preview_to_device()
+        self.refresh_(None)
+        self.set_settings_message(f"Preset applied: {PRESET_LABELS[payload['preset']]}.")
 
     @objc.IBAction
     def setBlendMode_(self, sender):
@@ -4092,6 +4119,18 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
     scroll_stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
 
     behavior_outer, behavior_inner = native_ui.make_card("Blend Mode & Behavior")
+    preset_popup = make_color_preset_popup(target)
+    behavior_inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Preset",
+            preset_popup,
+            help_text=(
+                "One-click personality for the whole display: blend mode, "
+                "animation, speed, and fade set together. Any manual tweak "
+                "below switches this back to Custom."
+            ),
+        )
+    )
     blend_popup = make_blend_mode_popup(target)
     behavior_inner.addArrangedSubview_(native_ui.make_row("Blend Mode", blend_popup))
     blend_description = native_ui.make_label("", secondary=True, size=12.0)
@@ -4282,6 +4321,7 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
     target.color_hex_labels = hex_labels
     target.color_fields = {
         "preview_scenario_popup": preview_scenario_popup,
+        "preset_popup": preset_popup,
         "blend_mode_popup": blend_popup,
         "blend_description": blend_description,
         "urgency_alert_checkbox": urgency_alert_checkbox,
@@ -4303,6 +4343,9 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
 def refresh_blend_and_speed_fields(target: StatusBarController) -> None:
     colors = target.settings.colors
     fields = target.color_fields
+    preset_popup = fields.get("preset_popup")
+    if preset_popup is not None:
+        select_color_preset(preset_popup, matching_preset(colors))
     popup = fields.get("blend_mode_popup")
     if popup is not None:
         select_blend_mode(popup, colors.blend_mode)
@@ -4403,6 +4446,26 @@ def make_blend_mode_popup(target):
         popup.addItemWithTitle_(BLEND_MODE_LABELS[mode])
         popup.lastItem().setRepresentedObject_({"blend_mode": mode})
     return popup
+
+
+def make_color_preset_popup(target):
+    popup = native_ui.make_popup_button(target, "setColorPreset:")
+    popup.addItemWithTitle_(PRESET_LABELS[PRESET_CUSTOM])
+    popup.lastItem().setRepresentedObject_({"preset": PRESET_CUSTOM})
+    for preset in PRESET_CHOICES:
+        popup.addItemWithTitle_(PRESET_LABELS[preset])
+        item = popup.lastItem()
+        item.setRepresentedObject_({"preset": preset})
+        item.setToolTip_(PRESET_DESCRIPTIONS[preset])
+    return popup
+
+
+def select_color_preset(popup, preset: str) -> None:
+    for index in range(popup.numberOfItems()):
+        payload = popup.itemAtIndex_(index).representedObject()
+        if isinstance(payload, dict) and payload.get("preset") == preset:
+            popup.selectItemAtIndex_(index)
+            return
 
 
 def select_blend_mode(popup, blend_mode: str) -> None:
