@@ -1,5 +1,27 @@
 # SidePulse fork — master plan
 
+> **SIGNAL ENGINE WAVE — SHIPPED (2026-08-11, second build day).**
+> Spec: docs/superpowers/specs/2026-08-11-signal-engine-design.md.
+> All five phases landed and a closing adversarial review's 12
+> findings were fixed the same day (commits 7371c95..0688bcc):
+> 1. One signal model + one renderer (SignalStyle/style_to_program),
+>    byte-identical invisible migration, precedence arbiter.
+> 2. Ask escalation: ramp (brightness + blend quickening) → menu-bar
+>    flash → opt-in chime/takeover; per-agent episodes (oldest
+>    unanswered ask governs); tier is a ceiling; thresholds ordered.
+> 3. Color = agent: 8-hue identity palette (sorted-set-deterministic),
+>    session overrides via each session's Identity Color submenu,
+>    dropdown identity dots; lone sessions keep brand colors.
+> 4. Reminders-due amber glow (async EventKit, once per reminder).
+> 5. The Signals pane: style cards with animating pattern thumbnails,
+>    color wells, continuous sliders (preview-only mid-drag), live
+>    preview strips, escalation card. All controls re-sync on refresh.
+> Also that day: pixel-measured hardware notch (no model tables),
+> 6pt rounded bracket, identity-color visibility fix, calendar glow,
+> notification blinks, transcript fallback made real, and the app
+> bundle/FDA saga closed. Still deferred: weather, calibration
+> profiles, per-device blend override, progress fill.
+
 > **Status (2026-08-11, end of build day): SHIPPED through Phase 5's
 > feasible scope.** Twenty-plus commits on
 > `feat/color-customization-and-led-behavior`. Summary of what landed
