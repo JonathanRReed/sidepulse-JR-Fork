@@ -306,13 +306,18 @@ def glow_color_for_column(
     of a wide wing -- reading as "the glow doesn't reach the edges" even
     though the window itself is genuinely that wide.
     """
+    # Wings sample their color at the edge LED's CENTER, not at the
+    # notch's geometric edge -- at the edge itself the inter-LED blend
+    # has already fallen off half an LED early, so the whole wing
+    # inherited a pre-dimmed color and the notch/wing boundary showed a
+    # hard brightness seam ("the wings are fucked up").
     if wing_offset > 0.0 and center_x < wing_offset:
         distance_into_wing = wing_offset - center_x
-        edge_x = 0.0
+        edge_x = led_width * 0.5
         wing_width = wing_offset
     elif wing_offset > 0.0 and center_x > wing_offset + notch_width:
         distance_into_wing = center_x - (wing_offset + notch_width)
-        edge_x = notch_width
+        edge_x = notch_width - led_width * 0.5
         wing_width = wing_offset
     else:
         return blended_led_color_at_x(colors, center_x - wing_offset, led_width)
@@ -589,11 +594,21 @@ class VirtualLedView(NSView):
             # edge LED (not the already-tapered-to-~0 color right at the
             # true edge), since the riser is a new visual element in its
             # own right, not a continuation of the horizontal taper.
-            left_edge_color = blended_led_color_at_x(colors, 0.0, led_width)
-            right_edge_color = blended_led_color_at_x(colors, notch_width, led_width)
-            self._draw_wing_riser(cg_context, left_edge_color, 0.0, min(WING_RISER_WIDTH, wing_offset), height)
+            left_edge_color = blended_led_color_at_x(colors, led_width * 0.5, led_width)
+            right_edge_color = blended_led_color_at_x(
+                colors, notch_width - led_width * 0.5, led_width
+            )
             self._draw_wing_riser(
-                cg_context, right_edge_color, max(width - WING_RISER_WIDTH, wing_offset + notch_width), width, height
+                cg_context, left_edge_color, 0.0, min(WING_RISER_WIDTH, wing_offset), height,
+                outer_on_left=True,
+            )
+            self._draw_wing_riser(
+                cg_context,
+                right_edge_color,
+                max(width - WING_RISER_WIDTH, wing_offset + notch_width),
+                width,
+                height,
+                outer_on_left=False,
             )
 
         # Edge highlight/shadow: unclipped and full-width (as it always
@@ -632,12 +647,16 @@ class VirtualLedView(NSView):
         # The full-width underline: clip to the LED band (plus a whisper
         # of bloom above it) so the gap region shows a clean bright line
         # rather than the full-height glow that belongs to the wings.
+        # Taper floor 1.0 -- the underline is ONE continuous line at one
+        # intensity. With the wings' 0.55 floor here, the section under
+        # the notch rendered hot while the wings faded, and the seam
+        # between the two read as a rendering bug, not a design.
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath.bezierPathWithRect_(((0.0, 0.0), (width, LED_BAND_HEIGHT + 3.0))).addClip()
         self._fill_glow_row(
             cg_context, colors, led_width, notch_width, glow_height, height,
             x_start=0.0, x_end=width, wing_offset=wing_offset,
-            wing_taper_floor=WINGS_ONLY_TAPER_FLOOR,
+            wing_taper_floor=1.0,
         )
         NSGraphicsContext.restoreGraphicsState()
 
@@ -651,12 +670,22 @@ class VirtualLedView(NSView):
                     wing_taper_floor=WINGS_ONLY_TAPER_FLOOR,
                 )
                 NSGraphicsContext.restoreGraphicsState()
-        left_edge_color = blended_led_color_at_x(colors, 0.0, led_width)
-        right_edge_color = blended_led_color_at_x(colors, notch_width, led_width)
+        # Sampled at the edge LEDs' centers -- the same fix as
+        # glow_color_for_column's wings: at the geometric edge the
+        # blend has already dropped and the risers came out dimmer
+        # than the bar they belong to.
+        left_edge_color = blended_led_color_at_x(colors, led_width * 0.5, led_width)
+        right_edge_color = blended_led_color_at_x(colors, notch_width - led_width * 0.5, led_width)
         # Risers at the window's own ends, even with zero wing -- the
         # bracket's uprights must never be able to vanish.
-        self._draw_wing_riser(cg_context, left_edge_color, 0.0, max(WING_RISER_WIDTH, min(WING_RISER_WIDTH, width)), height)
-        self._draw_wing_riser(cg_context, right_edge_color, width - WING_RISER_WIDTH, width, height)
+        self._draw_wing_riser(
+            cg_context, left_edge_color, 0.0, min(WING_RISER_WIDTH, width), height,
+            outer_on_left=True,
+        )
+        self._draw_wing_riser(
+            cg_context, right_edge_color, width - WING_RISER_WIDTH, width, height,
+            outer_on_left=False,
+        )
 
     def _fill_glow_row(self, cg_context, colors, led_width, notch_width, glow_height, _height, *, x_start, x_end, wing_offset, wing_taper_floor=0.0):
         """Draws the 4-layer LED glow (bloom / soft falloff / core / hotline)
@@ -709,7 +738,9 @@ class VirtualLedView(NSView):
             )
             column_x += column_width
 
-    def _draw_wing_riser(self, cg_context, edge_color, x_start, x_end, height) -> None:
+    def _draw_wing_riser(
+        self, cg_context, edge_color, x_start, x_end, height, *, outer_on_left: bool = True
+    ) -> None:
         """A vertical glow at one wing's outer edge, solid for its lower
         WING_RISER_SOLID_FRACTION and softly tapering above that -- see
         WING_RISER_WIDTH's comment for why. `edge_color` is the nearest
@@ -718,27 +749,51 @@ class VirtualLedView(NSView):
         *entire* height: over a real menu bar's actual height (well under
         40pt), a taper starting at the very bottom reads as a faint hint
         rather than a bracket you can actually see.
+
+        Rendering detail: 48 steps, not 16 -- at ~37pt tall, 16 steps
+        were ~2.3pt bands each and the riser read as a glitchy dotted
+        column instead of a fading upright. And the riser is not a flat
+        slab: a bright core hugs the window's outer edge while the
+        inner half fades toward the bar, so the upright has one crisp
+        edge (the bracket) and one soft edge (light).
         """
         if x_end <= x_start or height <= 0.0:
             return
         red, green, blue, alpha = edge_color
         if max(red, green, blue, alpha) <= 0.001:
             return
+        width = x_end - x_start
+        core_width = max(1.0, width * 0.45)
+        if outer_on_left:
+            core_rect_x, soft_rect_x = x_start, x_start + core_width
+        else:
+            core_rect_x, soft_rect_x = x_end - core_width, x_start
+        soft_width = max(0.0, width - core_width)
         solid_height = height * WING_RISER_SOLID_FRACTION
         taper_height = max(1.0, height - solid_height)
-        steps = 16
+        steps = 48
         for index in range(steps):
             y_start = (height / steps) * index
             y_end = (height / steps) * (index + 1)
             phase = min(1.0, max(0.0, (y_start - solid_height) / taper_height))
             taper = 0.5 + 0.5 * math.cos(math.pi * phase)
+            if taper <= 0.004:
+                continue
             fill_rect_with_cg(
                 cg_context,
-                ((x_start, y_start), (x_end - x_start, y_end - y_start)),
+                ((core_rect_x, y_start), (core_width, y_end - y_start)),
                 tone_mapped_led_color(
                     red, green, blue, alpha, boost=LED_HOTLINE_BOOST, alpha_scale=0.9 * taper
                 ),
             )
+            if soft_width > 0.0:
+                fill_rect_with_cg(
+                    cg_context,
+                    ((soft_rect_x, y_start), (soft_width, y_end - y_start)),
+                    tone_mapped_led_color(
+                        red, green, blue, alpha, boost=LED_CORE_BOOST, alpha_scale=0.34 * taper
+                    ),
+                )
 
     def _draw_compact_accent(self) -> None:
         """When another notch app (e.g. Alcove) is occupying the notch's
