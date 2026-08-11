@@ -109,10 +109,19 @@ def _info_plist(environment: dict[str, str]) -> bytes:
         # Finder/Raycast/TCC-reopen launches resolve the interpreter's
         # runtime exactly like the launchd job does.
         "LSEnvironment": environment,
-        # Usage descriptions for the TCC prompts the bundle unlocks --
-        # present now so future EventKit/notification features can ask.
+        # Usage descriptions for the TCC prompts the bundle presents.
+        # EVERY foreseeable key ships in one batch: each Info.plist
+        # change re-signs the bundle, and macOS pins existing TCC
+        # grants (Full Disk Access included) to the exact signature --
+        # so every new key here costs the user a re-grant. Batch them.
         "NSCalendarsUsageDescription": (
             "SidePulse can glow before calendar events start."
+        ),
+        "NSCalendarsFullAccessUsageDescription": (
+            "SidePulse can glow before calendar events start."
+        ),
+        "NSRemindersFullAccessUsageDescription": (
+            "SidePulse can glow when reminders come due."
         ),
     }
     return plistlib.dumps(info)

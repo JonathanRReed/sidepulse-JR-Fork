@@ -8240,6 +8240,170 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TranscriptFallbackTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        settings_path = Path(self._tmp.name) / "settings.json"
+        patcher_settings = patch("sidepulse.settings.default_settings_path", return_value=settings_path)
+        patcher_status_bar = patch("sidepulse.status_bar.default_settings_path", return_value=settings_path)
+        patcher_settings.start()
+        patcher_status_bar.start()
+        self.addCleanup(patcher_settings.stop)
+        self.addCleanup(patcher_status_bar.stop)
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+        self.status_bar = status_bar
+        self.controller = status_bar.StatusBarController.alloc().init()
+
+    def test_transcript_monitor_follows_the_switches(self) -> None:
+        # The "Watch ... transcripts" switches used to save a setting
+        # nothing in the app read (transcript scanning lived only in the
+        # CLI's monitor) -- the fallback silently did nothing.
+        from sidepulse.collector import CODEX_TRANSCRIPT_PROVIDER
+
+        self.controller.settings = (
+            self.controller.settings.with_transcript_provider("codex", False)
+            .with_transcript_provider("claude", False)
+        )
+        self.assertIsNone(self.controller.build_transcript_monitor())
+
+        self.controller.settings = self.controller.settings.with_transcript_provider(
+            "codex", True
+        )
+        monitor = self.controller.build_transcript_monitor()
+        self.assertIsNotNone(monitor)
+        self.assertEqual(
+            {source.provider for source in monitor.sources},
+            {CODEX_TRANSCRIPT_PROVIDER},
+        )
+
+    def test_transcript_records_reach_the_live_monitor_exactly_once(self) -> None:
+        from datetime import datetime, timezone
+
+        from sidepulse.models import HookEvent
+
+        record = HookEvent(
+            provider="codex",
+            logged_at=datetime(2026, 8, 11, 12, 0, 0, tzinfo=timezone.utc),
+            event_name="SessionStart",
+            raw={},
+            session_id="transcript-session",
+        )
+
+        class FakeTranscriptMonitor:
+            def __init__(self, records):
+                self.records = records
+                self.calls = 0
+
+            def iter_records(self):
+                self.calls += 1
+                return list(self.records)
+
+        fake = FakeTranscriptMonitor([record])
+        self.controller.transcript_monitor = fake
+        self.controller.transcript_watermark = None
+
+        self.controller.ingest_transcript_fallback()
+        first_keys = set(self.controller.monitor.statuses_by_key)
+        self.assertTrue(
+            any("transcript-session" in key for key in first_keys),
+            f"transcript record never reached the live monitor: {first_keys}",
+        )
+        # Watermark: the same records must not re-ingest on later ticks.
+        before = dict(self.controller.monitor.statuses_by_key)
+        self.controller.ingest_transcript_fallback()
+        self.assertEqual(self.controller.monitor.statuses_by_key, before)
+        self.assertEqual(fake.calls, 2)
+
+
+class CalendarAlertTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        settings_path = Path(self._tmp.name) / "settings.json"
+        patcher_settings = patch("sidepulse.settings.default_settings_path", return_value=settings_path)
+        patcher_status_bar = patch("sidepulse.status_bar.default_settings_path", return_value=settings_path)
+        patcher_settings.start()
+        patcher_status_bar.start()
+        self.addCleanup(patcher_settings.stop)
+        self.addCleanup(patcher_status_bar.stop)
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+        self.status_bar = status_bar
+        self.controller = status_bar.StatusBarController.alloc().init()
+
+    def _device(self):
+        return self.status_bar.StatusBarDevice(
+            device_id="SidePulsePro",
+            name="SidePulse Pro",
+            root=Path("/Volumes/SidePulsePro"),
+            target=Path("/Volumes/SidePulsePro/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+
+    def test_settings_round_trip(self) -> None:
+        configured = (
+            AgentMonitorSettings()
+            .with_calendar_alerts_enabled(True)
+            .with_calendar_lead_minutes(12.0)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            reloaded = load_settings(path)
+        self.assertTrue(reloaded.calendar_alerts_enabled)
+        self.assertEqual(reloaded.calendar_lead_minutes, 12.0)
+        # Clamps stay sane.
+        self.assertEqual(
+            AgentMonitorSettings().with_calendar_lead_minutes(500.0).calendar_lead_minutes,
+            60.0,
+        )
+
+    def test_glow_program_fits_device_limits_and_repeats(self) -> None:
+        from sidepulse.device_writer import MAX_LED_BYTES, MAX_LED_LINES
+        from sidepulse.led_status import calendar_glow_program
+
+        program = calendar_glow_program(128)
+        self.assertLessEqual(len(program.encode()), MAX_LED_BYTES)
+        self.assertLessEqual(len(program.splitlines()), MAX_LED_LINES)
+        # Unlike a notification blink, the warning holds until the event
+        # starts -- it must loop.
+        self.assertIn("repeat", program)
+
+    def test_display_kind_precedence(self) -> None:
+        device = self._device()
+        self.controller.settings = (
+            self.controller.settings.with_calendar_alerts_enabled(True)
+            .with_notification_blinks_enabled(True)
+        )
+        # Glow active -> calendar outranks the agent display.
+        self.controller.calendar_glow_until = time.monotonic() + 120.0
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_CALENDAR,
+        )
+        # A notification blink is a moment on top of the glow.
+        self.controller.notification_blink_color = "#34C759"
+        self.controller.notification_blink_until = time.monotonic() + 1.0
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_NOTIFICATION,
+        )
+        # Expired glow -> back to agent status.
+        self.controller.notification_blink_until = 0.0
+        self.controller.calendar_glow_until = time.monotonic() - 1.0
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_AGENT,
+        )
+
+
 class NotificationBlinkTests(unittest.TestCase):
     def _fixture_db(self, tmp: str) -> Path:
         import sqlite3

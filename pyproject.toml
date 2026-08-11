@@ -34,6 +34,8 @@ dependencies = [
     # (the wheel ships the JavaScriptCore module itself -- there is no
     # separate pyobjc-framework-JavaScriptCore distribution).
     "pyobjc-framework-WebKit>=10; sys_platform == 'darwin'",
+    # Calendar alerts ("glow before events start") -- see calendar_watch.py.
+    "pyobjc-framework-EventKit>=10; sys_platform == 'darwin'",
     # Round-trip YAML editing for the Hermes Agent hook installer --
     # ruamel preserves the user's own comments and formatting in
     # ~/.hermes/config.yaml, which plain PyYAML would destroy.

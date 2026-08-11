@@ -264,6 +264,12 @@ class AgentMonitor:
             for path in self._recent_transcript_files(root, limit=limit)
         )
 
+    def iter_records(self) -> Iterable[HookEvent]:
+        """All records this monitor's sources currently contain --
+        public so the status bar's transcript-fallback path can feed
+        them into LiveAgentMonitor's own state machine."""
+        return self._iter_records()
+
     def _iter_records(self) -> Iterable[HookEvent]:
         for source in self.sources:
             if not source.path.exists():

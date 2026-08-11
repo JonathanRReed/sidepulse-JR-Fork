@@ -460,6 +460,24 @@ def low_battery_program(brightness: int | float = 255) -> str:
     )
 
 
+# Calendar warning glow: purple is deliberately outside every agent
+# state's color family (working cyan / done green / ask red-orange),
+# so "a meeting is about to start" can't be misread as agent status.
+CALENDAR_GLOW_PURPLE = "#A45CFF"
+CALENDAR_GLOW_BREATH_MS = 2600
+
+
+def calendar_glow_program(brightness: int | float = 255) -> str:
+    """Calm whole-bar purple breathe while a calendar event is about to
+    start -- same rhythm family as the low-battery reminder: a presence,
+    not an alarm. Whole-bar lines render identically on the Dot, the
+    Pro, and the Screen Bar."""
+    return apply_brightness(
+        f"off 400ms cosine\n{CALENDAR_GLOW_PURPLE} {CALENDAR_GLOW_BREATH_MS}ms pulse\nrepeat",
+        brightness,
+    )
+
+
 NOTIFICATION_FLASH_MS = 170
 NOTIFICATION_GAP_MS = 130
 NOTIFICATION_BLINK_FLASHES = 3

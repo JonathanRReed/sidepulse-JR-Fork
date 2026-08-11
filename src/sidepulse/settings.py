@@ -180,6 +180,11 @@ class AgentMonitorSettings:
     notification_app_colors: dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_NOTIFICATION_APP_COLORS)
     )
+    # Calm purple glow starting this many minutes before a calendar
+    # event. Off by default: enabling it presents the system Calendars
+    # permission prompt (see calendar_watch.py).
+    calendar_alerts_enabled: bool = False
+    calendar_lead_minutes: float = 5.0
     session_open_preferences: dict[str, str] = field(default_factory=dict)
     setup_screen_completed: bool = False
     colors: ColorSettings = field(default_factory=ColorSettings.defaults)
@@ -607,6 +612,12 @@ class AgentMonitorSettings:
     def with_notification_blinks_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, notification_blinks_enabled=bool(enabled))
 
+    def with_calendar_alerts_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+        return replace(self, calendar_alerts_enabled=bool(enabled))
+
+    def with_calendar_lead_minutes(self, minutes: float) -> "AgentMonitorSettings":
+        return replace(self, calendar_lead_minutes=max(1.0, min(60.0, float(minutes))))
+
     def with_notification_app_color(self, bundle_id: str, color: str | None) -> "AgentMonitorSettings":
         """color=None removes the app from the blink list entirely."""
         apps = dict(self.notification_app_colors)
@@ -662,6 +673,8 @@ class AgentMonitorSettings:
             },
             "notification_blinks_enabled": self.notification_blinks_enabled,
             "notification_app_colors": dict(sorted(self.notification_app_colors.items())),
+            "calendar_alerts_enabled": self.calendar_alerts_enabled,
+            "calendar_lead_minutes": self.calendar_lead_minutes,
             "session_open_preferences": dict(sorted(self.session_open_preferences.items())),
             "setup_screen_completed": self.setup_screen_completed,
             "colors": self.colors.to_dict(),
@@ -802,6 +815,10 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         notification_blinks_enabled=_bool_setting(data.get("notification_blinks_enabled"), True),
         notification_app_colors=_notification_app_colors(data.get("notification_app_colors")),
+        calendar_alerts_enabled=_bool_setting(data.get("calendar_alerts_enabled"), False),
+        calendar_lead_minutes=max(
+            1.0, min(60.0, _float_setting(data.get("calendar_lead_minutes"), 5.0))
+        ),
         session_open_preferences=_session_open_preferences(data.get("session_open_preferences")),
         setup_screen_completed=_bool_setting(data.get("setup_screen_completed"), False),
         colors=ColorSettings.from_dict(data.get("colors")),

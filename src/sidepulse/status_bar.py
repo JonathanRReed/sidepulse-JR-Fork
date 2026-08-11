@@ -73,6 +73,7 @@ from .battery import (
     program_for_battery,
     read_battery_snapshot,
 )
+from . import calendar_watch
 from . import display_brightness
 from . import focus_sync
 from . import native_ui
@@ -82,7 +83,15 @@ from .audit import (
     export_status_audit_csv,
     export_status_audit_html,
 )
-from .collector import LiveAgentMonitor, SourceSpec, read_recent_lines
+from .collector import (
+    CLAUDE_TRANSCRIPT_PROVIDER,
+    CODEX_TRANSCRIPT_PROVIDER,
+    AgentMonitor,
+    LiveAgentMonitor,
+    SourceSpec,
+    default_sources,
+    read_recent_lines,
+)
 from .device_writer import (
     DEFAULT_FILE_NAME,
     MOUNT_ROOT,
@@ -110,6 +119,7 @@ from .led_status import (
     LedDisplayState,
     apply_brightness,
     brightness_percent,
+    calendar_glow_program,
     led_count_for_target,
     low_battery_program,
     notification_blink_program,
@@ -243,6 +253,9 @@ STATUS_BAR_KEEPALIVE_VOLUME_NAMES = (
 # low-battery reminder takes over every display while active.
 LED_DISPLAY_LOW_BATTERY = "low_battery"
 LED_DISPLAY_NOTIFICATION = "notification"
+LED_DISPLAY_CALENDAR = "calendar"
+CALENDAR_WATCH_SECONDS = 30.0
+CALENDAR_WATCH_RETRY_SECONDS = 300.0
 # How often the Notification Center store is polled (one indexed
 # rec_id query on a small database), and how long to back off after a
 # failed read (no Full Disk Access yet, database locked, ...).
@@ -317,6 +330,8 @@ class StatusBarController(NSObject):
 
         self.settings = load_settings()
         self.monitor = self.build_monitor()
+        self.transcript_monitor = self.build_transcript_monitor()
+        self.transcript_watermark = None
         self.event_server = None
         self.status_item = None
         self.timer = None
@@ -375,6 +390,11 @@ class StatusBarController(NSObject):
         self.notification_blink_until = 0.0
         self.notification_blink_color: str | None = None
         self.notification_watch_retry_at = 0.0
+        # Calendar glow: monotonic deadline of the next event's start
+        # (0.0 = no upcoming event inside the lead window).
+        self.calendar_glow_until = 0.0
+        self.calendar_event_title: str | None = None
+        self.calendar_watch_retry_at = 0.0
         self.current_state = STATE_IDLE
         # None until set_status() actually confirms Idle -- avoids assuming
         # "idle since launch" if the real initial state turns out to be
@@ -467,6 +487,15 @@ class StatusBarController(NSObject):
             None,
             True,
         )
+        # Calendar watcher: inert until the user enables the glow and
+        # grants Calendars access (see calendar_watch.py).
+        self.calendar_watch_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            CALENDAR_WATCH_SECONDS,
+            self,
+            "pollCalendar:",
+            None,
+            True,
+        )
         self.show_setup_window_if_needed()
         if SCREEN_BAR_FEATURE_ENABLED and self.settings.virtual_status_device_enabled:
             self.virtual_status_device.show()
@@ -547,8 +576,40 @@ class StatusBarController(NSObject):
         )
 
     @objc.IBAction
+    def pollCalendar_(self, _sender):
+        """Keeps calendar_glow_until pointing at the next event's start
+        while one is inside the lead window. All failure paths (access
+        not granted, EventKit absent) back off quietly."""
+        if not self.settings.calendar_alerts_enabled:
+            return
+        now = time.monotonic()
+        if now < self.calendar_watch_retry_at:
+            return
+        try:
+            upcoming = calendar_watch.next_event_start(self.settings.calendar_lead_minutes)
+        except calendar_watch.CalendarUnavailableError:
+            self.calendar_watch_retry_at = now + CALENDAR_WATCH_RETRY_SECONDS
+            return
+        was_active = now < self.calendar_glow_until
+        if upcoming is None:
+            self.calendar_glow_until = 0.0
+            self.calendar_event_title = None
+            if was_active:
+                self.refresh_(None)
+            return
+        title, start = upcoming
+        from datetime import datetime, timezone
+
+        seconds_until_start = (start - datetime.now(timezone.utc)).total_seconds()
+        self.calendar_event_title = title
+        self.calendar_glow_until = now + max(0.0, seconds_until_start)
+        if not was_active:
+            self.refresh_(None)
+
+    @objc.IBAction
     def refresh_(self, _sender):
         try:
+            self.ingest_transcript_fallback()
             snapshot = self.monitor.snapshot(include_stale=False)
         except Exception as exc:
             log_status_bar(f"refresh error: {exc}")
@@ -762,6 +823,71 @@ class StatusBarController(NSObject):
             NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
                 [NSURL.fileURLWithPath_(target_path)]
             )
+
+    @objc.IBAction
+    def toggleCalendarAlerts_(self, sender):
+        enabled = bool(sender.state())
+        self.settings = self.settings.with_calendar_alerts_enabled(enabled)
+        save_settings(self.settings)
+        self.calendar_watch_retry_at = 0.0
+        if not enabled:
+            self.calendar_glow_until = 0.0
+            self.set_settings_message("Calendar glow off.")
+            self.refresh_(None)
+            return
+        try:
+            status = calendar_watch.authorization_status()
+        except calendar_watch.CalendarUnavailableError:
+            self.set_settings_message("Calendar access is unavailable on this system.")
+            return
+        if status == calendar_watch.AUTH_AUTHORIZED:
+            self.set_settings_message("Calendar glow on.")
+            self.pollCalendar_(None)
+        elif status == calendar_watch.AUTH_NOT_DETERMINED:
+            self.set_settings_message("Calendar glow on — asking macOS for access…")
+
+            def _granted(ok):
+                # EventKit calls back off the main thread.
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "calendarAccessResolved:", bool(ok), False
+                )
+
+            calendar_watch.request_access(_granted)
+        else:
+            self.set_settings_message(
+                "Calendar access is denied — enable SidePulse under "
+                "Privacy & Security → Calendars."
+            )
+
+    @objc.IBAction
+    def calendarAccessResolved_(self, granted):
+        if granted:
+            self.set_settings_message("Calendar access granted.")
+            self.calendar_watch_retry_at = 0.0
+            self.pollCalendar_(None)
+        else:
+            self.set_settings_message(
+                "Calendar access was declined — the glow stays off until "
+                "it's granted in Privacy & Security → Calendars."
+            )
+
+    @objc.IBAction
+    def applyCalendarLead_(self, _sender):
+        field = self.settings_fields.get("calendar_lead_field")
+        if field is None:
+            return
+        try:
+            minutes = float(str(field.stringValue()).strip())
+        except ValueError:
+            field.setStringValue_(f"{self.settings.calendar_lead_minutes:g}")
+            return
+        self.settings = self.settings.with_calendar_lead_minutes(minutes)
+        save_settings(self.settings)
+        field.setStringValue_(f"{self.settings.calendar_lead_minutes:g}")
+        self.calendar_watch_retry_at = 0.0
+        self.set_settings_message(
+            f"Calendar glow starts {self.settings.calendar_lead_minutes:g} minutes before events."
+        )
 
     @objc.IBAction
     def toggleNotificationBlinks_(self, sender):
@@ -1158,8 +1284,57 @@ class StatusBarController(NSObject):
             latest_state_path=default_latest_state_path(),
         )
 
+    def build_transcript_monitor(self) -> AgentMonitor | None:
+        """The transcript-fallback scanner behind the Agents pane's
+        "Watch ... transcripts" switches. Those switches used to save a
+        setting nothing in the app ever read -- transcript scanning
+        lived only in the CLI's AgentMonitor, so a user without hooks
+        saw "fallback enabled" and a menu bar that stayed idle forever.
+        This restricted AgentMonitor reads ONLY the transcript sources;
+        ingest_transcript_fallback feeds its records into the live
+        monitor's own state machine on every refresh."""
+        wanted = {
+            provider
+            for provider, enabled in (
+                (CODEX_TRANSCRIPT_PROVIDER, self.settings.codex_transcripts_enabled),
+                (CLAUDE_TRANSCRIPT_PROVIDER, self.settings.claude_transcripts_enabled),
+            )
+            if enabled
+        }
+        if not wanted:
+            return None
+        sources = tuple(
+            source
+            for source in default_sources(self.settings)
+            if source.provider in wanted
+        )
+        if not sources:
+            return None
+        return AgentMonitor(sources=sources)
+
+    def ingest_transcript_fallback(self) -> None:
+        monitor = getattr(self, "transcript_monitor", None)
+        if monitor is None:
+            return
+        try:
+            records = sorted(monitor.iter_records(), key=lambda record: record.logged_at)
+        except Exception as exc:
+            log_status_bar(f"transcript fallback error: {exc}")
+            return
+        watermark = getattr(self, "transcript_watermark", None)
+        newest = watermark
+        for record in records:
+            if watermark is not None and record.logged_at <= watermark:
+                continue
+            self.monitor.ingest_record(record)
+            if newest is None or record.logged_at > newest:
+                newest = record.logged_at
+        self.transcript_watermark = newest
+
     def reload_monitor(self) -> None:
         self.monitor = self.build_monitor()
+        self.transcript_monitor = self.build_transcript_monitor()
+        self.transcript_watermark = None
 
     def start_event_server(self) -> None:
         self.stop_event_server()
@@ -1964,6 +2139,31 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("low_battery_alert"),
             self.settings.low_battery_alert_enabled,
         )
+        set_field_value(
+            self.settings_fields.get("low_battery_threshold_field"),
+            f"{self.settings.low_battery_threshold_percent:g}",
+        )
+        set_checkbox_state(
+            self.settings_buttons.get("notification_blinks_enabled"),
+            self.settings.notification_blinks_enabled,
+        )
+        for bundle_id in DEFAULT_NOTIFICATION_APP_COLORS:
+            set_field_value(
+                self.settings_fields.get(f"notification_color:{bundle_id}"),
+                self.settings.notification_app_colors.get(bundle_id, ""),
+            )
+        set_checkbox_state(
+            self.settings_buttons.get("calendar_alerts_enabled"),
+            self.settings.calendar_alerts_enabled,
+        )
+        set_field_value(
+            self.settings_fields.get("calendar_lead_field"),
+            f"{self.settings.calendar_lead_minutes:g}",
+        )
+        for identifier, fraction in self.settings.focus_dim_rules.items():
+            popup = self.settings_fields.get(f"focus_rule_popup:{identifier}")
+            if popup is not None:
+                select_focus_dim_choice(popup, fraction)
         for provider in HOOK_PROVIDERS:
             popup = self.settings_fields.get(f"{provider}_session_opener")
             if popup is not None:
@@ -2817,6 +3017,11 @@ class StatusBarController(NSObject):
             and time.monotonic() < self.notification_blink_until
         ):
             return LED_DISPLAY_NOTIFICATION
+        if (
+            self.settings.calendar_alerts_enabled
+            and time.monotonic() < self.calendar_glow_until
+        ):
+            return LED_DISPLAY_CALENDAR
         if device.display == LED_DISPLAY_BATTERY:
             return LED_DISPLAY_BATTERY
         if battery_snapshot is not None and time.monotonic() < self.battery_preview_until:
@@ -2907,6 +3112,10 @@ class StatusBarController(NSObject):
             self.virtual_status_device.set_program(
                 notification_blink_program(self.notification_blink_color, brightness),
                 started_at=started_at,
+            )
+        elif display == LED_DISPLAY_CALENDAR:
+            self.virtual_status_device.set_program(
+                calendar_glow_program(brightness), started_at=started_at
             )
         elif display == LED_DISPLAY_LOW_BATTERY:
             self.virtual_status_device.set_program(low_battery_program(brightness), started_at=started_at)
@@ -3025,6 +3234,16 @@ class StatusBarController(NSObject):
                     LedDisplayState.ASK,
                 )
                 label = f"{device.name} Notification blink"
+                if result.error:
+                    agent_write_failed = True
+                elif result.changed:
+                    agent_write_changed = True
+            elif device_display_kind == LED_DISPLAY_CALENDAR:
+                controller = self.agent_controller_for_device(device)
+                result = controller.sync_program(
+                    calendar_glow_program(controller.brightness), LedDisplayState.ASK
+                )
+                label = f"{device.name} Calendar {self.calendar_event_title or 'event'}"
                 if result.error:
                     agent_write_failed = True
                 elif result.changed:
@@ -4313,10 +4532,39 @@ def _build_led_behavior_pane(target: StatusBarController):
         fields[f"notification_color:{bundle_id}"] = color_field
     stack.addArrangedSubview_(notif_outer)
 
+    # Calendar glow: a warning light, not a calendar app -- one switch,
+    # one lead time. Enabling it presents the system Calendars prompt.
+    cal_outer, cal_inner = native_ui.make_card("Calendar")
+    cal_row, cal_switch = native_ui.make_switch_row(
+        "Glow before events start",
+        target,
+        "toggleCalendarAlerts:",
+        help_text=(
+            "A calm purple breathe on every surface while an event is "
+            "about to begin. Turning this on asks macOS for Calendar "
+            "access."
+        ),
+    )
+    cal_inner.addArrangedSubview_(cal_row)
+    native_ui.add_separator(cal_inner)
+    lead_field = native_ui.make_field(
+        f"{target.settings.calendar_lead_minutes:g}",
+        target=target,
+        action="applyCalendarLead:",
+    )
+    native_ui.constrain_width(lead_field, 48.0)
+    lead_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
+    lead_controls.addArrangedSubview_(lead_field)
+    lead_controls.addArrangedSubview_(native_ui.make_label("minutes before", secondary=True))
+    cal_inner.addArrangedSubview_(native_ui.make_row("Start glowing", lead_controls))
+    stack.addArrangedSubview_(cal_outer)
+    fields["calendar_lead_field"] = lead_field
+
     buttons = {
         "idle_dim_enabled": idle_switch,
         "focus_sync_enabled": focus_switch,
         "notification_blinks_enabled": notif_switch,
+        "calendar_alerts_enabled": cal_switch,
     }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
@@ -4328,6 +4576,18 @@ FOCUS_DIM_CHOICES: tuple[tuple[str, str], ...] = (
     ("Dim to 25%", "0.25"),
     ("Turn off", "0.0"),
 )
+
+
+def select_focus_dim_choice(popup, fraction: float | None) -> None:
+    """Selects the popup item matching a saved rule (None = shared
+    default) -- refresh_settings_window's counterpart to
+    make_focus_dim_popup's construction-time selection."""
+    wanted = "default" if fraction is None else f"{float(fraction):g}"
+    for index in range(popup.numberOfItems()):
+        item = popup.itemAtIndex_(index)
+        if str(item.representedObject() or "") == wanted:
+            popup.selectItem_(item)
+            return
 
 
 def make_focus_dim_popup(target: StatusBarController, mode_identifier: str):
