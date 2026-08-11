@@ -40,6 +40,7 @@ try:
         NSScrollView,
         NSSavePanel,
         NSSlider,
+        NSSwitch,
         NSSplitView,
         NSSplitViewDividerStyleThin,
         NSStatusBar,
@@ -313,6 +314,7 @@ class StatusBarController(NSObject):
         self._device_calibration_popover = None
         self.setup_fields = {}
         self.setup_buttons = {}
+        self.setup_demo_timer = None
         self.color_swatches = {}
         self.color_hex_labels = {}
         self.color_fields = {}
@@ -1481,9 +1483,24 @@ class StatusBarController(NSObject):
     def show_setup_window(self) -> None:
         if self.setup_window is None:
             self.setup_window = build_setup_window(self)
+        if self.setup_demo_timer is None:
+            # Drives the welcome hero's live LED demo -- the view animates
+            # itself from monotonic time on each draw, so the timer only
+            # needs to mark it dirty, and only while the window shows.
+            self.setup_demo_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                1.0 / 30.0, self, "redrawSetupDemo:", None, True
+            )
         self.refresh_setup_window()
         self.setup_window.makeKeyAndOrderFront_(None)
         NSApp.activateIgnoringOtherApps_(True)
+
+    @objc.IBAction
+    def redrawSetupDemo_(self, _sender):
+        if self.setup_window is None or not self.setup_window.isVisible():
+            return
+        demo_view = self.setup_fields.get("demo_view")
+        if demo_view is not None:
+            demo_view.setNeedsDisplay_(True)
 
     def refresh_setup_window(self) -> None:
         if self.setup_window is None:
@@ -1511,6 +1528,21 @@ class StatusBarController(NSObject):
         eject_uninstall = self.setup_buttons.get("eject_guard_uninstall")
         if eject_uninstall is not None:
             eject_uninstall.setEnabled_(eject_installed)
+            eject_uninstall.setHidden_(not eject_installed)
+
+        # The welcome window's provider rows mirror the Settings Agents
+        # pane: one contextual action, honest status.
+        for provider in HOOK_PROVIDERS:
+            status_label = self.setup_fields.get(f"setup_{provider}_status")
+            install_button = self.setup_buttons.get(f"setup_{provider}_install")
+            if status_label is None and install_button is None:
+                continue
+            config = provider_spec(provider).detector(None)
+            installed = provider_hooks_installed(config)
+            if status_label is not None:
+                set_field_value(status_label, "Connected ✓" if installed else "")
+            if install_button is not None:
+                install_button.setHidden_(installed)
 
     def set_setup_checkbox(self, key: str, checked: bool, *, enabled: bool) -> None:
         button = self.setup_buttons.get(key)
@@ -1823,6 +1855,7 @@ class StatusBarController(NSObject):
         self.set_settings_message(f"{provider.title()} hooks {action}.")
         self.reload_monitor()
         self.refresh_settings_window()
+        self.refresh_setup_window()
         self.refresh_(None)
 
     def set_transcript_monitoring(self, provider: str, enabled: bool) -> None:
@@ -3248,85 +3281,159 @@ def build_channel_gain_slider_item(
     return item
 
 
+SETUP_DEMO_WIDTH = 420.0
+SETUP_DEMO_HEIGHT = 30.0
+
+
+def _setup_toggle_row(title: str, help_text: str | None = None):
+    """A "Title ... status [switch]" row for the welcome window -- the
+    switch carries no action (its state is read when Set Up runs), the
+    status label reports installed-ness."""
+    switch = NSSwitch.alloc().init()
+    status = native_ui.make_label("", secondary=True, size=12.0)
+    cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    cluster.addArrangedSubview_(status)
+    cluster.addArrangedSubview_(switch)
+    row = native_ui.make_row(title, cluster, help_text=help_text)
+    return row, switch, status
+
+
 def build_setup_window(target: StatusBarController) -> NSWindow:
-    width = 620
-    height = 330
-    style = (
-        NSWindowStyleMaskTitled
-        | NSWindowStyleMaskClosable
-        | NSWindowStyleMaskMiniaturizable
-    )
+    """The welcome window: what SidePulse is (shown live, not described),
+    which agents to connect, and the Mac-level installs -- a first-run
+    moment that should feel like the product, not a permissions form."""
+    width, height = 680, 800
+    style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
     window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
         ((0, 0), (width, height)),
         style,
         NSBackingStoreBuffered,
         False,
     )
-    window.setTitle_("SidePulse Setup")
+    window.setTitle_("Welcome to SidePulse")
     window.setReleasedWhenClosed_(False)
     window.center()
-    content = window.contentView()
 
-    add_label(content, "SidePulse", 24, 282, 180, 28)
-    add_label(content, "Finish setup for this Mac.", 24, 254, 340, 22)
+    root = NSView.alloc().init()
+    window.setContentView_(root)
+    root.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    root.widthAnchor().constraintEqualToConstant_(width).setActive_(True)
+    root.heightAnchor().constraintEqualToConstant_(height).setActive_(True)
 
-    launch = add_checkbox(
-        content,
-        "Run at Login",
-        32,
-        206,
-        190,
-        24,
-        target,
-        "",
+    stack = native_ui.make_fill_stack(spacing=14.0)
+    root.addSubview_(stack)
+    NSLayoutConstraint.activateConstraints_(
+        [
+            stack.topAnchor().constraintEqualToAnchor_constant_(root.topAnchor(), 28.0),
+            stack.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 28.0),
+            stack.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -28.0),
+        ]
     )
-    add_label(content, "Start the menu-bar app automatically.", 56, 184, 300, 20)
-    launch_status = add_label(content, "", 380, 206, 140, 22)
 
-    eject_guard = add_checkbox(
-        content,
+    # Hero: the product introduces itself by DOING the thing -- a live
+    # LED strip playing the full-team demo, not a paragraph about LEDs.
+    title = native_ui.make_label("SidePulse", size=27.0, bold=True)
+    hero_title_holder = native_ui.make_stack(orientation="vertical", spacing=0.0)
+    hero_title_holder.addArrangedSubview_(title)
+    stack.addArrangedSubview_(hero_title_holder)
+    subtitle = native_ui.make_label("Your agents, at a glance — as light.", secondary=True, size=14.0)
+    subtitle_holder = native_ui.make_stack(orientation="vertical", spacing=0.0)
+    subtitle_holder.addArrangedSubview_(subtitle)
+    stack.addArrangedSubview_(subtitle_holder)
+
+    demo_container = native_ui.make_fixed_area(SETUP_DEMO_WIDTH, SETUP_DEMO_HEIGHT)
+    demo_view = VirtualLedView.alloc().initWithFrame_(((0.0, 0.0), (SETUP_DEMO_WIDTH, SETUP_DEMO_HEIGHT)))
+    demo_view.setHasNotch_(False)
+    demo_colors = getattr(getattr(target, "settings", None), "colors", None) or ColorSettings.defaults()
+    _, demo_program = program_for_snapshot(
+        colors_module.preview_statuses_for_scenario(colors_module.PREVIEW_SCENARIO_FULL_TEAM),
+        led_count=8,
+        colors=demo_colors,
+        brightness=255,
+    )
+    demo_view.setProgram_startedAt_(demo_program, time.monotonic())
+    demo_container.addSubview_(demo_view)
+    stack.addArrangedSubview_(demo_container)
+
+    # Connect Your Agents: the same contextual one-action rows the
+    # Settings Agents pane uses, so first-run and settings agree.
+    agents_outer, agents_inner = native_ui.make_card("Connect Your Agents")
+    setup_fields: dict[str, object] = {"demo_view": demo_view}
+    setup_buttons: dict[str, object] = {}
+    for index, provider in enumerate(HOOK_PROVIDERS):
+        status_label = native_ui.make_label("", secondary=True, size=12.0)
+        install_button = native_ui.make_button("Install", target, f"install{provider.title()}Hooks:")
+        cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+        cluster.addArrangedSubview_(status_label)
+        cluster.addArrangedSubview_(install_button)
+        agents_inner.addArrangedSubview_(native_ui.make_row(provider_spec(provider).label, cluster))
+        if index < len(HOOK_PROVIDERS) - 1:
+            native_ui.add_separator(agents_inner)
+        setup_fields[f"setup_{provider}_status"] = status_label
+        setup_buttons[f"setup_{provider}_install"] = install_button
+    stack.addArrangedSubview_(agents_outer)
+
+    # Set Up This Mac: the three system-level installs as switch rows.
+    mac_outer, mac_inner = native_ui.make_card("Set Up This Mac")
+    launch_row, launch, launch_status = _setup_toggle_row(
+        "Run at Login", "Start the menu-bar app automatically."
+    )
+    mac_inner.addArrangedSubview_(launch_row)
+    eject_row, eject_guard, eject_status = _setup_toggle_row(
         SD_EJECT_GUARD_DISPLAY_NAME,
-        32,
-        146,
-        300,
-        24,
-        target,
-        "",
+        "Keep SidePulse Pro/SidePulse Dot available after sleep.",
     )
-    add_label(content, "Keep SidePulse Pro/SidePulse Dot available after sleep.", 56, 124, 390, 20)
-    eject_status = add_label(content, "", 398, 146, 88, 22)
-    eject_uninstall = add_button(content, "Uninstall", 498, 142, 92, 28, target, "uninstallSdEjectGuard:")
-
-    sleep_helper = add_checkbox(
-        content,
+    mac_inner.addArrangedSubview_(eject_row)
+    sleep_row, sleep_helper, sleep_status = _setup_toggle_row(
         "Closed-Lid Sleep Prevention",
-        32,
-        86,
-        260,
-        24,
-        target,
-        "",
+        "Opens a one-time administrator setup in Terminal.",
     )
-    add_label(content, "Open a one-time administrator setup in Terminal.", 56, 64, 360, 20)
-    sleep_status = add_label(content, "", 398, 86, 190, 22)
+    mac_inner.addArrangedSubview_(sleep_row)
+    eject_uninstall = native_ui.make_button("Uninstall", target, "uninstallSdEjectGuard:")
+    eject_uninstall.setHidden_(True)
+    uninstall_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    uninstall_cluster.addArrangedSubview_(eject_uninstall)
+    uninstall_cluster.addArrangedSubview_(native_ui.make_hspacer())
+    mac_inner.addArrangedSubview_(uninstall_cluster)
+    stack.addArrangedSubview_(mac_outer)
 
-    message = add_label(content, "", 24, 36, width - 48, 20)
+    # Footer: transient message + the two actions, pinned to the bottom.
+    message = native_ui.make_label("", secondary=True, size=12.0)
+    skip_button = native_ui.make_button("Skip for Now", target, "skipFirstLaunchSetup:")
+    setup_button = native_ui.make_button("Set Up", target, "runFirstLaunchSetup:")
+    setup_button.setKeyEquivalent_("\r")
+    footer = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    footer.addArrangedSubview_(message)
+    footer.addArrangedSubview_(native_ui.make_hspacer())
+    footer.addArrangedSubview_(skip_button)
+    footer.addArrangedSubview_(setup_button)
+    root.addSubview_(footer)
+    NSLayoutConstraint.activateConstraints_(
+        [
+            footer.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 28.0),
+            footer.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -28.0),
+            footer.bottomAnchor().constraintEqualToAnchor_constant_(root.bottomAnchor(), -20.0),
+        ]
+    )
 
-    add_button(content, "Skip", 392, 8, 84, 28, target, "skipFirstLaunchSetup:")
-    add_button(content, "Set Up", 490, 8, 100, 28, target, "runFirstLaunchSetup:")
-
-    target.setup_fields = {
-        "launch_status": launch_status,
-        "eject_status": eject_status,
-        "sleep_status": sleep_status,
-        "message": message,
-    }
-    target.setup_buttons = {
-        "launch": launch,
-        "eject_guard": eject_guard,
-        "eject_guard_uninstall": eject_uninstall,
-        "sleep_helper": sleep_helper,
-    }
+    setup_fields.update(
+        {
+            "launch_status": launch_status,
+            "eject_status": eject_status,
+            "sleep_status": sleep_status,
+            "message": message,
+        }
+    )
+    setup_buttons.update(
+        {
+            "launch": launch,
+            "eject_guard": eject_guard,
+            "eject_guard_uninstall": eject_uninstall,
+            "sleep_helper": sleep_helper,
+        }
+    )
+    target.setup_fields = setup_fields
+    target.setup_buttons = setup_buttons
     return window
 
 

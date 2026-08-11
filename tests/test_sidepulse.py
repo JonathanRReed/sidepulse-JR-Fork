@@ -1850,7 +1850,7 @@ class AgentMonitorTests(unittest.TestCase):
 
         window = status_bar.build_setup_window(target)
 
-        self.assertEqual(window.title(), "SidePulse Setup")
+        self.assertEqual(window.title(), "Welcome to SidePulse")
         self.assertIn("launch", target.setup_buttons)
         self.assertIn("eject_guard", target.setup_buttons)
         self.assertIn("eject_guard_uninstall", target.setup_buttons)
@@ -1858,6 +1858,12 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertIn("launch_status", target.setup_fields)
         self.assertIn("eject_status", target.setup_fields)
         self.assertIn("sleep_status", target.setup_fields)
+        # The welcome window's own additions: the live demo strip and one
+        # contextual connect row per registered provider.
+        self.assertIn("demo_view", target.setup_fields)
+        for provider in status_bar.HOOK_PROVIDERS:
+            self.assertIn(f"setup_{provider}_status", target.setup_fields)
+            self.assertIn(f"setup_{provider}_install", target.setup_buttons)
 
     def test_first_launch_setup_window_only_shows_until_completed(self) -> None:
         try:
