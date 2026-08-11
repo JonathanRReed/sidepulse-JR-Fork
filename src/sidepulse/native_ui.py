@@ -37,6 +37,8 @@ method in this app already lives there.
 
 from __future__ import annotations
 
+import objc
+
 try:
     from AppKit import (
         NSBezelStyleRounded,
@@ -45,8 +47,10 @@ try:
         NSClipView,
         NSColor,
         NSFont,
+        NSFontWeightSemibold,
         NSLayoutAttributeCenterY,
         NSLayoutConstraint,
+        NSLayoutConstraintOrientationHorizontal,
         NSLayoutConstraintOrientationVertical,
         NSLayoutPriorityDefaultHigh,
         NSPopUpButton,
@@ -54,11 +58,11 @@ try:
         NSSlider,
         NSStackView,
         NSStackViewDistributionFill,
+        NSSwitch,
         NSTableColumn,
         NSTableView,
         NSTableViewSelectionHighlightStyleSourceList,
         NSTableViewStylePlain,
-        NSTextAlignmentRight,
         NSTextField,
         NSUserInterfaceLayoutOrientationHorizontal,
         NSUserInterfaceLayoutOrientationVertical,
@@ -196,9 +200,54 @@ def make_sidebar_background():
 
 
 # --- Rows and cards ------------------------------------------------------
+#
+# Spacing scale: every gap in this module comes from this 4pt-based set,
+# not ad-hoc numbers -- rhythm comes from *varying* between these values
+# (tight within a group, generous between groups), not from one uniform
+# gap everywhere.
 
-ROW_LABEL_WIDTH = 176.0
+SPACE_XS = 4.0  # inside a control cluster (field + unit label)
+SPACE_S = 8.0  # between tightly-related rows
+SPACE_M = 12.0  # default row spacing inside a card
+SPACE_L = 24.0  # between cards / titled groups in a pane
 CARD_PADDING = 16.0
+ROW_MIN_HEIGHT = 26.0
+
+
+class _FillWidthStackView(NSStackView):
+    """A vertical stack whose arranged subviews are stretched to its own
+    full width -- the geometry System Settings' grouped forms are built
+    on (rows span the group edge-to-edge; controls sit at the trailing
+    edge because the *row* reaches it, not because anything is centered).
+
+    NSStackView's default cross-axis alignment for a vertical stack is
+    centerX, which is exactly the "content floating in the middle of the
+    card with dead margins either side" look this exists to kill. The
+    width constraint is priority 999, not required: content that
+    declares its own required fixed width (a preview strip built on
+    make_fixed_area) simply wins, keeps its size, and -- since the
+    stack's centerX alignment still applies to anything not stretched --
+    stays centered, which is just right for visual previews.
+    """
+
+    def addArrangedSubview_(self, view):
+        objc.super(_FillWidthStackView, self).addArrangedSubview_(view)
+        constraint = view.widthAnchor().constraintEqualToAnchor_(self.widthAnchor())
+        constraint.setPriority_(999)
+        constraint.setActive_(True)
+
+
+def make_fill_stack(*, spacing: float = SPACE_M) -> "NSStackView":
+    """A vertical _FillWidthStackView with the shared stack defaults --
+    the standard container for a pane's column of cards and for card
+    content itself (make_card uses it for you)."""
+    stack = _FillWidthStackView.alloc().init()
+    stack.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
+    stack.setSpacing_(spacing)
+    stack.setDistribution_(NSStackViewDistributionFill)
+    stack.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    stack.setContentHuggingPriority_forOrientation_(NSLayoutPriorityDefaultHigh, NSLayoutConstraintOrientationVertical)
+    return stack
 
 
 def make_stack(*, orientation: str = "vertical", spacing: float = 8.0, alignment=None) -> "NSStackView":
@@ -235,22 +284,43 @@ def make_label(text: str, *, secondary: bool = False, size: float = 13.0, bold: 
 
 
 def make_section_title(text: str) -> "NSTextField":
-    return make_label(text, size=18.0, bold=True)
+    """A group header in System Settings' own register: small, semibold,
+    left-aligned -- the sidebar selection already names the pane, so
+    in-content titles are quiet organizers, not display headlines."""
+    label = NSTextField.labelWithString_(text)
+    label.setFont_(NSFont.systemFontOfSize_weight_(13.0, NSFontWeightSemibold))
+    label.setTextColor_(NSColor.labelColor())
+    return label
 
 
-def make_row(label_text: str, control, *, help_text: str | None = None) -> "NSStackView":
-    """A "label ... control" row matching System Settings' own alignment:
-    a fixed-width, right-aligned label on the left, the control filling
-    the remaining width on the right. help_text (if given) becomes the
-    row's tooltip rather than a permanently-visible caption line -- detail
-    on demand instead of clutter by default.
+def make_row(label_text: str, control, *, help_text: str | None = None, fill_control: bool = False) -> "NSStackView":
+    """A full-width "label ......... control" row in System Settings' own
+    geometry: label at the leading edge (primary color -- it's the row's
+    subject, not a caption), control at the trailing edge, the gap
+    between them absorbing all the slack. fill_control=True instead lets
+    the control itself stretch across that gap (sliders). help_text
+    becomes the row's tooltip rather than a permanently-visible caption
+    line -- detail on demand instead of clutter by default.
     """
-    row = make_stack(orientation="horizontal", spacing=12.0, alignment=NSLayoutAttributeCenterY)
-    label = make_label(label_text, secondary=True)
-    label.setAlignment_(NSTextAlignmentRight)
-    constrain_width(label, ROW_LABEL_WIDTH)
-    row.addArrangedSubview_(label)
-    row.addArrangedSubview_(control)
+    row = make_stack(orientation="horizontal", spacing=SPACE_M, alignment=NSLayoutAttributeCenterY)
+    label = make_label(label_text)
+    if fill_control:
+        row.addArrangedSubview_(label)
+        row.addArrangedSubview_(control)
+        control.setContentHuggingPriority_forOrientation_(1, NSLayoutConstraintOrientationHorizontal)
+    else:
+        # label | <no-intrinsic spacer> | control: the spacer is the only
+        # arranged view without an intrinsic width, so the stack's slack
+        # lands entirely there and everything real keeps its natural
+        # size. (Gravity areas were tried first and do NOT do this --
+        # NSStackView still stretches the lowest-hugging real view, so a
+        # button would balloon to fill the row.)
+        row.addArrangedSubview_(label)
+        row.addArrangedSubview_(make_hspacer())
+        row.addArrangedSubview_(control)
+    # A consistent minimum beat per row -- rhythm needs a steady baseline
+    # even when a row's control is shorter than its neighbors'.
+    row.heightAnchor().constraintGreaterThanOrEqualToConstant_(ROW_MIN_HEIGHT).setActive_(True)
     if help_text:
         row.setToolTip_(help_text)
         label.setToolTip_(help_text)
@@ -269,20 +339,59 @@ def make_checkbox(title: str, target, selector: str, *, help_text: str | None = 
     return checkbox
 
 
+def make_switch_row(
+    title: str, target, selector: str, *, help_text: str | None = None
+) -> tuple["NSStackView", "NSSwitch"]:
+    """A "Title ......... [switch]" row -- the System Settings register
+    for a boolean, replacing the box-on-the-left checkbox (which reads
+    as a dialog control, not a settings row). Returns (row, switch);
+    callers keep the switch for state refresh exactly as they kept the
+    checkbox before -- NSSwitch shares NSButton's state()/setState_
+    contract, so existing handlers and refresh paths work unchanged.
+    """
+    switch = NSSwitch.alloc().init()
+    switch.setTarget_(target)
+    if selector:
+        switch.setAction_(selector)
+    row = make_row(title, switch, help_text=help_text)
+    if help_text:
+        switch.setToolTip_(help_text)
+    return row, switch
+
+
+def make_hspacer() -> "NSView":
+    """A no-intrinsic-size view that soaks up leftover width. Append to a
+    horizontal cluster that sits directly in a fill-width stack, so the
+    stretch lands here instead of arbitrarily distorting the
+    lowest-hugging real control."""
+    spacer = NSView.alloc().init()
+    spacer.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    return spacer
+
+
 def make_card(title: str | None = None) -> tuple["NSView", "NSStackView"]:
     """A translucent, rounded, padded card -- the grouped-box unit both
     windows are built from. Returns (outer_view_to_add_to_parent_stack,
-    inner_content_stack) -- callers append rows to the inner stack."""
-    outer, inner_container = make_glass_panel(corner_radius=14.0)
-    content = make_stack(orientation="vertical", spacing=12.0)
+    inner_content_stack) -- callers append rows to the inner stack.
+
+    A title renders as a small left-aligned header *above* the panel
+    (System Settings' own placement for group titles), never as a
+    display-size headline inside it. Panes whose sidebar selection
+    already says the same thing should pass no title at all.
+    """
+    panel, inner_container = make_glass_panel(corner_radius=14.0)
+    content = make_fill_stack(spacing=SPACE_M)
     inner_container.addSubview_(content)
     _pin_edges(
         content,
         inner_container,
         insets=(CARD_PADDING, CARD_PADDING, CARD_PADDING, CARD_PADDING),
     )
-    if title:
-        content.addArrangedSubview_(make_section_title(title))
+    if not title:
+        return panel, content
+    outer = make_fill_stack(spacing=SPACE_S)
+    outer.addArrangedSubview_(make_section_title(title))
+    outer.addArrangedSubview_(panel)
     return outer, content
 
 
@@ -434,7 +543,7 @@ def wrap_in_scroll_pane(stack: "NSStackView", *, padding: float = 20.0) -> "NSSc
     "document height" formula at all -- each one just scrolls exactly as
     far as its own content requires, entirely on its own.
     """
-    padded = make_stack(orientation="vertical", spacing=0.0)
+    padded = make_fill_stack(spacing=0.0)
     padded.addArrangedSubview_(stack)
 
     scroll = NSScrollView.alloc().init()

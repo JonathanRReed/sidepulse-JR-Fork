@@ -28,6 +28,7 @@ try:
         NSForegroundColorAttributeName,
         NSImage,
         NSLayoutConstraint,
+        NSLayoutConstraintOrientationHorizontal,
         NSMaxYEdge,
         NSMenu,
         NSMenuItem,
@@ -3173,7 +3174,7 @@ SETTINGS_SIDEBAR_ITEMS: tuple[tuple[str, str], ...] = (
 
 
 def _build_devices_pane(target: StatusBarController):
-    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
     devices = target.status_bar_devices(remember=False)
     device_controls: dict[str, dict[str, object]] = {}
     if not devices:
@@ -3197,13 +3198,20 @@ def _build_devices_pane(target: StatusBarController):
             # disk write.
             continuous=True,
         )
-        native_ui.constrain_width(brightness_slider, 200)
         brightness_label = native_ui.make_label(f"{brightness_percent(device.brightness)}%", secondary=True)
         native_ui.constrain_width(brightness_label, 44)
         brightness_row_controls = native_ui.make_stack(orientation="horizontal", spacing=10.0)
         brightness_row_controls.addArrangedSubview_(brightness_slider)
         brightness_row_controls.addArrangedSubview_(brightness_label)
-        inner.addArrangedSubview_(native_ui.make_row("Brightness", brightness_row_controls))
+        # The slider stretches to whatever width the row gives it -- a
+        # brightness track is the one control here that gets better the
+        # longer it is.
+        brightness_slider.setContentHuggingPriority_forOrientation_(
+            1, NSLayoutConstraintOrientationHorizontal
+        )
+        inner.addArrangedSubview_(
+            native_ui.make_row("Brightness", brightness_row_controls, fill_control=True)
+        )
 
         led_count = LED_COUNT if device.device_id == VIRTUAL_DEVICE_ID else led_count_for_target(device.target)
         dots_width = led_count * (COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP) - COLOR_SWATCH_GAP
@@ -3314,8 +3322,8 @@ SCREEN_BAR_PREVIEW_WING_WIDTH = 70.0
 
 
 def _build_colors_screen_bar_pane(target: StatusBarController):
-    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
-    outer, inner = native_ui.make_card("Colors & Screen Bar")
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    outer, inner = native_ui.make_card()
 
     inner.addArrangedSubview_(
         native_ui.make_row("Colors", native_ui.make_button("Customize Colors…", target, "openColorsWindow:"))
@@ -3339,10 +3347,10 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
     preview_container.addSubview_(preview_view)
     inner.addArrangedSubview_(preview_container)
 
-    wraps_checkbox = native_ui.make_checkbox(
+    wraps_row, wraps_switch = native_ui.make_switch_row(
         "Extend glow along the menu bar", target, "toggleScreenBarWrapsMenuBar:"
     )
-    inner.addArrangedSubview_(wraps_checkbox)
+    inner.addArrangedSubview_(wraps_row)
 
     stack.addArrangedSubview_(outer)
     fields = {
@@ -3350,13 +3358,13 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         "screen_bar_preview_view": preview_view,
         "screen_bar_preview_container": preview_container,
     }
-    buttons = {"screen_bar_wraps_menu_bar": wraps_checkbox}
+    buttons = {"screen_bar_wraps_menu_bar": wraps_switch}
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
 def _build_closed_lid_pane(target: StatusBarController):
-    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
-    outer, inner = native_ui.make_card("Closed-Lid Awake")
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    outer, inner = native_ui.make_card()
 
     policy_popup = make_closed_lid_awake_policy_popup(target)
     inner.addArrangedSubview_(native_ui.make_row("Policy", policy_popup))
@@ -3384,28 +3392,29 @@ def _build_closed_lid_pane(target: StatusBarController):
 
 
 def _build_led_behavior_pane(target: StatusBarController):
-    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
-    outer, inner = native_ui.make_card("LED Behavior")
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    outer, inner = native_ui.make_card()
 
-    idle_checkbox = native_ui.make_checkbox("Dim further after being idle", target, "toggleIdleDim:")
-    inner.addArrangedSubview_(idle_checkbox)
+    idle_row, idle_switch = native_ui.make_switch_row(
+        "Dim further after being idle", target, "toggleIdleDim:"
+    )
+    inner.addArrangedSubview_(idle_row)
 
     minutes_field = native_ui.make_field(f"{target.settings.idle_dim_after_minutes:g}")
     native_ui.constrain_width(minutes_field, 48.0)
     fraction_field = native_ui.make_field(f"{round(target.settings.idle_dim_fraction * 100)}")
     native_ui.constrain_width(fraction_field, 48.0)
-    idle_controls = native_ui.make_stack(orientation="horizontal", spacing=6.0)
-    idle_controls.addArrangedSubview_(native_ui.make_label("After", secondary=True))
+    idle_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
     idle_controls.addArrangedSubview_(minutes_field)
     idle_controls.addArrangedSubview_(native_ui.make_label("min, dim to", secondary=True))
     idle_controls.addArrangedSubview_(fraction_field)
     idle_controls.addArrangedSubview_(native_ui.make_label("%", secondary=True))
     idle_controls.addArrangedSubview_(native_ui.make_button("Apply", target, "applyIdleDimSettings:"))
-    inner.addArrangedSubview_(idle_controls)
+    inner.addArrangedSubview_(native_ui.make_row("After", idle_controls))
 
     native_ui.add_separator(inner)
 
-    focus_checkbox = native_ui.make_checkbox(
+    focus_row, focus_switch = native_ui.make_switch_row(
         "Dim while a macOS Focus is active",
         target,
         "toggleFocusSync:",
@@ -3414,33 +3423,27 @@ def _build_led_behavior_pane(target: StatusBarController):
             "in System Settings -- otherwise this has no effect."
         ),
     )
-    inner.addArrangedSubview_(focus_checkbox)
+    inner.addArrangedSubview_(focus_row)
 
     stack.addArrangedSubview_(outer)
     fields = {"idle_dim_minutes_field": minutes_field, "idle_dim_fraction_field": fraction_field}
-    buttons = {"idle_dim_enabled": idle_checkbox, "focus_sync_enabled": focus_checkbox}
+    buttons = {"idle_dim_enabled": idle_switch, "focus_sync_enabled": focus_switch}
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
 def _build_hooks_pane(target: StatusBarController):
-    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
-    outer, inner = native_ui.make_card("Agent Hooks")
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    outer, inner = native_ui.make_card()
 
     hook_statuses: dict[str, object] = {}
     for index, provider in enumerate(HOOK_PROVIDERS):
-        status_label = native_ui.make_label("", secondary=True, size=12.0)
-        inner.addArrangedSubview_(native_ui.make_row(provider_spec(provider).label, status_label))
-
         selector = provider.title()
-        buttons_row = native_ui.make_stack(orientation="horizontal", spacing=8.0)
-        buttons_row.addArrangedSubview_(native_ui.make_button("Install", target, f"install{selector}Hooks:"))
-        buttons_row.addArrangedSubview_(native_ui.make_button("Uninstall", target, f"uninstall{selector}Hooks:"))
-        indent_row = native_ui.make_stack(orientation="horizontal", spacing=12.0)
-        spacer = native_ui.make_label("")
-        native_ui.constrain_width(spacer, native_ui.ROW_LABEL_WIDTH)
-        indent_row.addArrangedSubview_(spacer)
-        indent_row.addArrangedSubview_(buttons_row)
-        inner.addArrangedSubview_(indent_row)
+        status_label = native_ui.make_label("", secondary=True, size=12.0)
+        controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+        controls.addArrangedSubview_(status_label)
+        controls.addArrangedSubview_(native_ui.make_button("Install", target, f"install{selector}Hooks:"))
+        controls.addArrangedSubview_(native_ui.make_button("Uninstall", target, f"uninstall{selector}Hooks:"))
+        inner.addArrangedSubview_(native_ui.make_row(provider_spec(provider).label, controls))
 
         if index < len(HOOK_PROVIDERS) - 1:
             native_ui.add_separator(inner)
@@ -3452,43 +3455,44 @@ def _build_hooks_pane(target: StatusBarController):
 
 
 def _build_sessions_pane(target: StatusBarController):
-    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
-    outer, inner = native_ui.make_card("Sessions")
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    outer, inner = native_ui.make_card()
 
-    codex_checkbox = native_ui.make_checkbox(
+    codex_row, codex_switch = native_ui.make_switch_row(
         "CLI fallback: Codex transcripts", target, "toggleCodexTranscripts:"
     )
-    inner.addArrangedSubview_(codex_checkbox)
-    claude_checkbox = native_ui.make_checkbox(
+    inner.addArrangedSubview_(codex_row)
+    claude_row, claude_switch = native_ui.make_switch_row(
         "CLI fallback: Claude transcripts", target, "toggleClaudeTranscripts:"
     )
-    inner.addArrangedSubview_(claude_checkbox)
+    inner.addArrangedSubview_(claude_row)
+    stack.addArrangedSubview_(outer)
 
-    native_ui.add_separator(inner)
-    inner.addArrangedSubview_(native_ui.make_label("Open Sessions With", bold=True, size=14.0))
-
+    openers_outer, openers_inner = native_ui.make_card("Open Sessions With")
     provider_openers: dict[str, object] = {}
     for provider in provider_session_opener_providers():
         popup = make_provider_opener_popup(provider, target)
-        inner.addArrangedSubview_(native_ui.make_row(provider_spec(provider).label, popup))
+        openers_inner.addArrangedSubview_(native_ui.make_row(provider_spec(provider).label, popup))
         provider_openers[provider] = popup
+    stack.addArrangedSubview_(openers_outer)
 
-    stack.addArrangedSubview_(outer)
     fields = {f"{provider}_session_opener": popup for provider, popup in provider_openers.items()}
-    buttons = {"codex_transcripts": codex_checkbox, "claude_transcripts": claude_checkbox}
+    buttons = {"codex_transcripts": codex_switch, "claude_transcripts": claude_switch}
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
 def _build_battery_pane(target: StatusBarController):
-    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
-    outer, inner = native_ui.make_card("Battery")
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    outer, inner = native_ui.make_card()
 
-    battery_leds = native_ui.make_checkbox("Show battery on LEDs", target, "setBatteryLedDisplayFromCheckbox:")
-    inner.addArrangedSubview_(battery_leds)
-    battery_power_preview = native_ui.make_checkbox(
+    leds_row, battery_leds = native_ui.make_switch_row(
+        "Show battery on LEDs", target, "setBatteryLedDisplayFromCheckbox:"
+    )
+    inner.addArrangedSubview_(leds_row)
+    preview_row, battery_power_preview = native_ui.make_switch_row(
         "Show battery for 7s on plug/unplug", target, "setBatteryPowerPreviewFromCheckbox:"
     )
-    inner.addArrangedSubview_(battery_power_preview)
+    inner.addArrangedSubview_(preview_row)
 
     stack.addArrangedSubview_(outer)
     buttons = {"battery_leds": battery_leds, "battery_power_preview": battery_power_preview}
@@ -3496,7 +3500,7 @@ def _build_battery_pane(target: StatusBarController):
 
 
 def _build_lid_animations_pane(target: StatusBarController):
-    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
 
     closed_outer, closed_inner = native_ui.make_card("Lid Closed")
     closed_duration = native_ui.make_field("")
@@ -3504,9 +3508,10 @@ def _build_lid_animations_pane(target: StatusBarController):
     closed_inner.addArrangedSubview_(native_ui.make_row("Duration (sec)", closed_duration))
     closed_scroll, closed_program = native_ui.make_text_editor("")
     closed_inner.addArrangedSubview_(closed_scroll)
-    closed_buttons = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    closed_buttons = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     closed_buttons.addArrangedSubview_(native_ui.make_button("Preview", target, "previewLidClosedAnimation:"))
     closed_buttons.addArrangedSubview_(native_ui.make_button("Reset", target, "resetLidClosedAnimation:"))
+    closed_buttons.addArrangedSubview_(native_ui.make_hspacer())
     closed_inner.addArrangedSubview_(closed_buttons)
     stack.addArrangedSubview_(closed_outer)
 
@@ -3516,10 +3521,11 @@ def _build_lid_animations_pane(target: StatusBarController):
     open_inner.addArrangedSubview_(native_ui.make_row("Duration (sec)", open_duration))
     open_scroll, open_program = native_ui.make_text_editor("")
     open_inner.addArrangedSubview_(open_scroll)
-    open_buttons = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    open_buttons = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     open_buttons.addArrangedSubview_(native_ui.make_button("Preview", target, "previewLidOpenAnimation:"))
     open_buttons.addArrangedSubview_(native_ui.make_button("Reset", target, "resetLidOpenAnimation:"))
     open_buttons.addArrangedSubview_(native_ui.make_button("Save Animations", target, "saveLidAnimations:"))
+    open_buttons.addArrangedSubview_(native_ui.make_hspacer())
     open_inner.addArrangedSubview_(open_buttons)
     stack.addArrangedSubview_(open_outer)
 
@@ -3533,14 +3539,15 @@ def _build_lid_animations_pane(target: StatusBarController):
 
 
 def _build_debug_pane(target: StatusBarController):
-    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
-    outer, inner = native_ui.make_card("Debug Log")
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    outer, inner = native_ui.make_card()
 
     status_label = native_ui.make_label("", secondary=True, size=12.0)
     inner.addArrangedSubview_(status_label)
-    buttons_row = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    buttons_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     buttons_row.addArrangedSubview_(native_ui.make_button("Export CSV", target, "exportDebugCsv:"))
     buttons_row.addArrangedSubview_(native_ui.make_button("Export HTML", target, "exportDebugHtml:"))
+    buttons_row.addArrangedSubview_(native_ui.make_hspacer())
     inner.addArrangedSubview_(buttons_row)
 
     stack.addArrangedSubview_(outer)
@@ -3566,6 +3573,15 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
 
     root = NSView.alloc().init()
     window.setContentView_(root)
+    # Same treatment build_colors_window documents for its own root: with
+    # a pure-Auto-Layout content hierarchy, the window pulls itself to the
+    # content's computed fitting width -- which for a sidebar + a column
+    # of natural-width form rows is well under the size this window is
+    # designed at. Pin the design size explicitly; panes still lay out
+    # freely inside it (and the window stays user-resizable above it).
+    root.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    root.widthAnchor().constraintGreaterThanOrEqualToConstant_(width).setActive_(True)
+    root.heightAnchor().constraintGreaterThanOrEqualToConstant_(height).setActive_(True)
 
     split = NSSplitView.alloc().init()
     split.setVertical_(True)
@@ -3777,14 +3793,14 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
         preview_rows.append({"led_count": led_count, "dots": dots, "legend": legend})
 
     # Everything else scrolls independently below the pinned preview.
-    scroll_stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
+    scroll_stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
 
     behavior_outer, behavior_inner = native_ui.make_card("Blend Mode & Behavior")
     blend_popup = make_blend_mode_popup(target)
     behavior_inner.addArrangedSubview_(native_ui.make_row("Blend Mode", blend_popup))
     blend_description = native_ui.make_label("", secondary=True, size=12.0)
     behavior_inner.addArrangedSubview_(blend_description)
-    urgency_alert_checkbox = native_ui.make_checkbox(
+    urgency_row, urgency_alert_checkbox = native_ui.make_switch_row(
         "Alert when blocked or waiting",
         target,
         "toggleUrgencyAlert:",
@@ -3793,14 +3809,14 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
             "color instead of its own, so it stands out."
         ),
     )
-    behavior_inner.addArrangedSubview_(urgency_alert_checkbox)
-    done_celebration_checkbox = native_ui.make_checkbox(
+    behavior_inner.addArrangedSubview_(urgency_row)
+    done_row, done_celebration_checkbox = native_ui.make_switch_row(
         "Celebrate when finished",
         target,
         "toggleDoneCelebration:",
         help_text="A brief twinkle plays before settling into the Done color.",
     )
-    behavior_inner.addArrangedSubview_(done_celebration_checkbox)
+    behavior_inner.addArrangedSubview_(done_row)
     native_ui.add_separator(behavior_inner)
 
     speed_field = native_ui.make_field("")
@@ -3831,7 +3847,6 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
     cycle_row.addArrangedSubview_(native_ui.make_button("Apply", target, "applyCycleModeSpeed:"))
     behavior_inner.addArrangedSubview_(cycle_row)
     scroll_stack.addArrangedSubview_(behavior_outer)
-    native_ui.stretch_to_stack_width(scroll_stack, behavior_outer)
 
     swatches: dict[tuple[tuple[str, str], str], object] = {}
     hex_labels: dict[tuple[str, str], object] = {}
@@ -3855,7 +3870,6 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
             )
         )
     scroll_stack.addArrangedSubview_(agent_outer)
-    native_ui.stretch_to_stack_width(scroll_stack, agent_outer)
 
     mode_outer, mode_inner = native_ui.make_card("Mode Colors")
     for key in MODE_COLOR_KEYS:
@@ -3876,7 +3890,6 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
             )
         )
     scroll_stack.addArrangedSubview_(mode_outer)
-    native_ui.stretch_to_stack_width(scroll_stack, mode_outer)
 
     anim_outer, anim_inner = native_ui.make_card("Animation Style")
     animation_popups: dict[str, object] = {}
@@ -3886,7 +3899,6 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
         animation_popups[key] = popup
         anim_inner.addArrangedSubview_(native_ui.make_row(MODE_COLOR_DISPLAY_LABELS[key], popup))
     scroll_stack.addArrangedSubview_(anim_outer)
-    native_ui.stretch_to_stack_width(scroll_stack, anim_outer)
 
     fade_outer, fade_inner = native_ui.make_card("Fade Intensity")
     fade_inner.addArrangedSubview_(
@@ -3914,7 +3926,6 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
         fade_inner.addArrangedSubview_(native_ui.make_row(MODE_COLOR_DISPLAY_LABELS[key], controls))
     fade_inner.addArrangedSubview_(native_ui.make_button("Apply Fade Intensity", target, "applyFadeIntensity:"))
     scroll_stack.addArrangedSubview_(fade_outer)
-    native_ui.stretch_to_stack_width(scroll_stack, fade_outer)
 
     scroll_pane = native_ui.wrap_in_scroll_pane(scroll_stack)
     root.addSubview_(scroll_pane)
@@ -3944,15 +3955,18 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
 
     NSLayoutConstraint.activateConstraints_(
         [
-            preview_outer.topAnchor().constraintEqualToAnchor_constant_(root.topAnchor(), 16.0),
-            preview_outer.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 16.0),
-            preview_outer.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -16.0),
+            # 20pt to match wrap_in_scroll_pane's own content padding --
+            # the pinned card and the scrolling cards below it share one
+            # left edge, so the pane reads as a single aligned column.
+            preview_outer.topAnchor().constraintEqualToAnchor_constant_(root.topAnchor(), 20.0),
+            preview_outer.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 20.0),
+            preview_outer.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -20.0),
             scroll_pane.topAnchor().constraintEqualToAnchor_constant_(preview_outer.bottomAnchor(), 16.0),
             scroll_pane.leadingAnchor().constraintEqualToAnchor_(root.leadingAnchor()),
             scroll_pane.trailingAnchor().constraintEqualToAnchor_(root.trailingAnchor()),
             scroll_pane.bottomAnchor().constraintEqualToAnchor_constant_(footer.topAnchor(), -12.0),
-            footer.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 16.0),
-            footer.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -16.0),
+            footer.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 20.0),
+            footer.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -20.0),
             footer.bottomAnchor().constraintEqualToAnchor_constant_(root.bottomAnchor(), -14.0),
         ]
     )
