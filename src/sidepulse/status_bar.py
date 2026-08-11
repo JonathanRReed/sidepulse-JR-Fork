@@ -312,6 +312,9 @@ class StatusBarController(NSObject):
         self.settings_sidebar_table = None
         self.settings_panes = {}
         self._device_calibration_popover = None
+        # (device_id, hex) while a calibration test patch is lighting the
+        # device; None otherwise. See startCalibrationTest_.
+        self.calibration_test = None
         self.setup_fields = {}
         self.setup_buttons = {}
         self.setup_demo_timer = None
@@ -852,6 +855,51 @@ class StatusBarController(NSObject):
         self.set_device_channel_gain(str(device_id), "blue", sender.doubleValue() / 100.0)
 
     @objc.IBAction
+    def startCalibrationTest_(self, sender):
+        payload = sender.representedObject()
+        if not isinstance(payload, dict):
+            return
+        device_id = str(payload.get("device_id") or "")
+        hex_color = str(payload.get("hex") or "")
+        if not device_id or not hex_color:
+            return
+        self.calibration_test = (device_id, hex_color)
+        self._send_calibration_test()
+
+    def _send_calibration_test(self) -> None:
+        """Lights the device under calibration with the chosen reference
+        color, THROUGH the current channel gains -- so every gain-slider
+        move re-lights it and the user sees convergence live."""
+        if not self.calibration_test:
+            return
+        device_id, hex_color = self.calibration_test
+        program = f"{hex_color} 500ms\nrepeat"
+        if device_id == VIRTUAL_DEVICE_ID:
+            self.virtual_status_device.set_program(
+                apply_brightness(program, self.settings.brightness_for_device(device_id))
+            )
+            return
+        device = next(
+            (
+                entry
+                for entry in self.status_bar_devices(remember=False)
+                if entry.device_id == device_id and entry.connected
+            ),
+            None,
+        )
+        if device is None:
+            return
+        controller = self.agent_controller_for_device(device)
+        controller.sync_program(apply_brightness(program, controller.brightness), LedDisplayState.ASK)
+
+    def popoverDidClose_(self, _notification):
+        """NSPopover delegate: the calibration popover closed -- stop any
+        test color and hand the device straight back to live status."""
+        if self.calibration_test is not None:
+            self.calibration_test = None
+            self.refresh_(None)
+
+    @objc.IBAction
     def resetDeviceColorCalibration_(self, sender):
         device_id = sender.representedObject()
         if device_id is None:
@@ -879,6 +927,9 @@ class StatusBarController(NSObject):
         popover = NSPopover.alloc().init()
         popover.setContentViewController_(view_controller)
         popover.setBehavior_(NSPopoverBehaviorTransient)
+        # For popoverDidClose_ -- a dismissed calibration popover must
+        # stop any test color and return the device to live status.
+        popover.setDelegate_(self)
         popover.showRelativeToRect_ofView_preferredEdge_(sender.bounds(), sender, NSMaxYEdge)
         self._device_calibration_popover = popover
         self.device_settings_controls.setdefault(device_id, {}).update(controls)
@@ -2028,7 +2079,12 @@ class StatusBarController(NSObject):
             f"G{round(green * 100)}% B{round(blue * 100)}%."
         )
         self.refresh_settings_window()
-        if self.last_snapshot is not None:
+        if self.calibration_test is not None and self.calibration_test[0] == str(device_id):
+            # Mid-calibration: re-light the test color through the new
+            # gains instead of resuming live status under the user's
+            # hands -- live status returns when the popover closes.
+            self._send_calibration_test()
+        elif self.last_snapshot is not None:
             self.sync_leds(
                 self.last_snapshot.aggregate.mode,
                 self.last_battery_snapshot,
@@ -3591,16 +3647,52 @@ def calibration_summary_text(auto_brightness_enabled: bool, red: float, green: f
     return " · ".join(parts)
 
 
+CALIBRATION_TEST_PATCHES: tuple[tuple[str, str], ...] = (
+    ("White", "#FFFFFF"),
+    ("Red", "#FF0000"),
+    ("Green", "#00FF00"),
+    ("Blue", "#0000FF"),
+)
+
+
 def build_calibration_popover_content(device: StatusBarDevice, target: StatusBarController):
     """The content shown inside the "Calibrate…" popover for one device:
-    Auto-Brightness + the three per-channel gain sliders + Reset. Kept out
-    of the main Devices pane row (where three bare "R"/"G"/"B" sliders
-    previously sat inline all the time) -- calibration is something you
-    set once and rarely touch again, not something that should occupy
-    permanent space in the list.
+    a guided matching flow, not blind sliders. The reference patches at
+    the top are the ground truth -- click one and the device lights with
+    that exact color (through the current gains), so you hold the device
+    beside the screen and adjust each slider until light and patch agree.
+    Closing the popover returns the device to live status automatically.
     """
     stack = native_ui.make_stack(orientation="vertical", spacing=14.0)
     native_ui.constrain_width(stack, 300.0)
+
+    stack.addArrangedSubview_(
+        native_ui.make_label(
+            "Hold the device beside these patches.\n"
+            "Click one to light the device with it, then\n"
+            "adjust until the light matches the patch.",
+            secondary=True,
+            size=11.0,
+        )
+    )
+    patch_size = 26
+    patch_gap = 10
+    patches_width = len(CALIBRATION_TEST_PATCHES) * (patch_size + patch_gap) - patch_gap
+    patches = native_ui.make_fixed_area(float(patches_width), float(patch_size))
+    x = 0
+    for _label, hex_color in CALIBRATION_TEST_PATCHES:
+        add_color_swatch(
+            patches,
+            hex_color,
+            x,
+            1,
+            target,
+            "startCalibrationTest:",
+            {"device_id": device.device_id, "hex": hex_color},
+        )
+        x += patch_size + patch_gap
+    stack.addArrangedSubview_(patches)
+    native_ui.add_separator(stack)
 
     auto_checkbox = native_ui.make_checkbox(
         "Auto-Brightness (matches screen)", target, "toggleDeviceAutoBrightness:"

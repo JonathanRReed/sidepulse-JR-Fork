@@ -7831,6 +7831,34 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         self.status_bar = status_bar
         self.controller = status_bar.StatusBarController.alloc().init()
 
+    def test_calibration_test_lights_device_and_follows_gain_changes(self) -> None:
+        # The guided flow's contract: clicking a patch lights the device
+        # with it; every gain change re-lights THROUGH the new gains; and
+        # closing the popover hands the device back to live status.
+        status_bar = self.status_bar
+        controller = self.controller
+        sends = []
+        controller._send_calibration_test = lambda: sends.append(controller.calibration_test)
+        refreshes = []
+        controller.refresh_ = lambda _s: refreshes.append(True)
+
+        patch_button = SimpleNamespace(
+            representedObject=lambda: {"device_id": status_bar.VIRTUAL_DEVICE_ID, "hex": "#FF0000"}
+        )
+        controller.startCalibrationTest_(patch_button)
+        self.assertEqual(controller.calibration_test, (status_bar.VIRTUAL_DEVICE_ID, "#FF0000"))
+        self.assertEqual(len(sends), 1)
+
+        controller.set_device_channel_gain(status_bar.VIRTUAL_DEVICE_ID, "red", 0.8)
+        self.assertEqual(len(sends), 2)
+
+        controller.popoverDidClose_(None)
+        self.assertIsNone(controller.calibration_test)
+        self.assertEqual(refreshes, [True])
+        # A second close is a no-op, not a second refresh.
+        controller.popoverDidClose_(None)
+        self.assertEqual(refreshes, [True])
+
     def test_brightness_watcher_resyncs_only_on_a_real_change(self) -> None:
         # Auto-brightness used to re-evaluate only when an agent state
         # change triggered an LED write -- dimming the screen during a
