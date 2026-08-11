@@ -64,10 +64,16 @@ WING_MAX_WIDTH = 110.0
 # Automatic wings are a TIGHT hug: the risers land essentially flush
 # with the notch's own corners and the bar reads as the size of the
 # actual notch. Auto wings at the full 110pt made the bracket twice
-# the notch's width -- "nowhere near the correct size" -- and even
-# 28pt read as overhang against the measured notch. Anyone who wants
-# longer wings has the Wing Length slider (up to 400pt).
-WING_AUTO_LENGTH = 10.0
+# the notch's width -- "nowhere near the correct size" -- 28pt still
+# read as overhang, and 10pt "could be a little tighter". At 6pt the
+# riser IS the wing. Anyone who wants longer wings has the Wing
+# Length slider (up to 400pt).
+WING_AUTO_LENGTH = 6.0
+# The bracket is clipped to a rounded rect: the underline's ends curve
+# up into the risers and the riser tops are capped instead of ending
+# in hard right angles -- "more rounded on the corners so they feel
+# more naturally part of it".
+BRACKET_CORNER_RADIUS = 5.0
 WING_SAFETY_MARGIN = 28.0
 WING_MIN_USABLE = 24.0
 # A wing that's just a flat horizontal strip fading sideways reads as a
@@ -793,6 +799,16 @@ class VirtualLedView(NSView):
         glow_height = min(LED_GLOW_HEIGHT, max(0.0, height - LED_BAND_HEIGHT))
         cg_context = current_cg_context()
 
+        # One rounded-rect clip softens every corner of the bracket at
+        # once: the underline's ends curve up into the risers and the
+        # riser tops get a cap -- no hard right angles anywhere.
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            ((0.0, 0.0), (width, height)),
+            BRACKET_CORNER_RADIUS,
+            BRACKET_CORNER_RADIUS,
+        ).addClip()
+
         # The full-width underline: clip to the LED band (plus a whisper
         # of bloom above it) so the gap region shows a clean bright line
         # rather than the full-height glow that belongs to the wings.
@@ -835,6 +851,7 @@ class VirtualLedView(NSView):
             cg_context, right_edge_color, width - WING_RISER_WIDTH, width, height,
             outer_on_left=False,
         )
+        NSGraphicsContext.restoreGraphicsState()
 
     def _fill_glow_row(self, cg_context, colors, led_width, notch_width, glow_height, _height, *, x_start, x_end, wing_offset, wing_taper_floor=0.0):
         """Draws the 4-layer LED glow (bloom / soft falloff / core / hotline)
