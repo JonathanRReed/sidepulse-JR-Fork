@@ -54,6 +54,7 @@ SIGNAL_LOW_BATTERY = "low_battery"
 SIGNAL_NOTIFICATION = "notification"
 SIGNAL_REMINDERS = "reminders"
 SIGNAL_CALENDAR = "calendar"
+SIGNAL_WEATHER = "weather"
 
 _HEX_RE = re.compile(r"#?[0-9a-fA-F]{6}")
 
@@ -115,6 +116,9 @@ DEFAULT_SIGNAL_STYLES: dict[str, SignalStyle] = {
     SIGNAL_NOTIFICATION: SignalStyle("#34C759", PATTERN_BLINK, 0.3, 1.0),
     SIGNAL_REMINDERS: SignalStyle("#FFB340", PATTERN_BREATHE, 1.5, 1.0),
     SIGNAL_CALENDAR: SignalStyle("#A45CFF", PATTERN_BREATHE, 2.6, 1.0),
+    # Emergency weather: an urgent heartbeat in warning pink-red --
+    # unmistakable, and unlike any agent state's rhythm or hue.
+    SIGNAL_WEATHER: SignalStyle("#FF2D55", PATTERN_HEARTBEAT, 1.4, 1.0),
 }
 
 

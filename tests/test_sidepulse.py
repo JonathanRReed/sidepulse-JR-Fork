@@ -8697,6 +8697,62 @@ class EscalationControllerTests(unittest.TestCase):
         self.assertGreater(boosted, baseline * 1.05)
 
 
+class WeatherAlertTests(unittest.TestCase):
+    def test_only_severe_and_extreme_alerts_count(self) -> None:
+        from sidepulse.weather_watch import alerts_from_payload
+
+        payload = {
+            "features": [
+                {"id": "a1", "properties": {"severity": "Extreme", "event": "Tornado Warning"}},
+                {"id": "a2", "properties": {"severity": "Severe", "event": "Thunderstorm Warning"}},
+                {"id": "a3", "properties": {"severity": "Moderate", "event": "Wind Advisory"}},
+                {"id": "a4", "properties": {"severity": "Minor", "event": "Frost Advisory"}},
+                {"properties": {"severity": "Extreme", "event": "No id"}},
+            ]
+        }
+        alerts = alerts_from_payload(payload)
+        self.assertEqual(
+            alerts,
+            [
+                ("a1", "Extreme", "Tornado Warning"),
+                ("a2", "Severe", "Thunderstorm Warning"),
+            ],
+        )
+        self.assertEqual(alerts_from_payload({}), [])
+        self.assertEqual(alerts_from_payload(None), [])
+        self.assertEqual(alerts_from_payload({"features": [{"bogus": True}]}), [])
+
+    def test_weather_settings_round_trip(self) -> None:
+        configured = (
+            AgentMonitorSettings()
+            .with_weather_alerts_enabled(True)
+            .with_weather_location(37.77, -122.42)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            reloaded = load_settings(path)
+        self.assertTrue(reloaded.weather_alerts_enabled)
+        self.assertAlmostEqual(reloaded.weather_latitude, 37.77)
+        self.assertAlmostEqual(reloaded.weather_longitude, -122.42)
+        # Automatic (both None) round-trips too.
+        cleared = reloaded.with_weather_location(None, None)
+        self.assertIsNone(cleared.weather_latitude)
+
+    def test_weather_default_style_is_a_heartbeat_within_limits(self) -> None:
+        from sidepulse import signals
+        from sidepulse.device_writer import MAX_LED_BYTES, MAX_LED_LINES
+        from sidepulse.led_status import style_to_program
+
+        style = signals.DEFAULT_SIGNAL_STYLES[signals.SIGNAL_WEATHER]
+        self.assertEqual(style.pattern, signals.PATTERN_HEARTBEAT)
+        for led_count in (2, 8):
+            program = style_to_program(style, 255, led_count=led_count)
+            self.assertLessEqual(len(program.encode()), MAX_LED_BYTES)
+            self.assertLessEqual(len(program.splitlines()), MAX_LED_LINES)
+            self.assertIn("repeat", program)
+
+
 class CalendarAlertTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

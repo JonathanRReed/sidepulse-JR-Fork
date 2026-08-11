@@ -189,6 +189,13 @@ class AgentMonitorSettings:
     # Amber glow when a Reminder comes due. Off by default: enabling it
     # presents the system Reminders prompt (see reminders_watch.py).
     reminder_alerts_enabled: bool = False
+    # Severe/Extreme weather warnings (NWS). Location: manual lat/lon
+    # if set, otherwise a one-shot IP geolocation -- deliberately not
+    # CoreLocation (a Location prompt would cost another bundle
+    # re-sign and another lost FDA grant).
+    weather_alerts_enabled: bool = False
+    weather_latitude: float | None = None
+    weather_longitude: float | None = None
     # Per-signal look overrides (Signal Engine). Keys/values validated
     # by signals.SignalStyle; absent keys mean the built-in defaults.
     signal_styles: dict[str, dict] = field(default_factory=dict)
@@ -641,6 +648,19 @@ class AgentMonitorSettings:
     def with_reminder_alerts_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, reminder_alerts_enabled=bool(enabled))
 
+    def with_weather_alerts_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+        return replace(self, weather_alerts_enabled=bool(enabled))
+
+    def with_weather_location(
+        self, latitude: float | None, longitude: float | None
+    ) -> "AgentMonitorSettings":
+        """Both None = automatic IP geolocation."""
+        if latitude is not None:
+            latitude = max(-90.0, min(90.0, float(latitude)))
+        if longitude is not None:
+            longitude = max(-180.0, min(180.0, float(longitude)))
+        return replace(self, weather_latitude=latitude, weather_longitude=longitude)
+
     def with_calendar_lead_minutes(self, minutes: float) -> "AgentMonitorSettings":
         return replace(self, calendar_lead_minutes=max(1.0, min(60.0, float(minutes))))
 
@@ -750,6 +770,9 @@ class AgentMonitorSettings:
             "calendar_alerts_enabled": self.calendar_alerts_enabled,
             "calendar_lead_minutes": self.calendar_lead_minutes,
             "reminder_alerts_enabled": self.reminder_alerts_enabled,
+            "weather_alerts_enabled": self.weather_alerts_enabled,
+            "weather_latitude": self.weather_latitude,
+            "weather_longitude": self.weather_longitude,
             "signal_styles": dict(sorted(self.signal_styles.items())),
             "escalation_tier": self.escalation_tier,
             "escalation_ramp_seconds": self.escalation_ramp_seconds,
@@ -942,6 +965,9 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             1.0, min(60.0, _float_setting(data.get("calendar_lead_minutes"), 5.0))
         ),
         reminder_alerts_enabled=_bool_setting(data.get("reminder_alerts_enabled"), False),
+        weather_alerts_enabled=_bool_setting(data.get("weather_alerts_enabled"), False),
+        weather_latitude=_optional_dimension(data.get("weather_latitude"), -90.0, 90.0),
+        weather_longitude=_optional_dimension(data.get("weather_longitude"), -180.0, 180.0),
         signal_styles=_signal_styles(data.get("signal_styles")),
         escalation_tier=_escalation_tier(data.get("escalation_tier")),
         **_escalation_thresholds(data),

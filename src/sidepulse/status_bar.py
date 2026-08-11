@@ -85,6 +85,7 @@ from .battery import (
 from . import calendar_watch
 from . import reminders_watch
 from . import signals as signals_module
+from . import weather_watch
 from . import display_brightness
 from . import focus_sync
 from . import native_ui
@@ -266,6 +267,9 @@ LED_DISPLAY_ESCALATION = "escalation"
 LED_DISPLAY_REMINDERS = "reminders"
 REMINDERS_WATCH_SECONDS = 60.0
 REMINDERS_WATCH_RETRY_SECONDS = 300.0
+LED_DISPLAY_WEATHER = "weather"
+WEATHER_WATCH_SECONDS = 600.0
+WEATHER_WATCH_RETRY_SECONDS = 1800.0
 CALENDAR_WATCH_SECONDS = 30.0
 CALENDAR_WATCH_RETRY_SECONDS = 300.0
 # How often the Notification Center store is polled (one indexed
@@ -413,6 +417,11 @@ class StatusBarController(NSObject):
         self.reminders_glow_until = 0.0
         self.reminders_seen: dict[str, float] = {}
         self.reminders_watch_retry_at = 0.0
+        # Weather emergency: alert active right now (state, not moment).
+        self.weather_alert_active = False
+        self.weather_alert_event: str | None = None
+        self.weather_watch_retry_at = 0.0
+        self.weather_fetch_in_flight = False
         self.current_state = STATE_IDLE
         # None until set_status() actually confirms Idle -- avoids assuming
         # "idle since launch" if the real initial state turns out to be
@@ -531,6 +540,14 @@ class StatusBarController(NSObject):
             None,
             True,
         )
+        # Weather watcher: network fetch on a worker thread, every 10min.
+        self.weather_watch_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            WEATHER_WATCH_SECONDS,
+            self,
+            "pollWeather:",
+            None,
+            True,
+        )
         self.show_setup_window_if_needed()
         if SCREEN_BAR_FEATURE_ENABLED and self.settings.virtual_status_device_enabled:
             self.virtual_status_device.show()
@@ -646,6 +663,49 @@ class StatusBarController(NSObject):
         self.calendar_event_title = title
         self.calendar_glow_until = now + max(0.0, seconds_until_start)
         if not was_active:
+            self.refresh_(None)
+
+    @objc.IBAction
+    def pollWeather_(self, _sender):
+        """Fetches NWS alerts on a worker thread (urllib would block the
+        main thread for seconds on a slow network) and hops the verdict
+        back to the main thread."""
+        if not self.settings.weather_alerts_enabled:
+            return
+        now = time.monotonic()
+        if now < self.weather_watch_retry_at or self.weather_fetch_in_flight:
+            return
+        self.weather_fetch_in_flight = True
+        latitude = self.settings.weather_latitude
+        longitude = self.settings.weather_longitude
+
+        def _fetch():
+            try:
+                if latitude is not None and longitude is not None:
+                    location = (latitude, longitude)
+                else:
+                    location = weather_watch.ip_location()
+                alerts = weather_watch.active_alerts(*location)
+                payload = {"ok": True, "alerts": alerts}
+            except weather_watch.WeatherUnavailableError as exc:
+                payload = {"ok": False, "error": str(exc)}
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "weatherChecked:", payload, False
+            )
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    @objc.IBAction
+    def weatherChecked_(self, payload):
+        self.weather_fetch_in_flight = False
+        if not payload.get("ok"):
+            self.weather_watch_retry_at = time.monotonic() + WEATHER_WATCH_RETRY_SECONDS
+            return
+        alerts = list(payload.get("alerts") or [])
+        was_active = self.weather_alert_active
+        self.weather_alert_active = bool(alerts)
+        self.weather_alert_event = str(alerts[0][2]) if alerts else None
+        if self.weather_alert_active != was_active:
             self.refresh_(None)
 
     @objc.IBAction
@@ -1156,6 +1216,20 @@ class StatusBarController(NSObject):
                 "Reminders access is denied — enable SidePulse under "
                 "Privacy & Security → Reminders."
             )
+
+    @objc.IBAction
+    def toggleWeatherAlerts_(self, sender):
+        enabled = bool(sender.state())
+        self.settings = self.settings.with_weather_alerts_enabled(enabled)
+        save_settings(self.settings)
+        self.weather_watch_retry_at = 0.0
+        if enabled:
+            self.set_settings_message("Weather warnings on — checking your area…")
+            self.pollWeather_(None)
+        else:
+            self.weather_alert_active = False
+            self.set_settings_message("Weather warnings off.")
+            self.refresh_(None)
 
     @objc.IBAction
     def reminderAccessResolved_(self, granted):
@@ -2619,6 +2693,10 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("reminder_alerts_enabled"),
             self.settings.reminder_alerts_enabled,
         )
+        set_checkbox_state(
+            self.settings_buttons.get("weather_alerts_enabled"),
+            self.settings.weather_alerts_enabled,
+        )
         # Signals cards: re-render each from saved state, and sync the
         # escalation controls -- like every other control here, they must
         # reflect changes made outside their own handlers.
@@ -3507,6 +3585,12 @@ class StatusBarController(NSObject):
             # Opt-in stage-3 takeover outranks everything: the user
             # explicitly chose "don't let me miss this".
             (LED_DISPLAY_ESCALATION, self.escalation_takeover_active),
+            # A Severe/Extreme weather warning outranks every routine
+            # signal -- it is the definition of "emergency".
+            (
+                LED_DISPLAY_WEATHER,
+                lambda: self.settings.weather_alerts_enabled and self.weather_alert_active,
+            ),
             (LED_DISPLAY_LOW_BATTERY, lambda: self.low_power_active(battery_snapshot)),
             (
                 LED_DISPLAY_NOTIFICATION,
@@ -3635,6 +3719,13 @@ class StatusBarController(NSObject):
                     self.settings.signal_style(signals_module.SIGNAL_NOTIFICATION),
                     brightness,
                     color=self.notification_blink_color,
+                ),
+                started_at=started_at,
+            )
+        elif display == LED_DISPLAY_WEATHER:
+            self.virtual_status_device.set_program(
+                style_to_program(
+                    self.settings.signal_style(signals_module.SIGNAL_WEATHER), brightness
                 ),
                 started_at=started_at,
             )
@@ -3791,6 +3882,21 @@ class StatusBarController(NSObject):
                     LedDisplayState.ASK,
                 )
                 label = f"{device.name} Notification blink"
+                if result.error:
+                    agent_write_failed = True
+                elif result.changed:
+                    agent_write_changed = True
+            elif device_display_kind == LED_DISPLAY_WEATHER:
+                controller = self.agent_controller_for_device(device)
+                result = controller.sync_program(
+                    style_to_program(
+                        self.settings.signal_style(signals_module.SIGNAL_WEATHER),
+                        controller.brightness,
+                        led_count=device_led_count,
+                    ),
+                    LedDisplayState.ASK,
+                )
+                label = f"{device.name} Weather {self.weather_alert_event or 'alert'}"
                 if result.error:
                     agent_write_failed = True
                 elif result.changed:
@@ -5027,6 +5133,7 @@ SIGNAL_STYLE_CARDS: tuple[tuple[str, str, bool], ...] = (
     ("notification", "Notification Style", False),
     ("reminders", "Reminder Style", True),
     ("calendar", "Calendar Style", True),
+    ("weather", "Weather Alert Style", True),
 )
 SIGNAL_THUMB_SIZE = (52.0, 20.0)
 SIGNAL_PREVIEW_SIZE = (220.0, 22.0)
@@ -5319,6 +5426,18 @@ def _build_led_behavior_pane(target: StatusBarController):
         ),
     )
     cal_inner.addArrangedSubview_(rem_row)
+    native_ui.add_separator(cal_inner)
+    weather_row, weather_switch = native_ui.make_switch_row(
+        "Flash on severe weather warnings",
+        target,
+        "toggleWeatherAlerts:",
+        help_text=(
+            "An urgent heartbeat while a Severe or Extreme National "
+            "Weather Service warning covers your area. Location comes "
+            "from your network address -- no Location permission needed."
+        ),
+    )
+    cal_inner.addArrangedSubview_(weather_row)
     stack.addArrangedSubview_(cal_outer)
     fields["calendar_lead_field"] = lead_field
 
@@ -5364,6 +5483,7 @@ def _build_led_behavior_pane(target: StatusBarController):
         "notification_blinks_enabled": notif_switch,
         "calendar_alerts_enabled": cal_switch,
         "reminder_alerts_enabled": rem_switch,
+        "weather_alerts_enabled": weather_switch,
     }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
