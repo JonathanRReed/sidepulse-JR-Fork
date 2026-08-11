@@ -208,68 +208,12 @@ def is_alcove_running() -> bool:
         return False
 
 
-# The bracket's uprights sit this far outside Alcove's overlay window.
-ALCOVE_GAP_MARGIN = 6.0
-# An Alcove window wider than this fraction of the screen is one of its
-# transient full-width states (expanded dropdown/HUD), not the
-# menu-bar overlay -- sizing the bracket to one of those put the wings
-# at the screen edges.
-ALCOVE_MAX_GAP_FRACTION = 0.6
-
-
-def alcove_gap_from_windows(
-    windows, screen_x: float, screen_width: float
-) -> float | None:
-    """The gap the bracket should leave for Alcove, from a CGWindowList
-    snapshot: the widest Alcove-owned window that sits in the menu-bar
-    strip (y = 0), spans the screen's horizontal center (where the
-    notch is), and is not one of Alcove's full-width states. Window
-    bounds -- not the drawn capsule, which pixel-reading can't separate
-    from a near-black menu bar -- so the bracket is a LOOSE fit that
-    nothing Alcove draws can ever stick out of. Returns None when no
-    qualifying window exists (caller falls back to hardware geometry).
-    Pure and testable; ``measure_alcove_gap_width`` feeds it live data.
-    """
-    center = screen_x + screen_width / 2.0
-    best = None
-    for info in windows or []:
-        try:
-            owner = str(info.get("kCGWindowOwnerName", "") or "")
-            bounds = info.get("kCGWindowBounds") or {}
-            x = float(bounds.get("X", 0.0))
-            y = float(bounds.get("Y", 1e9))
-            width = float(bounds.get("Width", 0.0))
-        except Exception:
-            continue
-        if owner.strip().lower() != "alcove":
-            continue
-        if y > 1.0 or width <= 0.0:
-            continue
-        if not (x <= center <= x + width):
-            continue
-        if width > screen_width * ALCOVE_MAX_GAP_FRACTION:
-            continue
-        if best is None or width > best:
-            best = width
-    if best is None:
-        return None
-    return best + 2.0 * ALCOVE_GAP_MARGIN
-
-
-def measure_alcove_gap_width(screen) -> float | None:
-    """Live wrapper around alcove_gap_from_windows -- see its docstring."""
-    try:
-        import Quartz
-
-        infos = Quartz.CGWindowListCopyWindowInfo(
-            Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID
-        )
-    except Exception:
-        return None
-    frame = screen.frame()
-    return alcove_gap_from_windows(
-        infos, float(frame.origin.x), float(frame.size.width)
-    )
+# NOTE on sizing to Alcove: tried twice, reverted twice. Alcove's
+# window bounds say nothing about the visible capsule (it keeps a wide,
+# often invisible window; notification HUDs widen it further), and its
+# capsule can't be told apart from a near-black menu bar in pixels.
+# Automatic geometry is hardware-notch; the Bar Size sliders are the
+# manual override for anything else.
 
 
 
@@ -989,26 +933,22 @@ class VirtualStatusDevice(NSObject):
         # while Alcove runs, SidePulse always rides one level above it,
         # drawing the bracket (wings + risers) when wrap is on or a thin
         # accent underline when it's off; without Alcove, the normal full
-        # render at the normal status level. In Automatic size, the gap
-        # follows Alcove's own overlay window (its live-activity capsule
-        # is wider than the hardware notch, and a hardware-sized bracket
-        # landed ON TOP of it); the user's Bar Size sliders still
-        # override everything precisely.
+        # render at the normal status level. Automatic size is ALWAYS
+        # hardware-notch geometry: sizing to Alcove's overlay window was
+        # tried twice and is a dead end -- Alcove keeps a huge (often
+        # invisible) window whose bounds say nothing about what it's
+        # drawing, so the bar ballooned across the menu bar. The user's
+        # Bar Size sliders are the override for anything else.
         alcove_active = is_alcove_running()
         wings_only = alcove_active and self.wraps_menu_bar
         compact = alcove_active and not self.wraps_menu_bar
 
         gap_override = getattr(self, "gap_width_override", None)
         wing_override = getattr(self, "wing_length_override", None)
-        effective_gap = gap_override
-        if alcove_active and gap_override is None:
-            measured = measure_alcove_gap_width(screen)
-            if measured is not None:
-                effective_gap = max(measured, slot_width_for_screen(screen))
         window_frame = virtual_window_frame_for_screen(
             screen,
             wrap_menu_bar=self.wraps_menu_bar,
-            gap_width=effective_gap,
+            gap_width=gap_override,
             wing_length=wing_override,
         )
         current = self.window.frame()
@@ -1028,7 +968,7 @@ class VirtualStatusDevice(NSObject):
             if frame_changed:
                 self.view.setFrame_(((0, 0), window_frame[1]))
             if self.wraps_menu_bar:
-                notch_width = float(effective_gap) if effective_gap else slot_width_for_screen(screen)
+                notch_width = float(gap_override) if gap_override else slot_width_for_screen(screen)
             else:
                 notch_width = None
             self.view.setNotchWidth_(notch_width)
