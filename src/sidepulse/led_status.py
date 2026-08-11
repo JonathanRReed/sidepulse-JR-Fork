@@ -492,6 +492,44 @@ def style_to_program(
             for index in range(led_count)
         )
         body = f"off 300ms cosine\n{segments}\nrepeat"
+    elif style.pattern == "ripple":
+        # Overlapping full-length pulses, one LED-step apart: a wave
+        # that travels the strip -- the on-screen twin of Relay's chase.
+        duration = min(65535, max(1, speed_ms))
+        segments = "; ".join(
+            f"{index}:{hex_color} {duration}ms pulse "
+            f"{min(65535, round(index * speed_ms / max(1, led_count)))}ms"
+            for index in range(led_count)
+        )
+        body = f"off 300ms cosine\n{segments}\nrepeat"
+    elif style.pattern == "comet":
+        # A short bright head racing the strip, cosine decay as its tail.
+        duration = min(65535, max(1, round(speed_ms / 4)))
+        segments = "; ".join(
+            f"{index}:{hex_color} {duration}ms pulse "
+            f"{min(65535, round(index * speed_ms / max(1, led_count)))}ms"
+            for index in range(led_count)
+        )
+        body = f"off 300ms cosine\n{segments}\nrepeat"
+    elif style.pattern == "sparkle":
+        # Deterministic scatter (a fixed co-prime permutation, so it
+        # renders identically everywhere) of short twinkles.
+        flash = min(65535, max(1, round(speed_ms / 6)))
+        segments = "; ".join(
+            f"{index}:{hex_color} {flash}ms pulse "
+            f"{min(65535, round(((index * 5 + 3) % max(1, led_count)) * speed_ms / max(1, led_count)))}ms"
+            for index in range(led_count)
+        )
+        body = f"off 300ms cosine\n{segments}\nrepeat"
+    elif style.pattern == "heartbeat":
+        # Lub-dub: two quick whole-bar thumps, then a rest.
+        thump = max(1, round(speed_ms * 0.18))
+        gap = max(1, round(speed_ms * 0.12))
+        rest = max(1, round(speed_ms * 0.52))
+        body = (
+            f"{hex_color} {thump}ms cosine\noff {gap}ms cosine\n"
+            f"{hex_color} {thump}ms cosine\noff {rest}ms cosine\nrepeat"
+        )
     else:  # pragma: no cover - normalized() forbids this
         body = hex_color
     return apply_brightness(body, effective)
