@@ -52,6 +52,12 @@ def session_resume_command(status: AgentStatus) -> str | None:
         return f"cd {cwd} && devin --resume {session_id}"
     if provider == "grok":
         return f"cd {cwd} && grok --resume {session_id}"
+    if provider == "cursor":
+        return f"cd {cwd} && cursor-agent --resume {session_id}"
+    if provider == "hermes":
+        return f"cd {cwd} && hermes --resume {session_id}"
+    # OpenClaw sessions live in the gateway (chat surfaces), not a
+    # resumable CLI -- callers fall back to a plain terminal at the cwd.
     return None
 
 

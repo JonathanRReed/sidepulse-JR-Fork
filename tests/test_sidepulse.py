@@ -69,12 +69,18 @@ from sidepulse.install import (
     hook_command,
     install_claude_hooks,
     install_codex_hooks,
+    install_cursor_hooks,
     install_devin_hooks,
     install_grok_hooks,
+    install_hermes_hooks,
+    install_openclaw_hooks,
     uninstall_claude_hooks,
     uninstall_codex_hooks,
+    uninstall_cursor_hooks,
     uninstall_devin_hooks,
     uninstall_grok_hooks,
+    uninstall_hermes_hooks,
+    uninstall_openclaw_hooks,
     update_codex_trusted_hashes,
 )
 from sidepulse.keep_awake import KeepAwakeController, status_file_for_target
@@ -182,7 +188,9 @@ class FakeProcess:
 
 class AgentMonitorTests(unittest.TestCase):
     def test_provider_registry_includes_devin_as_first_class_provider(self) -> None:
-        self.assertEqual(HOOK_PROVIDERS, ("codex", "claude", "devin", "grok"))
+        self.assertEqual(
+            HOOK_PROVIDERS, ("codex", "claude", "devin", "grok", "cursor", "hermes", "openclaw")
+        )
         self.assertEqual(provider_spec("devin").label, "Devin")
         self.assertEqual(provider_spec("devin").config_kind, "devin-json")
         self.assertEqual(provider_spec("devin").events, DEVIN_EVENTS)
@@ -2296,6 +2304,116 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertIn("matcher", data["hooks"]["PreToolUse"][-1])
             self.assertNotIn("matcher", data["hooks"]["SessionStart"][-1])
 
+    def test_cursor_installer_preserves_other_tools_flat_hooks(self) -> None:
+        # Cursor's hooks.json holds flat {"command": ...} entries and is a
+        # shared user-level file -- other tools' hooks must survive our
+        # install AND our uninstall byte-for-byte.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "hooks.json"
+            log = base / "cursor.jsonl"
+            other = {"command": "/usr/local/bin/other-tool-hook"}
+            config.write_text(
+                json.dumps({"version": 1, "hooks": {"beforeShellExecution": [dict(other)]}})
+            )
+
+            first = install_cursor_hooks(log, config, python_executable="python3")
+            second = install_cursor_hooks(log, config, python_executable="python3")
+            data = json.loads(config.read_text())
+
+            self.assertTrue(first.changed)
+            self.assertFalse(second.changed)
+            self.assertEqual(data["version"], 1)
+            shell_commands = [entry["command"] for entry in data["hooks"]["beforeShellExecution"]]
+            self.assertIn(other["command"], shell_commands)
+            self.assertEqual(sum("--provider cursor" in c for c in shell_commands), 1)
+            from sidepulse.providers import CURSOR_EVENTS, detect_cursor_config
+
+            for event in CURSOR_EVENTS:
+                self.assertIn(event, data["hooks"])
+
+            detected = detect_cursor_config(home=base)  # wrong home; use path directly below
+            uninstall_cursor_hooks(log, config)
+            data = json.loads(config.read_text())
+            self.assertEqual(data["hooks"], {"beforeShellExecution": [other]})
+            del detected
+
+    def test_hermes_installer_round_trips_yaml_preserving_comments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.yaml"
+            log = base / "hermes.jsonl"
+            config.write_text(
+                "# my precious hand-written comment\n"
+                "model: hermes-4\n"
+                "hooks:\n"
+                "  pre_tool_call:\n"
+                "    - command: /usr/local/bin/my-own-hook.sh\n"
+            )
+
+            first = install_hermes_hooks(log, config, python_executable="python3")
+            second = install_hermes_hooks(log, config, python_executable="python3")
+            text = config.read_text()
+
+            self.assertTrue(first.changed)
+            self.assertFalse(second.changed)
+            self.assertIn("# my precious hand-written comment", text)
+            self.assertIn("model: hermes-4", text)
+            self.assertIn("/usr/local/bin/my-own-hook.sh", text)
+            self.assertIn("--provider hermes", text)
+
+            uninstall_hermes_hooks(log, config)
+            text = config.read_text()
+            self.assertIn("# my precious hand-written comment", text)
+            self.assertIn("/usr/local/bin/my-own-hook.sh", text)
+            self.assertNotIn("--provider hermes", text)
+
+    def test_openclaw_installer_writes_handler_and_enables_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "openclaw.json"
+            log = base / "openclaw.jsonl"
+            config.write_text(json.dumps({"gateway": {"port": 18789}}))
+
+            first = install_openclaw_hooks(log, config, python_executable="python3")
+            second = install_openclaw_hooks(log, config, python_executable="python3")
+            data = json.loads(config.read_text())
+            handler = base / "hooks" / "sidepulse-status" / "handler.ts"
+
+            self.assertTrue(first.changed)
+            self.assertFalse(second.changed)
+            self.assertEqual(data["gateway"], {"port": 18789})
+            self.assertTrue(data["hooks"]["internal"]["enabled"])
+            self.assertTrue(data["hooks"]["internal"]["entries"]["sidepulse-status"]["enabled"])
+            self.assertTrue(handler.exists())
+            self.assertIn('"--provider", "openclaw"', handler.read_text())
+            self.assertTrue((handler.parent / "HOOK.md").exists())
+
+            uninstall_openclaw_hooks(log, config)
+            data = json.loads(config.read_text())
+            self.assertEqual(data["gateway"], {"port": 18789})
+            self.assertNotIn("entries", data["hooks"]["internal"])
+            self.assertFalse(handler.parent.exists())
+
+    def test_new_provider_native_events_canonicalize_on_ingest(self) -> None:
+        from sidepulse.providers import KNOWN_EVENTS, canonical_event_name
+
+        # Cursor camelCase and Hermes snake_case both land on the shared
+        # canonical vocabulary...
+        self.assertEqual(canonical_event_name("beforeShellExecution"), "PreToolUse")
+        self.assertEqual(canonical_event_name("afterShellExecution"), "PostToolUse")
+        self.assertEqual(canonical_event_name("beforeSubmitPrompt"), "UserPromptSubmit")
+        self.assertEqual(canonical_event_name("sessionStart"), "SessionStart")
+        self.assertEqual(canonical_event_name("stop"), "Stop")
+        self.assertEqual(canonical_event_name("pre_tool_call"), "PreToolUse")
+        self.assertEqual(canonical_event_name("pre_llm_call"), "UserPromptSubmit")
+        self.assertEqual(canonical_event_name("on_session_end"), "SessionEnd")
+        # ...and the native names themselves never pollute the canonical
+        # set (a member of KNOWN_EVENTS passes through verbatim, so a
+        # native name here would leak through ingest un-normalized).
+        for native in ("beforeShellExecution", "sessionStart", "pre_tool_call", "on_session_start"):
+            self.assertNotIn(native, KNOWN_EVENTS)
+
     def test_devin_installer_preserves_agent_deck_hooks_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -2827,11 +2945,21 @@ class AgentMonitorTests(unittest.TestCase):
             cleanup_skipped=None,
         )
 
+        extra_results = tuple(
+            SimpleNamespace(
+                provider=provider,
+                config_path=Path(f"/tmp/{provider}-config"),
+                log_path=Path(f"/tmp/{provider}.jsonl"),
+                changed=True,
+                backup_path=None,
+            )
+            for provider in ("cursor", "hermes", "openclaw")
+        )
         with (
             patch.object(
                 cli_module,
                 "install_provider_hooks",
-                side_effect=(codex_result, claude_result, devin_result, grok_result),
+                side_effect=(codex_result, claude_result, devin_result, grok_result, *extra_results),
             ) as install,
             patch(
                 "sidepulse.sd_eject_guard_launch.install_sd_eject_guard",
@@ -2847,7 +2975,7 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(
             [call.args[0] for call in install.call_args_list],
-            ["codex", "claude", "devin", "grok"],
+            ["codex", "claude", "devin", "grok", "cursor", "hermes", "openclaw"],
         )
         guard.assert_called_once_with(scope="auto", dry_run=False)
         launch.assert_called_once_with(start=True)

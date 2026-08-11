@@ -18,11 +18,19 @@ from typing import Any
 from .providers import (
     CLAUDE_EVENTS,
     CODEX_EVENTS,
+    CURSOR_EVENTS,
     DEVIN_EVENTS,
     GROK_EVENTS,
+    HERMES_EVENTS,
+    OPENCLAW_HOOK_NAME,
+    default_cursor_config_path,
     default_devin_config_path,
     default_grok_hook_config_path,
+    default_hermes_config_path,
+    default_openclaw_config_path,
     detect_log_path,
+    is_sidepulse_hook_command,
+    openclaw_hook_dir,
 )
 
 MANAGED_START = "# >>> agent-monitor hooks >>>"
@@ -200,6 +208,350 @@ def install_devin_hooks(
     return InstallResult("devin", config, target_log, changed, backup, dry_run)
 
 
+def _remove_flat_sidepulse_hooks(entries: list[Any], provider: str) -> list[Any]:
+    """Drops SidePulse's own flat {"command": ...} hook entries, keeping
+    everything else byte-identical -- for configs (Cursor, Hermes) whose
+    hook entries hold the command directly rather than Claude's nested
+    {"hooks": [...]} shape."""
+    cleaned: list[Any] = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            command = entry.get("command")
+            if isinstance(command, str) and is_sidepulse_hook_command(command, provider):
+                continue
+        cleaned.append(entry)
+    return cleaned
+
+
+def install_cursor_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+    python_executable: str | None = None,
+) -> InstallResult:
+    """Adds SidePulse's command to ~/.cursor/hooks.json (shared user-level
+    file: other tools' hooks and unknown keys are preserved untouched)."""
+    config = config_path or default_cursor_config_path()
+    target_log = (log_path or detect_log_path("cursor")).expanduser()
+    data = read_json_config(config)
+
+    original = json.dumps(data, sort_keys=True)
+    data.setdefault("version", 1)
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError(f"Expected hooks object in {config}")
+    command = hook_command("cursor", target_log, python_executable)
+
+    for event_name in CURSOR_EVENTS:
+        entries = hooks.get(event_name, [])
+        if not isinstance(entries, list):
+            entries = []
+        cleaned = _remove_flat_sidepulse_hooks(entries, "cursor")
+        cleaned.append({"command": command})
+        hooks[event_name] = cleaned
+
+    changed = json.dumps(data, sort_keys=True) != original
+    backup = None
+    if changed and not dry_run:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        backup = backup_file(config)
+        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+        target_log.parent.mkdir(parents=True, exist_ok=True)
+        target_log.touch(exist_ok=True)
+
+    return InstallResult("cursor", config, target_log, changed, backup, dry_run)
+
+
+def uninstall_cursor_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+) -> InstallResult:
+    config = config_path or default_cursor_config_path()
+    target_log = (log_path or detect_log_path("cursor")).expanduser()
+    data = read_json_config(config)
+
+    original = json.dumps(data, sort_keys=True)
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        for event_name in list(hooks):
+            entries = hooks.get(event_name)
+            if event_name not in CURSOR_EVENTS or not isinstance(entries, list):
+                continue
+            cleaned = _remove_flat_sidepulse_hooks(entries, "cursor")
+            if cleaned:
+                hooks[event_name] = cleaned
+            else:
+                hooks.pop(event_name, None)
+        if not hooks:
+            data.pop("hooks", None)
+
+    changed = json.dumps(data, sort_keys=True) != original
+    backup = None
+    if changed and not dry_run:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        backup = backup_file(config)
+        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+
+    return InstallResult("cursor", config, target_log, changed, backup, dry_run)
+
+
+def _hermes_yaml():
+    from ruamel.yaml import YAML
+
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    return yaml
+
+
+def _hermes_dump(yaml, data) -> str:
+    import io
+
+    buffer = io.StringIO()
+    yaml.dump(data, buffer)
+    return buffer.getvalue()
+
+
+def install_hermes_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+    python_executable: str | None = None,
+) -> InstallResult:
+    """Adds SidePulse's shell hooks to ~/.hermes/config.yaml's hooks:
+    block. Edited with a round-trip YAML parser (ruamel) specifically so
+    the user's own comments and formatting survive -- config.yaml is a
+    hand-maintained file for most Hermes users."""
+    config = config_path or default_hermes_config_path()
+    target_log = (log_path or detect_log_path("hermes")).expanduser()
+    yaml = _hermes_yaml()
+    if config.exists():
+        data = yaml.load(config.read_text())
+        if data is None:
+            data = {}
+    else:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a YAML mapping at the top level of {config}")
+
+    original = _hermes_dump(yaml, data)
+    hooks = data.get("hooks")
+    if hooks is None:
+        hooks = {}
+        data["hooks"] = hooks
+    if not isinstance(hooks, dict):
+        raise ValueError(f"Expected hooks mapping in {config}")
+    command = hook_command("hermes", target_log, python_executable)
+
+    for event_name in HERMES_EVENTS:
+        entries = hooks.get(event_name)
+        if not isinstance(entries, list):
+            entries = []
+        cleaned = _remove_flat_sidepulse_hooks(list(entries), "hermes")
+        # Hooks time out per invocation; ours just appends a JSON line,
+        # so a tight timeout keeps a wedged filesystem from ever
+        # stalling the agent loop.
+        cleaned.append({"command": command, "timeout": 10})
+        hooks[event_name] = cleaned
+
+    changed = _hermes_dump(yaml, data) != original
+    backup = None
+    if changed and not dry_run:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        backup = backup_file(config)
+        config.write_text(_hermes_dump(yaml, data))
+        target_log.parent.mkdir(parents=True, exist_ok=True)
+        target_log.touch(exist_ok=True)
+
+    return InstallResult("hermes", config, target_log, changed, backup, dry_run)
+
+
+def uninstall_hermes_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+) -> InstallResult:
+    config = config_path or default_hermes_config_path()
+    target_log = (log_path or detect_log_path("hermes")).expanduser()
+    yaml = _hermes_yaml()
+    if config.exists():
+        data = yaml.load(config.read_text())
+        if data is None:
+            data = {}
+    else:
+        data = {}
+    if not isinstance(data, dict):
+        return InstallResult("hermes", config, target_log, False, None, dry_run)
+
+    original = _hermes_dump(yaml, data)
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        for event_name in list(hooks):
+            entries = hooks.get(event_name)
+            if event_name not in HERMES_EVENTS or not isinstance(entries, list):
+                continue
+            cleaned = _remove_flat_sidepulse_hooks(list(entries), "hermes")
+            if cleaned:
+                hooks[event_name] = cleaned
+            else:
+                del hooks[event_name]
+        if not hooks:
+            data.pop("hooks", None)
+
+    changed = _hermes_dump(yaml, data) != original
+    backup = None
+    if changed and not dry_run:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        backup = backup_file(config)
+        config.write_text(_hermes_dump(yaml, data))
+
+    return InstallResult("hermes", config, target_log, changed, backup, dry_run)
+
+
+def openclaw_handler_source(log_path: Path, python_executable: str | None = None) -> str:
+    """The in-gateway JS handler OpenClaw loads for SidePulse. It maps the
+    gateway's own events to SidePulse's canonical hook events and forwards
+    each as one short-lived detached process -- OpenClaw's hook contract
+    forbids handlers owning long-lived resources, so each event is
+    fire-and-forget."""
+    executable = python_executable or sys.executable or "python3"
+    entry_point = Path(__file__).with_name("hook_entry.py")
+    return f"""// Managed by SidePulse -- reinstalling overwrites this file.
+import {{ spawn }} from "node:child_process";
+
+const EVENT_MAP = {{
+  "command:new": "SessionStart",
+  "message:received": "UserPromptSubmit",
+  "message:sent": "Stop",
+  "command:stop": "SessionEnd",
+}};
+
+const handler = async (event) => {{
+  const mapped = EVENT_MAP[`${{event.type}}:${{event.action}}`];
+  if (!mapped) return;
+  const payload = JSON.stringify({{
+    hook_event_name: mapped,
+    session_id: event.sessionKey ?? null,
+    logged_at: new Date().toISOString(),
+  }});
+  try {{
+    const child = spawn(
+      {json.dumps(str(executable))},
+      [{json.dumps(str(entry_point))}, "--provider", "openclaw", "--log", {json.dumps(str(log_path.expanduser()))}],
+      {{ stdio: ["pipe", "ignore", "ignore"], detached: true }},
+    );
+    child.stdin.end(payload);
+    child.unref();
+  }} catch {{}}
+}};
+
+export default handler;
+"""
+
+
+OPENCLAW_HOOK_MD = """---
+name: {name}
+description: "Forwards agent activity to SidePulse so the LEDs show live status."
+metadata:
+  openclaw:
+    emoji: "\U0001F4A1"
+    events: ["command:new", "command:stop", "message:received", "message:sent"]
+    export: "default"
+---
+
+# SidePulse Status
+
+Forwards OpenClaw gateway events to the SidePulse agent monitor. Managed
+by SidePulse -- `sidepulse agent-monitor uninstall openclaw` removes it.
+"""
+
+
+def install_openclaw_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+    python_executable: str | None = None,
+) -> InstallResult:
+    """Two coordinated writes: the handler directory under
+    ~/.openclaw/hooks/ (auto-discovered by the gateway) and the enabled
+    entry in openclaw.json. Unknown config keys are preserved untouched;
+    the gateway needs a restart to pick the hook up."""
+    config = config_path or default_openclaw_config_path()
+    target_log = (log_path or detect_log_path("openclaw")).expanduser()
+    hook_dir = openclaw_hook_dir() if config_path is None else config.parent / "hooks" / OPENCLAW_HOOK_NAME
+    data = read_json_config(config)
+
+    original = json.dumps(data, sort_keys=True)
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError(f"Expected hooks object in {config}")
+    internal = hooks.setdefault("internal", {})
+    if not isinstance(internal, dict):
+        raise ValueError(f"Expected hooks.internal object in {config}")
+    internal["enabled"] = True
+    entries = internal.setdefault("entries", {})
+    if not isinstance(entries, dict):
+        raise ValueError(f"Expected hooks.internal.entries object in {config}")
+    entries[OPENCLAW_HOOK_NAME] = {"enabled": True}
+
+    handler_source = openclaw_handler_source(target_log, python_executable)
+    handler_path = hook_dir / "handler.ts"
+    hook_md_path = hook_dir / "HOOK.md"
+    files_changed = (
+        not handler_path.exists()
+        or handler_path.read_text() != handler_source
+        or not hook_md_path.exists()
+    )
+
+    changed = json.dumps(data, sort_keys=True) != original or files_changed
+    backup = None
+    if changed and not dry_run:
+        hook_dir.mkdir(parents=True, exist_ok=True)
+        handler_path.write_text(handler_source)
+        hook_md_path.write_text(OPENCLAW_HOOK_MD.format(name=OPENCLAW_HOOK_NAME))
+        config.parent.mkdir(parents=True, exist_ok=True)
+        backup = backup_file(config)
+        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+        target_log.parent.mkdir(parents=True, exist_ok=True)
+        target_log.touch(exist_ok=True)
+
+    return InstallResult("openclaw", config, target_log, changed, backup, dry_run)
+
+
+def uninstall_openclaw_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+) -> InstallResult:
+    """Removes only SidePulse's own entry and handler directory --
+    hooks.internal.enabled stays as-is (other entries may rely on it)."""
+    config = config_path or default_openclaw_config_path()
+    target_log = (log_path or detect_log_path("openclaw")).expanduser()
+    hook_dir = openclaw_hook_dir() if config_path is None else config.parent / "hooks" / OPENCLAW_HOOK_NAME
+    data = read_json_config(config)
+
+    original = json.dumps(data, sort_keys=True)
+    internal = (data.get("hooks") or {}).get("internal")
+    if isinstance(internal, dict):
+        entries = internal.get("entries")
+        if isinstance(entries, dict):
+            entries.pop(OPENCLAW_HOOK_NAME, None)
+            if not entries:
+                internal.pop("entries", None)
+
+    changed = json.dumps(data, sort_keys=True) != original or hook_dir.exists()
+    backup = None
+    if changed and not dry_run:
+        if json.dumps(data, sort_keys=True) != original:
+            config.parent.mkdir(parents=True, exist_ok=True)
+            backup = backup_file(config)
+            config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+        if hook_dir.exists():
+            shutil.rmtree(hook_dir, ignore_errors=True)
+
+    return InstallResult("openclaw", config, target_log, changed, backup, dry_run)
+
+
 def uninstall_codex_hooks(
     log_path: Path | None = None,
     config_path: Path | None = None,
@@ -346,6 +698,9 @@ INSTALLERS = {
     "claude": install_claude_hooks,
     "devin": install_devin_hooks,
     "grok": install_grok_hooks,
+    "cursor": install_cursor_hooks,
+    "hermes": install_hermes_hooks,
+    "openclaw": install_openclaw_hooks,
 }
 
 UNINSTALLERS = {
@@ -353,6 +708,9 @@ UNINSTALLERS = {
     "claude": uninstall_claude_hooks,
     "devin": uninstall_devin_hooks,
     "grok": uninstall_grok_hooks,
+    "cursor": uninstall_cursor_hooks,
+    "hermes": uninstall_hermes_hooks,
+    "openclaw": uninstall_openclaw_hooks,
 }
 
 

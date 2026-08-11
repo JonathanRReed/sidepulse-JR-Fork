@@ -31,6 +31,10 @@ dependencies = [
     "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=10; sys_platform == 'darwin'",
     "pyobjc-framework-WebKit>=10; sys_platform == 'darwin'",
+    # Round-trip YAML editing for the Hermes Agent hook installer --
+    # ruamel preserves the user's own comments and formatting in
+    # ~/.hermes/config.yaml, which plain PyYAML would destroy.
+    "ruamel.yaml>=0.18",
 ]
 
 [project.urls]

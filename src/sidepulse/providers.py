@@ -73,6 +73,51 @@ DEVIN_EVENTS = (
     "SessionEnd",
 )
 
+# Cursor's own native hook event names (camelCase, per ~/.cursor/hooks.json's
+# documented schema) -- registered verbatim, canonicalized on ingest by
+# canonical_event_name's alias table. The cursor-agent CLI currently only
+# emits the shell-execution pair; the IDE emits the full set.
+CURSOR_EVENTS = (
+    "sessionStart",
+    "beforeSubmitPrompt",
+    "preToolUse",
+    "postToolUse",
+    "postToolUseFailure",
+    "beforeShellExecution",
+    "afterShellExecution",
+    "beforeMCPExecution",
+    "afterMCPExecution",
+    "subagentStart",
+    "subagentStop",
+    "preCompact",
+    "stop",
+    "sessionEnd",
+)
+
+# Hermes Agent's native plugin-hook event names (snake_case, declared under
+# the hooks: block of ~/.hermes/config.yaml). No explicit turn-end event
+# exists; staleness timeouts cover the gap after on_session_end.
+HERMES_EVENTS = (
+    "on_session_start",
+    "pre_llm_call",
+    "pre_tool_call",
+    "post_tool_call",
+    "subagent_start",
+    "subagent_stop",
+    "on_session_end",
+)
+
+# OpenClaw hooks are in-gateway JS handlers, not shell commands -- the
+# installed handler (see install.openclaw_handler_source) translates the
+# gateway's own events to these canonical names before forwarding, so
+# the Python side only ever sees canonical events.
+OPENCLAW_EVENTS = (
+    "SessionStart",
+    "UserPromptSubmit",
+    "Stop",
+    "SessionEnd",
+)
+
 
 @dataclass(frozen=True)
 class ProviderConfig:
@@ -270,16 +315,196 @@ def detect_grok_config(home: Path | None = None) -> ProviderConfig:
     return detect_json_hook_config("grok", config_path, GROK_EVENTS)
 
 
+def is_sidepulse_hook_command(command: str, provider: str) -> bool:
+    """True when `command` is one of SidePulse's own hook commands for
+    `provider` -- the generic form of is_sidepulse_devin_command, used by
+    installers/uninstallers and detectors that must never count or touch
+    another tool's hooks in a shared config file."""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    has_provider = any(
+        (part == "--provider" and index + 1 < len(parts) and parts[index + 1] == provider)
+        or part == f"--provider={provider}"
+        for index, part in enumerate(parts)
+    )
+    if not has_provider:
+        return False
+    return any(Path(part).name == "hook_entry.py" for part in parts) or (
+        "agent-monitor" in parts and "hook-log" in parts
+    )
+
+
+def default_cursor_config_path(home: Path | None = None) -> Path:
+    base = home or Path.home()
+    return base / ".cursor" / "hooks.json"
+
+
+def detect_cursor_config(home: Path | None = None) -> ProviderConfig:
+    """Cursor's hooks.json holds FLAT entries ({"command": ...} directly,
+    not Claude's nested {"hooks": [...]} shape) and is a shared user-level
+    file other tools also write to -- only SidePulse's own commands count
+    toward installed-ness here."""
+    config_path = default_cursor_config_path(home)
+    if not config_path.exists():
+        return ProviderConfig("cursor", config_path, False, False, (), ())
+    try:
+        data = json.loads(config_path.read_text())
+    except Exception:
+        return ProviderConfig("cursor", config_path, True, False, (), ())
+
+    hooks = data.get("hooks") or {}
+    hook_events: list[str] = []
+    paths: list[Path] = []
+    if isinstance(hooks, dict):
+        for event_name, entries in hooks.items():
+            if event_name not in CURSOR_EVENTS or not isinstance(entries, list):
+                continue
+            event_paths: list[Path] = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                command = entry.get("command")
+                if isinstance(command, str) and is_sidepulse_hook_command(command, "cursor"):
+                    event_paths.extend(extract_log_paths_from_command(command))
+            if event_paths:
+                hook_events.append(event_name)
+                paths.extend(event_paths)
+
+    return ProviderConfig(
+        "cursor",
+        config_path,
+        True,
+        bool(hook_events),
+        tuple(sorted(set(hook_events))),
+        _dedupe_paths(paths),
+    )
+
+
+def default_hermes_config_path(home: Path | None = None) -> Path:
+    base = home or Path.home()
+    return base / ".hermes" / "config.yaml"
+
+
+def detect_hermes_config(home: Path | None = None) -> ProviderConfig:
+    config_path = default_hermes_config_path(home)
+    if not config_path.exists():
+        return ProviderConfig("hermes", config_path, False, False, (), ())
+    try:
+        from ruamel.yaml import YAML
+
+        data = YAML(typ="safe").load(config_path.read_text()) or {}
+    except Exception:
+        return ProviderConfig("hermes", config_path, True, False, (), ())
+
+    hooks = data.get("hooks") if isinstance(data, dict) else {}
+    hook_events: list[str] = []
+    paths: list[Path] = []
+    if isinstance(hooks, dict):
+        for event_name, entries in hooks.items():
+            if event_name not in HERMES_EVENTS or not isinstance(entries, list):
+                continue
+            event_paths: list[Path] = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                command = entry.get("command")
+                if isinstance(command, str) and is_sidepulse_hook_command(command, "hermes"):
+                    event_paths.extend(extract_log_paths_from_command(command))
+            if event_paths:
+                hook_events.append(event_name)
+                paths.extend(event_paths)
+
+    return ProviderConfig(
+        "hermes",
+        config_path,
+        True,
+        bool(hook_events),
+        tuple(sorted(set(hook_events))),
+        _dedupe_paths(paths),
+    )
+
+
+OPENCLAW_HOOK_NAME = "sidepulse-status"
+
+
+def default_openclaw_config_path(home: Path | None = None) -> Path:
+    base = home or Path.home()
+    return base / ".openclaw" / "openclaw.json"
+
+
+def openclaw_hook_dir(home: Path | None = None) -> Path:
+    base = home or Path.home()
+    return base / ".openclaw" / "hooks" / OPENCLAW_HOOK_NAME
+
+
+def detect_openclaw_config(home: Path | None = None) -> ProviderConfig:
+    """Installed-ness for OpenClaw means BOTH halves are present: the
+    handler directory under ~/.openclaw/hooks/ AND the enabled entry in
+    openclaw.json -- either alone does nothing (the gateway only loads
+    enabled entries, and an entry without its handler is dead config)."""
+    config_path = default_openclaw_config_path(home)
+    if not config_path.exists():
+        return ProviderConfig("openclaw", config_path, False, False, (), ())
+    try:
+        data = json.loads(config_path.read_text())
+    except Exception:
+        return ProviderConfig("openclaw", config_path, True, False, (), ())
+
+    entry_enabled = False
+    if isinstance(data, dict):
+        internal = ((data.get("hooks") or {}).get("internal")) or {}
+        if isinstance(internal, dict):
+            entry = (internal.get("entries") or {}).get(OPENCLAW_HOOK_NAME)
+            entry_enabled = bool(isinstance(entry, dict) and entry.get("enabled"))
+
+    handler = openclaw_hook_dir(home) / "handler.ts"
+    paths: list[Path] = []
+    if handler.exists():
+        try:
+            # The handler passes args as a JS array, so the log path sits
+            # in '"--log", "<path>"' form -- not shell syntax.
+            for match in re.finditer(r'"--log",\s*"([^"]+)"', handler.read_text()):
+                paths.append(Path(match.group(1)).expanduser())
+        except OSError:
+            paths = []
+
+    installed = entry_enabled and handler.exists()
+    return ProviderConfig(
+        "openclaw",
+        config_path,
+        True,
+        installed,
+        OPENCLAW_EVENTS if installed else (),
+        _dedupe_paths(paths),
+    )
+
+
 PROVIDER_SPECS = (
     ProviderSpec("codex", "Codex", CODEX_EVENTS, "codex-toml", default_codex_config_path, detect_codex_config),
     ProviderSpec("claude", "Claude", CLAUDE_EVENTS, "claude-json", default_claude_config_path, detect_claude_config),
     ProviderSpec("devin", "Devin", DEVIN_EVENTS, "devin-json", default_devin_config_path, detect_devin_config),
     ProviderSpec("grok", "Grok", GROK_EVENTS, "grok-json", default_grok_hook_config_path, detect_grok_config),
+    ProviderSpec("cursor", "Cursor", CURSOR_EVENTS, "cursor-json", default_cursor_config_path, detect_cursor_config),
+    ProviderSpec("hermes", "Hermes Agent", HERMES_EVENTS, "hermes-yaml", default_hermes_config_path, detect_hermes_config),
+    ProviderSpec(
+        "openclaw", "OpenClaw", OPENCLAW_EVENTS, "openclaw-handler", default_openclaw_config_path, detect_openclaw_config
+    ),
 )
 PROVIDER_REGISTRY = {spec.provider: spec for spec in PROVIDER_SPECS}
 HOOK_PROVIDERS = tuple(PROVIDER_REGISTRY)
+# The CANONICAL event vocabulary -- what everything normalizes TO. Cursor
+# and Hermes register their own native names in their configs (their spec
+# .events tuples), but those must never enter this set: canonical_event_name
+# returns members of this set verbatim, so a native name here would leak
+# through ingest un-normalized and break mode mapping downstream.
 KNOWN_EVENTS = tuple(
-    dict.fromkeys(event for spec in PROVIDER_SPECS for event in spec.events)
+    dict.fromkeys(
+        event
+        for events in (CODEX_EVENTS, CLAUDE_EVENTS, GROK_EVENTS, DEVIN_EVENTS, OPENCLAW_EVENTS)
+        for event in events
+    )
 )
 
 
@@ -398,6 +623,18 @@ def canonical_event_name(value: Any) -> str | None:
             "post_compact": "PostCompact",
             "post_compaction": "PostCompact",
             "stop_failure": "StopFailure",
+            # Cursor natives (camelCase normalizes to snake_case first).
+            "before_shell_execution": "PreToolUse",
+            "after_shell_execution": "PostToolUse",
+            "before_mcp_execution": "PreToolUse",
+            "after_mcp_execution": "PostToolUse",
+            "before_submit_prompt": "UserPromptSubmit",
+            # Hermes Agent natives.
+            "pre_tool_call": "PreToolUse",
+            "post_tool_call": "PostToolUse",
+            "pre_llm_call": "UserPromptSubmit",
+            "on_session_start": "SessionStart",
+            "on_session_end": "SessionEnd",
         }
     )
     return aliases.get(normalized)

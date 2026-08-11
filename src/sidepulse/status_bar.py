@@ -706,6 +706,30 @@ class StatusBarController(NSObject):
         self.update_hooks("grok", install=False)
 
     @objc.IBAction
+    def installCursorHooks_(self, _sender):
+        self.update_hooks("cursor", install=True)
+
+    @objc.IBAction
+    def uninstallCursorHooks_(self, _sender):
+        self.update_hooks("cursor", install=False)
+
+    @objc.IBAction
+    def installHermesHooks_(self, _sender):
+        self.update_hooks("hermes", install=True)
+
+    @objc.IBAction
+    def uninstallHermesHooks_(self, _sender):
+        self.update_hooks("hermes", install=False)
+
+    @objc.IBAction
+    def installOpenclawHooks_(self, _sender):
+        self.update_hooks("openclaw", install=True)
+
+    @objc.IBAction
+    def uninstallOpenclawHooks_(self, _sender):
+        self.update_hooks("openclaw", install=False)
+
+    @objc.IBAction
     def toggleCodexTranscripts_(self, sender):
         self.set_transcript_monitoring("codex", sender.state() == NSOnState)
 

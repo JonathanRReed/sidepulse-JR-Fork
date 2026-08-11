@@ -1304,10 +1304,13 @@ def _scenario_pair(now: datetime) -> tuple[AgentStatus, ...]:
 
 
 def _scenario_full_team(now: datetime) -> tuple[AgentStatus, ...]:
+    # Modes cycle so EVERY registered provider appears no matter how many
+    # there are -- zip() against a fixed mode tuple silently dropped any
+    # provider past the fourth.
     modes = (AgentMode.WORKING, AgentMode.WAITING_FOR_INPUT, AgentMode.COMPLETED, AgentMode.IDLE_READY)
     return tuple(
-        _preview_status(spec.provider, mode, agent_id=f"{spec.provider}:preview", now=now)
-        for spec, mode in zip(PROVIDER_SPECS, modes)
+        _preview_status(spec.provider, modes[index % len(modes)], agent_id=f"{spec.provider}:preview", now=now)
+        for index, spec in enumerate(PROVIDER_SPECS)
     )
 
 
