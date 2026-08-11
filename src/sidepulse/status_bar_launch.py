@@ -45,6 +45,13 @@ def build_launch_agent_plist(
     stdout_path: Path | None = None,
     stderr_path: Path | None = None,
 ) -> dict[str, Any]:
+    if python_executable is None and not getattr(sys, "frozen", False):
+        # Run inside the SidePulse.app wrapper so macOS Privacy lists
+        # show "SidePulse" by name and TCC grants stick to the app --
+        # see app_bundle.py for why a bare venv process can't get there.
+        from .app_bundle import build_app_bundle
+
+        python_executable = build_app_bundle().executable_path
     executable = str(python_executable or sys.executable or "python3")
     state_dir = default_state_dir()
     stdout = stdout_path or state_dir / "status-bar.out.log"

@@ -65,6 +65,7 @@ except ImportError as exc:  # pragma: no cover - only exercised on non-macOS set
         "  python3 -m pip install pyobjc-framework-Cocoa"
     ) from exc
 
+from .app_bundle import default_app_bundle_path, running_inside_bundle
 from .battery import (
     BatteryLedController,
     BatterySnapshot,
@@ -676,10 +677,13 @@ class StatusBarController(NSObject):
         """Shows the exact interpreter binary Full Disk Access must be
         granted to -- users can drag it straight from this Finder window
         into the Privacy Settings list."""
-        interpreter = os.path.realpath(sys.executable or "")
-        if interpreter:
+        if running_inside_bundle():
+            target_path = str(default_app_bundle_path())
+        else:
+            target_path = os.path.realpath(sys.executable or "")
+        if target_path:
             NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
-                [NSURL.fileURLWithPath_(interpreter)]
+                [NSURL.fileURLWithPath_(target_path)]
             )
 
     @objc.IBAction
@@ -3990,7 +3994,7 @@ def _build_power_pane(target: StatusBarController):
 
 def _build_led_behavior_pane(target: StatusBarController):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
-    outer, inner = native_ui.make_card()
+    outer, inner = native_ui.make_card("Dimming")
 
     idle_row, idle_switch = native_ui.make_switch_row(
         "Dim further after being idle", target, "toggleIdleDim:"
@@ -4038,27 +4042,36 @@ def _build_led_behavior_pane(target: StatusBarController):
     except focus_sync.FocusSyncUnavailableError:
         focus_modes = None
     if not focus_modes:
+        if running_inside_bundle():
+            grant_target = str(default_app_bundle_path())
+            grant_instructions = (
+                "In Privacy Settings, click +, and pick SidePulse from your "
+                "Applications folder. This pane fills with your Focus modes "
+                "once granted."
+            )
+        else:
+            # Not yet running inside the app bundle: macOS attributes file
+            # access to the RESOLVED binary, not the venv symlink.
+            grant_target = os.path.realpath(sys.executable or "python3")
+            grant_instructions = (
+                "In Privacy Settings, click +, press ⌘⇧G, and paste that "
+                "path. This pane fills with your Focus modes once granted."
+            )
         focus_inner.addArrangedSubview_(
             native_ui.make_wrapping_label(
-                "Per-Focus rules need Full Disk Access — and macOS grants it "
-                "per program, so it must go to SidePulse's own background "
-                "process (not Terminal or the app you launched it from):",
+                "Per-Focus rules need Full Disk Access, granted to SidePulse "
+                "itself:",
                 secondary=True,
                 size=12.0,
                 max_width=500.0,
             )
         )
-        # The RESOLVED binary, not the venv symlink -- macOS attributes
-        # file access to the real executable, so granting the symlink (or
-        # any other "python" in the list) does nothing.
-        resolved_interpreter = os.path.realpath(sys.executable or "python3")
-        interpreter_label = native_ui.make_label(resolved_interpreter, secondary=True, size=11.0)
+        interpreter_label = native_ui.make_label(grant_target, secondary=True, size=11.0)
         interpreter_label.setSelectable_(True)
         focus_inner.addArrangedSubview_(interpreter_label)
         focus_inner.addArrangedSubview_(
             native_ui.make_wrapping_label(
-                "In Privacy Settings, click +, press ⌘⇧G, and paste that path. "
-                "This pane fills with your Focus modes once granted.",
+                grant_instructions,
                 secondary=True,
                 size=11.0,
                 max_width=500.0,
@@ -4069,7 +4082,11 @@ def _build_led_behavior_pane(target: StatusBarController):
             native_ui.make_button("Open Privacy Settings…", target, "openFullDiskAccessSettings:")
         )
         fda_controls.addArrangedSubview_(
-            native_ui.make_button("Reveal Program in Finder", target, "revealFocusBinaryInFinder:")
+            native_ui.make_button(
+                "Reveal SidePulse in Finder" if running_inside_bundle() else "Reveal Program in Finder",
+                target,
+                "revealFocusBinaryInFinder:",
+            )
         )
         fda_controls.addArrangedSubview_(native_ui.make_hspacer())
         focus_inner.addArrangedSubview_(fda_controls)
