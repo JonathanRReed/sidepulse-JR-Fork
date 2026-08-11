@@ -21,6 +21,17 @@
 > (Cursor / Hermes Agent / OpenClaw, each speaking its real config
 > dialect), the Welcome onboarding window with a live LED demo.
 >
+> **NEXT ARCHITECTURAL STEP — app bundle.** The single highest-leverage
+> remaining change: package the launchd process inside a real
+> `SidePulse.app` bundle (py2app/briefcase, executable must be the
+> actual interpreter binary inside the bundle, not a shell shim — TCC
+> attributes file access to the process's real executable). It fixes,
+> at once: Full Disk Access appearing as "SidePulse" by name in the
+> Privacy list (today the venv `python` symlink resolves into
+> Homebrew's Cellar, which no reasonable person can find), plus unlocks
+> the EventKit-calendar and notification-observation features that
+> require a bundle to even present their permission prompts.
+>
 > **Deferred, with reasons:**
 > - *Calendar alerts (EventKit):* calendar TCC permission requires an
 >   app **bundle** with a usage description; the current launchd-bare-
