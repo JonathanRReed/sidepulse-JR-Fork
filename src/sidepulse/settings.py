@@ -183,6 +183,12 @@ class AgentMonitorSettings:
     # Access to (see focus_sync.py); silently defaulting this on would
     # look "broken" (no visible effect) for anyone who hasn't done that.
     focus_sync_enabled: bool = False
+    # Per-Focus dim rules, keyed by the Focus mode identifier (e.g.
+    # "com.apple.donotdisturb.mode.default"): 1.0 = don't dim, 0.0 = LEDs
+    # fully off while that Focus is active. A Focus with no rule falls
+    # back to idle_dim_fraction, the pre-per-Focus behavior. Only
+    # meaningful while focus_sync_enabled is on.
+    focus_dim_rules: dict[str, float] = field(default_factory=dict)
 
     def transcript_enabled(self, provider: str) -> bool:
         if provider == "codex":
@@ -551,6 +557,24 @@ class AgentMonitorSettings:
     def with_focus_sync_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, focus_sync_enabled=bool(enabled))
 
+    def focus_dim_fraction(self, mode_identifier: str) -> float:
+        """The brightness fraction to apply while this Focus is active --
+        its own rule if set, otherwise the shared idle-dim amount (the
+        pre-per-Focus behavior)."""
+        rule = self.focus_dim_rules.get(mode_identifier)
+        if rule is None:
+            return self.idle_dim_fraction
+        return max(0.0, min(1.0, float(rule)))
+
+    def with_focus_dim_rule(self, mode_identifier: str, fraction: float | None) -> "AgentMonitorSettings":
+        """fraction=None removes the rule (back to the shared default)."""
+        rules = dict(self.focus_dim_rules)
+        if fraction is None:
+            rules.pop(mode_identifier, None)
+        else:
+            rules[mode_identifier] = max(0.0, min(1.0, float(fraction)))
+        return replace(self, focus_dim_rules=rules)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "led_display": self.led_display,
@@ -579,6 +603,7 @@ class AgentMonitorSettings:
             "idle_dim_after_minutes": self.idle_dim_after_minutes,
             "idle_dim_fraction": self.idle_dim_fraction,
             "focus_sync_enabled": self.focus_sync_enabled,
+            "focus_dim_rules": dict(sorted(self.focus_dim_rules.items())),
         }
 
 
@@ -594,6 +619,20 @@ def default_config_dir(home: Path | None = None) -> Path:
 
 def default_settings_path(home: Path | None = None) -> Path:
     return default_config_dir(home) / "settings.json"
+
+
+def _focus_dim_rules(raw: object) -> dict[str, float]:
+    """Sanitizes the persisted per-Focus dim rules: string identifiers to
+    0.0-1.0 fractions, anything malformed dropped rather than guessed at."""
+    if not isinstance(raw, dict):
+        return {}
+    rules: dict[str, float] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key:
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            rules[key] = max(0.0, min(1.0, float(value)))
+    return rules
 
 
 def load_settings(path: Path | None = None) -> AgentMonitorSettings:
@@ -672,6 +711,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             data.get("idle_dim_fraction"), default=DEFAULT_IDLE_DIM_FRACTION
         ),
         focus_sync_enabled=_bool_setting(data.get("focus_sync_enabled"), False),
+        focus_dim_rules=_focus_dim_rules(data.get("focus_dim_rules")),
     )
 
 

@@ -41,10 +41,78 @@ import json
 from pathlib import Path
 
 ASSERTIONS_PATH = Path("~/Library/DoNotDisturb/DB/Assertions.json").expanduser()
+MODE_CONFIGURATIONS_PATH = Path("~/Library/DoNotDisturb/DB/ModeConfigurations.json").expanduser()
 
 
 class FocusSyncUnavailableError(RuntimeError):
     pass
+
+
+def _load_focus_json(path: Path) -> object:
+    try:
+        raw = path.read_text()
+    except OSError as exc:
+        raise FocusSyncUnavailableError(str(exc)) from exc
+    if not raw.strip():
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise FocusSyncUnavailableError(str(exc)) from exc
+
+
+def _collect_string_values(node: object, key: str, found: set[str]) -> None:
+    """Depth-first search for every string value stored under ``key``,
+    anywhere in the parsed structure -- the same schema-drift-tolerant
+    stance _has_active_assertion takes, for the same reason: focusd's
+    JSON layout is undocumented and has moved keys between macOS
+    releases, but the key NAMES themselves have stayed stable in
+    everything community tooling has published."""
+    if isinstance(node, dict):
+        value = node.get(key)
+        if isinstance(value, str) and value:
+            found.add(value)
+        for child in node.values():
+            _collect_string_values(child, key, found)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_string_values(item, key, found)
+
+
+def active_focus_mode_identifiers() -> list[str]:
+    """Mode identifiers (e.g. "com.apple.donotdisturb.mode.default") for
+    every currently-active Focus assertion, sorted. Empty when no Focus is
+    on. Raises FocusSyncUnavailableError when it can't be determined (no
+    Full Disk Access, missing file, unparseable JSON)."""
+    data = _load_focus_json(ASSERTIONS_PATH)
+    if not _has_active_assertion(data):
+        return []
+    identifiers: set[str] = set()
+    _collect_string_values(data, "assertionDetailsModeIdentifier", identifiers)
+    return sorted(identifiers)
+
+
+def configured_focus_modes() -> list[tuple[str, str]]:
+    """(identifier, display name) for every Focus the user has configured,
+    sorted by name -- the roster the per-Focus dim rules UI offers. Raises
+    FocusSyncUnavailableError when unreadable."""
+    data = _load_focus_json(MODE_CONFIGURATIONS_PATH)
+    modes: dict[str, str] = {}
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            identifier = node.get("modeIdentifier")
+            name = node.get("name")
+            if isinstance(identifier, str) and identifier and isinstance(name, str) and name:
+                modes.setdefault(identifier, name)
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(data)
+    return sorted(modes.items(), key=lambda item: item[1].lower())
 
 
 def _has_active_assertion(node: object) -> bool:

@@ -6992,6 +6992,85 @@ class FocusSyncTests(unittest.TestCase):
             self.assertTrue(focus_sync.is_focus_active())
 
 
+class FocusModeParsingTests(unittest.TestCase):
+    def test_active_identifiers_found_regardless_of_nesting(self) -> None:
+        from sidepulse import focus_sync
+
+        data = {
+            "data": [
+                {
+                    "storeAssertionRecords": [
+                        {"assertionDetails": {"assertionDetailsModeIdentifier": "com.apple.focus.work"}},
+                        {"deep": {"assertionDetails": {"assertionDetailsModeIdentifier": "com.apple.sleep"}}},
+                    ]
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Assertions.json"
+            path.write_text(json.dumps(data))
+            with patch.object(focus_sync, "ASSERTIONS_PATH", path):
+                self.assertEqual(
+                    focus_sync.active_focus_mode_identifiers(),
+                    ["com.apple.focus.work", "com.apple.sleep"],
+                )
+
+    def test_no_active_assertions_means_no_identifiers(self) -> None:
+        from sidepulse import focus_sync
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Assertions.json"
+            path.write_text(json.dumps({"data": [{"storeAssertionRecords": []}]}))
+            with patch.object(focus_sync, "ASSERTIONS_PATH", path):
+                self.assertEqual(focus_sync.active_focus_mode_identifiers(), [])
+
+    def test_configured_modes_parsed_and_sorted_by_name(self) -> None:
+        from sidepulse import focus_sync
+
+        data = {
+            "data": [
+                {
+                    "modeConfigurations": {
+                        "a": {"mode": {"modeIdentifier": "com.apple.sleep", "name": "Sleep"}},
+                        "b": {"mode": {"modeIdentifier": "com.apple.focus.work", "name": "Work"}},
+                        "c": {"mode": {"modeIdentifier": "custom.school", "name": "School"}},
+                    }
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ModeConfigurations.json"
+            path.write_text(json.dumps(data))
+            with patch.object(focus_sync, "MODE_CONFIGURATIONS_PATH", path):
+                self.assertEqual(
+                    focus_sync.configured_focus_modes(),
+                    [
+                        ("custom.school", "School"),
+                        ("com.apple.sleep", "Sleep"),
+                        ("com.apple.focus.work", "Work"),
+                    ],
+                )
+
+    def test_focus_dim_rules_round_trip_and_sanitize(self) -> None:
+        settings = (
+            AgentMonitorSettings()
+            .with_focus_dim_rule("com.apple.sleep", 0.0)
+            .with_focus_dim_rule("com.apple.focus.work", 0.5)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(settings, path)
+            loaded = load_settings(path)
+        self.assertEqual(loaded.focus_dim_rules, {"com.apple.sleep": 0.0, "com.apple.focus.work": 0.5})
+        # Malformed persisted values are dropped, numeric ones clamped.
+        from sidepulse.settings import _focus_dim_rules
+
+        self.assertEqual(
+            _focus_dim_rules({"ok": 2.5, "bad": "x", 3: 0.1, "flag": True}),
+            {"ok": 1.0},
+        )
+
+
 class FocusSyncScaleFactorTests(unittest.TestCase):
     def setUp(self) -> None:
         try:
@@ -7003,25 +7082,55 @@ class FocusSyncScaleFactorTests(unittest.TestCase):
 
     def test_neutral_when_disabled(self) -> None:
         self.controller.settings = self.controller.settings.with_focus_sync_enabled(False)
-        with patch.object(self.status_bar.focus_sync, "is_focus_active", return_value=True):
+        with patch.object(
+            self.status_bar.focus_sync, "active_focus_mode_identifiers", return_value=["com.apple.focus.work"]
+        ):
             self.assertEqual(self.controller.focus_sync_scale_factor(), 1.0)
 
-    def test_dims_when_enabled_and_focus_is_active(self) -> None:
+    def test_dims_by_the_shared_amount_when_a_focus_has_no_rule(self) -> None:
         settings = self.controller.settings.with_focus_sync_enabled(True).with_idle_dim_fraction(0.4)
         self.controller.settings = settings
-        with patch.object(self.status_bar.focus_sync, "is_focus_active", return_value=True):
+        with patch.object(
+            self.status_bar.focus_sync, "active_focus_mode_identifiers", return_value=["com.apple.focus.work"]
+        ):
             self.assertEqual(self.controller.focus_sync_scale_factor(), 0.4)
+
+    def test_a_focus_specific_rule_beats_the_shared_amount(self) -> None:
+        settings = (
+            self.controller.settings.with_focus_sync_enabled(True)
+            .with_idle_dim_fraction(0.4)
+            .with_focus_dim_rule("com.apple.focus.work", 0.75)
+        )
+        self.controller.settings = settings
+        with patch.object(
+            self.status_bar.focus_sync, "active_focus_mode_identifiers", return_value=["com.apple.focus.work"]
+        ):
+            self.assertEqual(self.controller.focus_sync_scale_factor(), 0.75)
+
+    def test_strictest_rule_wins_and_off_means_zero(self) -> None:
+        settings = (
+            self.controller.settings.with_focus_sync_enabled(True)
+            .with_focus_dim_rule("com.apple.sleep", 0.0)
+            .with_focus_dim_rule("com.apple.focus.work", 0.5)
+        )
+        self.controller.settings = settings
+        with patch.object(
+            self.status_bar.focus_sync,
+            "active_focus_mode_identifiers",
+            return_value=["com.apple.focus.work", "com.apple.sleep"],
+        ):
+            self.assertEqual(self.controller.focus_sync_scale_factor(), 0.0)
 
     def test_neutral_when_enabled_but_no_focus_active(self) -> None:
         self.controller.settings = self.controller.settings.with_focus_sync_enabled(True)
-        with patch.object(self.status_bar.focus_sync, "is_focus_active", return_value=False):
+        with patch.object(self.status_bar.focus_sync, "active_focus_mode_identifiers", return_value=[]):
             self.assertEqual(self.controller.focus_sync_scale_factor(), 1.0)
 
     def test_fails_safe_to_neutral_when_detection_unavailable(self) -> None:
         self.controller.settings = self.controller.settings.with_focus_sync_enabled(True)
         with patch.object(
             self.status_bar.focus_sync,
-            "is_focus_active",
+            "active_focus_mode_identifiers",
             side_effect=self.status_bar.focus_sync.FocusSyncUnavailableError("no FDA"),
         ):
             self.assertEqual(self.controller.focus_sync_scale_factor(), 1.0)
@@ -7043,7 +7152,9 @@ class FocusSyncScaleFactorTests(unittest.TestCase):
             display=LED_DISPLAY_BATTERY,
             brightness=200,
         )
-        with patch.object(self.status_bar.focus_sync, "is_focus_active", return_value=True):
+        with patch.object(
+            self.status_bar.focus_sync, "active_focus_mode_identifiers", return_value=["com.apple.focus.work"]
+        ):
             # 200 * 0.5 (idle) * 0.5 (focus) = 50
             self.assertEqual(self.controller.effective_brightness_for_device(device), 50)
 

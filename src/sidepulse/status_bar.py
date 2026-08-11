@@ -346,6 +346,7 @@ class StatusBarController(NSObject):
         self.leds_enabled = True
         self.led_sync_in_flight = False
         self.last_watched_brightness = None
+        self.last_watched_focus_scale = None
         self.last_led_error = None
         self.last_led_display_kind = LED_DISPLAY_AGENT
         self.last_connected_device_signature = None
@@ -422,20 +423,32 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def pollScreenBrightness_(self, _sender):
-        """The screen-brightness watcher's tick (see the timer above): one
-        cheap reading, and a full re-sync only when it genuinely moved and
-        some device is actually tracking it."""
-        if not any(device.auto_brightness_enabled for device in self.settings.devices):
-            return
-        try:
-            reading = display_brightness.auto_led_brightness()
-        except display_brightness.DisplayBrightnessUnavailableError:
-            return
-        last = self.last_watched_brightness
-        self.last_watched_brightness = reading
-        if last is None or abs(reading - last) < BRIGHTNESS_WATCH_MIN_DELTA:
-            return
-        self.refresh_(None)
+        """The brightness/Focus watcher's tick (see the timer above): two
+        cheap readings, and a full re-sync only when something genuinely
+        moved. Screen brightness and the active Focus share one watcher
+        because they share one failure mode -- both used to apply only
+        when an agent state change happened to trigger an LED write."""
+        needs_refresh = False
+
+        if any(device.auto_brightness_enabled for device in self.settings.devices):
+            try:
+                reading = display_brightness.auto_led_brightness()
+            except display_brightness.DisplayBrightnessUnavailableError:
+                reading = None
+            if reading is not None:
+                last = self.last_watched_brightness
+                self.last_watched_brightness = reading
+                if last is not None and abs(reading - last) >= BRIGHTNESS_WATCH_MIN_DELTA:
+                    needs_refresh = True
+
+        if self.settings.focus_sync_enabled:
+            scale = self.focus_sync_scale_factor()
+            if self.last_watched_focus_scale is not None and scale != self.last_watched_focus_scale:
+                needs_refresh = True
+            self.last_watched_focus_scale = scale
+
+        if needs_refresh:
+            self.refresh_(None)
 
     @objc.IBAction
     def refresh_(self, _sender):
@@ -619,6 +632,26 @@ class StatusBarController(NSObject):
         self.settings = self.settings.with_focus_sync_enabled(checkbox_is_on(sender))
         save_settings(self.settings)
         self.refresh_settings_window()
+
+    @objc.IBAction
+    def setFocusDimRule_(self, sender):
+        identifier = str(sender.identifier() or "")
+        if not identifier:
+            return
+        item = sender.selectedItem()
+        raw = str(item.representedObject() or "default") if item is not None else "default"
+        fraction = None if raw == "default" else float(raw)
+        self.settings = self.settings.with_focus_dim_rule(identifier, fraction)
+        save_settings(self.settings)
+        label = item.title() if item is not None else "Shared dim"
+        self.set_settings_message(f"Focus rule saved: {label}.")
+        self.refresh_(None)
+
+    @objc.IBAction
+    def openFullDiskAccessSettings_(self, _sender):
+        NSWorkspace.sharedWorkspace().openURL_(
+            NSURL.URLWithString_("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+        )
 
     @objc.IBAction
     def openSettings_(self, _sender):
@@ -2242,10 +2275,15 @@ class StatusBarController(NSObject):
         if not self.settings.focus_sync_enabled:
             return 1.0
         try:
-            active = focus_sync.is_focus_active()
+            active = focus_sync.active_focus_mode_identifiers()
         except focus_sync.FocusSyncUnavailableError:
             return 1.0
-        return self.settings.idle_dim_fraction if active else 1.0
+        if not active:
+            return 1.0
+        # With several Focuses somehow active at once, the strictest rule
+        # wins -- a Sleep "off" rule must never be overridden by a Work
+        # "dim a little" one.
+        return min(self.settings.focus_dim_fraction(identifier) for identifier in active)
 
     def status_bar_devices(self, *, remember: bool = True) -> list[StatusBarDevice]:
         entries_by_id: dict[str, StatusBarDevice] = {}
@@ -3518,11 +3556,68 @@ def _build_led_behavior_pane(target: StatusBarController):
         ),
     )
     inner.addArrangedSubview_(focus_row)
-
     stack.addArrangedSubview_(outer)
+
     fields = {"idle_dim_minutes_field": minutes_field, "idle_dim_fraction_field": fraction_field}
+
+    # Per-Focus rules: each configured Focus gets its own dim choice.
+    # When the Focus database can't be read (no Full Disk Access), say so
+    # plainly and offer the one-click path to fix it, instead of showing
+    # a feature that silently does nothing.
+    focus_outer, focus_inner = native_ui.make_card("Focus Dimming")
+    try:
+        focus_modes = focus_sync.configured_focus_modes()
+    except focus_sync.FocusSyncUnavailableError:
+        focus_modes = None
+    if not focus_modes:
+        focus_inner.addArrangedSubview_(
+            native_ui.make_label(
+                "Per-Focus rules need Full Disk Access, so SidePulse can see "
+                "which Focus is on.",
+                secondary=True,
+                size=12.0,
+            )
+        )
+        fda_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+        fda_controls.addArrangedSubview_(
+            native_ui.make_button("Open Privacy Settings…", target, "openFullDiskAccessSettings:")
+        )
+        fda_controls.addArrangedSubview_(native_ui.make_hspacer())
+        focus_inner.addArrangedSubview_(fda_controls)
+    else:
+        for index, (identifier, name) in enumerate(focus_modes):
+            popup = make_focus_dim_popup(target, identifier)
+            focus_inner.addArrangedSubview_(native_ui.make_row(name, popup))
+            if index < len(focus_modes) - 1:
+                native_ui.add_separator(focus_inner)
+            fields[f"focus_rule_popup:{identifier}"] = popup
+    stack.addArrangedSubview_(focus_outer)
+
     buttons = {"idle_dim_enabled": idle_switch, "focus_sync_enabled": focus_switch}
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
+
+
+FOCUS_DIM_CHOICES: tuple[tuple[str, str], ...] = (
+    ("Shared dim (default)", "default"),
+    ("Don't dim", "1.0"),
+    ("Dim to 50%", "0.5"),
+    ("Dim to 25%", "0.25"),
+    ("Turn off", "0.0"),
+)
+
+
+def make_focus_dim_popup(target: StatusBarController, mode_identifier: str):
+    popup = native_ui.make_popup_button(target, "setFocusDimRule:")
+    popup.setIdentifier_(mode_identifier)
+    current = target.settings.focus_dim_rules.get(mode_identifier)
+    current_key = "default" if current is None else f"{current:g}"
+    for label, key in FOCUS_DIM_CHOICES:
+        popup.addItemWithTitle_(label)
+        item = popup.lastItem()
+        item.setRepresentedObject_(key)
+        if key == current_key:
+            popup.selectItem_(item)
+    return popup
 
 
 def _build_agents_pane(target: StatusBarController):
