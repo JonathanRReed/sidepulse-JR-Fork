@@ -7120,6 +7120,78 @@ class FocusSyncTests(unittest.TestCase):
             self.assertTrue(focus_sync.is_focus_active())
 
 
+class LowPowerModeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+        self.status_bar = status_bar
+        self.controller = status_bar.StatusBarController.alloc().init()
+
+    def _snapshot(self, percent: int, *, plugged: bool = False):
+        from sidepulse.battery import BatterySnapshot
+
+        return BatterySnapshot(percent=percent, is_plugged=plugged, battery_present=True)
+
+    def test_low_power_active_thresholds(self) -> None:
+        controller = self.controller
+        self.assertTrue(controller.low_power_active(self._snapshot(4)))
+        self.assertTrue(controller.low_power_active(self._snapshot(5)))
+        self.assertFalse(controller.low_power_active(self._snapshot(6)))
+        # Plugged in means charging -- the reminder's job is done.
+        self.assertFalse(controller.low_power_active(self._snapshot(4, plugged=True)))
+        self.assertFalse(controller.low_power_active(None))
+        controller.settings = controller.settings.with_low_battery_alert_enabled(False)
+        self.assertFalse(controller.low_power_active(self._snapshot(2)))
+
+    def test_low_power_outranks_every_display_kind(self) -> None:
+        status_bar = self.status_bar
+        device = status_bar.StatusBarDevice(
+            device_id="SidePulseDot",
+            name="SidePulseDot",
+            root=Path("/Volumes/SidePulseDot"),
+            target=Path("/Volumes/SidePulseDot/LEDS.LED"),
+            connected=True,
+            display=status_bar.LED_DISPLAY_BATTERY,
+            brightness=200,
+        )
+        kind = self.controller.active_led_display_kind_for_device(device, self._snapshot(3))
+        self.assertEqual(kind, status_bar.LED_DISPLAY_LOW_BATTERY)
+        # Recovered battery falls back to the device's own choice.
+        kind = self.controller.active_led_display_kind_for_device(device, self._snapshot(80))
+        self.assertEqual(kind, status_bar.LED_DISPLAY_BATTERY)
+
+    def test_low_battery_program_is_a_calm_whole_bar_breathe(self) -> None:
+        from sidepulse.led_status import LOW_BATTERY_BREATH_MS, low_battery_program
+
+        program = low_battery_program(255)
+        lines = program.splitlines()
+        self.assertEqual(lines[-1], "repeat")
+        self.assertIn(f"{LOW_BATTERY_BREATH_MS}ms pulse", program)
+        # Whole-bar lines only: no per-LED "N:" prefixes, so the same
+        # program renders on the 2-LED Dot, 8-LED Pro, and Screen Bar.
+        for line in lines:
+            self.assertFalse(line.split(":", 1)[0].isdigit(), line)
+        self.assertLessEqual(len(program.encode()), 512)
+
+    def test_low_battery_settings_round_trip(self) -> None:
+        settings = (
+            AgentMonitorSettings()
+            .with_low_battery_alert_enabled(False)
+            .with_low_battery_threshold_percent(12.0)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(settings, path)
+            loaded = load_settings(path)
+        self.assertFalse(loaded.low_battery_alert_enabled)
+        self.assertEqual(loaded.low_battery_threshold_percent, 12.0)
+        # Threshold clamps to something sane.
+        clamped = AgentMonitorSettings().with_low_battery_threshold_percent(400.0)
+        self.assertEqual(clamped.low_battery_threshold_percent, 50.0)
+
+
 class FocusModeParsingTests(unittest.TestCase):
     def test_active_identifiers_found_regardless_of_nesting(self) -> None:
         from sidepulse import focus_sync

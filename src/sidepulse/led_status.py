@@ -40,6 +40,11 @@ ASK_AMBER = "#FF3A00"
 WORKING_CYAN = "#00E5FF"
 DONE_GREEN = "#00FF66"
 IDLE_DIM = "#020204"
+# The low-battery reminder: a deliberately CALM slow red breathe -- "plug
+# me in sometime soon", not an alarm. A charge reminder that strobes is a
+# nagging light; one long 3.6s breath reads as patient.
+LOW_BATTERY_RED = "#E01010"
+LOW_BATTERY_BREATH_MS = 3600
 DEVICE_LED_COUNTS = {
     "sidepulsedot": 2,
     "sidepulsepro": 8,
@@ -444,6 +449,17 @@ def brightness_percent(value: int | float | None) -> int:
     return round(normalize_brightness(value) / 255 * 100)
 
 
+def low_battery_program(brightness: int | float = 255) -> str:
+    """The whole-bar calm red breathe shown while battery is below the
+    low-power threshold and unplugged -- see LOW_BATTERY_RED's comment for
+    why it's deliberately slow. Whole-bar lines, so it renders identically
+    on the 2-LED Dot, the 8-LED Pro, and the Screen Bar."""
+    return apply_brightness(
+        f"off 400ms cosine\n{LOW_BATTERY_RED} {LOW_BATTERY_BREATH_MS}ms pulse\nrepeat",
+        brightness,
+    )
+
+
 def apply_brightness(program: str, brightness: int | float = 255) -> str:
     value = normalize_brightness(brightness)
     if value >= 255:
@@ -581,6 +597,16 @@ class AgentLedController:
         # still produces a different string here and correctly triggers a
         # rewrite, with no separate "did gains change" tracking needed.
         program = apply_channel_gain_to_program(program, self.channel_gains)
+        return self._write_deduped_program(state, program)
+
+    def sync_program(self, program: str, state: LedDisplayState) -> LedStatusWrite:
+        """Writes a pre-rendered program through the same gain/dedup/retry
+        path sync_snapshot uses -- for displays that aren't derived from
+        agent statuses at all (e.g. the low-battery reminder)."""
+        program = apply_channel_gain_to_program(program, self.channel_gains)
+        return self._write_deduped_program(state, program)
+
+    def _write_deduped_program(self, state: LedDisplayState, program: str) -> LedStatusWrite:
         now = time.monotonic()
 
         if program == self.last_program and self.last_error is None:

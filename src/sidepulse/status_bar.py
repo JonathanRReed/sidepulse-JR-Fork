@@ -100,9 +100,11 @@ from .led_status import (
     MAX_CHANNEL_GAIN,
     MIN_CHANNEL_GAIN,
     AgentLedController,
+    LedDisplayState,
     apply_brightness,
     brightness_percent,
     led_count_for_target,
+    low_battery_program,
     normalize_brightness,
     normalized_device_name,
     write_mode_to_leds,
@@ -217,6 +219,10 @@ STATUS_BAR_KEEPALIVE_VOLUME_NAMES = (
     "SidePulsePro",
     "SidePulseDot",
 )
+# Runtime-only display kind (never a persisted per-device choice): the
+# low-battery reminder takes over every display while active.
+LED_DISPLAY_LOW_BATTERY = "low_battery"
+
 STATUS_BAR_REFRESH_SECONDS = 15.0
 # How often the screen-brightness watcher samples (one cheap ctypes call)
 # and the minimum 0-255 delta that counts as a real change -- small enough
@@ -752,6 +758,30 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def setBatteryPowerPreviewFromCheckbox_(self, sender):
         self.set_battery_power_preview(sender.state() == NSOnState)
+
+    @objc.IBAction
+    def toggleLowBatteryAlert_(self, sender):
+        self.settings = self.settings.with_low_battery_alert_enabled(checkbox_is_on(sender))
+        save_settings(self.settings)
+        self.refresh_(None)
+
+    @objc.IBAction
+    def applyLowBatteryThreshold_(self, _sender):
+        field = self.settings_fields.get("low_battery_threshold_field")
+        if field is None:
+            return
+        try:
+            percent = float(str(field.stringValue()).strip().rstrip("%"))
+        except ValueError:
+            self.set_settings_message("Low-battery threshold must be a number.")
+            return
+        self.settings = self.settings.with_low_battery_threshold_percent(percent)
+        save_settings(self.settings)
+        set_field_value(field, f"{self.settings.low_battery_threshold_percent:g}")
+        self.set_settings_message(
+            f"Charge reminder below {self.settings.low_battery_threshold_percent:g}%."
+        )
+        self.refresh_(None)
 
     @objc.IBAction
     def setDeviceDisplayAgent_(self, sender):
@@ -1615,6 +1645,10 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("battery_power_preview"),
             self.settings.battery_show_on_power_change,
         )
+        set_checkbox_state(
+            self.settings_buttons.get("low_battery_alert"),
+            self.settings.low_battery_alert_enabled,
+        )
         for provider in HOOK_PROVIDERS:
             popup = self.settings_fields.get(f"{provider}_session_opener")
             if popup is not None:
@@ -2444,11 +2478,23 @@ class StatusBarController(NSObject):
             return
         log_status_bar("device remember: skipped after repeated concurrent settings changes")
 
+    def low_power_active(self, battery_snapshot: BatterySnapshot | None) -> bool:
+        """True while the battery is below the low-power threshold and
+        unplugged (and the reminder is enabled) -- the one condition that
+        outranks every other display, on every device at once."""
+        if not self.settings.low_battery_alert_enabled or battery_snapshot is None:
+            return False
+        if battery_snapshot.is_plugged or not battery_snapshot.battery_present:
+            return False
+        return battery_snapshot.percent <= self.settings.low_battery_threshold_percent
+
     def active_led_display_kind_for_device(
         self,
         device: StatusBarDevice,
         battery_snapshot: BatterySnapshot | None,
     ) -> str:
+        if self.low_power_active(battery_snapshot):
+            return LED_DISPLAY_LOW_BATTERY
         if device.display == LED_DISPLAY_BATTERY:
             return LED_DISPLAY_BATTERY
         if battery_snapshot is not None and time.monotonic() < self.battery_preview_until:
@@ -2530,7 +2576,9 @@ class StatusBarController(NSObject):
         # any of them.
         brightness = self.effective_brightness_for_device(device)
         display = self.active_led_display_kind_for_device(device, battery_snapshot)
-        if display == LED_DISPLAY_BATTERY and battery_snapshot is not None:
+        if display == LED_DISPLAY_LOW_BATTERY:
+            self.virtual_status_device.set_program(low_battery_program(brightness), started_at=started_at)
+        elif display == LED_DISPLAY_BATTERY and battery_snapshot is not None:
             self.virtual_status_device.set_program(
                 program_for_battery(
                     battery_snapshot,
@@ -2628,7 +2676,17 @@ class StatusBarController(NSObject):
                 self.reset_led_controllers_for_device(device.device_id)
                 self.last_led_display_kind_by_device[device.device_id] = device_display_kind
 
-            if device_display_kind == LED_DISPLAY_BATTERY and battery_snapshot is not None:
+            if device_display_kind == LED_DISPLAY_LOW_BATTERY:
+                controller = self.agent_controller_for_device(device)
+                result = controller.sync_program(
+                    low_battery_program(controller.brightness), LedDisplayState.ASK
+                )
+                label = f"{device.name} Low battery {battery_snapshot.percent if battery_snapshot else '?'}%"
+                if result.error:
+                    agent_write_failed = True
+                elif result.changed:
+                    agent_write_changed = True
+            elif device_display_kind == LED_DISPLAY_BATTERY and battery_snapshot is not None:
                 result = self.battery_controller_for_device(device).sync_snapshot(battery_snapshot)
                 label = (
                     f"{device.name} Battery {battery_snapshot.percent}% "
@@ -3537,10 +3595,39 @@ def _build_power_pane(target: StatusBarController):
         "Show battery for 7s on plug/unplug", target, "setBatteryPowerPreviewFromCheckbox:"
     )
     battery_inner.addArrangedSubview_(preview_row)
+    native_ui.add_separator(battery_inner)
+    low_power_row, low_battery_switch = native_ui.make_switch_row(
+        "Charge reminder when battery is low",
+        target,
+        "toggleLowBatteryAlert:",
+        help_text=(
+            "Below the threshold while unplugged, every display switches to "
+            "a calm, slow red breathe until you plug in."
+        ),
+    )
+    battery_inner.addArrangedSubview_(low_power_row)
+    threshold_field = native_ui.make_field(
+        f"{target.settings.low_battery_threshold_percent:g}",
+        target=target,
+        action="applyLowBatteryThreshold:",
+    )
+    native_ui.constrain_width(threshold_field, 48.0)
+    threshold_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
+    threshold_controls.addArrangedSubview_(threshold_field)
+    threshold_controls.addArrangedSubview_(native_ui.make_label("%", secondary=True))
+    battery_inner.addArrangedSubview_(native_ui.make_row("Below", threshold_controls))
     stack.addArrangedSubview_(battery_outer)
 
-    fields = {"closed_lid_awake_policy_popup": policy_popup, "closed_lid_grace_field": grace_field}
-    buttons = {"battery_leds": battery_leds, "battery_power_preview": battery_power_preview}
+    fields = {
+        "closed_lid_awake_policy_popup": policy_popup,
+        "closed_lid_grace_field": grace_field,
+        "low_battery_threshold_field": threshold_field,
+    }
+    buttons = {
+        "battery_leds": battery_leds,
+        "battery_power_preview": battery_power_preview,
+        "low_battery_alert": low_battery_switch,
+    }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 

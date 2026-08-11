@@ -156,6 +156,12 @@ class AgentMonitorSettings:
     battery_full_charge_watts: float | None = None
     battery_show_on_power_change: bool = True
     battery_power_change_preview_seconds: float = DEFAULT_POWER_CHANGE_PREVIEW_SECONDS
+    # Below this percent while unplugged, every display switches to the
+    # calm slow-red "plug me in" breathe (led_status.low_battery_program)
+    # until power returns or the level recovers. Default on: a dying
+    # battery is the one signal that should outrank agent status.
+    low_battery_alert_enabled: bool = True
+    low_battery_threshold_percent: float = 5.0
     session_open_preferences: dict[str, str] = field(default_factory=dict)
     setup_screen_completed: bool = False
     colors: ColorSettings = field(default_factory=ColorSettings.defaults)
@@ -557,6 +563,12 @@ class AgentMonitorSettings:
     def with_focus_sync_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, focus_sync_enabled=bool(enabled))
 
+    def with_low_battery_alert_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+        return replace(self, low_battery_alert_enabled=bool(enabled))
+
+    def with_low_battery_threshold_percent(self, percent: float) -> "AgentMonitorSettings":
+        return replace(self, low_battery_threshold_percent=max(1.0, min(50.0, float(percent))))
+
     def focus_dim_fraction(self, mode_identifier: str) -> float:
         """The brightness fraction to apply while this Focus is active --
         its own rule if set, otherwise the shared idle-dim amount (the
@@ -594,6 +606,8 @@ class AgentMonitorSettings:
                 "full_charge_watts": self.battery_full_charge_watts,
                 "show_on_power_change": self.battery_show_on_power_change,
                 "power_change_preview_seconds": self.battery_power_change_preview_seconds,
+                "low_battery_alert_enabled": self.low_battery_alert_enabled,
+                "low_battery_threshold_percent": self.low_battery_threshold_percent,
             },
             "session_open_preferences": dict(sorted(self.session_open_preferences.items())),
             "setup_screen_completed": self.setup_screen_completed,
@@ -696,6 +710,10 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         battery_power_change_preview_seconds=_float_setting(
             battery.get("power_change_preview_seconds"),
             DEFAULT_POWER_CHANGE_PREVIEW_SECONDS,
+        ),
+        low_battery_alert_enabled=_bool_setting(battery.get("low_battery_alert_enabled"), True),
+        low_battery_threshold_percent=max(
+            1.0, min(50.0, _float_setting(battery.get("low_battery_threshold_percent"), 5.0))
         ),
         session_open_preferences=_session_open_preferences(data.get("session_open_preferences")),
         setup_screen_completed=_bool_setting(data.get("setup_screen_completed"), False),
