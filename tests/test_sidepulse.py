@@ -7857,7 +7857,10 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
 
         for key, pane in self.controller.settings_panes.items():
             pane.layoutSubtreeIfNeeded()
-            content_stack = pane.documentView().arrangedSubviews()[0]
+            # documentView is a plain container (padding lives inside it,
+            # where NSClipView's scroll-to-document-origin can't eat it);
+            # its single subview is the padded column stack.
+            content_stack = pane.documentView().subviews()[0].arrangedSubviews()[0]
             frames = [
                 v.frame()
                 for v in content_stack.arrangedSubviews()
@@ -7884,6 +7887,32 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
             self.assertGreater(
                 pane.documentView().frame().size.height, 0, f"{key!r} pane has no content height"
             )
+
+    def test_settings_pane_columns_stay_centered_after_clip_constrain(self) -> None:
+        # Regression: NSClipView constrains its bounds to the document
+        # view's frame. When the padded column WAS the document view, the
+        # clip scrolled to the column's own (padding, padding) origin --
+        # so live panes rendered flush against the sidebar with both
+        # paddings dumped on the right ("everything is off-center"),
+        # while frame-based tests kept passing. Forcing the constrain
+        # pass here reproduces what the real display does.
+        self.controller.show_settings_window()
+        self.controller.settings_window.contentView().layoutSubtreeIfNeeded()
+        for key, pane in self.controller.settings_panes.items():
+            pane.layoutSubtreeIfNeeded()
+            clip = pane.contentView()
+            origin = clip.constrainBoundsRect_(clip.bounds()).origin
+            self.assertEqual(
+                (origin.x, origin.y), (0.0, 0.0), f"{key!r} pane clip scrolls away from its origin"
+            )
+            document = pane.documentView()
+            column = document.subviews()[0]
+            left = column.frame().origin.x
+            right = document.frame().size.width - left - column.frame().size.width
+            self.assertAlmostEqual(
+                left, right, delta=1.0, msg=f"{key!r} pane column is off-center"
+            )
+            self.assertGreaterEqual(left, 19.0, f"{key!r} pane column lost its edge padding")
 
     def test_devices_section_exists_for_each_connected_device(self) -> None:
         self.controller.show_settings_window()
@@ -8136,3 +8165,32 @@ class ScreenBarSettingsTakeEffectImmediatelyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AppBundleTests(unittest.TestCase):
+    def test_bundle_wraps_the_venv_and_is_idempotent(self) -> None:
+        # The wrapper must run as "SidePulse", resolve the venv's
+        # packages, and rebuild only when something actually changed --
+        # this is what puts SidePulse by name in the Privacy list.
+        try:
+            from sidepulse import app_bundle
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+        import subprocess as sp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp) / "SidePulse.app"
+            first = app_bundle.build_app_bundle(bundle, venv_python=sys.executable)
+            self.assertTrue(first.changed)
+            self.assertEqual(first.executable_path.name, "SidePulse")
+            second = app_bundle.build_app_bundle(bundle, venv_python=sys.executable)
+            self.assertFalse(second.changed)
+
+            result = sp.run(
+                [str(first.executable_path), "-c", "import sys, sidepulse; print(sys.prefix)"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("SidePulse.app/Contents", result.stdout)

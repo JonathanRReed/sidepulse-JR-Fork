@@ -592,6 +592,17 @@ def wrap_in_scroll_pane(stack: "NSStackView", *, padding: float = 20.0) -> "NSSc
     padded = make_fill_stack(spacing=0.0)
     padded.addArrangedSubview_(stack)
 
+    # The padding and centering live INSIDE the document view, never
+    # between the document and the clip. NSClipView constrains its
+    # bounds to the document's frame, so a document smaller than the
+    # clip gets scrolled TO ITS OWN ORIGIN -- a column placed at
+    # (padding, padding) inside the clip's coordinate space rendered
+    # flush against the top-left edge with both paddings dumped on the
+    # right, which read as "everything is off-center" (it was).
+    document = NSView.alloc().init()
+    document.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    document.addSubview_(padded)
+
     scroll = NSScrollView.alloc().init()
     scroll.setHasVerticalScroller_(True)
     scroll.setHasHorizontalScroller_(False)
@@ -603,40 +614,40 @@ def wrap_in_scroll_pane(stack: "NSStackView", *, padding: float = 20.0) -> "NSSc
     scroll.setScrollerStyle_(NSScrollerStyleOverlay)
     scroll.setTranslatesAutoresizingMaskIntoConstraints_(False)
     scroll.setContentView_(_FlippedClipView.alloc().init())
-    scroll.setDocumentView_(padded)
+    scroll.setDocumentView_(document)
     content_view = scroll.contentView()
     # A centered column capped at CONTENT_MAX_WIDTH (preferring exactly
     # that width when there's room -- the 749 preference loses only to
-    # the required minimum margins in a narrow pane). Centered against
-    # the SCROLL VIEW's own frame, not the clip view -- see the scroller
-    # note above for why those two centers can differ.
+    # the required minimum margins in a narrow pane). The document spans
+    # the clip's full width, so its origin is always the clip's origin
+    # and the clip has nothing to mis-scroll to; the overlay-scroller
+    # guarantee above keeps the clip the pane's true width.
     width_preference = padded.widthAnchor().constraintEqualToConstant_(CONTENT_MAX_WIDTH)
     width_preference.setPriority_(749)
     NSLayoutConstraint.activateConstraints_(
         [
-            padded.centerXAnchor().constraintEqualToAnchor_(scroll.centerXAnchor()),
-            padded.topAnchor().constraintEqualToAnchor_constant_(content_view.topAnchor(), padding),
+            document.leadingAnchor().constraintEqualToAnchor_(content_view.leadingAnchor()),
+            document.topAnchor().constraintEqualToAnchor_(content_view.topAnchor()),
+            document.widthAnchor().constraintEqualToAnchor_(content_view.widthAnchor()),
+            padded.centerXAnchor().constraintEqualToAnchor_(document.centerXAnchor()),
+            padded.topAnchor().constraintEqualToAnchor_constant_(document.topAnchor(), padding),
+            padded.bottomAnchor().constraintEqualToAnchor_constant_(
+                document.bottomAnchor(), -padding
+            ),
             padded.widthAnchor().constraintLessThanOrEqualToConstant_(CONTENT_MAX_WIDTH),
             padded.leadingAnchor().constraintGreaterThanOrEqualToAnchor_constant_(
-                content_view.leadingAnchor(), padding
+                document.leadingAnchor(), padding
             ),
             width_preference,
         ]
     )
-    # Deliberately no bottom-anchor constraint at all: padded's height
-    # comes entirely from its own arranged content (an ordinary vertical
-    # NSStackView's intrinsic content size, no different from any other
-    # stack in this module), and needs no relationship to the clip
-    # view's height to be well-determined either way -- shorter content
-    # just leaves blank scrollable space below it, taller content
-    # scrolls, neither needs a constraint to make happen. A `<=` bound
-    # here once capped scrollable content at the visible viewport
-    # (nothing could ever exceed it, so nothing could ever scroll); the
-    # `>=` that replaced it fixed that but, for a pane short enough to
-    # fit without scrolling, forced padded to inflate to the clip's full
-    # height -- and with nothing else objecting at that priority,
-    # Auto Layout dumped the slack into one arbitrary row or card rather
-    # than leaving it as the blank space it should have been.
+    # The document's height comes entirely from the column's top+bottom
+    # pins (content height plus both paddings) and needs no relationship
+    # to the clip's height: shorter content leaves blank space below
+    # (the flipped clip keeps it top-aligned), taller content scrolls.
+    # A `<=` bound against the clip here once capped scrollable content
+    # at the visible viewport (nothing could ever scroll); a `>=` forced
+    # short panes to inflate and dump the slack into one arbitrary card.
     return scroll
 
 
