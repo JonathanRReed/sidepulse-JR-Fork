@@ -185,6 +185,9 @@ class AgentMonitorSettings:
     # permission prompt (see calendar_watch.py).
     calendar_alerts_enabled: bool = False
     calendar_lead_minutes: float = 5.0
+    # Per-signal look overrides (Signal Engine). Keys/values validated
+    # by signals.SignalStyle; absent keys mean the built-in defaults.
+    signal_styles: dict[str, dict] = field(default_factory=dict)
     session_open_preferences: dict[str, str] = field(default_factory=dict)
     setup_screen_completed: bool = False
     colors: ColorSettings = field(default_factory=ColorSettings.defaults)
@@ -618,6 +621,23 @@ class AgentMonitorSettings:
     def with_calendar_lead_minutes(self, minutes: float) -> "AgentMonitorSettings":
         return replace(self, calendar_lead_minutes=max(1.0, min(60.0, float(minutes))))
 
+    def signal_style(self, key: str):
+        """The effective SignalStyle for a signal: the user's override
+        merged over the built-in default."""
+        from .signals import DEFAULT_SIGNAL_STYLES, SignalStyle
+
+        fallback = DEFAULT_SIGNAL_STYLES[key]
+        return SignalStyle.from_dict(self.signal_styles.get(key), fallback)
+
+    def with_signal_style(self, key: str, style) -> "AgentMonitorSettings":
+        from .signals import DEFAULT_SIGNAL_STYLES
+
+        if key not in DEFAULT_SIGNAL_STYLES:
+            raise ValueError(f"Unknown signal: {key}")
+        styles = dict(self.signal_styles)
+        styles[key] = style.normalized().to_dict()
+        return replace(self, signal_styles=styles)
+
     def with_notification_app_color(self, bundle_id: str, color: str | None) -> "AgentMonitorSettings":
         """color=None removes the app from the blink list entirely."""
         apps = dict(self.notification_app_colors)
@@ -675,6 +695,7 @@ class AgentMonitorSettings:
             "notification_app_colors": dict(sorted(self.notification_app_colors.items())),
             "calendar_alerts_enabled": self.calendar_alerts_enabled,
             "calendar_lead_minutes": self.calendar_lead_minutes,
+            "signal_styles": dict(sorted(self.signal_styles.items())),
             "session_open_preferences": dict(sorted(self.session_open_preferences.items())),
             "setup_screen_completed": self.setup_screen_completed,
             "colors": self.colors.to_dict(),
@@ -709,6 +730,22 @@ def _hex_color(raw: object) -> str | None:
     if re.fullmatch(r"#?[0-9a-fA-F]{6}", value):
         return "#" + value.lstrip("#").upper()
     return None
+
+
+def _signal_styles(raw: object) -> dict[str, dict]:
+    """Only known signals, each entry re-validated through SignalStyle
+    so a hand-edited file can never smuggle a bad pattern or speed."""
+    from .signals import DEFAULT_SIGNAL_STYLES, SignalStyle
+
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, dict] = {}
+    for key, value in raw.items():
+        fallback = DEFAULT_SIGNAL_STYLES.get(key)
+        if fallback is None:
+            continue
+        result[key] = SignalStyle.from_dict(value, fallback).to_dict()
+    return result
 
 
 def _notification_app_colors(raw: object) -> dict[str, str]:
@@ -819,6 +856,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         calendar_lead_minutes=max(
             1.0, min(60.0, _float_setting(data.get("calendar_lead_minutes"), 5.0))
         ),
+        signal_styles=_signal_styles(data.get("signal_styles")),
         session_open_preferences=_session_open_preferences(data.get("session_open_preferences")),
         setup_screen_completed=_bool_setting(data.get("setup_screen_completed"), False),
         colors=ColorSettings.from_dict(data.get("colors")),

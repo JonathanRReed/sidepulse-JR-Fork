@@ -8319,6 +8319,82 @@ class TranscriptFallbackTests(unittest.TestCase):
         self.assertEqual(fake.calls, 2)
 
 
+class SignalEngineTests(unittest.TestCase):
+    def test_default_styles_render_the_pre_engine_programs_byte_for_byte(self) -> None:
+        # The migration to the Signal Engine must be INVISIBLE: the
+        # default styles reproduce the old bespoke programs exactly.
+        from sidepulse import signals
+        from sidepulse.led_status import style_to_program
+
+        self.assertEqual(
+            style_to_program(signals.DEFAULT_SIGNAL_STYLES[signals.SIGNAL_LOW_BATTERY]),
+            "off 400ms cosine\n#E01010 3600ms pulse\nrepeat",
+        )
+        self.assertEqual(
+            style_to_program(signals.DEFAULT_SIGNAL_STYLES[signals.SIGNAL_CALENDAR]),
+            "off 400ms cosine\n#A45CFF 2600ms pulse\nrepeat",
+        )
+        self.assertEqual(
+            style_to_program(
+                signals.DEFAULT_SIGNAL_STYLES[signals.SIGNAL_NOTIFICATION],
+                color="#34C759",
+            ),
+            "\n".join(["#34C759 170ms cosine\noff 130ms cosine"] * 3),
+        )
+
+    def test_every_pattern_stays_within_device_limits_at_every_extreme(self) -> None:
+        import re as _re
+
+        from sidepulse import signals
+        from sidepulse.device_writer import MAX_LED_BYTES, MAX_LED_LINES
+        from sidepulse.led_status import style_to_program
+
+        for pattern in signals.SIGNAL_PATTERNS:
+            for speed in (signals.MIN_SPEED_SECONDS, 1.0, signals.MAX_SPEED_SECONDS):
+                for intensity in (signals.MIN_INTENSITY, 1.0):
+                    style = signals.SignalStyle("#ABCDEF", pattern, speed, intensity)
+                    program = style_to_program(style, 128, led_count=8)
+                    label = f"{pattern}@{speed}s/{intensity}"
+                    self.assertLessEqual(len(program.encode()), MAX_LED_BYTES, label)
+                    self.assertLessEqual(len(program.splitlines()), MAX_LED_LINES, label)
+                    for value in _re.findall(r"(\d+)ms", program):
+                        self.assertLessEqual(int(value), 65535, label)
+
+    def test_signal_style_settings_round_trip_and_validation(self) -> None:
+        from sidepulse import signals
+
+        style = signals.SignalStyle("#112233", signals.PATTERN_SWEEP, 2.0, 0.6)
+        configured = AgentMonitorSettings().with_signal_style("calendar", style)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            reloaded = load_settings(path)
+        self.assertEqual(reloaded.signal_style("calendar"), style)
+        # Untouched signals keep their defaults.
+        self.assertEqual(
+            reloaded.signal_style("low_battery"),
+            signals.DEFAULT_SIGNAL_STYLES["low_battery"],
+        )
+        # A hand-edited bad pattern falls back to the default, never crashes.
+        broken = dict(configured.to_dict())
+        broken["signal_styles"] = {"calendar": {"pattern": "explode", "speed_seconds": 99}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(json.dumps(broken))
+            reloaded = load_settings(path)
+        style = reloaded.signal_style("calendar")
+        self.assertIn(style.pattern, signals.SIGNAL_PATTERNS)
+        self.assertLessEqual(style.speed_seconds, signals.MAX_SPEED_SECONDS)
+
+    def test_unknown_signal_key_is_rejected(self) -> None:
+        from sidepulse import signals
+
+        with self.assertRaises(ValueError):
+            AgentMonitorSettings().with_signal_style(
+                "nope", signals.DEFAULT_SIGNAL_STYLES["calendar"]
+            )
+
+
 class CalendarAlertTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

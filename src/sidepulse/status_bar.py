@@ -74,6 +74,7 @@ from .battery import (
     read_battery_snapshot,
 )
 from . import calendar_watch
+from . import signals as signals_module
 from . import display_brightness
 from . import focus_sync
 from . import native_ui
@@ -114,17 +115,14 @@ from .led_status import (
     ANIMATION_STYLE_CHOICES,
     MAX_CHANNEL_GAIN,
     MIN_CHANNEL_GAIN,
-    NOTIFICATION_BLINK_SECONDS,
     AgentLedController,
     LedDisplayState,
     apply_brightness,
     brightness_percent,
-    calendar_glow_program,
     led_count_for_target,
-    low_battery_program,
-    notification_blink_program,
     normalize_brightness,
     normalized_device_name,
+    style_to_program,
     write_mode_to_leds,
 )
 from . import colors as colors_module
@@ -563,12 +561,15 @@ class StatusBarController(NSObject):
             return
         # Several at once: the newest app's color wins; the blink says
         # "something arrived", the menu bar says what.
+        hold = signals_module.signal_hold_seconds(
+            self.settings.signal_style(signals_module.SIGNAL_NOTIFICATION)
+        )
         self.notification_blink_color = matched[-1]
-        self.notification_blink_until = now + NOTIFICATION_BLINK_SECONDS
+        self.notification_blink_until = now + hold
         self.refresh_(None)
         # One-shot revert back to the agent display when the window ends.
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            NOTIFICATION_BLINK_SECONDS + 0.1,
+            hold + 0.1,
             self,
             "refresh:",
             None,
@@ -3009,23 +3010,40 @@ class StatusBarController(NSObject):
         device: StatusBarDevice,
         battery_snapshot: BatterySnapshot | None,
     ) -> str:
-        if self.low_power_active(battery_snapshot):
-            return LED_DISPLAY_LOW_BATTERY
-        if (
-            self.settings.notification_blinks_enabled
-            and self.notification_blink_color is not None
-            and time.monotonic() < self.notification_blink_until
-        ):
-            return LED_DISPLAY_NOTIFICATION
-        if (
-            self.settings.calendar_alerts_enabled
-            and time.monotonic() < self.calendar_glow_until
-        ):
-            return LED_DISPLAY_CALENDAR
-        if device.display == LED_DISPLAY_BATTERY:
-            return LED_DISPLAY_BATTERY
-        if battery_snapshot is not None and time.monotonic() < self.battery_preview_until:
-            return LED_DISPLAY_BATTERY
+        # The Signal Engine's arbiter: one fixed precedence order, first
+        # active claim wins (see the spec's precedence table). Agent is
+        # the always-active default.
+        now = time.monotonic()
+        claims = (
+            (LED_DISPLAY_LOW_BATTERY, lambda: self.low_power_active(battery_snapshot)),
+            (
+                LED_DISPLAY_NOTIFICATION,
+                lambda: (
+                    self.settings.notification_blinks_enabled
+                    and self.notification_blink_color is not None
+                    and now < self.notification_blink_until
+                ),
+            ),
+            (
+                LED_DISPLAY_CALENDAR,
+                lambda: (
+                    self.settings.calendar_alerts_enabled and now < self.calendar_glow_until
+                ),
+            ),
+            (
+                LED_DISPLAY_BATTERY,
+                lambda: (
+                    device.display == LED_DISPLAY_BATTERY
+                    or (battery_snapshot is not None and now < self.battery_preview_until)
+                ),
+            ),
+        )
+        for key, active in claims:
+            try:
+                if active():
+                    return key
+            except Exception:
+                continue
         return LED_DISPLAY_AGENT
 
     def sync_leds(
@@ -3110,15 +3128,27 @@ class StatusBarController(NSObject):
         display = self.active_led_display_kind_for_device(device, battery_snapshot)
         if display == LED_DISPLAY_NOTIFICATION and self.notification_blink_color:
             self.virtual_status_device.set_program(
-                notification_blink_program(self.notification_blink_color, brightness),
+                style_to_program(
+                    self.settings.signal_style(signals_module.SIGNAL_NOTIFICATION),
+                    brightness,
+                    color=self.notification_blink_color,
+                ),
                 started_at=started_at,
             )
         elif display == LED_DISPLAY_CALENDAR:
             self.virtual_status_device.set_program(
-                calendar_glow_program(brightness), started_at=started_at
+                style_to_program(
+                    self.settings.signal_style(signals_module.SIGNAL_CALENDAR), brightness
+                ),
+                started_at=started_at,
             )
         elif display == LED_DISPLAY_LOW_BATTERY:
-            self.virtual_status_device.set_program(low_battery_program(brightness), started_at=started_at)
+            self.virtual_status_device.set_program(
+                style_to_program(
+                    self.settings.signal_style(signals_module.SIGNAL_LOW_BATTERY), brightness
+                ),
+                started_at=started_at,
+            )
         elif display == LED_DISPLAY_BATTERY and battery_snapshot is not None:
             self.virtual_status_device.set_program(
                 program_for_battery(
@@ -3228,8 +3258,10 @@ class StatusBarController(NSObject):
             if device_display_kind == LED_DISPLAY_NOTIFICATION and self.notification_blink_color:
                 controller = self.agent_controller_for_device(device)
                 result = controller.sync_program(
-                    notification_blink_program(
-                        self.notification_blink_color, controller.brightness
+                    style_to_program(
+                        self.settings.signal_style(signals_module.SIGNAL_NOTIFICATION),
+                        controller.brightness,
+                        color=self.notification_blink_color,
                     ),
                     LedDisplayState.ASK,
                 )
@@ -3241,7 +3273,11 @@ class StatusBarController(NSObject):
             elif device_display_kind == LED_DISPLAY_CALENDAR:
                 controller = self.agent_controller_for_device(device)
                 result = controller.sync_program(
-                    calendar_glow_program(controller.brightness), LedDisplayState.ASK
+                    style_to_program(
+                        self.settings.signal_style(signals_module.SIGNAL_CALENDAR),
+                        controller.brightness,
+                    ),
+                    LedDisplayState.ASK,
                 )
                 label = f"{device.name} Calendar {self.calendar_event_title or 'event'}"
                 if result.error:
@@ -3251,7 +3287,11 @@ class StatusBarController(NSObject):
             elif device_display_kind == LED_DISPLAY_LOW_BATTERY:
                 controller = self.agent_controller_for_device(device)
                 result = controller.sync_program(
-                    low_battery_program(controller.brightness), LedDisplayState.ASK
+                    style_to_program(
+                        self.settings.signal_style(signals_module.SIGNAL_LOW_BATTERY),
+                        controller.brightness,
+                    ),
+                    LedDisplayState.ASK,
                 )
                 label = f"{device.name} Low battery {battery_snapshot.percent if battery_snapshot else '?'}%"
                 if result.error:

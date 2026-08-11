@@ -450,51 +450,72 @@ def brightness_percent(value: int | float | None) -> int:
 
 
 def low_battery_program(brightness: int | float = 255) -> str:
-    """The whole-bar calm red breathe shown while battery is below the
-    low-power threshold and unplugged -- see LOW_BATTERY_RED's comment for
-    why it's deliberately slow. Whole-bar lines, so it renders identically
-    on the 2-LED Dot, the 8-LED Pro, and the Screen Bar."""
-    return apply_brightness(
-        f"off 400ms cosine\n{LOW_BATTERY_RED} {LOW_BATTERY_BREATH_MS}ms pulse\nrepeat",
-        brightness,
-    )
+    """The low-battery signal's DEFAULT style through the one renderer
+    (see LOW_BATTERY_RED's comment for why it's deliberately slow)."""
+    from .signals import DEFAULT_SIGNAL_STYLES, SIGNAL_LOW_BATTERY
+
+    return style_to_program(DEFAULT_SIGNAL_STYLES[SIGNAL_LOW_BATTERY], brightness)
 
 
-# Calendar warning glow: purple is deliberately outside every agent
-# state's color family (working cyan / done green / ask red-orange),
-# so "a meeting is about to start" can't be misread as agent status.
-CALENDAR_GLOW_PURPLE = "#A45CFF"
-CALENDAR_GLOW_BREATH_MS = 2600
+def style_to_program(
+    style,
+    brightness: int | float = 255,
+    *,
+    color: str | None = None,
+    led_count: int = 8,
+) -> str:
+    """The Signal Engine's ONE renderer: any SignalStyle -> device DSL.
+    ``color`` overrides the style's own (the notification signal passes
+    the notifying app's color). Every pattern emits whole-bar lines
+    except sweep (indexed chase); all durations/delays stay within the
+    firmware's 65535ms cap and the 512B/20-line program limits at every
+    legal speed (asserted by tests)."""
+    style = style.normalized()
+    hex_color = color or style.color
+    speed_ms = max(1, round(style.speed_seconds * 1000.0))
+    effective = normalize_brightness(brightness) * style.intensity
+
+    if style.pattern == "breathe":
+        body = f"off 400ms cosine\n{hex_color} {speed_ms}ms pulse\nrepeat"
+    elif style.pattern in ("blink", "double-blink"):
+        cycles = 3 if style.pattern == "blink" else 2
+        flash = max(1, round(speed_ms * 17 / 30))
+        gap = max(1, round(speed_ms * 13 / 30))
+        body = "\n".join([f"{hex_color} {flash}ms cosine\noff {gap}ms cosine"] * cycles)
+    elif style.pattern == "solid":
+        body = hex_color
+    elif style.pattern == "sweep":
+        duration = min(65535, max(1, round(speed_ms / 2)))
+        segments = "; ".join(
+            f"{index}:{hex_color} {duration}ms pulse "
+            f"{min(65535, round(index * speed_ms / max(1, led_count)))}ms"
+            for index in range(led_count)
+        )
+        body = f"off 300ms cosine\n{segments}\nrepeat"
+    else:  # pragma: no cover - normalized() forbids this
+        body = hex_color
+    return apply_brightness(body, effective)
 
 
 def calendar_glow_program(brightness: int | float = 255) -> str:
-    """Calm whole-bar purple breathe while a calendar event is about to
-    start -- same rhythm family as the low-battery reminder: a presence,
-    not an alarm. Whole-bar lines render identically on the Dot, the
-    Pro, and the Screen Bar."""
-    return apply_brightness(
-        f"off 400ms cosine\n{CALENDAR_GLOW_PURPLE} {CALENDAR_GLOW_BREATH_MS}ms pulse\nrepeat",
-        brightness,
-    )
+    """The calendar signal's DEFAULT style through the one renderer --
+    kept as a named helper for call sites and tests."""
+    from .signals import DEFAULT_SIGNAL_STYLES, SIGNAL_CALENDAR
+
+    return style_to_program(DEFAULT_SIGNAL_STYLES[SIGNAL_CALENDAR], brightness)
 
 
-NOTIFICATION_FLASH_MS = 170
-NOTIFICATION_GAP_MS = 130
-NOTIFICATION_BLINK_FLASHES = 3
-# Long enough for all three flashes plus a beat of dark before agent
-# status resumes; status_bar's display-kind override uses this too.
-NOTIFICATION_BLINK_SECONDS = (
-    NOTIFICATION_BLINK_FLASHES * (NOTIFICATION_FLASH_MS + NOTIFICATION_GAP_MS) / 1000.0 + 0.4
-)
+NOTIFICATION_BLINK_SECONDS = 3 * 0.3 + 0.4  # default blink style's hold
 
 
 def notification_blink_program(color: str, brightness: int | float = 255) -> str:
-    """Three quick whole-bar flashes in the notifying app's own color,
-    then dark -- status_bar reverts to the agent display when the blink
-    window closes, so this program deliberately does NOT repeat.
-    Whole-bar lines: identical on the Dot, the Pro, and the Screen Bar."""
-    flash = f"{color} {NOTIFICATION_FLASH_MS}ms cosine\noff {NOTIFICATION_GAP_MS}ms cosine"
-    return apply_brightness("\n".join([flash] * NOTIFICATION_BLINK_FLASHES), brightness)
+    """The notification signal's DEFAULT style (app color override)
+    through the one renderer."""
+    from .signals import DEFAULT_SIGNAL_STYLES, SIGNAL_NOTIFICATION
+
+    return style_to_program(
+        DEFAULT_SIGNAL_STYLES[SIGNAL_NOTIFICATION], brightness, color=color
+    )
 
 
 def apply_brightness(program: str, brightness: int | float = 255) -> str:
