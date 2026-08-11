@@ -74,7 +74,7 @@ WING_RISER_WIDTH = 6.0
 # In wings-only (Alcove) mode the bracket is SidePulse's entire visible
 # presence, so its horizontal stroke keeps at least this fraction of the
 # edge color all the way out to where it meets the riser.
-WINGS_ONLY_TAPER_FLOOR = 0.35
+WINGS_ONLY_TAPER_FLOOR = 0.55
 WING_RISER_SOLID_FRACTION = 0.45
 LED_BLEND_RADIUS_LEDS = 1.5
 BLEND_COLUMN_WIDTH = 2.0
@@ -171,7 +171,12 @@ def virtual_window_frame_for_screen(
     frame = screen.frame()
     notch_width = float(gap_width) if gap_width else slot_width_for_screen(screen)
     if wrap_menu_bar:
-        wing = float(wing_length) if wing_length is not None else wing_width_for_screen(screen, notch_width)
+        if wing_length is not None:
+            # A user-set wing can be short but never invisibly zero --
+            # a zero wing in bracket mode made the whole bar vanish.
+            wing = max(float(wing_length), WING_MIN_USABLE)
+        else:
+            wing = wing_width_for_screen(screen, notch_width)
     else:
         wing = 0.0
     # Never wider than the screen itself, whatever the user typed.
@@ -608,37 +613,50 @@ class VirtualLedView(NSView):
             )
 
     def _draw_wings_only(self):
-        """The Alcove-aware wrap: Alcove owns the notch shape and the
-        center of the bar, so SidePulse draws only the bracket -- the
-        horizontal wing glow plus the vertical risers -- and the window
-        geometry (see VirtualStatusDevice.reposition) places both wings
-        entirely OUTSIDE Alcove's own overlay window. No z-order fight:
-        Alcove keeps its near-maximum window level, and the bracket
-        simply isn't underneath it anymore."""
+        """The Alcove coexistence render: a continuous, unmissable LED
+        underline across the WHOLE bar -- through the gap, over the
+        bottom edge of Alcove's backdrop -- plus the wing glow and the
+        risers at each end. The earlier wings-only attempt drew nothing
+        in the gap and left only faint wing stubs; over Alcove's huge
+        dark backdrop that read as "the app disappeared". The underline
+        is the bar's identity now: always visible, colored by the live
+        agent state, and the risers turn it into the |____| bracket."""
         colors = self._colors_for_draw()
         width = self.bounds().size.width
         height = self.bounds().size.height
         notch_width, wing_offset = self._notch_geometry()
-        if wing_offset <= 0.0:
-            return
         led_width = notch_width / LED_COUNT
         glow_height = min(LED_GLOW_HEIGHT, max(0.0, height - LED_BAND_HEIGHT))
         cg_context = current_cg_context()
-        for x_start, x_end in ((0.0, wing_offset), (wing_offset + notch_width, width)):
-            NSGraphicsContext.saveGraphicsState()
-            NSBezierPath.bezierPathWithRect_(((x_start, 0.0), (x_end - x_start, height))).addClip()
-            self._fill_glow_row(
-                cg_context, colors, led_width, notch_width, glow_height, height,
-                x_start=x_start, x_end=x_end, wing_offset=wing_offset,
-                wing_taper_floor=WINGS_ONLY_TAPER_FLOOR,
-            )
-            NSGraphicsContext.restoreGraphicsState()
+
+        # The full-width underline: clip to the LED band (plus a whisper
+        # of bloom above it) so the gap region shows a clean bright line
+        # rather than the full-height glow that belongs to the wings.
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath.bezierPathWithRect_(((0.0, 0.0), (width, LED_BAND_HEIGHT + 3.0))).addClip()
+        self._fill_glow_row(
+            cg_context, colors, led_width, notch_width, glow_height, height,
+            x_start=0.0, x_end=width, wing_offset=wing_offset,
+            wing_taper_floor=WINGS_ONLY_TAPER_FLOOR,
+        )
+        NSGraphicsContext.restoreGraphicsState()
+
+        if wing_offset > 0.0:
+            for x_start, x_end in ((0.0, wing_offset), (wing_offset + notch_width, width)):
+                NSGraphicsContext.saveGraphicsState()
+                NSBezierPath.bezierPathWithRect_(((x_start, 0.0), (x_end - x_start, height))).addClip()
+                self._fill_glow_row(
+                    cg_context, colors, led_width, notch_width, glow_height, height,
+                    x_start=x_start, x_end=x_end, wing_offset=wing_offset,
+                    wing_taper_floor=WINGS_ONLY_TAPER_FLOOR,
+                )
+                NSGraphicsContext.restoreGraphicsState()
         left_edge_color = blended_led_color_at_x(colors, 0.0, led_width)
         right_edge_color = blended_led_color_at_x(colors, notch_width, led_width)
-        self._draw_wing_riser(cg_context, left_edge_color, 0.0, min(WING_RISER_WIDTH, wing_offset), height)
-        self._draw_wing_riser(
-            cg_context, right_edge_color, max(width - WING_RISER_WIDTH, wing_offset + notch_width), width, height
-        )
+        # Risers at the window's own ends, even with zero wing -- the
+        # bracket's uprights must never be able to vanish.
+        self._draw_wing_riser(cg_context, left_edge_color, 0.0, max(WING_RISER_WIDTH, min(WING_RISER_WIDTH, width)), height)
+        self._draw_wing_riser(cg_context, right_edge_color, width - WING_RISER_WIDTH, width, height)
 
     def _fill_glow_row(self, cg_context, colors, led_width, notch_width, glow_height, _height, *, x_start, x_end, wing_offset, wing_taper_floor=0.0):
         """Draws the 4-layer LED glow (bloom / soft falloff / core / hotline)

@@ -1500,17 +1500,34 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def setScreenBarGapWidth_(self, sender):
-        self.settings = self.settings.with_screen_bar_gap_width(float(sender.doubleValue()))
-        save_settings(self.settings)
-        self.reposition_virtual_status_device_now()
-        self.set_settings_message(f"Bar gap: {self.settings.screen_bar_gap_width:g} pt.")
+        self._apply_screen_bar_geometry_from_sliders(commit=not self._slider_event_is_drag())
 
     @objc.IBAction
     def setScreenBarWingLength_(self, sender):
-        self.settings = self.settings.with_screen_bar_wing_length(float(sender.doubleValue()))
+        self._apply_screen_bar_geometry_from_sliders(commit=not self._slider_event_is_drag())
+
+    def _slider_event_is_drag(self) -> bool:
+        event = NSApp.currentEvent()
+        return event is not None and event.type() == NSEventTypeLeftMouseDragged
+
+    def _apply_screen_bar_geometry_from_sliders(self, *, commit: bool) -> None:
+        """Live geometry while dragging (no disk writes per tick), the
+        settings save on release -- the same feel as the brightness
+        slider, so the bar visibly follows the thumb."""
+        gap_slider = self.settings_fields.get("screen_bar_gap_slider")
+        wing_slider = self.settings_fields.get("screen_bar_wing_slider")
+        if gap_slider is None or wing_slider is None:
+            return
+        gap = float(gap_slider.doubleValue())
+        wing = float(wing_slider.doubleValue())
+        if not commit:
+            self.virtual_status_device.set_geometry_overrides(gap, wing)
+            self.virtual_status_device.reposition()
+            return
+        self.settings = self.settings.with_screen_bar_gap_width(gap).with_screen_bar_wing_length(wing)
         save_settings(self.settings)
         self.reposition_virtual_status_device_now()
-        self.set_settings_message(f"Wing length: {self.settings.screen_bar_wing_length:g} pt.")
+        self.set_settings_message(f"Bar size: gap {gap:g} pt, wings {wing:g} pt.")
 
     @objc.IBAction
     def resetScreenBarGeometry_(self, _sender):
@@ -3850,7 +3867,12 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         else auto_wing
     )
     gap_slider = native_ui.make_slider(
-        min_value=140.0, max_value=900.0, value=float(gap_value), target=target, action="setScreenBarGapWidth:"
+        min_value=140.0,
+        max_value=900.0,
+        value=float(gap_value),
+        target=target,
+        action="setScreenBarGapWidth:",
+        continuous=True,
     )
     size_inner.addArrangedSubview_(
         native_ui.make_row(
@@ -3861,7 +3883,12 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         )
     )
     wing_slider = native_ui.make_slider(
-        min_value=0.0, max_value=300.0, value=float(wing_value), target=target, action="setScreenBarWingLength:"
+        min_value=24.0,
+        max_value=300.0,
+        value=max(24.0, float(wing_value)),
+        target=target,
+        action="setScreenBarWingLength:",
+        continuous=True,
     )
     size_inner.addArrangedSubview_(
         native_ui.make_row(
