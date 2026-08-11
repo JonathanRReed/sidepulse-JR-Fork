@@ -8395,6 +8395,124 @@ class SignalEngineTests(unittest.TestCase):
             )
 
 
+class EscalationTests(unittest.TestCase):
+    def test_stage_function_thresholds_and_tier_ceiling(self) -> None:
+        from sidepulse import signals
+
+        def stage(elapsed, tier="takeover"):
+            return signals.escalation_stage(
+                elapsed,
+                ramp_seconds=30.0,
+                menu_bar_seconds=120.0,
+                final_seconds=300.0,
+                tier=tier,
+            )
+
+        self.assertEqual(stage(None), 0)
+        self.assertEqual(stage(10.0), 0)
+        self.assertEqual(stage(30.0), 1)
+        self.assertEqual(stage(119.9), 1)
+        self.assertEqual(stage(120.0), 2)
+        self.assertEqual(stage(300.0), 3)
+        # The tier is a CEILING: quieter tiers never reach later stages.
+        self.assertEqual(stage(300.0, tier="light"), 1)
+        self.assertEqual(stage(300.0, tier="menu_bar"), 2)
+        self.assertEqual(stage(300.0, tier="chime"), 3)
+
+    def test_escalation_settings_round_trip_and_ordering(self) -> None:
+        configured = (
+            AgentMonitorSettings()
+            .with_escalation_tier("chime")
+            .with_escalation_thresholds(ramp_seconds=60, menu_bar_seconds=45, final_seconds=10)
+        )
+        # Thresholds can never be out of order: each floor is the prior.
+        self.assertEqual(configured.escalation_ramp_seconds, 60.0)
+        self.assertGreaterEqual(configured.escalation_menu_bar_seconds, 60.0)
+        self.assertGreaterEqual(
+            configured.escalation_final_seconds, configured.escalation_menu_bar_seconds
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            reloaded = load_settings(path)
+        self.assertEqual(reloaded.escalation_tier, "chime")
+        with self.assertRaises(ValueError):
+            AgentMonitorSettings().with_escalation_tier("shout")
+
+
+class EscalationControllerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        settings_path = Path(self._tmp.name) / "settings.json"
+        patcher_settings = patch("sidepulse.settings.default_settings_path", return_value=settings_path)
+        patcher_status_bar = patch("sidepulse.status_bar.default_settings_path", return_value=settings_path)
+        patcher_settings.start()
+        patcher_status_bar.start()
+        self.addCleanup(patcher_settings.stop)
+        self.addCleanup(patcher_status_bar.stop)
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+        self.status_bar = status_bar
+        self.controller = status_bar.StatusBarController.alloc().init()
+
+    def test_blocked_episode_tracking_and_flash_timer_lifecycle(self) -> None:
+        from sidepulse.models import AgentMode
+
+        self.controller.track_ask_blocked(AgentMode.WAITING_FOR_INPUT)
+        self.assertIsNotNone(self.controller.ask_blocked_since)
+        started = self.controller.ask_blocked_since
+        # Staying blocked keeps the ORIGINAL episode start.
+        self.controller.track_ask_blocked(AgentMode.BLOCKED_ERROR)
+        self.assertEqual(self.controller.ask_blocked_since, started)
+
+        # Age the episode past stage 2: the menu-bar flash timer starts.
+        self.controller.ask_blocked_since = time.monotonic() - 200.0
+        self.controller.apply_escalation()
+        self.assertGreaterEqual(self.controller.current_escalation_stage(), 2)
+        self.assertIsNotNone(self.controller.escalation_flash_timer)
+
+        # Any non-ask state ends the episode and stops the flash.
+        self.controller.track_ask_blocked(AgentMode.WORKING)
+        self.assertIsNone(self.controller.ask_blocked_since)
+        self.assertIsNone(self.controller.escalation_flash_timer)
+
+    def test_takeover_claims_the_top_of_the_precedence_order(self) -> None:
+        device = self.status_bar.StatusBarDevice(
+            device_id="SidePulsePro",
+            name="SidePulse Pro",
+            root=Path("/Volumes/SidePulsePro"),
+            target=Path("/Volumes/SidePulsePro/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        self.controller.settings = self.controller.settings.with_escalation_tier("takeover")
+        self.controller.ask_blocked_since = time.monotonic() - 400.0
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_ESCALATION,
+        )
+        program = self.controller.escalation_takeover_program(255)
+        self.assertIn("repeat", program)
+
+    def test_ramp_boosts_effective_brightness(self) -> None:
+        device = self.status_bar.StatusBarDevice(
+            device_id="SidePulsePro",
+            name="SidePulse Pro",
+            root=Path("/Volumes/SidePulsePro"),
+            target=Path("/Volumes/SidePulsePro/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        object.__setattr__(device, "brightness", 100) if hasattr(device, "__dataclass_fields__") else None
+        baseline = self.controller.effective_brightness_for_device(device)
+        self.controller.ask_blocked_since = time.monotonic() - 60.0
+        boosted = self.controller.effective_brightness_for_device(device)
+        self.assertGreater(boosted, baseline * 1.05)
+
+
 class CalendarAlertTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

@@ -105,6 +105,51 @@ DEFAULT_SIGNAL_STYLES: dict[str, SignalStyle] = {
 }
 
 
+# --- Ask escalation ---------------------------------------------------
+# How loud "an agent needs you" may get as it's ignored. Stages:
+#   0  fresh ask, normal rendering
+#   1  ramp: brightness boost on the light surfaces
+#   2  + menu-bar icon flash (catches full-screen apps)
+#   3  + the user's opt-in finale: a single chime, or a full takeover
+# The tier is the user's chosen CEILING; stages above it never fire.
+ESCALATION_TIER_LIGHT = "light"
+ESCALATION_TIER_MENU_BAR = "menu_bar"
+ESCALATION_TIER_CHIME = "chime"
+ESCALATION_TIER_TAKEOVER = "takeover"
+ESCALATION_TIERS = (
+    ESCALATION_TIER_LIGHT,
+    ESCALATION_TIER_MENU_BAR,
+    ESCALATION_TIER_CHIME,
+    ESCALATION_TIER_TAKEOVER,
+)
+_TIER_CEILING = {
+    ESCALATION_TIER_LIGHT: 1,
+    ESCALATION_TIER_MENU_BAR: 2,
+    ESCALATION_TIER_CHIME: 3,
+    ESCALATION_TIER_TAKEOVER: 3,
+}
+ESCALATION_RAMP_BRIGHTNESS_BOOST = 1.15
+
+
+def escalation_stage(
+    blocked_elapsed_seconds: float | None,
+    *,
+    ramp_seconds: float,
+    menu_bar_seconds: float,
+    final_seconds: float,
+    tier: str,
+) -> int:
+    """Pure: how escalated an ignored ask currently is (0-3)."""
+    if blocked_elapsed_seconds is None or blocked_elapsed_seconds < ramp_seconds:
+        return 0
+    stage = 1
+    if blocked_elapsed_seconds >= menu_bar_seconds:
+        stage = 2
+    if blocked_elapsed_seconds >= final_seconds:
+        stage = 3
+    return min(stage, _TIER_CEILING.get(tier, 2))
+
+
 def signal_hold_seconds(style: SignalStyle) -> float:
     """How long a MOMENT signal (notification/reminders) claims the bar
     for one firing: the pattern's full play time plus a settle beat."""

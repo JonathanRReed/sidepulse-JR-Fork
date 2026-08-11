@@ -252,6 +252,7 @@ STATUS_BAR_KEEPALIVE_VOLUME_NAMES = (
 LED_DISPLAY_LOW_BATTERY = "low_battery"
 LED_DISPLAY_NOTIFICATION = "notification"
 LED_DISPLAY_CALENDAR = "calendar"
+LED_DISPLAY_ESCALATION = "escalation"
 CALENDAR_WATCH_SECONDS = 30.0
 CALENDAR_WATCH_RETRY_SECONDS = 300.0
 # How often the Notification Center store is polled (one indexed
@@ -398,6 +399,14 @@ class StatusBarController(NSObject):
         # "idle since launch" if the real initial state turns out to be
         # something else once the first real snapshot arrives.
         self.idle_since_monotonic: float | None = None
+        # Ask escalation: when the aggregate first entered ask/blocked
+        # (None = not blocked), the last applied stage, the menu-bar
+        # flash timer, and whether this block episode already chimed.
+        self.ask_blocked_since: float | None = None
+        self.escalation_last_stage = 0
+        self.escalation_flash_timer = None
+        self.escalation_flash_on = False
+        self.escalation_chimed = False
         self.led_controller = AgentLedController()
         self.battery_led_controller = BatteryLedController()
         self.agent_led_controllers_by_device = {}
@@ -526,6 +535,10 @@ class StatusBarController(NSObject):
                 needs_refresh = True
             self.last_watched_focus_scale = scale
 
+        # Escalation stages advance with TIME, not events -- this shared
+        # watcher tick is what promotes an ignored ask to the next stage.
+        self.apply_escalation(allow_refresh=True)
+
         if needs_refresh:
             self.refresh_(None)
 
@@ -629,6 +642,7 @@ class StatusBarController(NSObject):
         battery_snapshot = self.read_battery_snapshot()
         state = state_for_mode(snapshot.aggregate.mode)
         self.observe_connected_devices()
+        self.track_ask_blocked(snapshot.aggregate.mode)
         self.set_status(state)
         self.sync_keep_awake(snapshot.aggregate.mode)
         self.sync_leds(
@@ -1257,6 +1271,102 @@ class StatusBarController(NSObject):
         self.stop_event_server()
         self.closed_lid_awake.release()
         self.keep_awake.release()
+
+    # --- Ask escalation ------------------------------------------------
+
+    def track_ask_blocked(self, mode: AgentMode) -> None:
+        """Marks when the aggregate first entered ask/blocked; clears
+        the episode (and its one-chime latch) on any other state."""
+        if mode in (AgentMode.WAITING_FOR_INPUT, AgentMode.BLOCKED_ERROR):
+            if self.ask_blocked_since is None:
+                self.ask_blocked_since = time.monotonic()
+                self.escalation_chimed = False
+        else:
+            self.ask_blocked_since = None
+        self.apply_escalation()
+
+    def current_escalation_stage(self) -> int:
+        elapsed = (
+            time.monotonic() - self.ask_blocked_since
+            if self.ask_blocked_since is not None
+            else None
+        )
+        return signals_module.escalation_stage(
+            elapsed,
+            ramp_seconds=self.settings.escalation_ramp_seconds,
+            menu_bar_seconds=self.settings.escalation_menu_bar_seconds,
+            final_seconds=self.settings.escalation_final_seconds,
+            tier=self.settings.escalation_tier,
+        )
+
+    def apply_escalation(self, *, allow_refresh: bool = False) -> None:
+        """Starts/stops the stage-2 menu-bar flash, fires the stage-3
+        chime once per episode, and (when invoked from the watcher tick,
+        where recursion is impossible) triggers a resync so stage
+        changes reach the light surfaces promptly."""
+        stage = self.current_escalation_stage()
+        changed = stage != self.escalation_last_stage
+        self.escalation_last_stage = stage
+
+        if stage >= 2:
+            if self.escalation_flash_timer is None:
+                self.escalation_flash_timer = (
+                    NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                        0.6, self, "escalationFlashTick:", None, True
+                    )
+                )
+        elif self.escalation_flash_timer is not None:
+            self.escalation_flash_timer.invalidate()
+            self.escalation_flash_timer = None
+            self.escalation_flash_on = False
+            # Restore the honest title/icon.
+            self.set_status(self.current_state)
+
+        if (
+            stage >= 3
+            and self.settings.escalation_tier == signals_module.ESCALATION_TIER_CHIME
+            and not self.escalation_chimed
+        ):
+            self.escalation_chimed = True
+            try:
+                from AppKit import NSSound
+
+                sound = NSSound.soundNamed_("Glass")
+                if sound is not None:
+                    sound.play()
+            except Exception:
+                pass
+
+        if changed and allow_refresh:
+            self.refresh_(None)
+
+    @objc.IBAction
+    def escalationFlashTick_(self, _timer):
+        if self.status_item is None:
+            return
+        button = self.status_item.button()
+        if button is None:
+            return
+        self.escalation_flash_on = not self.escalation_flash_on
+        if self.escalation_flash_on:
+            button.setTitle_(f" {STATE_ASK.label}")
+            button.setImage_(image_for_symbol(STATE_ASK.symbol, STATE_ASK.label))
+        else:
+            button.setTitle_("")
+            button.setImage_(image_for_symbol(self.current_state.symbol, self.current_state.label))
+
+    def escalation_takeover_program(self, brightness: int | float) -> str:
+        """Fast full-bar strobe in the ask color -- the opt-in "don't
+        let me miss this" finale."""
+        ask_color = self.settings.colors.mode_colors.get("ask", "#FF3A00")
+        style = signals_module.SignalStyle(ask_color, signals_module.PATTERN_BREATHE, 0.45, 1.0)
+        return style_to_program(style, brightness)
+
+    def escalation_takeover_active(self) -> bool:
+        return (
+            self.settings.escalation_tier == signals_module.ESCALATION_TIER_TAKEOVER
+            and self.current_escalation_stage() >= 3
+        )
 
     def set_status(self, state: StatusBarState) -> None:
         previous = self.current_state
@@ -2821,7 +2931,16 @@ class StatusBarController(NSObject):
                 base = display_brightness.auto_led_brightness()
             except display_brightness.DisplayBrightnessUnavailableError:
                 base = device.brightness
-        return normalize_brightness(base * self.idle_dim_scale_factor() * self.focus_sync_scale_factor())
+        # Escalation stage >= 1: an ignored ask pushes THROUGH dimming --
+        # a ramp that idle-dim could cancel out wouldn't be a ramp.
+        boost = (
+            signals_module.ESCALATION_RAMP_BRIGHTNESS_BOOST
+            if self.current_escalation_stage() >= 1
+            else 1.0
+        )
+        return normalize_brightness(
+            base * self.idle_dim_scale_factor() * self.focus_sync_scale_factor() * boost
+        )
 
     def idle_dim_scale_factor(self) -> float:
         """1.0 normally; idle_dim_fraction once idle_dim_after_minutes of
@@ -3015,6 +3134,9 @@ class StatusBarController(NSObject):
         # the always-active default.
         now = time.monotonic()
         claims = (
+            # Opt-in stage-3 takeover outranks everything: the user
+            # explicitly chose "don't let me miss this".
+            (LED_DISPLAY_ESCALATION, self.escalation_takeover_active),
             (LED_DISPLAY_LOW_BATTERY, lambda: self.low_power_active(battery_snapshot)),
             (
                 LED_DISPLAY_NOTIFICATION,
@@ -3126,7 +3248,11 @@ class StatusBarController(NSObject):
         # any of them.
         brightness = self.effective_brightness_for_device(device)
         display = self.active_led_display_kind_for_device(device, battery_snapshot)
-        if display == LED_DISPLAY_NOTIFICATION and self.notification_blink_color:
+        if display == LED_DISPLAY_ESCALATION:
+            self.virtual_status_device.set_program(
+                self.escalation_takeover_program(brightness), started_at=started_at
+            )
+        elif display == LED_DISPLAY_NOTIFICATION and self.notification_blink_color:
             self.virtual_status_device.set_program(
                 style_to_program(
                     self.settings.signal_style(signals_module.SIGNAL_NOTIFICATION),
@@ -3255,7 +3381,18 @@ class StatusBarController(NSObject):
                 self.reset_led_controllers_for_device(device.device_id)
                 self.last_led_display_kind_by_device[device.device_id] = device_display_kind
 
-            if device_display_kind == LED_DISPLAY_NOTIFICATION and self.notification_blink_color:
+            if device_display_kind == LED_DISPLAY_ESCALATION:
+                controller = self.agent_controller_for_device(device)
+                result = controller.sync_program(
+                    self.escalation_takeover_program(controller.brightness),
+                    LedDisplayState.ASK,
+                )
+                label = f"{device.name} Needs you (takeover)"
+                if result.error:
+                    agent_write_failed = True
+                elif result.changed:
+                    agent_write_changed = True
+            elif device_display_kind == LED_DISPLAY_NOTIFICATION and self.notification_blink_color:
                 controller = self.agent_controller_for_device(device)
                 result = controller.sync_program(
                     style_to_program(

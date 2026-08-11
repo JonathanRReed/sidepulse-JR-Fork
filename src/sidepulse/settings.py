@@ -188,6 +188,12 @@ class AgentMonitorSettings:
     # Per-signal look overrides (Signal Engine). Keys/values validated
     # by signals.SignalStyle; absent keys mean the built-in defaults.
     signal_styles: dict[str, dict] = field(default_factory=dict)
+    # Ask escalation: how loud an ignored "agent needs you" may get
+    # (the tier is a ceiling) and when each stage kicks in.
+    escalation_tier: str = "menu_bar"
+    escalation_ramp_seconds: float = 30.0
+    escalation_menu_bar_seconds: float = 120.0
+    escalation_final_seconds: float = 300.0
     session_open_preferences: dict[str, str] = field(default_factory=dict)
     setup_screen_completed: bool = False
     colors: ColorSettings = field(default_factory=ColorSettings.defaults)
@@ -621,6 +627,36 @@ class AgentMonitorSettings:
     def with_calendar_lead_minutes(self, minutes: float) -> "AgentMonitorSettings":
         return replace(self, calendar_lead_minutes=max(1.0, min(60.0, float(minutes))))
 
+    def with_escalation_tier(self, tier: str) -> "AgentMonitorSettings":
+        from .signals import ESCALATION_TIERS
+
+        if tier not in ESCALATION_TIERS:
+            raise ValueError(f"Unknown escalation tier: {tier}")
+        return replace(self, escalation_tier=tier)
+
+    def with_escalation_thresholds(
+        self,
+        ramp_seconds: float | None = None,
+        menu_bar_seconds: float | None = None,
+        final_seconds: float | None = None,
+    ) -> "AgentMonitorSettings":
+        def clamp(value, low, high):
+            return max(low, min(high, float(value)))
+
+        ramp = clamp(ramp_seconds, 5.0, 600.0) if ramp_seconds is not None else self.escalation_ramp_seconds
+        menu = clamp(menu_bar_seconds, ramp, 1800.0) if menu_bar_seconds is not None else max(
+            self.escalation_menu_bar_seconds, ramp
+        )
+        final = clamp(final_seconds, menu, 3600.0) if final_seconds is not None else max(
+            self.escalation_final_seconds, menu
+        )
+        return replace(
+            self,
+            escalation_ramp_seconds=ramp,
+            escalation_menu_bar_seconds=menu,
+            escalation_final_seconds=final,
+        )
+
     def signal_style(self, key: str):
         """The effective SignalStyle for a signal: the user's override
         merged over the built-in default."""
@@ -696,6 +732,10 @@ class AgentMonitorSettings:
             "calendar_alerts_enabled": self.calendar_alerts_enabled,
             "calendar_lead_minutes": self.calendar_lead_minutes,
             "signal_styles": dict(sorted(self.signal_styles.items())),
+            "escalation_tier": self.escalation_tier,
+            "escalation_ramp_seconds": self.escalation_ramp_seconds,
+            "escalation_menu_bar_seconds": self.escalation_menu_bar_seconds,
+            "escalation_final_seconds": self.escalation_final_seconds,
             "session_open_preferences": dict(sorted(self.session_open_preferences.items())),
             "setup_screen_completed": self.setup_screen_completed,
             "colors": self.colors.to_dict(),
@@ -730,6 +770,14 @@ def _hex_color(raw: object) -> str | None:
     if re.fullmatch(r"#?[0-9a-fA-F]{6}", value):
         return "#" + value.lstrip("#").upper()
     return None
+
+
+def _escalation_tier(raw: object) -> str:
+    from .signals import ESCALATION_TIERS
+
+    if isinstance(raw, str) and raw in ESCALATION_TIERS:
+        return raw
+    return "menu_bar"
 
 
 def _signal_styles(raw: object) -> dict[str, dict]:
@@ -857,6 +905,16 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             1.0, min(60.0, _float_setting(data.get("calendar_lead_minutes"), 5.0))
         ),
         signal_styles=_signal_styles(data.get("signal_styles")),
+        escalation_tier=_escalation_tier(data.get("escalation_tier")),
+        escalation_ramp_seconds=max(
+            5.0, min(600.0, _float_setting(data.get("escalation_ramp_seconds"), 30.0))
+        ),
+        escalation_menu_bar_seconds=max(
+            5.0, min(1800.0, _float_setting(data.get("escalation_menu_bar_seconds"), 120.0))
+        ),
+        escalation_final_seconds=max(
+            5.0, min(3600.0, _float_setting(data.get("escalation_final_seconds"), 300.0))
+        ),
         session_open_preferences=_session_open_preferences(data.get("session_open_preferences")),
         setup_screen_completed=_bool_setting(data.get("setup_screen_completed"), False),
         colors=ColorSettings.from_dict(data.get("colors")),
