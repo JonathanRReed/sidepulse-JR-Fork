@@ -22,8 +22,10 @@ try:
         NSBezelStyleRounded,
         NSButton,
         NSButtonTypeSwitch,
+        NSClickGestureRecognizer,
         NSColor,
         NSColorPanel,
+        NSColorWell,
         NSCompositingOperationSourceOver,
         NSEventTypeLeftMouseDragged,
         NSFont,
@@ -940,6 +942,149 @@ class StatusBarController(NSObject):
                 "Privacy & Security → Calendars."
             )
 
+    # --- Signal style cards --------------------------------------------
+
+    def _current_signal_style(self, key: str):
+        return self.settings.signal_style(key)
+
+    def _save_signal_style(self, key: str, style) -> None:
+        self.settings = self.settings.with_signal_style(key, style)
+        save_settings(self.settings)
+        self.refresh_signal_card(key)
+        self.refresh_(None)
+
+    def refresh_signal_card(self, key: str) -> None:
+        """Re-renders one card's thumbnails, preview, and selection ring
+        from the saved style."""
+        style = self.settings.signal_style(key)
+        preview_color = _signal_preview_color(self, key)
+        thumbs = self.settings_fields.get(f"signal_thumbs:{key}")
+        if isinstance(thumbs, dict):
+            for pattern, thumb in thumbs.items():
+                preview_style = signals_module.SignalStyle(
+                    style.color, pattern, style.speed_seconds, style.intensity
+                )
+                thumb.setProgram_(style_to_program(preview_style, 255, color=preview_color))
+            _apply_thumb_selection(thumbs, style.pattern)
+        preview = self.settings_fields.get(f"signal_preview:{key}")
+        if preview is not None:
+            preview.setProgram_(style_to_program(style, 255, color=preview_color))
+        well = self.settings_fields.get(f"signal_color:{key}")
+        if well is not None:
+            well.setColor_(nscolor_from_hex(style.color))
+
+    @objc.IBAction
+    def setSignalColor_(self, sender):
+        key = str(sender.identifier() or "")
+        if key not in signals_module.DEFAULT_SIGNAL_STYLES:
+            return
+        style = self._current_signal_style(key)
+        new_color = hex_from_nscolor(sender.color())
+        self._save_signal_style(
+            key,
+            signals_module.SignalStyle(
+                new_color, style.pattern, style.speed_seconds, style.intensity
+            ),
+        )
+
+    @objc.IBAction
+    def selectSignalPattern_(self, recognizer):
+        view = recognizer.view()
+        key = getattr(view, "signal_card_key", None)
+        pattern = getattr(view, "signal_card_pattern", None)
+        if not key or not pattern:
+            return
+        style = self._current_signal_style(key)
+        self._save_signal_style(
+            key,
+            signals_module.SignalStyle(
+                style.color, pattern, style.speed_seconds, style.intensity
+            ),
+        )
+        self.set_settings_message(f"{key.replace('_', ' ').title()}: {pattern} pattern.")
+
+    @objc.IBAction
+    def setSignalSpeed_(self, sender):
+        key = str(sender.identifier() or "")
+        if key not in signals_module.DEFAULT_SIGNAL_STYLES:
+            return
+        style = self._current_signal_style(key)
+        self._save_signal_style(
+            key,
+            signals_module.SignalStyle(
+                style.color, style.pattern, float(sender.doubleValue()), style.intensity
+            ),
+        )
+
+    @objc.IBAction
+    def setSignalIntensity_(self, sender):
+        key = str(sender.identifier() or "")
+        if key not in signals_module.DEFAULT_SIGNAL_STYLES:
+            return
+        style = self._current_signal_style(key)
+        self._save_signal_style(
+            key,
+            signals_module.SignalStyle(
+                style.color, style.pattern, style.speed_seconds, float(sender.doubleValue())
+            ),
+        )
+
+    @objc.IBAction
+    def setEscalationTier_(self, sender):
+        item = sender.selectedItem()
+        tier = str(item.representedObject() or "") if item is not None else ""
+        try:
+            self.settings = self.settings.with_escalation_tier(tier)
+        except ValueError:
+            return
+        save_settings(self.settings)
+        self.apply_escalation()
+        self.set_settings_message(f"Escalation ceiling: {item.title()}.")
+
+    @objc.IBAction
+    def applyEscalationThresholds_(self, _sender):
+        def read(field_key, fallback):
+            field = self.settings_fields.get(field_key)
+            if field is None:
+                return fallback
+            try:
+                return float(str(field.stringValue()).strip())
+            except ValueError:
+                return fallback
+
+        self.settings = self.settings.with_escalation_thresholds(
+            ramp_seconds=read("escalation_ramp_field", self.settings.escalation_ramp_seconds),
+            menu_bar_seconds=read(
+                "escalation_menu_bar_field", self.settings.escalation_menu_bar_seconds
+            ),
+            final_seconds=read("escalation_final_field", self.settings.escalation_final_seconds),
+        )
+        save_settings(self.settings)
+        for field_key, value in (
+            ("escalation_ramp_field", self.settings.escalation_ramp_seconds),
+            ("escalation_menu_bar_field", self.settings.escalation_menu_bar_seconds),
+            ("escalation_final_field", self.settings.escalation_final_seconds),
+        ):
+            field = self.settings_fields.get(field_key)
+            if field is not None:
+                field.setStringValue_(f"{value:g}")
+        self.apply_escalation()
+        self.set_settings_message("Escalation timing saved.")
+
+    @objc.IBAction
+    def redrawSignalPreviews_(self, _timer):
+        if self.settings_window is None or not self.settings_window.isVisible():
+            if getattr(self, "signal_preview_timer", None) is not None:
+                self.signal_preview_timer.invalidate()
+                self.signal_preview_timer = None
+            return
+        for field_key, view in self.settings_fields.items():
+            if field_key.startswith("signal_preview:"):
+                view.setNeedsDisplay_(True)
+            elif field_key.startswith("signal_thumbs:") and isinstance(view, dict):
+                for thumb in view.values():
+                    thumb.setNeedsDisplay_(True)
+
     @objc.IBAction
     def toggleReminderAlerts_(self, sender):
         enabled = bool(sender.state())
@@ -1612,6 +1757,15 @@ class StatusBarController(NSObject):
                     NSIndexSet.indexSetWithIndex_(0), False
                 )
         self.refresh_settings_window()
+        # Animate the Signals pane's pattern thumbnails and previews
+        # while the window is visible (self-invalidating on close, same
+        # pattern as the welcome demo timer).
+        if getattr(self, "signal_preview_timer", None) is None:
+            self.signal_preview_timer = (
+                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    1.0 / 30.0, self, "redrawSignalPreviews:", None, True
+                )
+            )
         self.settings_window.makeKeyAndOrderFront_(None)
         NSApp.activateIgnoringOtherApps_(True)
 
@@ -4361,7 +4515,7 @@ SETTINGS_SIDEBAR_ITEMS: tuple[tuple[str, str], ...] = (
     ("devices", "Devices"),
     ("colors_screen_bar", "Colors & Screen Bar"),
     ("agents", "Agents"),
-    ("led_behavior", "LED Behavior"),
+    ("led_behavior", "Signals"),
     ("power", "Power"),
     ("lid_animations", "Lid Animations"),
     ("debug", "Debug"),
@@ -4728,6 +4882,132 @@ def _build_power_pane(target: StatusBarController):
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
+# Style cards: every signal is edited BY EYE -- a color well, pattern
+# thumbnails that ANIMATE their pattern live, continuous sliders, and a
+# live preview strip rendering exactly what the Screen Bar will show.
+SIGNAL_STYLE_CARDS: tuple[tuple[str, str, bool], ...] = (
+    ("low_battery", "Low Battery Style", True),
+    ("notification", "Notification Style", False),
+    ("reminders", "Reminder Style", True),
+    ("calendar", "Calendar Style", True),
+)
+SIGNAL_THUMB_SIZE = (52.0, 20.0)
+SIGNAL_PREVIEW_SIZE = (220.0, 22.0)
+ESCALATION_TIER_LABELS: tuple[tuple[str, str], ...] = (
+    ("Light ramp only", "light"),
+    ("Ramp + menu bar flash", "menu_bar"),
+    ("Ramp + flash + one chime", "chime"),
+    ("Full takeover", "takeover"),
+)
+
+
+def _signal_preview_color(target: StatusBarController, key: str) -> str | None:
+    """The color previews render with -- the notification signal has no
+    color of its own (the app's color is the meaning), so previews use
+    its first configured app color."""
+    if key != "notification":
+        return None
+    colors = list(target.settings.notification_app_colors.values())
+    return colors[0] if colors else "#34C759"
+
+
+def _mini_led_view(width: float, height: float):
+    view = VirtualLedView.alloc().initWithFrame_(((0, 0), (width, height)))
+    view.setHasNotch_(False)
+    view.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    native_ui.constrain_width(view, width)
+    native_ui.constrain_height(view, height)
+    view.setWantsLayer_(True)
+    layer = view.layer()
+    if layer is not None:
+        layer.setCornerRadius_(5.0)
+        layer.setMasksToBounds_(True)
+    return view
+
+
+def _apply_thumb_selection(thumbs: dict, selected_pattern: str) -> None:
+    for pattern, thumb in thumbs.items():
+        layer = thumb.layer()
+        if layer is None:
+            continue
+        if pattern == selected_pattern:
+            layer.setBorderWidth_(2.0)
+            layer.setBorderColor_(NSColor.controlAccentColor().CGColor())
+        else:
+            layer.setBorderWidth_(0.0)
+
+
+def make_signal_style_card(target: StatusBarController, key: str, title: str, *, show_color: bool, fields: dict):
+    outer, inner = native_ui.make_card(title)
+    style = target.settings.signal_style(key)
+
+    if show_color:
+        well = NSColorWell.alloc().init()
+        well.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        well.setColor_(nscolor_from_hex(style.color))
+        well.setTarget_(target)
+        well.setAction_("setSignalColor:")
+        well.setIdentifier_(key)
+        native_ui.constrain_width(well, 44.0)
+        native_ui.constrain_height(well, 24.0)
+        inner.addArrangedSubview_(native_ui.make_row("Color", well))
+        native_ui.add_separator(inner)
+        fields[f"signal_color:{key}"] = well
+
+    preview_color = _signal_preview_color(target, key)
+    thumbs: dict[str, object] = {}
+    thumb_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    for pattern in signals_module.SIGNAL_PATTERNS:
+        thumb = _mini_led_view(*SIGNAL_THUMB_SIZE)
+        thumb.setToolTip_(pattern.replace("-", " ").title())
+        preview_style = signals_module.SignalStyle(
+            style.color, pattern, style.speed_seconds, style.intensity
+        )
+        thumb.setProgram_(style_to_program(preview_style, 255, color=preview_color))
+        thumb.signal_card_key = key
+        thumb.signal_card_pattern = pattern
+        recognizer = NSClickGestureRecognizer.alloc().initWithTarget_action_(
+            target, "selectSignalPattern:"
+        )
+        thumb.addGestureRecognizer_(recognizer)
+        thumbs[pattern] = thumb
+        thumb_row.addArrangedSubview_(thumb)
+    _apply_thumb_selection(thumbs, style.pattern)
+    inner.addArrangedSubview_(native_ui.make_row("Pattern", thumb_row))
+    native_ui.add_separator(inner)
+    fields[f"signal_thumbs:{key}"] = thumbs
+
+    speed = native_ui.make_slider(
+        min_value=signals_module.MIN_SPEED_SECONDS,
+        max_value=signals_module.MAX_SPEED_SECONDS,
+        value=style.speed_seconds,
+        target=target,
+        action="setSignalSpeed:",
+        identifier=key,
+        continuous=True,
+    )
+    inner.addArrangedSubview_(native_ui.make_row("Speed", speed, fill_control=True))
+    fields[f"signal_speed:{key}"] = speed
+    intensity = native_ui.make_slider(
+        min_value=signals_module.MIN_INTENSITY,
+        max_value=signals_module.MAX_INTENSITY,
+        value=style.intensity,
+        target=target,
+        action="setSignalIntensity:",
+        identifier=key,
+        continuous=True,
+    )
+    inner.addArrangedSubview_(native_ui.make_row("Intensity", intensity, fill_control=True))
+    fields[f"signal_intensity:{key}"] = intensity
+    native_ui.add_separator(inner)
+
+    preview = _mini_led_view(*SIGNAL_PREVIEW_SIZE)
+    preview.setProgram_(style_to_program(style, 255, color=preview_color))
+    inner.addArrangedSubview_(native_ui.make_row("Preview", preview))
+    fields[f"signal_preview:{key}"] = preview
+    return outer
+
+
 def _build_led_behavior_pane(target: StatusBarController):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
     outer, inner = native_ui.make_card("Dimming")
@@ -4904,6 +5184,42 @@ def _build_led_behavior_pane(target: StatusBarController):
     cal_inner.addArrangedSubview_(rem_row)
     stack.addArrangedSubview_(cal_outer)
     fields["calendar_lead_field"] = lead_field
+
+    # Needs-you escalation: how loud an ignored ask may get.
+    esc_outer, esc_inner = native_ui.make_card("Needs-You Escalation")
+    tier_popup = native_ui.make_popup_button(target, "setEscalationTier:")
+    for label, tier_key in ESCALATION_TIER_LABELS:
+        tier_popup.addItemWithTitle_(label)
+        item = tier_popup.lastItem()
+        item.setRepresentedObject_(tier_key)
+        if tier_key == target.settings.escalation_tier:
+            tier_popup.selectItem_(item)
+    esc_inner.addArrangedSubview_(native_ui.make_row("Ceiling", tier_popup))
+    fields["escalation_tier_popup"] = tier_popup
+    native_ui.add_separator(esc_inner)
+    threshold_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
+    for field_key, seconds, suffix in (
+        ("escalation_ramp_field", target.settings.escalation_ramp_seconds, "s ramp,"),
+        ("escalation_menu_bar_field", target.settings.escalation_menu_bar_seconds, "s flash,"),
+        ("escalation_final_field", target.settings.escalation_final_seconds, "s finale"),
+    ):
+        threshold_field = native_ui.make_field(
+            f"{seconds:g}", target=target, action="applyEscalationThresholds:"
+        )
+        native_ui.constrain_width(threshold_field, 52.0)
+        threshold_controls.addArrangedSubview_(threshold_field)
+        threshold_controls.addArrangedSubview_(native_ui.make_label(suffix, secondary=True))
+        fields[field_key] = threshold_field
+    esc_inner.addArrangedSubview_(native_ui.make_row("After", threshold_controls))
+    stack.addArrangedSubview_(esc_outer)
+
+    # Style cards: pick every signal's look by eye.
+    for signal_key, card_title, show_color in SIGNAL_STYLE_CARDS:
+        stack.addArrangedSubview_(
+            make_signal_style_card(
+                target, signal_key, card_title, show_color=show_color, fields=fields
+            )
+        )
 
     buttons = {
         "idle_dim_enabled": idle_switch,

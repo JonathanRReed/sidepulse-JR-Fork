@@ -8415,6 +8415,61 @@ class SignalEngineTests(unittest.TestCase):
             )
 
 
+class SignalStyleCardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        settings_path = Path(self._tmp.name) / "settings.json"
+        patcher_settings = patch("sidepulse.settings.default_settings_path", return_value=settings_path)
+        patcher_status_bar = patch("sidepulse.status_bar.default_settings_path", return_value=settings_path)
+        patcher_settings.start()
+        patcher_status_bar.start()
+        self.addCleanup(patcher_settings.stop)
+        self.addCleanup(patcher_status_bar.stop)
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+        self.status_bar = status_bar
+        self.controller = status_bar.StatusBarController.alloc().init()
+        self.controller.show_settings_window()
+
+    def tearDown(self) -> None:
+        timer = getattr(self.controller, "signal_preview_timer", None)
+        if timer is not None:
+            timer.invalidate()
+
+    def test_every_signal_gets_a_full_style_card(self) -> None:
+        from sidepulse import signals
+
+        for key, _title, show_color in self.status_bar.SIGNAL_STYLE_CARDS:
+            thumbs = self.controller.settings_fields.get(f"signal_thumbs:{key}")
+            self.assertIsInstance(thumbs, dict, key)
+            self.assertEqual(set(thumbs), set(signals.SIGNAL_PATTERNS), key)
+            self.assertIsNotNone(self.controller.settings_fields.get(f"signal_preview:{key}"))
+            self.assertIsNotNone(self.controller.settings_fields.get(f"signal_speed:{key}"))
+            self.assertIsNotNone(self.controller.settings_fields.get(f"signal_intensity:{key}"))
+            if show_color:
+                self.assertIsNotNone(self.controller.settings_fields.get(f"signal_color:{key}"))
+            else:
+                self.assertIsNone(self.controller.settings_fields.get(f"signal_color:{key}"))
+
+    def test_speed_slider_saves_the_style_and_updates_the_preview(self) -> None:
+        slider = self.controller.settings_fields.get("signal_speed:calendar")
+        slider.setDoubleValue_(4.2)
+        self.controller.setSignalSpeed_(slider)
+        self.assertAlmostEqual(
+            self.controller.settings.signal_style("calendar").speed_seconds, 4.2, places=5
+        )
+
+    def test_escalation_controls_exist_and_apply(self) -> None:
+        self.assertIsNotNone(self.controller.settings_fields.get("escalation_tier_popup"))
+        field = self.controller.settings_fields.get("escalation_ramp_field")
+        field.setStringValue_("45")
+        self.controller.applyEscalationThresholds_(None)
+        self.assertEqual(self.controller.settings.escalation_ramp_seconds, 45.0)
+
+
 class IdentityColorTests(unittest.TestCase):
     def test_assignment_is_deterministic_and_collision_free(self) -> None:
         from sidepulse.colors import IDENTITY_PALETTE, identity_colors_for_agents
