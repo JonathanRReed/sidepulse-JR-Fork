@@ -1150,6 +1150,67 @@ class AgentMonitorTests(unittest.TestCase):
         view.setCompactMode_(True)
         view._draw_compact_accent()
 
+    def test_wing_glow_reaches_the_wings_actual_edge(self) -> None:
+        # Regression guard: glow_color_for_column used to sample wing
+        # columns with blended_led_color_at_x's own inter-LED blend
+        # radius, which is sized for blending between neighboring LEDs a
+        # few points apart -- on a wide wing that faded to nothing tens
+        # of points before the wing's actual (much larger) assigned
+        # width, reading as "the glow doesn't extend to the edges" even
+        # though the window itself was genuinely that wide.
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        colors = virtual_device.virtual_led_colors(virtual_device.LedDisplayState.DONE, 0.0, 255)
+        notch_width = 200.0
+        wing_offset = 90.0  # wider than blended_led_color_at_x's own blend radius here
+        led_width = notch_width / virtual_device.LED_COUNT
+
+        at_notch_edge = virtual_device.glow_color_for_column(colors, led_width, notch_width, wing_offset, 89.0)
+        deep_in_wing = virtual_device.glow_color_for_column(colors, led_width, notch_width, wing_offset, 20.0)
+        at_wing_edge = virtual_device.glow_color_for_column(colors, led_width, notch_width, wing_offset, 0.0)
+        past_wing_edge = virtual_device.glow_color_for_column(colors, led_width, notch_width, wing_offset, -5.0)
+
+        self.assertGreater(at_notch_edge[3], 0.5, "glow should still be strong right at the notch's own edge")
+        self.assertGreater(deep_in_wing[3], 0.0, "glow should still be visible most of the way into the wing")
+        self.assertAlmostEqual(at_wing_edge[3], 0.0, delta=0.01)
+        self.assertEqual(past_wing_edge[3], 0.0)
+
+    def test_glow_color_for_column_matches_plain_blend_with_no_wing(self) -> None:
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        colors = virtual_device.virtual_led_colors(virtual_device.LedDisplayState.WORKING, 0.0, 255)
+        notch_width = 200.0
+        led_width = notch_width / virtual_device.LED_COUNT
+
+        for x in (0.0, 50.0, 100.0, 199.0):
+            self.assertEqual(
+                virtual_device.glow_color_for_column(colors, led_width, notch_width, 0.0, x),
+                virtual_device.blended_led_color_at_x(colors, x, led_width),
+            )
+
+    def test_preview_white_brightness_scales_all_leds_evenly(self) -> None:
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (220.0, 37.0)))
+        view.setPreviewWhiteBrightness_(128)
+
+        self.assertEqual(len(view.fixed_colors), virtual_device.LED_COUNT)
+        red, green, blue, alpha = view.fixed_colors[0]
+        self.assertEqual(red, green)
+        self.assertEqual(green, blue)
+        self.assertEqual(blue, alpha)
+        self.assertGreater(red, 0.0)
+        self.assertTrue(all(c == view.fixed_colors[0] for c in view.fixed_colors))
+
     def test_settings_persist_wraps_menu_bar_flag(self) -> None:
         settings = AgentMonitorSettings().with_virtual_status_device_wraps_menu_bar(True)
         self.assertTrue(settings.virtual_status_device_wraps_menu_bar)
@@ -7338,8 +7399,50 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         # you'd actually adjust often.
         self.controller.show_settings_window()
         for controls in self.controller.device_settings_controls.values():
-            for key in ("brightness_slider", "brightness_label", "calibrate_button", "calibration_label"):
+            for key in ("brightness_slider", "brightness_label", "brightness_dots", "calibrate_button", "calibration_label"):
                 self.assertIn(key, controls)
+
+    def test_brightness_preview_has_one_dot_per_led(self) -> None:
+        # The slider alone is a control, not a preview of its own effect
+        # -- one dot per real LED shows how bright the device will
+        # actually be.
+        self.controller.show_settings_window()
+        for device_id, controls in self.controller.device_settings_controls.items():
+            device = next(
+                d for d in self.controller.status_bar_devices(remember=False) if d.device_id == device_id
+            )
+            if device_id == self.status_bar.VIRTUAL_DEVICE_ID:
+                expected = self.status_bar.LED_COUNT
+            else:
+                expected = self.status_bar.led_count_for_target(device.target)
+            self.assertEqual(len(controls["brightness_dots"]), expected)
+
+    def test_dragging_the_brightness_slider_previews_without_committing(self) -> None:
+        # Continuous dragging must update the live preview on every tick
+        # but only actually save/sync on the drag's final tick -- treating
+        # every pixel of mouse movement as a full commit (settings save +
+        # hardware sync + a full settings-window refresh) would make the
+        # slider feel sluggish and thrash the disk.
+        self.controller.show_settings_window()
+        device_id = next(iter(self.controller.device_settings_controls))
+        controls = self.controller.device_settings_controls[device_id]
+        slider = controls["brightness_slider"]
+        self.assertTrue(slider.isContinuous())
+        before_settings = self.controller.settings
+
+        slider.setDoubleValue_(40.0)
+        with patch.object(self.status_bar, "NSApp") as mock_app:
+            mock_app.currentEvent.return_value = SimpleNamespace(
+                type=lambda: self.status_bar.NSEventTypeLeftMouseDragged
+            )
+            self.controller.setDeviceBrightness_(slider)
+        self.assertIs(self.controller.settings, before_settings)
+
+        with patch.object(self.status_bar, "NSApp") as mock_app:
+            mock_app.currentEvent.return_value = SimpleNamespace(type=lambda: -1)
+            self.controller.setDeviceBrightness_(slider)
+        self.assertIsNot(self.controller.settings, before_settings)
+        self.assertEqual(self.controller.settings.brightness_for_device(device_id), 40)
 
     def test_calibrate_button_opens_a_popover_with_the_full_controls(self) -> None:
         self.controller.show_settings_window()

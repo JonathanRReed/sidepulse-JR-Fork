@@ -22,6 +22,7 @@ try:
         NSColor,
         NSColorPanel,
         NSCompositingOperationSourceOver,
+        NSEventTypeLeftMouseDragged,
         NSFont,
         NSFontAttributeName,
         NSForegroundColorAttributeName,
@@ -100,6 +101,7 @@ from .led_status import (
     AgentLedController,
     apply_brightness,
     brightness_percent,
+    led_count_for_target,
     normalize_brightness,
     normalized_device_name,
     write_mode_to_leds,
@@ -118,7 +120,15 @@ from .colors import (
     ColorSettings,
     program_for_snapshot,
 )
-from .virtual_device import VIRTUAL_DEVICE_ID, VIRTUAL_DEVICE_NAME, VirtualStatusDevice, monotonic_ms
+from .virtual_device import (
+    LED_COUNT,
+    VIRTUAL_DEVICE_ID,
+    VIRTUAL_DEVICE_NAME,
+    WINDOW_HEIGHT as SCREEN_BAR_PREVIEW_HEIGHT,
+    VirtualLedView,
+    VirtualStatusDevice,
+    monotonic_ms,
+)
 from .led_wasm import LedWasmUnavailableError, SdLedWasmController
 from .lid_sleep import (
     LID_POLL_SECONDS,
@@ -662,7 +672,23 @@ class StatusBarController(NSObject):
         device_id = sender.identifier()
         if device_id is None:
             return
-        self.set_device_brightness(str(device_id), sender.doubleValue())
+        device_id = str(device_id)
+        value = sender.doubleValue()
+        controls = self.device_settings_controls.get(device_id)
+        if controls is not None:
+            self.set_brightness_preview_dots(controls.get("brightness_dots"), value)
+        if device_id == VIRTUAL_DEVICE_ID:
+            preview = self.settings_fields.get("screen_bar_preview_view")
+            if preview is not None:
+                preview.setPreviewWhiteBrightness_(value)
+        event = NSApp.currentEvent()
+        if event is not None and event.type() == NSEventTypeLeftMouseDragged:
+            # A live drag tick -- the preview above already tracks it;
+            # skip the expensive commit (settings save, hardware sync, a
+            # full settings-window refresh) until the drag actually ends,
+            # or every pixel of mouse movement would trigger all of that.
+            return
+        self.set_device_brightness(device_id, value)
 
     @objc.IBAction
     def toggleDeviceAutoBrightness_(self, sender):
@@ -1255,6 +1281,7 @@ class StatusBarController(NSObject):
             return
         save_settings(self.settings)
         self.reposition_virtual_status_device_now()
+        self.refresh_screen_bar_preview()
         self.set_settings_message(f"Alcove compatibility: {payload['alcove_mode']}")
 
     @objc.IBAction
@@ -1263,6 +1290,7 @@ class StatusBarController(NSObject):
         self.settings = self.settings.with_virtual_status_device_wraps_menu_bar(enabled)
         save_settings(self.settings)
         self.reposition_virtual_status_device_now()
+        self.refresh_screen_bar_preview()
         self.set_settings_message(
             "Screen Bar now extends along the menu bar." if enabled else "Screen Bar back to notch width only."
         )
@@ -1434,6 +1462,7 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("screen_bar_wraps_menu_bar"),
             self.settings.virtual_status_device_wraps_menu_bar,
         )
+        self.refresh_screen_bar_preview()
         closed_lid_policy_popup = self.settings_fields.get("closed_lid_awake_policy_popup")
         if closed_lid_policy_popup is not None:
             select_closed_lid_awake_policy(closed_lid_policy_popup, self.settings.closed_lid_awake_policy)
@@ -1513,6 +1542,9 @@ class StatusBarController(NSObject):
         if slider is not None:
             slider.setDoubleValue_(float(normalize_brightness(brightness)))
         set_field_value(controls.get("brightness_label"), f"{brightness_percent(brightness)}%")
+        self.set_brightness_preview_dots(controls.get("brightness_dots"), brightness)
+        if device_id == VIRTUAL_DEVICE_ID:
+            self.refresh_screen_bar_preview()
         set_checkbox_state(
             controls.get("auto_brightness_checkbox"),
             self.settings.auto_brightness_enabled_for_device(device_id),
@@ -1527,6 +1559,45 @@ class StatusBarController(NSObject):
             slider = controls.get(key)
             if slider is not None:
                 slider.setDoubleValue_(gain * 100.0)
+
+    def set_brightness_preview_dots(self, dots, brightness) -> None:
+        """A plain white dot strip, one per LED, showing at a glance how
+        bright the device will actually be at this value -- the slider
+        alone is a control, not a preview of the effect it has."""
+        if not dots:
+            return
+        value = int(round(normalize_brightness(brightness)))
+        for dot in dots:
+            set_preview_dot_rgb(dot, value, value, value)
+
+    def refresh_screen_bar_preview(self) -> None:
+        """Keeps the Colors & Screen Bar pane's live miniature in sync
+        with brightness, Alcove Compatibility, and "extend glow along the
+        menu bar" -- a fixed, representative notch/wing geometry rather
+        than the real screen's own (Settings isn't necessarily open on
+        the Mac's built-in display, and a fixed size keeps the preview
+        from jumping around as the real window gets dragged between
+        screens)."""
+        preview = self.settings_fields.get("screen_bar_preview_view")
+        container = self.settings_fields.get("screen_bar_preview_container")
+        if preview is None or container is None:
+            return
+        preview.setPreviewWhiteBrightness_(self.settings.brightness_for_device(VIRTUAL_DEVICE_ID))
+        # Deliberately not should_use_compact_layout()'s real-time Alcove
+        # detection: "Auto" would then render this preview differently
+        # depending on whether some third-party app happens to be running
+        # on whatever Mac Settings is open on, which has nothing to do
+        # with what's being previewed here (the wrap/wing effect) and
+        # would make the preview inconsistent between machines. Only an
+        # explicit "Always" choice is a deliberate, predictable one.
+        preview.setCompactMode_(self.settings.alcove_compatibility_mode == ALCOVE_COMPAT_ALWAYS)
+        wing_width = SCREEN_BAR_PREVIEW_WING_WIDTH if self.settings.virtual_status_device_wraps_menu_bar else 0.0
+        total_width = SCREEN_BAR_PREVIEW_NOTCH_WIDTH + 2.0 * wing_width
+        container_width = container.frame().size.width
+        preview.setFrame_(
+            (((container_width - total_width) / 2.0, 0.0), (total_width, SCREEN_BAR_PREVIEW_HEIGHT))
+        )
+        preview.setNotchWidth_(SCREEN_BAR_PREVIEW_NOTCH_WIDTH)
 
     def set_settings_message(self, message: str) -> None:
         set_field_value(self.settings_fields.get("message"), message)
@@ -3112,6 +3183,12 @@ def _build_devices_pane(target: StatusBarController):
             target=target,
             action="setDeviceBrightness:",
             identifier=device.device_id,
+            # Continuous so the LED preview below tracks the thumb while
+            # dragging, not just after release -- setDeviceBrightness_
+            # itself still only commits (saves + syncs hardware) on the
+            # final tick, so this doesn't turn every pixel of drag into a
+            # disk write.
+            continuous=True,
         )
         native_ui.constrain_width(brightness_slider, 200)
         brightness_label = native_ui.make_label(f"{brightness_percent(device.brightness)}%", secondary=True)
@@ -3120,6 +3197,25 @@ def _build_devices_pane(target: StatusBarController):
         brightness_row_controls.addArrangedSubview_(brightness_slider)
         brightness_row_controls.addArrangedSubview_(brightness_label)
         inner.addArrangedSubview_(native_ui.make_row("Brightness", brightness_row_controls))
+
+        led_count = LED_COUNT if device.device_id == VIRTUAL_DEVICE_ID else led_count_for_target(device.target)
+        dots_width = led_count * (COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP) - COLOR_SWATCH_GAP
+        dots_container = native_ui.make_fixed_area(dots_width, COLOR_SWATCH_SIZE)
+        brightness_dots = []
+        dot_x = 0.0
+        preview_value = int(normalize_brightness(device.brightness))
+        for _index in range(led_count):
+            dot = add_preview_dot(dots_container, dot_x, 0.0)
+            set_preview_dot_rgb(dot, preview_value, preview_value, preview_value)
+            brightness_dots.append(dot)
+            dot_x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
+        inner.addArrangedSubview_(
+            native_ui.make_row(
+                "Preview",
+                dots_container,
+                help_text="How bright the LEDs will actually be, at this brightness.",
+            )
+        )
 
         calibrate_button = native_ui.make_button("Calibrate…", target, "openDeviceCalibrationPopover:")
         calibrate_button.setRepresentedObject_(device.device_id)
@@ -3138,6 +3234,7 @@ def _build_devices_pane(target: StatusBarController):
         device_controls[device.device_id] = {
             "brightness_slider": brightness_slider,
             "brightness_label": brightness_label,
+            "brightness_dots": brightness_dots,
             "calibrate_button": calibrate_button,
             "calibration_label": calibration_label,
         }
@@ -3201,6 +3298,14 @@ def build_calibration_popover_content(device: StatusBarDevice, target: StatusBar
     return stack, controls
 
 
+SCREEN_BAR_PREVIEW_NOTCH_WIDTH = 200.0
+# A representative amount, not the real per-screen measurement
+# wing_width_for_screen computes -- this preview shows the *shape* of
+# "extend glow along the menu bar" (does the light actually reach the
+# edge it's given?) rather than standing in for any one real screen.
+SCREEN_BAR_PREVIEW_WING_WIDTH = 70.0
+
+
 def _build_colors_screen_bar_pane(target: StatusBarController):
     stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
     outer, inner = native_ui.make_card("Colors & Screen Bar")
@@ -3210,14 +3315,34 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
     )
     alcove_popup = make_alcove_compat_popup(target)
     inner.addArrangedSubview_(native_ui.make_row("Alcove Compatibility", alcove_popup))
+
     native_ui.add_separator(inner)
+
+    # A live, real miniature of the Screen Bar itself -- the same drawing
+    # code the actual on-screen widget uses, not an illustration -- so
+    # "extend glow along the menu bar" and Alcove Compatibility show
+    # their effect immediately instead of asking you to trust a checkbox
+    # label and go look at the real menu bar to check.
+    preview_max_width = SCREEN_BAR_PREVIEW_NOTCH_WIDTH + 2.0 * SCREEN_BAR_PREVIEW_WING_WIDTH
+    preview_container = native_ui.make_fixed_area(preview_max_width, SCREEN_BAR_PREVIEW_HEIGHT)
+    preview_view = VirtualLedView.alloc().initWithFrame_(
+        ((0.0, 0.0), (SCREEN_BAR_PREVIEW_NOTCH_WIDTH, SCREEN_BAR_PREVIEW_HEIGHT))
+    )
+    preview_view.setHasNotch_(True)
+    preview_container.addSubview_(preview_view)
+    inner.addArrangedSubview_(preview_container)
+
     wraps_checkbox = native_ui.make_checkbox(
         "Extend glow along the menu bar", target, "toggleScreenBarWrapsMenuBar:"
     )
     inner.addArrangedSubview_(wraps_checkbox)
 
     stack.addArrangedSubview_(outer)
-    fields = {"alcove_compat_popup": alcove_popup}
+    fields = {
+        "alcove_compat_popup": alcove_popup,
+        "screen_bar_preview_view": preview_view,
+        "screen_bar_preview_container": preview_container,
+    }
     buttons = {"screen_bar_wraps_menu_bar": wraps_checkbox}
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 

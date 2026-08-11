@@ -337,12 +337,14 @@ def make_field(text: str = "") -> "NSTextField":
     return field
 
 
-def make_slider(*, min_value: float, max_value: float, value: float, target, action: str, identifier=None):
+def make_slider(
+    *, min_value: float, max_value: float, value: float, target, action: str, identifier=None, continuous: bool = False
+):
     slider = NSSlider.alloc().init()
     slider.setMinValue_(min_value)
     slider.setMaxValue_(max_value)
     slider.setDoubleValue_(value)
-    slider.setContinuous_(False)
+    slider.setContinuous_(continuous)
     slider.setTarget_(target)
     slider.setAction_(action)
     if identifier is not None:

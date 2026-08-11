@@ -251,6 +251,44 @@ def blended_led_color_at_x(
     return tuple(min(1.0, max(0.0, value)) for value in totals)
 
 
+def glow_color_for_column(
+    colors: list[tuple[float, float, float, float]],
+    led_width: float,
+    notch_width: float,
+    wing_offset: float,
+    center_x: float,
+) -> tuple[float, float, float, float]:
+    """The LED glow color at one column, in *view*-local x (0 = the
+    view's own left edge, not the notch's).
+
+    Inside the notch body this is an ordinary inter-LED blend. Inside a
+    "wrap the menu bar" wing (wing_offset > 0), it's the nearest edge
+    LED's own color eased out across the wing's *actual* assigned width
+    (wing_offset itself -- both wings are always equal, see
+    virtual_window_frame_for_screen) rather than sampled with
+    blended_led_color_at_x's own inter-LED blend radius, which is sized
+    for blending between neighboring LEDs a few points apart and would
+    otherwise fade to nothing tens of points before reaching the far edge
+    of a wide wing -- reading as "the glow doesn't reach the edges" even
+    though the window itself is genuinely that wide.
+    """
+    if wing_offset > 0.0 and center_x < wing_offset:
+        distance_into_wing = wing_offset - center_x
+        edge_x = 0.0
+        wing_width = wing_offset
+    elif wing_offset > 0.0 and center_x > wing_offset + notch_width:
+        distance_into_wing = center_x - (wing_offset + notch_width)
+        edge_x = notch_width
+        wing_width = wing_offset
+    else:
+        return blended_led_color_at_x(colors, center_x - wing_offset, led_width)
+
+    red, green, blue, alpha = blended_led_color_at_x(colors, edge_x, led_width)
+    phase = min(1.0, max(0.0, distance_into_wing / wing_width))
+    taper = 0.5 + 0.5 * math.cos(math.pi * phase)
+    return red * taper, green * taper, blue * taper, alpha * taper
+
+
 def tone_mapped_led_color(
     red: float,
     green: float,
@@ -404,6 +442,18 @@ class VirtualLedView(NSView):
         self.fixed_colors = colors
         self.setNeedsDisplay_(True)
 
+    def setPreviewWhiteBrightness_(self, brightness):
+        """A plain white glow scaled by brightness alone, with no mode
+        color and no animation -- used for the Settings window's live
+        brightness/wing-extension preview, where the actual mode color
+        would be a red herring (brightness applies the same regardless of
+        mode) and the battery-style red/orange/green coloring above would
+        misrepresent what's actually being previewed."""
+        self.current_program = None
+        scale = normalize_brightness(brightness) / 255.0
+        self.fixed_colors = [(scale, scale, scale, scale)] * LED_COUNT
+        self.setNeedsDisplay_(True)
+
     def _ensure_wasm_controller(self) -> bool:
         if self.wasm_controller is not None:
             return True
@@ -467,21 +517,23 @@ class VirtualLedView(NSView):
         NSGraphicsContext.saveGraphicsState()
         body.addClip()
         self._fill_glow_row(
-            cg_context, colors, led_width, glow_height, height,
+            cg_context, colors, led_width, notch_width, glow_height, height,
             x_start=wing_offset, x_end=wing_offset + notch_width, wing_offset=wing_offset,
         )
         NSGraphicsContext.restoreGraphicsState()
 
         # Pass 2: the wings, if any -- a plain (unrounded) clip since
-        # there's no housing shape to match out here; the glow's own
-        # falloff already tapers it to nothing well before the wing's own
-        # far edge, so the hard clip edge is never actually visible.
+        # there's no housing shape to match out here; glow_color_for_column
+        # eases the edge LED's own color across the wing's full assigned
+        # width (see its docstring), reaching the far edge rather than
+        # fading out early, so the hard clip edge is never actually
+        # visible by the time it's reached.
         if wing_offset > 0.0:
             for x_start, x_end in ((0.0, wing_offset), (wing_offset + notch_width, width)):
                 NSGraphicsContext.saveGraphicsState()
                 NSBezierPath.bezierPathWithRect_(((x_start, 0.0), (x_end - x_start, height))).addClip()
                 self._fill_glow_row(
-                    cg_context, colors, led_width, glow_height, height,
+                    cg_context, colors, led_width, notch_width, glow_height, height,
                     x_start=x_start, x_end=x_end, wing_offset=wing_offset,
                 )
                 NSGraphicsContext.restoreGraphicsState()
@@ -502,17 +554,16 @@ class VirtualLedView(NSView):
                 (1.0, 1.0, 1.0, 0.055),
             )
 
-    def _fill_glow_row(self, cg_context, colors, led_width, glow_height, _height, *, x_start, x_end, wing_offset):
+    def _fill_glow_row(self, cg_context, colors, led_width, notch_width, glow_height, _height, *, x_start, x_end, wing_offset):
         """Draws the 4-layer LED glow (bloom / soft falloff / core / hotline)
-        across [x_start, x_end), sampling colors in notch-local coordinates
-        (wing_offset subtracted) so a wing's glow is a continuous
-        extrapolation of the notch's own nearest LED rather than resetting
-        to a separate coordinate space at the wing boundary."""
+        across [x_start, x_end) -- see glow_color_for_column for how a
+        wing's glow is colored versus the notch body's own inter-LED
+        blend."""
         column_x = x_start
         while column_x < x_end:
             column_width = min(BLEND_COLUMN_WIDTH, x_end - column_x)
-            sample_x = column_x + column_width / 2.0 - wing_offset
-            red, green, blue, alpha = blended_led_color_at_x(colors, sample_x, led_width)
+            center_x = column_x + column_width / 2.0
+            red, green, blue, alpha = glow_color_for_column(colors, led_width, notch_width, wing_offset, center_x)
             if max(red, green, blue, alpha) <= 0.001:
                 column_x += column_width
                 continue
@@ -568,8 +619,8 @@ class VirtualLedView(NSView):
         column_x = 0.0
         while column_x < width:
             column_width = min(BLEND_COLUMN_WIDTH, width - column_x)
-            sample_x = column_x + column_width / 2.0 - wing_offset
-            red, green, blue, alpha = blended_led_color_at_x(colors, sample_x, led_width)
+            center_x = column_x + column_width / 2.0
+            red, green, blue, alpha = glow_color_for_column(colors, led_width, notch_width, wing_offset, center_x)
             if max(red, green, blue, alpha) > 0.001:
                 fill_rect_with_cg(
                     cg_context,
