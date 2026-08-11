@@ -1,5 +1,45 @@
 # SidePulse fork — master plan
 
+> **Status (2026-08-11, end of build day): SHIPPED through Phase 5's
+> feasible scope.** Twenty-plus commits on
+> `feat/color-customization-and-led-behavior`. Summary of what landed
+> vs. what was deferred and why:
+>
+> **Shipped:** Phase 0 (verified + landed). Phase 1 (System Settings
+> form register, centered max-width column, fixed-size windows, instant
+> apply everywhere, contextual actions, IA consolidation to 7 panes,
+> dropdown tightening, debug-text cleanup). Phase 2 (auto-brightness
+> that actually tracks via a 3s watcher; Screen Bar now uses effective
+> brightness; per-Focus dim rules with an honest Full-Disk-Access
+> call-to-action). Phase 3 (attention takeover — full-bar double flash
+> for waiting/blocked agents in every blend mode; display presets
+> Calm/Informative/Everything; the blend-mode engine itself predated the
+> fork). Phase 4 (guided calibration: reference patches light the device
+> through live gains; popover close restores status). Extras: Alcove-
+> aware wrap (bracket drawn outside Alcove's overlay — measured, not
+> guessed), low-power calm charge reminder, three new providers
+> (Cursor / Hermes Agent / OpenClaw, each speaking its real config
+> dialect), the Welcome onboarding window with a live LED demo.
+>
+> **Deferred, with reasons:**
+> - *Calendar alerts (EventKit):* calendar TCC permission requires an
+>   app **bundle** with a usage description; the current launchd-bare-
+>   python architecture cannot even present the prompt. Path: bundle
+>   the app (py2app/briefcase), or a Raycast extension calling the
+>   existing `sidepulse` CLI.
+> - *Notification blinks:* no public API to observe other apps'
+>   notifications; the DB-polling route needs Full Disk Access and is
+>   schema-fragile. Revisit if/when the app is bundled.
+> - *Weather:* fun but lowest value; needs a display slot design first.
+> - *Progress-fill display:* hooks deliver no reliable progress
+>   fraction — nothing truthful to render.
+> - *Per-device blend override & calibration profiles:* complexity
+>   without a demonstrated need yet (single device, single
+>   environment). Revisit on demand.
+> - *Session-row icon redesign in the dropdown:* the wide composite
+>   icons indent session text well past other rows — standard macOS
+>   behavior, but worth a slimmer glyph system in a future pass.
+
 Decisions locked 2026-08-11 (grilling session with Jonathan):
 
 - **Fork posture:** quality-first divergence. No cap on how far the UI/UX moves,

@@ -5253,7 +5253,9 @@ def native_session_menu_title(status: AgentStatus) -> str:
     parts = [title]
     if project:
         parts.append(project)
-    return "  ".join(parts)
+    # An em dash, not a run of spaces -- "title — project" reads as two
+    # deliberate fields instead of accidental whitespace.
+    return " — ".join(parts)
 
 
 def build_session_options_menu(
