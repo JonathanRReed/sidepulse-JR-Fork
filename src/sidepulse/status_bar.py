@@ -3177,14 +3177,17 @@ def format_byte_count(size: int) -> str:
 # there's no shared "document height" formula left to keep in sync by
 # hand -- the recurring source of every layout bug this window has had.
 
+# Seven panes, each earning its slot: Agents = hooks + transcript
+# fallback + session openers (all "how SidePulse talks to your agents"),
+# Power = closed-lid awake + battery (both power management). The old
+# nine-pane split left several panes holding two controls in an
+# otherwise empty window.
 SETTINGS_SIDEBAR_ITEMS: tuple[tuple[str, str], ...] = (
     ("devices", "Devices"),
     ("colors_screen_bar", "Colors & Screen Bar"),
-    ("closed_lid", "Closed-Lid Awake"),
+    ("agents", "Agents"),
     ("led_behavior", "LED Behavior"),
-    ("hooks", "Agent Hooks"),
-    ("sessions", "Sessions"),
-    ("battery", "Battery"),
+    ("power", "Power"),
     ("lid_animations", "Lid Animations"),
     ("debug", "Debug"),
 )
@@ -3385,12 +3388,14 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
-def _build_closed_lid_pane(target: StatusBarController):
+def _build_power_pane(target: StatusBarController):
+    """Keep-awake policy and battery display together -- both are "what
+    SidePulse does with the Mac's power state"."""
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
-    outer, inner = native_ui.make_card()
 
+    awake_outer, awake_inner = native_ui.make_card("Keep Awake With Lid Closed")
     policy_popup = make_closed_lid_awake_policy_popup(target)
-    inner.addArrangedSubview_(native_ui.make_row("Policy", policy_popup))
+    awake_inner.addArrangedSubview_(native_ui.make_row("Policy", policy_popup))
 
     grace_field = native_ui.make_field(
         f"{target.settings.closed_lid_grace_minutes:g}", target=target, action="applyClosedLidGraceMinutes:"
@@ -3399,7 +3404,7 @@ def _build_closed_lid_pane(target: StatusBarController):
     grace_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
     grace_controls.addArrangedSubview_(grace_field)
     grace_controls.addArrangedSubview_(native_ui.make_label("min", secondary=True))
-    inner.addArrangedSubview_(
+    awake_inner.addArrangedSubview_(
         native_ui.make_row(
             "Wait before releasing",
             grace_controls,
@@ -3409,10 +3414,22 @@ def _build_closed_lid_pane(target: StatusBarController):
             ),
         )
     )
+    stack.addArrangedSubview_(awake_outer)
 
-    stack.addArrangedSubview_(outer)
+    battery_outer, battery_inner = native_ui.make_card("Battery")
+    leds_row, battery_leds = native_ui.make_switch_row(
+        "Show battery on LEDs", target, "setBatteryLedDisplayFromCheckbox:"
+    )
+    battery_inner.addArrangedSubview_(leds_row)
+    preview_row, battery_power_preview = native_ui.make_switch_row(
+        "Show battery for 7s on plug/unplug", target, "setBatteryPowerPreviewFromCheckbox:"
+    )
+    battery_inner.addArrangedSubview_(preview_row)
+    stack.addArrangedSubview_(battery_outer)
+
     fields = {"closed_lid_awake_policy_popup": policy_popup, "closed_lid_grace_field": grace_field}
-    return native_ui.wrap_in_scroll_pane(stack), fields
+    buttons = {"battery_leds": battery_leds, "battery_power_preview": battery_power_preview}
+    return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
 def _build_led_behavior_pane(target: StatusBarController):
@@ -3458,10 +3475,13 @@ def _build_led_behavior_pane(target: StatusBarController):
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
-def _build_hooks_pane(target: StatusBarController):
+def _build_agents_pane(target: StatusBarController):
+    """Everything about how SidePulse talks to coding agents: hook
+    installs, the transcript-watching fallback, and which app opens a
+    provider's sessions."""
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
-    outer, inner = native_ui.make_card()
 
+    hooks_outer, hooks_inner = native_ui.make_card("Hooks")
     fields: dict[str, object] = {}
     for index, provider in enumerate(HOOK_PROVIDERS):
         selector = provider.title()
@@ -3474,22 +3494,16 @@ def _build_hooks_pane(target: StatusBarController):
         # refresh_settings_window hides whichever doesn't apply.
         controls.addArrangedSubview_(install_button)
         controls.addArrangedSubview_(uninstall_button)
-        inner.addArrangedSubview_(native_ui.make_row(provider_spec(provider).label, controls))
+        hooks_inner.addArrangedSubview_(native_ui.make_row(provider_spec(provider).label, controls))
 
         if index < len(HOOK_PROVIDERS) - 1:
-            native_ui.add_separator(inner)
+            native_ui.add_separator(hooks_inner)
         fields[f"{provider}_hook_status"] = status_label
         fields[f"{provider}_hook_install"] = install_button
         fields[f"{provider}_hook_uninstall"] = uninstall_button
+    stack.addArrangedSubview_(hooks_outer)
 
-    stack.addArrangedSubview_(outer)
-    return native_ui.wrap_in_scroll_pane(stack), fields
-
-
-def _build_sessions_pane(target: StatusBarController):
-    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
-    outer, inner = native_ui.make_card()
-
+    fallback_outer, fallback_inner = native_ui.make_card("Transcript Fallback")
     fallback_help = (
         "Reads the CLI's transcript files directly when hook events aren't "
         "available -- a fallback, not the primary detection path."
@@ -3497,42 +3511,22 @@ def _build_sessions_pane(target: StatusBarController):
     codex_row, codex_switch = native_ui.make_switch_row(
         "Watch Codex CLI transcripts", target, "toggleCodexTranscripts:", help_text=fallback_help
     )
-    inner.addArrangedSubview_(codex_row)
+    fallback_inner.addArrangedSubview_(codex_row)
     claude_row, claude_switch = native_ui.make_switch_row(
         "Watch Claude CLI transcripts", target, "toggleClaudeTranscripts:", help_text=fallback_help
     )
-    inner.addArrangedSubview_(claude_row)
-    stack.addArrangedSubview_(outer)
+    fallback_inner.addArrangedSubview_(claude_row)
+    stack.addArrangedSubview_(fallback_outer)
 
     openers_outer, openers_inner = native_ui.make_card("Open Sessions With")
-    provider_openers: dict[str, object] = {}
     for provider in provider_session_opener_providers():
         popup = make_provider_opener_popup(provider, target)
         openers_inner.addArrangedSubview_(native_ui.make_row(provider_spec(provider).label, popup))
-        provider_openers[provider] = popup
+        fields[f"{provider}_session_opener"] = popup
     stack.addArrangedSubview_(openers_outer)
 
-    fields = {f"{provider}_session_opener": popup for provider, popup in provider_openers.items()}
     buttons = {"codex_transcripts": codex_switch, "claude_transcripts": claude_switch}
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
-
-
-def _build_battery_pane(target: StatusBarController):
-    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
-    outer, inner = native_ui.make_card()
-
-    leds_row, battery_leds = native_ui.make_switch_row(
-        "Show battery on LEDs", target, "setBatteryLedDisplayFromCheckbox:"
-    )
-    inner.addArrangedSubview_(leds_row)
-    preview_row, battery_power_preview = native_ui.make_switch_row(
-        "Show battery for 7s on plug/unplug", target, "setBatteryPowerPreviewFromCheckbox:"
-    )
-    inner.addArrangedSubview_(preview_row)
-
-    stack.addArrangedSubview_(outer)
-    buttons = {"battery_leds": battery_leds, "battery_power_preview": battery_power_preview}
-    return native_ui.wrap_in_scroll_pane(stack), buttons
 
 
 def _build_lid_animations_pane(target: StatusBarController):
@@ -3681,22 +3675,18 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
 
     devices_pane, device_controls = _build_devices_pane(target)
     colors_pane, colors_fields, colors_buttons = _build_colors_screen_bar_pane(target)
-    closed_lid_pane, closed_lid_fields = _build_closed_lid_pane(target)
+    agents_pane, agents_fields, agents_buttons = _build_agents_pane(target)
     led_behavior_pane, led_behavior_fields, led_behavior_buttons = _build_led_behavior_pane(target)
-    hooks_pane, hooks_fields = _build_hooks_pane(target)
-    sessions_pane, sessions_fields, sessions_buttons = _build_sessions_pane(target)
-    battery_pane, battery_buttons = _build_battery_pane(target)
+    power_pane, power_fields, power_buttons = _build_power_pane(target)
     lid_animations_pane, lid_animations_fields = _build_lid_animations_pane(target)
     debug_pane, debug_fields = _build_debug_pane(target)
 
     panes = {
         "devices": devices_pane,
         "colors_screen_bar": colors_pane,
-        "closed_lid": closed_lid_pane,
+        "agents": agents_pane,
         "led_behavior": led_behavior_pane,
-        "hooks": hooks_pane,
-        "sessions": sessions_pane,
-        "battery": battery_pane,
+        "power": power_pane,
         "lid_animations": lid_animations_pane,
         "debug": debug_pane,
     }
@@ -3716,18 +3706,17 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     target.settings_panes = panes
 
     target.settings_fields = {
-        **hooks_fields,
-        **sessions_fields,
+        **agents_fields,
         **lid_animations_fields,
         **debug_fields,
         **colors_fields,
-        **closed_lid_fields,
+        **power_fields,
         **led_behavior_fields,
         "message": message,
     }
     target.settings_buttons = {
-        **sessions_buttons,
-        **battery_buttons,
+        **agents_buttons,
+        **power_buttons,
         **colors_buttons,
         **led_behavior_buttons,
     }
