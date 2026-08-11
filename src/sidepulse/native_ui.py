@@ -42,10 +42,13 @@ try:
         NSBezelStyleRounded,
         NSButton,
         NSButtonTypeSwitch,
+        NSClipView,
         NSColor,
         NSFont,
         NSLayoutAttributeCenterY,
         NSLayoutConstraint,
+        NSLayoutConstraintOrientationVertical,
+        NSLayoutPriorityDefaultHigh,
         NSPopUpButton,
         NSScrollView,
         NSSlider,
@@ -103,6 +106,18 @@ def constrain_height(view, height: float):
     return view
 
 
+def _resist_vertical_stretch(view) -> None:
+    """Tells `view` not to grow taller than its own content needs just
+    because it happens to sit in extra space -- see make_stack's own use
+    of the same priority for why this matters. Cards (NSGlassEffectView/
+    NSVisualEffectView, not NSStackView, so this needs its own call
+    outside make_stack) are the other place this shows up: a pane with
+    one short card inside a scroll viewport taller than that card needs
+    would otherwise get the card itself stretched to fill it.
+    """
+    view.setContentHuggingPriority_forOrientation_(NSLayoutPriorityDefaultHigh, NSLayoutConstraintOrientationVertical)
+
+
 def _pin_edges(child, parent, *, insets=(0.0, 0.0, 0.0, 0.0)):
     top, left, bottom, right = insets
     NSLayoutConstraint.activateConstraints_(
@@ -143,6 +158,7 @@ def make_glass_panel(*, corner_radius: float = 14.0, tint=None):
         # (e.g. no NSSplitView imposing a real frame) can resolve that
         # ambiguity by collapsing to a sliver.
         _pin_edges(inner, outer)
+        _resist_vertical_stretch(outer)
         return outer, inner
 
     outer = NSVisualEffectView.alloc().init()
@@ -163,6 +179,7 @@ def make_glass_panel(*, corner_radius: float = 14.0, tint=None):
     outer.addSubview_(inner)
     inner.setTranslatesAutoresizingMaskIntoConstraints_(False)
     _pin_edges(inner, outer)
+    _resist_vertical_stretch(outer)
     return outer, inner
 
 
@@ -196,6 +213,17 @@ def make_stack(*, orientation: str = "vertical", spacing: float = 8.0, alignment
     if alignment is not None:
         stack.setAlignment_(alignment)
     stack.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    # Without this, a stack sitting in extra space it doesn't need (e.g.
+    # a short pane's one card, inside a scroll viewport that's taller
+    # than the card actually requires) has nothing telling it "don't
+    # grow to fill that" -- NSStackView's default vertical hugging
+    # (250, low) means *something* ends up absorbing the slack, and with
+    # several same-priority rows/cards to choose from, Auto Layout picks
+    # one arbitrarily rather than just leaving it as blank scrollable
+    # space at the bottom, where it belongs. This affects both a
+    # horizontal row (this is its cross axis) and a vertical column of
+    # cards (this is its main axis) the same useful way.
+    stack.setContentHuggingPriority_forOrientation_(NSLayoutPriorityDefaultHigh, NSLayoutConstraintOrientationVertical)
     return stack
 
 
@@ -380,6 +408,23 @@ def make_text_editor(text: str, *, height: float = 90.0):
     return scroll, text_view
 
 
+class _FlippedClipView(NSClipView):
+    """A clip view with the origin at the top-left instead of AppKit's
+    default bottom-left. Without this, a document view shorter than the
+    scroll view's own visible height -- true for most of these panes,
+    now that they size to their real content instead of being stretched
+    to fill (see wrap_in_scroll_pane) -- renders pinned to the *bottom*
+    of the visible area with all the slack space floating above it,
+    which reads as broken/uninitialized rather than as a short pane.
+    Top-down document flow is what every one of these panes actually
+    wants, and is the standard fix AppKit itself expects you to reach
+    for (NSClipView explicitly documents overriding isFlipped for this).
+    """
+
+    def isFlipped(self):
+        return True
+
+
 def wrap_in_scroll_pane(stack: "NSStackView", *, padding: float = 20.0) -> "NSScrollView":
     """Wraps a vertical content stack (typically a column of make_card()
     results) in its own independently-scrolling NSScrollView, pinned to
@@ -397,6 +442,7 @@ def wrap_in_scroll_pane(stack: "NSStackView", *, padding: float = 20.0) -> "NSSc
     scroll.setHasHorizontalScroller_(False)
     scroll.setDrawsBackground_(False)
     scroll.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    scroll.setContentView_(_FlippedClipView.alloc().init())
     scroll.setDocumentView_(padded)
     content_view = scroll.contentView()
     NSLayoutConstraint.activateConstraints_(
@@ -404,9 +450,22 @@ def wrap_in_scroll_pane(stack: "NSStackView", *, padding: float = 20.0) -> "NSSc
             padded.leadingAnchor().constraintEqualToAnchor_constant_(content_view.leadingAnchor(), padding),
             padded.trailingAnchor().constraintEqualToAnchor_constant_(content_view.trailingAnchor(), -padding),
             padded.topAnchor().constraintEqualToAnchor_constant_(content_view.topAnchor(), padding),
-            padded.bottomAnchor().constraintGreaterThanOrEqualToAnchor_constant_(content_view.bottomAnchor(), -padding),
         ]
     )
+    # Deliberately no bottom-anchor constraint at all: padded's height
+    # comes entirely from its own arranged content (an ordinary vertical
+    # NSStackView's intrinsic content size, no different from any other
+    # stack in this module), and needs no relationship to the clip
+    # view's height to be well-determined either way -- shorter content
+    # just leaves blank scrollable space below it, taller content
+    # scrolls, neither needs a constraint to make happen. A `<=` bound
+    # here once capped scrollable content at the visible viewport
+    # (nothing could ever exceed it, so nothing could ever scroll); the
+    # `>=` that replaced it fixed that but, for a pane short enough to
+    # fit without scrolling, forced padded to inflate to the clip's full
+    # height -- and with nothing else objecting at that priority,
+    # Auto Layout dumped the slack into one arbitrary row or card rather
+    # than leaving it as the blank space it should have been.
     return scroll
 
 
