@@ -81,6 +81,7 @@ from .battery import (
     read_battery_snapshot,
 )
 from . import calendar_watch
+from . import reminders_watch
 from . import signals as signals_module
 from . import display_brightness
 from . import focus_sync
@@ -260,6 +261,9 @@ LED_DISPLAY_LOW_BATTERY = "low_battery"
 LED_DISPLAY_NOTIFICATION = "notification"
 LED_DISPLAY_CALENDAR = "calendar"
 LED_DISPLAY_ESCALATION = "escalation"
+LED_DISPLAY_REMINDERS = "reminders"
+REMINDERS_WATCH_SECONDS = 60.0
+REMINDERS_WATCH_RETRY_SECONDS = 300.0
 CALENDAR_WATCH_SECONDS = 30.0
 CALENDAR_WATCH_RETRY_SECONDS = 300.0
 # How often the Notification Center store is polled (one indexed
@@ -401,6 +405,12 @@ class StatusBarController(NSObject):
         self.calendar_glow_until = 0.0
         self.calendar_event_title: str | None = None
         self.calendar_watch_retry_at = 0.0
+        # Reminders glow: transient window plus the per-run set of
+        # reminder ids that already glowed (a due-and-incomplete
+        # reminder stays "due" every poll -- it must fire ONCE).
+        self.reminders_glow_until = 0.0
+        self.reminders_seen: set[str] = set()
+        self.reminders_watch_retry_at = 0.0
         self.current_state = STATE_IDLE
         # None until set_status() actually confirms Idle -- avoids assuming
         # "idle since launch" if the real initial state turns out to be
@@ -507,6 +517,14 @@ class StatusBarController(NSObject):
             CALENDAR_WATCH_SECONDS,
             self,
             "pollCalendar:",
+            None,
+            True,
+        )
+        # Reminders watcher: same contract, async fetches.
+        self.reminders_watch_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            REMINDERS_WATCH_SECONDS,
+            self,
+            "pollReminders:",
             None,
             True,
         )
@@ -626,6 +644,47 @@ class StatusBarController(NSObject):
         self.calendar_glow_until = now + max(0.0, seconds_until_start)
         if not was_active:
             self.refresh_(None)
+
+    @objc.IBAction
+    def pollReminders_(self, _sender):
+        """Fires the amber glow once per newly-due reminder. EventKit
+        reminder fetches are async; results come back on an EventKit
+        queue and hop to the main thread via remindersDue:."""
+        if not self.settings.reminder_alerts_enabled:
+            return
+        now = time.monotonic()
+        if now < self.reminders_watch_retry_at:
+            return
+        try:
+            reminders_watch.fetch_due(
+                REMINDERS_WATCH_SECONDS * 2.0,
+                lambda items: self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "remindersDue:", list(items), False
+                ),
+            )
+        except reminders_watch.RemindersUnavailableError:
+            self.reminders_watch_retry_at = now + REMINDERS_WATCH_RETRY_SECONDS
+            return
+
+    @objc.IBAction
+    def remindersDue_(self, items):
+        fresh = [
+            (identifier, title)
+            for identifier, title in (tuple(item) for item in (items or []))
+            if identifier not in self.reminders_seen
+        ]
+        if not fresh:
+            return
+        for identifier, _title in fresh:
+            self.reminders_seen.add(identifier)
+        hold = signals_module.signal_hold_seconds(
+            self.settings.signal_style(signals_module.SIGNAL_REMINDERS)
+        )
+        self.reminders_glow_until = time.monotonic() + hold
+        self.refresh_(None)
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            hold + 0.1, self, "refresh:", None, False
+        )
 
     @objc.IBAction
     def refresh_(self, _sender):
@@ -879,6 +938,50 @@ class StatusBarController(NSObject):
             self.set_settings_message(
                 "Calendar access is denied — enable SidePulse under "
                 "Privacy & Security → Calendars."
+            )
+
+    @objc.IBAction
+    def toggleReminderAlerts_(self, sender):
+        enabled = bool(sender.state())
+        self.settings = self.settings.with_reminder_alerts_enabled(enabled)
+        save_settings(self.settings)
+        self.reminders_watch_retry_at = 0.0
+        if not enabled:
+            self.reminders_glow_until = 0.0
+            self.set_settings_message("Reminder glow off.")
+            self.refresh_(None)
+            return
+        try:
+            status = reminders_watch.authorization_status()
+        except reminders_watch.RemindersUnavailableError:
+            self.set_settings_message("Reminders access is unavailable on this system.")
+            return
+        if status == reminders_watch.AUTH_AUTHORIZED:
+            self.set_settings_message("Reminder glow on.")
+        elif status == reminders_watch.AUTH_NOT_DETERMINED:
+            self.set_settings_message("Reminder glow on — asking macOS for access…")
+
+            def _granted(ok):
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "reminderAccessResolved:", bool(ok), False
+                )
+
+            reminders_watch.request_access(_granted)
+        else:
+            self.set_settings_message(
+                "Reminders access is denied — enable SidePulse under "
+                "Privacy & Security → Reminders."
+            )
+
+    @objc.IBAction
+    def reminderAccessResolved_(self, granted):
+        if granted:
+            self.set_settings_message("Reminders access granted.")
+            self.reminders_watch_retry_at = 0.0
+        else:
+            self.set_settings_message(
+                "Reminders access was declined — the glow stays off until "
+                "it's granted in Privacy & Security → Reminders."
             )
 
     @objc.IBAction
@@ -2274,6 +2377,10 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("calendar_alerts_enabled"),
             self.settings.calendar_alerts_enabled,
         )
+        set_checkbox_state(
+            self.settings_buttons.get("reminder_alerts_enabled"),
+            self.settings.reminder_alerts_enabled,
+        )
         set_field_value(
             self.settings_fields.get("calendar_lead_field"),
             f"{self.settings.calendar_lead_minutes:g}",
@@ -3154,6 +3261,12 @@ class StatusBarController(NSObject):
                 ),
             ),
             (
+                LED_DISPLAY_REMINDERS,
+                lambda: (
+                    self.settings.reminder_alerts_enabled and now < self.reminders_glow_until
+                ),
+            ),
+            (
                 LED_DISPLAY_CALENDAR,
                 lambda: (
                     self.settings.calendar_alerts_enabled and now < self.calendar_glow_until
@@ -3265,6 +3378,13 @@ class StatusBarController(NSObject):
                     self.settings.signal_style(signals_module.SIGNAL_NOTIFICATION),
                     brightness,
                     color=self.notification_blink_color,
+                ),
+                started_at=started_at,
+            )
+        elif display == LED_DISPLAY_REMINDERS:
+            self.virtual_status_device.set_program(
+                style_to_program(
+                    self.settings.signal_style(signals_module.SIGNAL_REMINDERS), brightness
                 ),
                 started_at=started_at,
             )
@@ -3410,6 +3530,20 @@ class StatusBarController(NSObject):
                     LedDisplayState.ASK,
                 )
                 label = f"{device.name} Notification blink"
+                if result.error:
+                    agent_write_failed = True
+                elif result.changed:
+                    agent_write_changed = True
+            elif device_display_kind == LED_DISPLAY_REMINDERS:
+                controller = self.agent_controller_for_device(device)
+                result = controller.sync_program(
+                    style_to_program(
+                        self.settings.signal_style(signals_module.SIGNAL_REMINDERS),
+                        controller.brightness,
+                    ),
+                    LedDisplayState.ASK,
+                )
+                label = f"{device.name} Reminder due"
                 if result.error:
                     agent_write_failed = True
                 elif result.changed:
@@ -4757,6 +4891,17 @@ def _build_led_behavior_pane(target: StatusBarController):
     lead_controls.addArrangedSubview_(lead_field)
     lead_controls.addArrangedSubview_(native_ui.make_label("minutes before", secondary=True))
     cal_inner.addArrangedSubview_(native_ui.make_row("Start glowing", lead_controls))
+    native_ui.add_separator(cal_inner)
+    rem_row, rem_switch = native_ui.make_switch_row(
+        "Glow when a Reminder comes due",
+        target,
+        "toggleReminderAlerts:",
+        help_text=(
+            "A short amber glow the moment a Reminder's due time "
+            "arrives. Turning this on asks macOS for Reminders access."
+        ),
+    )
+    cal_inner.addArrangedSubview_(rem_row)
     stack.addArrangedSubview_(cal_outer)
     fields["calendar_lead_field"] = lead_field
 
@@ -4765,6 +4910,7 @@ def _build_led_behavior_pane(target: StatusBarController):
         "focus_sync_enabled": focus_switch,
         "notification_blinks_enabled": notif_switch,
         "calendar_alerts_enabled": cal_switch,
+        "reminder_alerts_enabled": rem_switch,
     }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 

@@ -185,6 +185,9 @@ class AgentMonitorSettings:
     # permission prompt (see calendar_watch.py).
     calendar_alerts_enabled: bool = False
     calendar_lead_minutes: float = 5.0
+    # Amber glow when a Reminder comes due. Off by default: enabling it
+    # presents the system Reminders prompt (see reminders_watch.py).
+    reminder_alerts_enabled: bool = False
     # Per-signal look overrides (Signal Engine). Keys/values validated
     # by signals.SignalStyle; absent keys mean the built-in defaults.
     signal_styles: dict[str, dict] = field(default_factory=dict)
@@ -624,6 +627,9 @@ class AgentMonitorSettings:
     def with_calendar_alerts_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, calendar_alerts_enabled=bool(enabled))
 
+    def with_reminder_alerts_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+        return replace(self, reminder_alerts_enabled=bool(enabled))
+
     def with_calendar_lead_minutes(self, minutes: float) -> "AgentMonitorSettings":
         return replace(self, calendar_lead_minutes=max(1.0, min(60.0, float(minutes))))
 
@@ -731,6 +737,7 @@ class AgentMonitorSettings:
             "notification_app_colors": dict(sorted(self.notification_app_colors.items())),
             "calendar_alerts_enabled": self.calendar_alerts_enabled,
             "calendar_lead_minutes": self.calendar_lead_minutes,
+            "reminder_alerts_enabled": self.reminder_alerts_enabled,
             "signal_styles": dict(sorted(self.signal_styles.items())),
             "escalation_tier": self.escalation_tier,
             "escalation_ramp_seconds": self.escalation_ramp_seconds,
@@ -904,6 +911,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         calendar_lead_minutes=max(
             1.0, min(60.0, _float_setting(data.get("calendar_lead_minutes"), 5.0))
         ),
+        reminder_alerts_enabled=_bool_setting(data.get("reminder_alerts_enabled"), False),
         signal_styles=_signal_styles(data.get("signal_styles")),
         escalation_tier=_escalation_tier(data.get("escalation_tier")),
         escalation_ramp_seconds=max(

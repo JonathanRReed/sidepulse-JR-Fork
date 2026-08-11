@@ -8656,6 +8656,7 @@ class CalendarAlertTests(unittest.TestCase):
         self.controller.settings = (
             self.controller.settings.with_calendar_alerts_enabled(True)
             .with_notification_blinks_enabled(True)
+            .with_reminder_alerts_enabled(True)
         )
         # Glow active -> calendar outranks the agent display.
         self.controller.calendar_glow_until = time.monotonic() + 120.0
@@ -8663,20 +8664,50 @@ class CalendarAlertTests(unittest.TestCase):
             self.controller.active_led_display_kind_for_device(device, None),
             self.status_bar.LED_DISPLAY_CALENDAR,
         )
-        # A notification blink is a moment on top of the glow.
+        # A due reminder is a moment: it outranks the calendar's state.
+        self.controller.reminders_glow_until = time.monotonic() + 2.0
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_REMINDERS,
+        )
+        # A notification blink outranks both.
         self.controller.notification_blink_color = "#34C759"
         self.controller.notification_blink_until = time.monotonic() + 1.0
         self.assertEqual(
             self.controller.active_led_display_kind_for_device(device, None),
             self.status_bar.LED_DISPLAY_NOTIFICATION,
         )
-        # Expired glow -> back to agent status.
+        # All expired -> back to agent status.
         self.controller.notification_blink_until = 0.0
+        self.controller.reminders_glow_until = 0.0
         self.controller.calendar_glow_until = time.monotonic() - 1.0
         self.assertEqual(
             self.controller.active_led_display_kind_for_device(device, None),
             self.status_bar.LED_DISPLAY_AGENT,
         )
+
+    def test_reminders_due_glows_once_per_reminder(self) -> None:
+        self.controller.settings = self.controller.settings.with_reminder_alerts_enabled(True)
+        self.controller.remindersDue_([("rem-1", "Pay rent")])
+        self.assertGreater(self.controller.reminders_glow_until, time.monotonic())
+        first_until = self.controller.reminders_glow_until
+        # The same reminder arriving again (still due, still incomplete)
+        # must NOT re-fire the glow.
+        self.controller.reminders_glow_until = 0.0
+        self.controller.remindersDue_([("rem-1", "Pay rent")])
+        self.assertEqual(self.controller.reminders_glow_until, 0.0)
+        # A different reminder fires fresh.
+        self.controller.remindersDue_([("rem-2", "Stand-up")])
+        self.assertGreater(self.controller.reminders_glow_until, 0.0)
+        self.assertGreaterEqual(first_until, 0.0)
+
+    def test_reminder_settings_round_trip(self) -> None:
+        configured = AgentMonitorSettings().with_reminder_alerts_enabled(True)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            reloaded = load_settings(path)
+        self.assertTrue(reloaded.reminder_alerts_enabled)
 
 
 class NotificationBlinkTests(unittest.TestCase):
