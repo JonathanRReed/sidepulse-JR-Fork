@@ -382,12 +382,17 @@ def identity_colors_for_agents(agent_ids: "list[str]") -> dict[str, str]:
     """Deterministic palette assignment: each id hashes to a preferred
     slot and probes forward past slots already taken this round, so the
     same set of sessions always maps to the same colors, and two
-    sessions never share a hue while free slots remain."""
+    sessions never share a hue while free slots remain.
+
+    Assignment iterates ids in SORTED order, never caller order: the
+    LED render, the dropdown dots, and any preview pass differently
+    ordered lists, and collision probing is order-dependent -- without
+    the sort, two hash-colliding sessions swapped hues whenever their
+    urgency order flipped, and the dropdown dot could disagree with
+    the LEDs. Sorted, the result is a pure function of the ID SET."""
     taken: set[int] = set()
     assignment: dict[str, str] = {}
-    for agent_id in agent_ids:
-        if agent_id in assignment:
-            continue
+    for agent_id in sorted(set(agent_ids)):
         start = int(hashlib.md5(agent_id.encode("utf-8")).hexdigest(), 16) % len(IDENTITY_PALETTE)
         slot = start
         for offset in range(len(IDENTITY_PALETTE)):

@@ -8595,25 +8595,41 @@ class EscalationControllerTests(unittest.TestCase):
         self.controller = status_bar.StatusBarController.alloc().init()
 
     def test_blocked_episode_tracking_and_flash_timer_lifecycle(self) -> None:
-        from sidepulse.models import AgentMode
-
-        self.controller.track_ask_blocked(AgentMode.WAITING_FOR_INPUT)
+        asking = (_status("codex", AgentMode.WAITING_FOR_INPUT),)
+        self.controller.track_ask_blocked(asking)
         self.assertIsNotNone(self.controller.ask_blocked_since)
         started = self.controller.ask_blocked_since
         # Staying blocked keeps the ORIGINAL episode start.
-        self.controller.track_ask_blocked(AgentMode.BLOCKED_ERROR)
+        self.controller.track_ask_blocked((_status("codex", AgentMode.BLOCKED_ERROR),))
         self.assertEqual(self.controller.ask_blocked_since, started)
 
         # Age the episode past stage 2: the menu-bar flash timer starts.
+        self.controller.ask_blocked_by_agent = {"codex": time.monotonic() - 200.0}
         self.controller.ask_blocked_since = time.monotonic() - 200.0
         self.controller.apply_escalation()
         self.assertGreaterEqual(self.controller.current_escalation_stage(), 2)
         self.assertIsNotNone(self.controller.escalation_flash_timer)
 
         # Any non-ask state ends the episode and stops the flash.
-        self.controller.track_ask_blocked(AgentMode.WORKING)
+        self.controller.track_ask_blocked((_status("codex", AgentMode.WORKING),))
         self.assertIsNone(self.controller.ask_blocked_since)
         self.assertIsNone(self.controller.escalation_flash_timer)
+
+    def test_escalation_follows_the_oldest_current_ask_per_agent(self) -> None:
+        # Agent A blocked for ages, agent B just asked; answering A must
+        # drop escalation to B's fresh episode, not inherit A's stage.
+        now = time.monotonic()
+        a_ask = _status("codex", AgentMode.WAITING_FOR_INPUT)
+        b_ask = _status("claude", AgentMode.WAITING_FOR_INPUT)
+        self.controller.ask_blocked_by_agent = {}
+        self.controller.track_ask_blocked((a_ask, b_ask))
+        self.controller.ask_blocked_by_agent["codex"] = now - 400.0
+        self.controller.track_ask_blocked((a_ask, b_ask))
+        self.assertLessEqual(self.controller.ask_blocked_since, now - 399.0)
+        # A answered: only B's young episode remains.
+        self.controller.track_ask_blocked((b_ask,))
+        self.assertGreater(self.controller.ask_blocked_since, now - 10.0)
+        self.assertEqual(self.controller.current_escalation_stage(), 0)
 
     def test_takeover_claims_the_top_of_the_precedence_order(self) -> None:
         device = self.status_bar.StatusBarDevice(

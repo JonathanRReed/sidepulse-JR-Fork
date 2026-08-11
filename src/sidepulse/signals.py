@@ -84,7 +84,10 @@ class SignalStyle:
             return fallback
         try:
             return cls(
-                color=str(raw.get("color", fallback.color)),
+                # An invalid color falls back to the SIGNAL's default,
+                # not normalized()'s generic white -- {"color": "red"}
+                # must yield the documented default, not a white glow.
+                color=_normalize_color(raw.get("color", fallback.color), fallback.color),
                 pattern=str(raw.get("pattern", fallback.pattern)),
                 speed_seconds=float(raw.get("speed_seconds", fallback.speed_seconds)),
                 intensity=float(raw.get("intensity", fallback.intensity)),

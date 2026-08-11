@@ -411,7 +411,7 @@ class StatusBarController(NSObject):
         # reminder ids that already glowed (a due-and-incomplete
         # reminder stays "due" every poll -- it must fire ONCE).
         self.reminders_glow_until = 0.0
-        self.reminders_seen: set[str] = set()
+        self.reminders_seen: dict[str, float] = {}
         self.reminders_watch_retry_at = 0.0
         self.current_state = STATE_IDLE
         # None until set_status() actually confirms Idle -- avoids assuming
@@ -422,6 +422,7 @@ class StatusBarController(NSObject):
         # (None = not blocked), the last applied stage, the menu-bar
         # flash timer, and whether this block episode already chimed.
         self.ask_blocked_since: float | None = None
+        self.ask_blocked_by_agent: dict[str, float] = {}
         self.escalation_last_stage = 0
         self.escalation_flash_timer = None
         self.escalation_flash_on = False
@@ -670,6 +671,15 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def remindersDue_(self, items):
+        now = time.monotonic()
+        # Prune ids that fell out of the fetch lookback long ago -- the
+        # seen-map must not grow for the process's whole life.
+        horizon = now - REMINDERS_WATCH_SECONDS * 8.0
+        self.reminders_seen = {
+            identifier: seen_at
+            for identifier, seen_at in self.reminders_seen.items()
+            if seen_at >= horizon
+        }
         fresh = [
             (identifier, title)
             for identifier, title in (tuple(item) for item in (items or []))
@@ -678,7 +688,7 @@ class StatusBarController(NSObject):
         if not fresh:
             return
         for identifier, _title in fresh:
-            self.reminders_seen.add(identifier)
+            self.reminders_seen[identifier] = now
         hold = signals_module.signal_hold_seconds(
             self.settings.signal_style(signals_module.SIGNAL_REMINDERS)
         )
@@ -695,6 +705,9 @@ class StatusBarController(NSObject):
             snapshot = self.monitor.snapshot(include_stale=False)
         except Exception as exc:
             log_status_bar(f"refresh error: {exc}")
+            # No confirmable agent state: clear any escalation episode
+            # rather than letting a stale one keep chiming/stroboing.
+            self.track_ask_blocked(())
             self.set_status(STATE_ASK)
             self.sync_keep_awake(AgentMode.BLOCKED_ERROR)
             self.sync_leds(AgentMode.BLOCKED_ERROR, None, LED_DISPLAY_AGENT, ())
@@ -710,7 +723,7 @@ class StatusBarController(NSObject):
         battery_snapshot = self.read_battery_snapshot()
         state = state_for_mode(snapshot.aggregate.mode)
         self.observe_connected_devices()
-        self.track_ask_blocked(snapshot.aggregate.mode)
+        self.track_ask_blocked(snapshot.statuses)
         self.set_status(state)
         self.sync_keep_awake(snapshot.aggregate.mode)
         self.sync_leds(
@@ -948,15 +961,24 @@ class StatusBarController(NSObject):
         return self.settings.signal_style(key)
 
     def _save_signal_style(self, key: str, style) -> None:
+        # Mid-drag, preview only: committing per drag tick meant a disk
+        # write + full refresh (menu rebuild, LED write, subprocesses)
+        # per mouse movement -- the same rule every other continuous
+        # slider in this file follows.
+        if self._slider_event_is_drag():
+            self._render_signal_card(key, style.normalized())
+            return
         self.settings = self.settings.with_signal_style(key, style)
         save_settings(self.settings)
         self.refresh_signal_card(key)
         self.refresh_(None)
 
     def refresh_signal_card(self, key: str) -> None:
+        self._render_signal_card(key, self.settings.signal_style(key))
+
+    def _render_signal_card(self, key: str, style) -> None:
         """Re-renders one card's thumbnails, preview, and selection ring
-        from the saved style."""
-        style = self.settings.signal_style(key)
+        from the given style (saved, or transient mid-drag)."""
         preview_color = _signal_preview_color(self, key)
         thumbs = self.settings_fields.get(f"signal_thumbs:{key}")
         if isinstance(thumbs, dict):
@@ -1080,10 +1102,27 @@ class StatusBarController(NSObject):
             return
         for field_key, view in self.settings_fields.items():
             if field_key.startswith("signal_preview:"):
-                view.setNeedsDisplay_(True)
+                if not view.isHiddenOrHasHiddenAncestor():
+                    view.setNeedsDisplay_(True)
             elif field_key.startswith("signal_thumbs:") and isinstance(view, dict):
                 for thumb in view.values():
-                    thumb.setNeedsDisplay_(True)
+                    if not thumb.isHiddenOrHasHiddenAncestor():
+                        thumb.setNeedsDisplay_(True)
+
+    @objc.IBAction
+    def setSessionIdentityColor_(self, sender):
+        payload = sender.representedObject() or {}
+        agent_id = str(payload.get("agent_id") or "")
+        if not agent_id:
+            return
+        color = payload.get("color")
+        self.settings = self.settings.with_colors(
+            self.settings.colors.with_session_color(
+                agent_id, str(color) if color is not None else None
+            )
+        )
+        save_settings(self.settings)
+        self.refresh_(None)
 
     @objc.IBAction
     def toggleReminderAlerts_(self, sender):
@@ -1529,13 +1568,29 @@ class StatusBarController(NSObject):
 
     # --- Ask escalation ------------------------------------------------
 
-    def track_ask_blocked(self, mode: AgentMode) -> None:
-        """Marks when the aggregate first entered ask/blocked; clears
-        the episode (and its one-chime latch) on any other state."""
-        if mode in (AgentMode.WAITING_FOR_INPUT, AgentMode.BLOCKED_ERROR):
-            if self.ask_blocked_since is None:
-                self.ask_blocked_since = time.monotonic()
+    def track_ask_blocked(self, statuses) -> None:
+        """Per-agent ask/blocked episode tracking. Escalation follows the
+        OLDEST currently-unanswered ask -- aggregate-level tracking let a
+        brand-new ask inherit a stage-3 chime from a different, already
+        answered agent's long episode. Pass an empty tuple to clear
+        (e.g. the refresh error path, where no state can be confirmed)."""
+        now = time.monotonic()
+        ask_modes = (AgentMode.WAITING_FOR_INPUT, AgentMode.BLOCKED_ERROR)
+        current = {
+            status.agent_id
+            for status in (statuses or ())
+            if status.mode in ask_modes and status.agent_id
+        }
+        tracked = getattr(self, "ask_blocked_by_agent", {})
+        updated = {agent_id: tracked.get(agent_id, now) for agent_id in current}
+        self.ask_blocked_by_agent = updated
+        if updated:
+            oldest = min(updated.values())
+            if self.ask_blocked_since != oldest:
+                # A new oldest episode (fresh ask, or the previous oldest
+                # was answered) gets a fresh one-chime latch.
                 self.escalation_chimed = False
+            self.ask_blocked_since = oldest
         else:
             self.ask_blocked_since = None
         self.apply_escalation()
@@ -1610,12 +1665,25 @@ class StatusBarController(NSObject):
             button.setTitle_("")
             button.setImage_(image_for_symbol(self.current_state.symbol, self.current_state.label))
 
-    def escalation_takeover_program(self, brightness: int | float) -> str:
+    def escalation_takeover_program(self, brightness: int | float, led_count: int = 8) -> str:
         """Fast full-bar strobe in the ask color -- the opt-in "don't
         let me miss this" finale."""
         ask_color = self.settings.colors.mode_colors.get("ask", "#FF3A00")
         style = signals_module.SignalStyle(ask_color, signals_module.PATTERN_BREATHE, 0.45, 1.0)
-        return style_to_program(style, brightness)
+        return style_to_program(style, brightness, led_count=led_count)
+
+    def agent_render_colors(self):
+        """ColorSettings for agent rendering with the stage>=1
+        quickening applied: blend cycles run at x0.75 speed, so the
+        ramp stays visible even at full brightness where the boost
+        alone would clamp away to nothing."""
+        colors = self.settings.colors
+        if self.current_escalation_stage() >= 1:
+            quickened = max(
+                colors_module.MIN_CYCLE_SPEED_SECONDS, colors.cycle_speed_seconds * 0.75
+            )
+            colors = colors.with_cycle_speed(quickened)
+        return colors
 
     def escalation_takeover_active(self) -> bool:
         return (
@@ -1761,9 +1829,12 @@ class StatusBarController(NSObject):
         # while the window is visible (self-invalidating on close, same
         # pattern as the welcome demo timer).
         if getattr(self, "signal_preview_timer", None) is None:
+            # 12Hz, not 30: every tick steps ~24 WASM preview engines
+            # (JavaScriptCore call + JSON round-trip each); pattern
+            # thumbnails read fine at 12 and the CPU cost drops by ~60%.
             self.signal_preview_timer = (
                 NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                    1.0 / 30.0, self, "redrawSignalPreviews:", None, True
+                    1.0 / 12.0, self, "redrawSignalPreviews:", None, True
                 )
             )
         self.settings_window.makeKeyAndOrderFront_(None)
@@ -2535,6 +2606,24 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("reminder_alerts_enabled"),
             self.settings.reminder_alerts_enabled,
         )
+        # Signals cards: re-render each from saved state, and sync the
+        # escalation controls -- like every other control here, they must
+        # reflect changes made outside their own handlers.
+        for signal_key in signals_module.DEFAULT_SIGNAL_STYLES:
+            self.refresh_signal_card(signal_key)
+        tier_popup = self.settings_fields.get("escalation_tier_popup")
+        if tier_popup is not None:
+            for index in range(tier_popup.numberOfItems()):
+                item = tier_popup.itemAtIndex_(index)
+                if str(item.representedObject() or "") == self.settings.escalation_tier:
+                    tier_popup.selectItem_(item)
+                    break
+        for field_key, value in (
+            ("escalation_ramp_field", self.settings.escalation_ramp_seconds),
+            ("escalation_menu_bar_field", self.settings.escalation_menu_bar_seconds),
+            ("escalation_final_field", self.settings.escalation_final_seconds),
+        ):
+            set_field_value(self.settings_fields.get(field_key), f"{value:g}")
         set_field_value(
             self.settings_fields.get("calendar_lead_field"),
             f"{self.settings.calendar_lead_minutes:g}",
@@ -3569,7 +3658,7 @@ class StatusBarController(NSObject):
             _, program = program_for_snapshot(
                 statuses,
                 led_count=8,
-                colors=self.settings.colors,
+                colors=self.agent_render_colors(),
                 brightness=brightness,
                 fallback_mode=mode,
             )
@@ -3662,10 +3751,13 @@ class StatusBarController(NSObject):
                 self.reset_led_controllers_for_device(device.device_id)
                 self.last_led_display_kind_by_device[device.device_id] = device_display_kind
 
+            device_led_count = led_count_for_target(device.target)
             if device_display_kind == LED_DISPLAY_ESCALATION:
                 controller = self.agent_controller_for_device(device)
                 result = controller.sync_program(
-                    self.escalation_takeover_program(controller.brightness),
+                    self.escalation_takeover_program(
+                        controller.brightness, led_count=device_led_count
+                    ),
                     LedDisplayState.ASK,
                 )
                 label = f"{device.name} Needs you (takeover)"
@@ -3680,6 +3772,7 @@ class StatusBarController(NSObject):
                         self.settings.signal_style(signals_module.SIGNAL_NOTIFICATION),
                         controller.brightness,
                         color=self.notification_blink_color,
+                        led_count=device_led_count,
                     ),
                     LedDisplayState.ASK,
                 )
@@ -3694,6 +3787,7 @@ class StatusBarController(NSObject):
                     style_to_program(
                         self.settings.signal_style(signals_module.SIGNAL_REMINDERS),
                         controller.brightness,
+                        led_count=device_led_count,
                     ),
                     LedDisplayState.ASK,
                 )
@@ -3708,6 +3802,7 @@ class StatusBarController(NSObject):
                     style_to_program(
                         self.settings.signal_style(signals_module.SIGNAL_CALENDAR),
                         controller.brightness,
+                        led_count=device_led_count,
                     ),
                     LedDisplayState.ASK,
                 )
@@ -3722,6 +3817,7 @@ class StatusBarController(NSObject):
                     style_to_program(
                         self.settings.signal_style(signals_module.SIGNAL_LOW_BATTERY),
                         controller.brightness,
+                        led_count=device_led_count,
                     ),
                     LedDisplayState.ASK,
                 )
@@ -3738,7 +3834,7 @@ class StatusBarController(NSObject):
                 )
             else:
                 result = self.agent_controller_for_device(device).sync_snapshot(
-                    statuses, self.settings.colors, fallback_mode=mode
+                    statuses, self.agent_render_colors(), fallback_mode=mode
                 )
                 label = f"{device.name} {result.label}"
                 if result.error:
@@ -6590,6 +6686,42 @@ def build_session_options_menu(
             target,
             selected=action == selected,
         )
+
+    # Identity color override: the spec's "auto-assigned, OVERRIDABLE".
+    # Auto + the eight palette hues, each shown as its own colored dot.
+    menu.addItem_(NSMenuItem.separatorItem())
+    identity_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Identity Color", None, ""
+    )
+    identity_menu = NSMenu.alloc().init()
+    current_override = None
+    if getattr(target, "settings", None) is not None:
+        current_override = target.settings.colors.session_color(status.agent_id)
+    choices: list[tuple[str, str | None]] = [("Automatic", None)]
+    choices.extend(
+        (hex_color, hex_color) for hex_color in colors_module.IDENTITY_PALETTE
+    )
+    for label, hex_color in choices:
+        choice = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            label if hex_color is None else f"● {label}",
+            "setSessionIdentityColor:",
+            "",
+        )
+        choice.setTarget_(target)
+        choice.setRepresentedObject_({"agent_id": status.agent_id, "color": hex_color})
+        if hex_color is not None:
+            attributed = NSMutableAttributedString.alloc().initWithString_(f"● {label}")
+            attributed.addAttribute_value_range_(
+                NSForegroundColorAttributeName, nscolor_from_hex(hex_color), (0, 1)
+            )
+            choice.setAttributedTitle_(attributed)
+        if (hex_color is None and current_override is None) or (
+            hex_color is not None and current_override == hex_color
+        ):
+            choice.setState_(NSOnState)
+        identity_menu.addItem_(choice)
+    identity_item.setSubmenu_(identity_menu)
+    menu.addItem_(identity_item)
     return menu
 
 

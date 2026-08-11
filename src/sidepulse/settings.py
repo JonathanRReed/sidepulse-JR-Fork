@@ -779,6 +779,19 @@ def _hex_color(raw: object) -> str | None:
     return None
 
 
+def _escalation_thresholds(data: dict) -> dict[str, float]:
+    """Clamped AND ordered (ramp <= menu bar <= final) -- a hand-edited
+    file with ramp=600, menu=10 must not jump straight to the finale."""
+    ramp = max(5.0, min(600.0, _float_setting(data.get("escalation_ramp_seconds"), 30.0)))
+    menu = max(ramp, min(1800.0, _float_setting(data.get("escalation_menu_bar_seconds"), 120.0)))
+    final = max(menu, min(3600.0, _float_setting(data.get("escalation_final_seconds"), 300.0)))
+    return {
+        "escalation_ramp_seconds": ramp,
+        "escalation_menu_bar_seconds": menu,
+        "escalation_final_seconds": final,
+    }
+
+
 def _escalation_tier(raw: object) -> str:
     from .signals import ESCALATION_TIERS
 
@@ -914,15 +927,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         reminder_alerts_enabled=_bool_setting(data.get("reminder_alerts_enabled"), False),
         signal_styles=_signal_styles(data.get("signal_styles")),
         escalation_tier=_escalation_tier(data.get("escalation_tier")),
-        escalation_ramp_seconds=max(
-            5.0, min(600.0, _float_setting(data.get("escalation_ramp_seconds"), 30.0))
-        ),
-        escalation_menu_bar_seconds=max(
-            5.0, min(1800.0, _float_setting(data.get("escalation_menu_bar_seconds"), 120.0))
-        ),
-        escalation_final_seconds=max(
-            5.0, min(3600.0, _float_setting(data.get("escalation_final_seconds"), 300.0))
-        ),
+        **_escalation_thresholds(data),
         session_open_preferences=_session_open_preferences(data.get("session_open_preferences")),
         setup_screen_completed=_bool_setting(data.get("setup_screen_completed"), False),
         colors=ColorSettings.from_dict(data.get("colors")),
