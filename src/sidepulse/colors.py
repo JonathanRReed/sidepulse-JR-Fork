@@ -20,6 +20,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
+from .device_writer import MAX_LED_BYTES, MAX_LED_LINES
 from .led_status import (
     ANIMATION_STYLE_CHOICES,
     ANIMATION_STYLE_PULSE,
@@ -222,6 +223,18 @@ ROUND_ROBIN_STAGGER_FRACTION = 0.12
 # Round-Robin or Cycle -- otherwise a blocked agent is just "whichever color
 # it happens to be," indistinguishable from an agent that's simply idle.
 DEFAULT_URGENCY_ALERT_ENABLED = True
+
+# The attention takeover: with the urgency alert on, ANY multi-agent
+# program with a Waiting-for-Input/Blocked agent opens each loop with a
+# full-bar double hard-flash in the Ask color at full ceiling. A per-slot
+# color swap alone is not an alert -- it pulses at the same rhythm and
+# brightness as every working neighbor, and the Ask color can literally
+# coincide with another agent's identity color (#FF3A00 is both the Ask
+# default AND Codex's brand color). No steady pulse can be confused with
+# a double flash of the whole bar; the temporal signature IS the alarm.
+ATTENTION_FLASH_MS = 240
+ATTENTION_FLASH_GAP_MS = 140
+ATTENTION_REST_MS = 900
 
 # A quick twinkle-then-bloom when an agent finishes, rather than an
 # instant snap to the solid Done color -- a small reward moment. Default
@@ -1079,15 +1092,48 @@ def program_for_snapshot(
 
     state = _representative_state(agents)
     if settings.blend_mode == BLEND_MODE_COLOR:
-        return state, _color_blend_program(agents, led_count=led_count, brightness=brightness, settings=settings)
-    if settings.blend_mode == BLEND_MODE_CYCLE:
-        return state, _cycle_program(agents, led_count=led_count, brightness=brightness, settings=settings)
-    if settings.blend_mode == BLEND_MODE_SPATIAL:
-        return state, _spatial_split_program(agents, led_count=led_count, brightness=brightness, settings=settings)
-    if settings.blend_mode == BLEND_MODE_RELAY:
-        return state, _relay_program(agents, led_count=led_count, brightness=brightness, settings=settings)
-    # Default / BLEND_MODE_ROUND_ROBIN
-    return state, _round_robin_program(agents, led_count=led_count, brightness=brightness, settings=settings)
+        program = _color_blend_program(agents, led_count=led_count, brightness=brightness, settings=settings)
+    elif settings.blend_mode == BLEND_MODE_CYCLE:
+        program = _cycle_program(agents, led_count=led_count, brightness=brightness, settings=settings)
+    elif settings.blend_mode == BLEND_MODE_SPATIAL:
+        program = _spatial_split_program(agents, led_count=led_count, brightness=brightness, settings=settings)
+    elif settings.blend_mode == BLEND_MODE_RELAY:
+        program = _relay_program(agents, led_count=led_count, brightness=brightness, settings=settings)
+    else:  # Default / BLEND_MODE_ROUND_ROBIN
+        program = _round_robin_program(agents, led_count=led_count, brightness=brightness, settings=settings)
+    return state, _with_attention_takeover(program, agents, settings=settings, brightness=brightness)
+
+
+def _with_attention_takeover(
+    program: str,
+    agents: "list[_ActiveAgent]",
+    *,
+    settings: ColorSettings,
+    brightness: int | float,
+) -> str:
+    """Prepends the full-bar double-flash preamble (see ATTENTION_FLASH_MS)
+    when the urgency alert is on and any agent is Waiting/Blocked. Applied
+    to every multi-agent blend -- an urgent agent must interrupt whatever
+    show is playing, not wait its turn in it. Single-agent and Classic
+    paths already hard-blink on Ask and need no takeover.
+
+    Programs also drive real SidePulse hardware, so the result must stay
+    inside the controller's 20-line / 512-byte limits: if the full
+    preamble doesn't fit, a single flash is tried; if even that doesn't
+    fit, the program is returned unchanged rather than truncated."""
+    if not settings.round_robin_urgency_alert:
+        return program
+    if not any(agent.state == LedDisplayState.ASK for agent in agents):
+        return program
+    ask = settings.mode_color(MODE_ASK)
+    flash = apply_brightness(f"{ask} {ATTENTION_FLASH_MS}ms", brightness)
+    double = [flash, f"off {ATTENTION_FLASH_GAP_MS}ms", flash, f"off {ATTENTION_REST_MS}ms"]
+    single = [flash, f"off {ATTENTION_REST_MS}ms"]
+    for preamble in (double, single):
+        candidate = "\n".join([*preamble, program])
+        if len(candidate.splitlines()) <= MAX_LED_LINES and len(candidate.encode("utf-8")) <= MAX_LED_BYTES:
+            return candidate
+    return program
 
 
 def _peak_color_for_agent(agent: "_ActiveAgent", settings: ColorSettings) -> str:

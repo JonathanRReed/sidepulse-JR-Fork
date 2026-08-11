@@ -5606,6 +5606,16 @@ def _status(provider: str, mode: AgentMode, *, when: datetime | None = None) -> 
     )
 
 
+def _program_body(program: str) -> list[str]:
+    """The blend program's own lines, past any attention-takeover preamble
+    (full-bar flash lines have no per-LED "N:" prefix)."""
+    lines = program.splitlines()
+    for index, line in enumerate(lines):
+        if line.split(":", 1)[0].isdigit():
+            return lines[index:]
+    return lines
+
+
 class ColorSettingsTests(unittest.TestCase):
     def test_defaults_seed_mode_colors_from_led_status_constants(self) -> None:
         from sidepulse.led_status import ASK_AMBER, DONE_GREEN, IDLE_DIM, WORKING_CYAN
@@ -5874,7 +5884,7 @@ class ColorSettingsTests(unittest.TestCase):
         )
         statuses = (_status("devin", AgentMode.BLOCKED_ERROR), _status("codex", AgentMode.WORKING))
         _, program = program_for_snapshot(statuses, led_count=8, colors=settings)
-        reset_line = program.splitlines()[0]
+        reset_line = _program_body(program)[0]
         # Devin (Ask, floor 0) resets to literal "off"; Codex (Working, floor
         # 0.2) resets to a scaled, non-off color.
         self.assertIn("off", reset_line)
@@ -5992,6 +6002,53 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         ]
         self.assertEqual(preview, expected)
 
+    def test_attention_takeover_double_flashes_when_any_agent_asks(self) -> None:
+        # A per-slot color swap is not an alert: it pulses at the same
+        # rhythm/brightness as working neighbors, and the Ask color can
+        # coincide with an agent's identity color. The takeover opens
+        # every loop with a full-bar double hard-flash instead.
+        settings = ColorSettings.defaults()
+        statuses = (
+            _status("claude", AgentMode.WAITING_FOR_INPUT),
+            _status("codex", AgentMode.WORKING),
+            _status("devin", AgentMode.WORKING),
+        )
+        _state, program = colors_module.program_for_snapshot(
+            statuses, led_count=8, colors=settings, brightness=255
+        )
+        lines = program.splitlines()
+        ask = settings.mode_color(colors_module.MODE_ASK)
+        self.assertEqual(lines[0], f"{ask} {colors_module.ATTENTION_FLASH_MS}ms")
+        self.assertEqual(lines[1], f"off {colors_module.ATTENTION_FLASH_GAP_MS}ms")
+        self.assertEqual(lines[2], f"{ask} {colors_module.ATTENTION_FLASH_MS}ms")
+        self.assertLessEqual(len(lines), 20)
+        self.assertLessEqual(len(program.encode("utf-8")), 512)
+
+    def test_attention_takeover_absent_without_an_asker_or_when_disabled(self) -> None:
+        working = (_status("codex", AgentMode.WORKING), _status("devin", AgentMode.WORKING))
+        _s, calm = colors_module.program_for_snapshot(
+            working, led_count=8, colors=ColorSettings.defaults(), brightness=255
+        )
+        self.assertTrue(calm.splitlines()[0].startswith("0:"))
+
+        asking = (_status("claude", AgentMode.WAITING_FOR_INPUT), _status("codex", AgentMode.WORKING))
+        disabled = ColorSettings.defaults().with_round_robin_urgency_alert(False)
+        _s, quiet = colors_module.program_for_snapshot(asking, led_count=8, colors=disabled, brightness=255)
+        self.assertTrue(quiet.splitlines()[0].startswith("0:"))
+
+    def test_attention_takeover_never_breaks_device_limits(self) -> None:
+        # Programs also drive real hardware (20 lines / 512 bytes) -- the
+        # takeover degrades to a single flash, then to no preamble at all,
+        # rather than ever producing an over-limit program.
+        settings = ColorSettings.defaults()
+        askers = [SimpleNamespace(state=colors_module.LedDisplayState.ASK)]
+        fat = "\n".join("0:#112233 100ms" for _ in range(18))
+        out = colors_module._with_attention_takeover(fat, askers, settings=settings, brightness=255)
+        self.assertEqual(len(out.splitlines()), 20)  # single-flash fallback: 18 + 2
+        fatter = "\n".join("0:#112233 100ms" for _ in range(20))
+        out2 = colors_module._with_attention_takeover(fatter, askers, settings=settings, brightness=255)
+        self.assertEqual(out2, fatter)
+
     def test_round_robin_led_assignment_is_invariant_to_input_status_order(self) -> None:
         # Regression guard: the collector sorts statuses most-recently-
         # updated-first, which reorders on nearly every poll once two-plus
@@ -6053,7 +6110,7 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
             _status("claude", AgentMode.BLOCKED_ERROR),
         )
         _, program = program_for_snapshot(statuses, led_count=8, colors=settings)
-        pulse_line = program.splitlines()[1]
+        pulse_line = _program_body(program)[1]
         indices = {segment.split(":")[0] for segment in pulse_line.split("; ")}
         self.assertEqual(indices, {str(i) for i in range(8)})
 
@@ -6078,7 +6135,7 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
             _status("claude", AgentMode.BLOCKED_ERROR),
         )
         _, program = program_for_snapshot(statuses, led_count=8, colors=settings)
-        pulse_line = program.splitlines()[1]
+        pulse_line = _program_body(program)[1]
         indices = {segment.split(":")[0] for segment in pulse_line.split("; ")}
         self.assertEqual(indices, {str(i) for i in range(8)})
 
@@ -6457,15 +6514,21 @@ class SpeedOverrideAndUrgencyAlertTests(unittest.TestCase):
         claude_own_color = colors_module.scale_hex_brightness(settings.agent_color("claude"), ask_ceiling)
         self.assertIn(claude_own_color, program)
 
-    def test_urgency_alert_does_not_affect_spatial_split(self) -> None:
-        # Spatial Split already signals urgency via block size -- the alert
-        # color swap is scoped to Round-Robin/Cycle only.
+    def test_urgency_alert_adds_takeover_but_never_recolors_spatial_split(self) -> None:
+        # Spatial Split still signals WHO is urgent via block size -- the
+        # per-slot alert color swap stays scoped to Round-Robin/Cycle, so
+        # the body colors are identical with the toggle on or off. But the
+        # attention takeover (the full-bar flash preamble) applies to every
+        # blend mode: block size alone was confirmed unmissable by nobody.
         settings_on = ColorSettings.defaults().with_blend_mode(BLEND_MODE_SPATIAL)
         settings_off = settings_on.with_round_robin_urgency_alert(False)
         statuses = (_status("codex", AgentMode.WORKING), _status("claude", AgentMode.BLOCKED_ERROR))
         _, program_on = program_for_snapshot(statuses, led_count=8, colors=settings_on)
         _, program_off = program_for_snapshot(statuses, led_count=8, colors=settings_off)
-        self.assertEqual(program_on, program_off)
+        self.assertEqual(_program_body(program_on), _program_body(program_off))
+        self.assertNotEqual(program_on, program_off)
+        ask = colors_module.ColorSettings.defaults().mode_color(colors_module.MODE_ASK)
+        self.assertTrue(program_on.startswith(f"{ask} {colors_module.ATTENTION_FLASH_MS}ms"))
 
 
 class AnimationStyleTests(unittest.TestCase):
