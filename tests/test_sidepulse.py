@@ -1646,9 +1646,18 @@ class AgentMonitorTests(unittest.TestCase):
 
         self.assertLess(titles.index("Agents"), titles.index("Devices"))
         self.assertIn("Keep Awake With Lid Closed", by_title)
-        self.assertEqual(by_title["Never"].state(), 0)
-        self.assertEqual(by_title["When Agents Work"].state(), 1)
-        self.assertEqual(by_title["Always"].state(), 0)
+        # The policy choices live in a submenu now -- one dropdown row
+        # for the whole concern, not four.
+        submenu = by_title["Keep Awake With Lid Closed"].submenu()
+        self.assertIsNotNone(submenu)
+        sub_items = {
+            submenu.itemAtIndex_(index).title(): submenu.itemAtIndex_(index)
+            for index in range(submenu.numberOfItems())
+        }
+        self.assertEqual(sub_items["Never"].state(), 0)
+        self.assertEqual(sub_items["When Agents Work"].state(), 1)
+        self.assertEqual(sub_items["Always"].state(), 0)
+        self.assertNotIn("Never", by_title)
         self.assertNotIn("Strong Sleep Override...", by_title)
         self.assertNotIn("Sleep Helper Missing", by_title)
         self.assertIn("Setup...", by_title)

@@ -2828,10 +2828,11 @@ class StatusBarController(NSObject):
 
 
 def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> NSMenu:
+    """The status-item dropdown. Glanceability rules: sessions first
+    (the thing you opened the menu to check), no self-titled header (you
+    know what menu you clicked), and one row per secondary concern --
+    the keep-awake policy is a submenu, not four inline rows."""
     menu = NSMenu.alloc().init()
-
-    menu.addItem_(disabled_menu_item("SidePulse"))
-    menu.addItem_(NSMenuItem.separatorItem())
 
     menu.addItem_(disabled_menu_item("Agents"))
 
@@ -2864,10 +2865,17 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         menu.addItem_(virtual_toggle)
 
     menu.addItem_(NSMenuItem.separatorItem())
-    menu.addItem_(disabled_menu_item("Keep Awake With Lid Closed"))
+    keep_awake_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Keep Awake With Lid Closed", None, ""
+    )
+    keep_awake_menu = NSMenu.alloc().init()
     for policy in CLOSED_LID_AWAKE_CHOICES:
-        menu.addItem_(build_closed_lid_awake_policy_item(policy, target))
+        keep_awake_menu.addItem_(build_closed_lid_awake_policy_item(policy, target))
+    keep_awake_item.setSubmenu_(keep_awake_menu)
+    menu.addItem_(keep_awake_item)
     if target.closed_lid_awake.last_error:
+        # Errors stay inline where they can't be missed -- never tucked
+        # into the submenu they originate from.
         menu.addItem_(disabled_menu_item(f"Sleep warning: {target.closed_lid_awake.last_error}"))
 
     menu.addItem_(NSMenuItem.separatorItem())
