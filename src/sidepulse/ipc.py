@@ -111,12 +111,19 @@ class HookEventServer:
                 self._handle_connection(connection)
 
     def _handle_connection(self, connection: socket.socket) -> None:
+        # The accept loop is single-threaded: one client that connects
+        # and never sends would otherwise block recv forever and stop
+        # ALL hook-event ingestion for the rest of the app's life.
+        try:
+            connection.settimeout(5.0)
+        except OSError:
+            return
         chunks: list[bytes] = []
         total = 0
         while True:
             try:
                 chunk = connection.recv(65536)
-            except OSError:
+            except (TimeoutError, OSError):
                 return
             if not chunk:
                 break

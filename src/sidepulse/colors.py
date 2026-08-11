@@ -945,6 +945,11 @@ def _relay_program(
         )
 
     duration_ms = max(1, int(settings.effective_speed_seconds(BLEND_MODE_RELAY) * 1000))
+    # The firmware caps every duration/delay at 65535 ms and a parse
+    # error blinks the whole device red -- the full stagger below peaks
+    # at (led_count - 1) * duration_ms, so cap the per-turn duration to
+    # keep the largest delay legal even at the slowest user speed.
+    duration_ms = min(duration_ms, 65535 // max(1, led_count - 1))
     settle_ms = settle_duration_ms(duration_ms)
 
     reset_segments: list[str] = []

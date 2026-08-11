@@ -460,6 +460,25 @@ def low_battery_program(brightness: int | float = 255) -> str:
     )
 
 
+NOTIFICATION_FLASH_MS = 170
+NOTIFICATION_GAP_MS = 130
+NOTIFICATION_BLINK_FLASHES = 3
+# Long enough for all three flashes plus a beat of dark before agent
+# status resumes; status_bar's display-kind override uses this too.
+NOTIFICATION_BLINK_SECONDS = (
+    NOTIFICATION_BLINK_FLASHES * (NOTIFICATION_FLASH_MS + NOTIFICATION_GAP_MS) / 1000.0 + 0.4
+)
+
+
+def notification_blink_program(color: str, brightness: int | float = 255) -> str:
+    """Three quick whole-bar flashes in the notifying app's own color,
+    then dark -- status_bar reverts to the agent display when the blink
+    window closes, so this program deliberately does NOT repeat.
+    Whole-bar lines: identical on the Dot, the Pro, and the Screen Bar."""
+    flash = f"{color} {NOTIFICATION_FLASH_MS}ms cosine\noff {NOTIFICATION_GAP_MS}ms cosine"
+    return apply_brightness("\n".join([flash] * NOTIFICATION_BLINK_FLASHES), brightness)
+
+
 def apply_brightness(program: str, brightness: int | float = 255) -> str:
     value = normalize_brightness(brightness)
     if value >= 255:

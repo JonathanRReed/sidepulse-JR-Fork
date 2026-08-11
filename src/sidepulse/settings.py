@@ -16,6 +16,16 @@ from .session_actions import SESSION_OPEN_CHOICES
 LED_DISPLAY_AGENT = "agent"
 LED_DISPLAY_BATTERY = "battery"
 LED_DISPLAY_CHOICES = (LED_DISPLAY_AGENT, LED_DISPLAY_BATTERY)
+# Notification blink defaults: each app's own brand color, so the blink
+# says WHICH app without reading anything.
+NOTIFICATION_APP_IMESSAGE = "com.apple.MobileSMS"
+NOTIFICATION_APP_WHATSAPP = "net.whatsapp.WhatsApp"
+NOTIFICATION_APP_TELEGRAM = "ru.keepcoder.Telegram"
+DEFAULT_NOTIFICATION_APP_COLORS: dict[str, str] = {
+    NOTIFICATION_APP_IMESSAGE: "#34C759",
+    NOTIFICATION_APP_WHATSAPP: "#25D366",
+    NOTIFICATION_APP_TELEGRAM: "#2AABEE",
+}
 ALCOVE_COMPAT_AUTO = "auto"
 ALCOVE_COMPAT_ALWAYS = "always"
 ALCOVE_COMPAT_NEVER = "never"
@@ -162,6 +172,14 @@ class AgentMonitorSettings:
     # battery is the one signal that should outrank agent status.
     low_battery_alert_enabled: bool = True
     low_battery_threshold_percent: float = 5.0
+    # Blink the LEDs briefly in an app's own color when it delivers a
+    # notification, then return to agent status. Reads the Notification
+    # Center store, so it needs Full Disk Access (the same grant the
+    # Focus rules use) and stays silently inert without it.
+    notification_blinks_enabled: bool = True
+    notification_app_colors: dict[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_NOTIFICATION_APP_COLORS)
+    )
     session_open_preferences: dict[str, str] = field(default_factory=dict)
     setup_screen_completed: bool = False
     colors: ColorSettings = field(default_factory=ColorSettings.defaults)
@@ -586,6 +604,20 @@ class AgentMonitorSettings:
     def with_low_battery_threshold_percent(self, percent: float) -> "AgentMonitorSettings":
         return replace(self, low_battery_threshold_percent=max(1.0, min(50.0, float(percent))))
 
+    def with_notification_blinks_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+        return replace(self, notification_blinks_enabled=bool(enabled))
+
+    def with_notification_app_color(self, bundle_id: str, color: str | None) -> "AgentMonitorSettings":
+        """color=None removes the app from the blink list entirely."""
+        apps = dict(self.notification_app_colors)
+        if color is None:
+            apps.pop(bundle_id, None)
+        else:
+            normalized = _hex_color(color)
+            if normalized is not None:
+                apps[bundle_id] = normalized
+        return replace(self, notification_app_colors=apps)
+
     def focus_dim_fraction(self, mode_identifier: str) -> float:
         """The brightness fraction to apply while this Focus is active --
         its own rule if set, otherwise the shared idle-dim amount (the
@@ -628,6 +660,8 @@ class AgentMonitorSettings:
                 "low_battery_alert_enabled": self.low_battery_alert_enabled,
                 "low_battery_threshold_percent": self.low_battery_threshold_percent,
             },
+            "notification_blinks_enabled": self.notification_blinks_enabled,
+            "notification_app_colors": dict(sorted(self.notification_app_colors.items())),
             "session_open_preferences": dict(sorted(self.session_open_preferences.items())),
             "setup_screen_completed": self.setup_screen_completed,
             "colors": self.colors.to_dict(),
@@ -652,6 +686,29 @@ def default_config_dir(home: Path | None = None) -> Path:
 
 def default_settings_path(home: Path | None = None) -> Path:
     return default_config_dir(home) / "settings.json"
+
+
+def _hex_color(raw: object) -> str | None:
+    """'#RRGGBB' (normalized upper-case) or None for anything else."""
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    if re.fullmatch(r"#?[0-9a-fA-F]{6}", value):
+        return "#" + value.lstrip("#").upper()
+    return None
+
+
+def _notification_app_colors(raw: object) -> dict[str, str]:
+    """Absent -> the defaults; present -> exactly what was saved (an
+    empty dict is a legitimate "no apps" choice), each color validated."""
+    if not isinstance(raw, dict):
+        return dict(DEFAULT_NOTIFICATION_APP_COLORS)
+    result: dict[str, str] = {}
+    for bundle_id, color in raw.items():
+        normalized = _hex_color(color)
+        if isinstance(bundle_id, str) and bundle_id and normalized is not None:
+            result[bundle_id] = normalized
+    return result
 
 
 def _optional_dimension(raw: object, minimum: float, maximum: float) -> float | None:
@@ -743,6 +800,8 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         low_battery_threshold_percent=max(
             1.0, min(50.0, _float_setting(battery.get("low_battery_threshold_percent"), 5.0))
         ),
+        notification_blinks_enabled=_bool_setting(data.get("notification_blinks_enabled"), True),
+        notification_app_colors=_notification_app_colors(data.get("notification_app_colors")),
         session_open_preferences=_session_open_preferences(data.get("session_open_preferences")),
         setup_screen_completed=_bool_setting(data.get("setup_screen_completed"), False),
         colors=ColorSettings.from_dict(data.get("colors")),
@@ -767,7 +826,15 @@ def save_settings(
 ) -> Path:
     target = (path or default_settings_path()).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(settings.to_dict(), indent=2, sort_keys=True) + "\n")
+    # Atomic: a crash mid-write must never truncate the file -- a
+    # truncated settings.json silently loads as ALL defaults, losing
+    # every color, device, and rule. (Also written from the LED worker
+    # thread via remember_connected_devices, so in-place truncation had
+    # a real interleaving window, not just a power-loss one.)
+    payload = json.dumps(settings.to_dict(), indent=2, sort_keys=True) + "\n"
+    scratch = target.with_name(target.name + ".tmp")
+    scratch.write_text(payload)
+    os.replace(scratch, target)
     return target
 
 

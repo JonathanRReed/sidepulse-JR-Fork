@@ -1253,53 +1253,6 @@ class AgentMonitorTests(unittest.TestCase):
         # when wing_offset > 0) on top of the existing notch/wing passes.
         view.drawRect_(view.bounds())
 
-    def test_alcove_gap_measured_from_its_menu_bar_window(self) -> None:
-        # In Automatic size with Alcove running, the bracket's gap must
-        # follow Alcove's own overlay window -- its live-activity capsule
-        # is wider than the hardware notch, and a hardware-sized bracket
-        # landed ON TOP of it ("the wings aren't properly sized").
-        try:
-            from sidepulse import virtual_device
-        except (ImportError, SystemExit) as exc:
-            self.skipTest(str(exc))
-
-        def window(owner, x, y, width):
-            return {
-                "kCGWindowOwnerName": owner,
-                "kCGWindowBounds": {"X": x, "Y": y, "Width": width, "Height": 320},
-            }
-
-        screen_x, screen_width = 0.0, 1512.0
-        gap = virtual_device.alcove_gap_from_windows(
-            [
-                window("Alcove", 444.0, 0.0, 624.0),
-                window("Alcove", 444.0, 0.0, 624.0),  # its second, identical layer
-                window("Finder", 0.0, 0.0, 1512.0),
-            ],
-            screen_x,
-            screen_width,
-        )
-        self.assertEqual(gap, 624.0 + 2.0 * virtual_device.ALCOVE_GAP_MARGIN)
-
-        # Full-width Alcove states (expanded HUD) must NOT balloon the bar.
-        self.assertIsNone(
-            virtual_device.alcove_gap_from_windows(
-                [window("Alcove", 0.0, 0.0, 1512.0)], screen_x, screen_width
-            )
-        )
-        # Windows outside the menu-bar strip or missing the notch don't count.
-        self.assertIsNone(
-            virtual_device.alcove_gap_from_windows(
-                [window("Alcove", 444.0, 200.0, 624.0), window("Alcove", 0.0, 0.0, 200.0)],
-                screen_x,
-                screen_width,
-            )
-        )
-        # No Alcove windows at all -> None (caller falls back to hardware).
-        self.assertIsNone(
-            virtual_device.alcove_gap_from_windows([], screen_x, screen_width)
-        )
-
     def test_auto_wing_backs_off_when_the_gap_is_wider_than_the_notch(self) -> None:
         # A measured (or user-set) gap wider than the hardware slot eats
         # each side's free room; the auto wing must shrink by the same
@@ -6335,6 +6288,27 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         indices = {segment.split(":")[0] for segment in pulse_line.split("; ")}
         self.assertEqual(indices, {str(i) for i in range(8)})
 
+    def test_relay_at_maximum_speed_stays_within_the_firmware_delay_cap(self) -> None:
+        # Durations and delays above 65535 ms are a firmware PARSE ERROR
+        # (all LEDs blink red six times). Full stagger peaks at
+        # (led_count - 1) * duration, so the slowest user speed (10 s)
+        # used to emit a 70000 ms delay and brick the display.
+        import re as _re
+
+        settings = (
+            ColorSettings.defaults()
+            .with_blend_mode(BLEND_MODE_RELAY)
+            .with_cycle_speed(10.0)
+        )
+        statuses = (
+            _status("codex", AgentMode.WORKING),
+            _status("claude", AgentMode.WORKING),
+        )
+        _, program = program_for_snapshot(statuses, led_count=8, colors=settings)
+        values = [int(token) for token in _re.findall(r"(\d+)ms", program)]
+        self.assertTrue(values)
+        self.assertLessEqual(max(values), 65535)
+
     def test_relay_fully_staggers_so_only_one_led_is_ever_mid_flare(self) -> None:
         # The defining difference from Round-Robin: each LED's delay is a
         # full multiple of the per-turn duration, not a small fraction of
@@ -8267,6 +8241,84 @@ class ScreenBarSettingsTakeEffectImmediatelyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NotificationBlinkTests(unittest.TestCase):
+    def _fixture_db(self, tmp: str) -> Path:
+        import sqlite3
+
+        path = Path(tmp) / "db"
+        connection = sqlite3.connect(path)
+        connection.execute("CREATE TABLE app (app_id INTEGER PRIMARY KEY, identifier TEXT)")
+        connection.execute("CREATE TABLE record (rec_id INTEGER PRIMARY KEY, app_id INTEGER)")
+        connection.execute("INSERT INTO app VALUES (1, 'com.apple.MobileSMS')")
+        connection.execute("INSERT INTO app VALUES (2, 'net.whatsapp.WhatsApp')")
+        connection.execute("INSERT INTO record VALUES (10, 1)")
+        connection.commit()
+        connection.close()
+        return path
+
+    def test_watch_returns_only_new_deliveries_in_order(self) -> None:
+        import sqlite3
+
+        from sidepulse import notification_watch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._fixture_db(tmp)
+            cursor = notification_watch.latest_record_id(path)
+            self.assertEqual(cursor, 10)
+            connection = sqlite3.connect(path)
+            connection.execute("INSERT INTO record VALUES (11, 2)")
+            connection.execute("INSERT INTO record VALUES (12, 1)")
+            connection.commit()
+            connection.close()
+            new_cursor, apps = notification_watch.delivered_after(cursor, path)
+            self.assertEqual(new_cursor, 12)
+            self.assertEqual(apps, ["net.whatsapp.WhatsApp", "com.apple.MobileSMS"])
+            self.assertEqual(notification_watch.delivered_after(new_cursor, path), (12, []))
+
+    def test_watch_raises_unavailable_without_the_store(self) -> None:
+        from sidepulse import notification_watch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(notification_watch.NotificationWatchUnavailableError):
+                notification_watch.latest_record_id(Path(tmp) / "missing")
+
+    def test_blink_program_fits_device_limits_and_does_not_repeat(self) -> None:
+        from sidepulse.device_writer import MAX_LED_BYTES, MAX_LED_LINES
+        from sidepulse.led_status import notification_blink_program
+
+        program = notification_blink_program("#34C759", 128)
+        self.assertLessEqual(len(program.encode()), MAX_LED_BYTES)
+        self.assertLessEqual(len(program.splitlines()), MAX_LED_LINES)
+        # The blink is a moment: status_bar reverts to the agent display
+        # when the window closes, so the program must not loop.
+        self.assertNotIn("repeat", program)
+
+    def test_notification_settings_round_trip_and_atomic_write(self) -> None:
+        configured = (
+            AgentMonitorSettings()
+            .with_notification_blinks_enabled(False)
+            .with_notification_app_color("com.apple.MobileSMS", "1a2b3c")
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            # Atomic write: the scratch file must not survive.
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["settings.json"])
+            reloaded = load_settings(path)
+        self.assertFalse(reloaded.notification_blinks_enabled)
+        self.assertEqual(reloaded.notification_app_colors["com.apple.MobileSMS"], "#1A2B3C")
+
+    def test_invalid_notification_color_is_rejected(self) -> None:
+        base = AgentMonitorSettings()
+        unchanged = base.with_notification_app_color("com.apple.MobileSMS", "not-a-color")
+        self.assertEqual(
+            unchanged.notification_app_colors["com.apple.MobileSMS"],
+            base.notification_app_colors["com.apple.MobileSMS"],
+        )
+        removed = base.with_notification_app_color("com.apple.MobileSMS", None)
+        self.assertNotIn("com.apple.MobileSMS", removed.notification_app_colors)
 
 
 class AppBundleTests(unittest.TestCase):

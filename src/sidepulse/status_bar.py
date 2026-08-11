@@ -76,6 +76,7 @@ from .battery import (
 from . import display_brightness
 from . import focus_sync
 from . import native_ui
+from . import notification_watch
 from .audit import (
     default_status_audit_log_path,
     export_status_audit_csv,
@@ -104,12 +105,14 @@ from .led_status import (
     ANIMATION_STYLE_CHOICES,
     MAX_CHANNEL_GAIN,
     MIN_CHANNEL_GAIN,
+    NOTIFICATION_BLINK_SECONDS,
     AgentLedController,
     LedDisplayState,
     apply_brightness,
     brightness_percent,
     led_count_for_target,
     low_battery_program,
+    notification_blink_program,
     normalize_brightness,
     normalized_device_name,
     write_mode_to_leds,
@@ -184,8 +187,12 @@ from .settings import (
     CLOSED_LID_AWAKE_ALWAYS,
     CLOSED_LID_AWAKE_CHOICES,
     CLOSED_LID_AWAKE_NEVER,
+    DEFAULT_NOTIFICATION_APP_COLORS,
     LED_DISPLAY_AGENT,
     LED_DISPLAY_BATTERY,
+    NOTIFICATION_APP_IMESSAGE,
+    NOTIFICATION_APP_TELEGRAM,
+    NOTIFICATION_APP_WHATSAPP,
     LID_ANIMATION_CLOSED,
     LID_ANIMATION_OPEN,
     LedAnimationSetting,
@@ -235,6 +242,12 @@ STATUS_BAR_KEEPALIVE_VOLUME_NAMES = (
 # Runtime-only display kind (never a persisted per-device choice): the
 # low-battery reminder takes over every display while active.
 LED_DISPLAY_LOW_BATTERY = "low_battery"
+LED_DISPLAY_NOTIFICATION = "notification"
+# How often the Notification Center store is polled (one indexed
+# rec_id query on a small database), and how long to back off after a
+# failed read (no Full Disk Access yet, database locked, ...).
+NOTIFICATION_WATCH_SECONDS = 2.0
+NOTIFICATION_WATCH_RETRY_SECONDS = 60.0
 
 STATUS_BAR_REFRESH_SECONDS = 15.0
 # How often the screen-brightness watcher samples (one cheap ctypes call)
@@ -355,6 +368,13 @@ class StatusBarController(NSObject):
         self.last_battery_error = None
         self.last_power_connected = None
         self.battery_preview_until = 0.0
+        # Notification blinks: cursor into the Notification Center
+        # store, the transient blink window, and a backoff so a missing
+        # FDA grant costs one failed query a minute, not one per tick.
+        self.notification_record_cursor: int | None = None
+        self.notification_blink_until = 0.0
+        self.notification_blink_color: str | None = None
+        self.notification_watch_retry_at = 0.0
         self.current_state = STATE_IDLE
         # None until set_status() actually confirms Idle -- avoids assuming
         # "idle since launch" if the real initial state turns out to be
@@ -438,6 +458,15 @@ class StatusBarController(NSObject):
             None,
             True,
         )
+        # Notification-blink watcher: silently inert until Full Disk
+        # Access is granted (see notification_watch.py).
+        self.notification_watch_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            NOTIFICATION_WATCH_SECONDS,
+            self,
+            "pollNotifications:",
+            None,
+            True,
+        )
         self.show_setup_window_if_needed()
         if SCREEN_BAR_FEATURE_ENABLED and self.settings.virtual_status_device_enabled:
             self.virtual_status_device.show()
@@ -472,6 +501,50 @@ class StatusBarController(NSObject):
 
         if needs_refresh:
             self.refresh_(None)
+
+    @objc.IBAction
+    def pollNotifications_(self, _sender):
+        """Blink the LEDs in an app's color when it delivers a
+        notification, then return to agent status. All failure modes
+        (no FDA, schema drift) back off quietly -- this signal must
+        never cost the user anything when it can't work."""
+        if not self.settings.notification_blinks_enabled:
+            return
+        if not self.settings.notification_app_colors:
+            return
+        now = time.monotonic()
+        if now < self.notification_watch_retry_at:
+            return
+        try:
+            if self.notification_record_cursor is None:
+                # First successful read just primes the cursor --
+                # pre-existing notifications must not replay as blinks.
+                self.notification_record_cursor = notification_watch.latest_record_id()
+                return
+            cursor, identifiers = notification_watch.delivered_after(
+                self.notification_record_cursor
+            )
+        except notification_watch.NotificationWatchUnavailableError:
+            self.notification_watch_retry_at = now + NOTIFICATION_WATCH_RETRY_SECONDS
+            return
+        self.notification_record_cursor = cursor
+        colors_by_app = self.settings.notification_app_colors
+        matched = [colors_by_app[app] for app in identifiers if app in colors_by_app]
+        if not matched:
+            return
+        # Several at once: the newest app's color wins; the blink says
+        # "something arrived", the menu bar says what.
+        self.notification_blink_color = matched[-1]
+        self.notification_blink_until = now + NOTIFICATION_BLINK_SECONDS
+        self.refresh_(None)
+        # One-shot revert back to the agent display when the window ends.
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            NOTIFICATION_BLINK_SECONDS + 0.1,
+            self,
+            "refresh:",
+            None,
+            False,
+        )
 
     @objc.IBAction
     def refresh_(self, _sender):
@@ -689,6 +762,35 @@ class StatusBarController(NSObject):
             NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
                 [NSURL.fileURLWithPath_(target_path)]
             )
+
+    @objc.IBAction
+    def toggleNotificationBlinks_(self, sender):
+        enabled = bool(sender.state())
+        self.settings = self.settings.with_notification_blinks_enabled(enabled)
+        save_settings(self.settings)
+        self.set_settings_message(
+            "Notification blinks on." if enabled else "Notification blinks off."
+        )
+
+    @objc.IBAction
+    def applyNotificationColors_(self, _sender):
+        for bundle_id in DEFAULT_NOTIFICATION_APP_COLORS:
+            field = self.settings_fields.get(f"notification_color:{bundle_id}")
+            if field is None:
+                continue
+            raw = str(field.stringValue()).strip()
+            self.settings = self.settings.with_notification_app_color(
+                bundle_id, raw or None
+            )
+        save_settings(self.settings)
+        # Reflect normalization (or a rejected value) back into the UI.
+        for bundle_id in DEFAULT_NOTIFICATION_APP_COLORS:
+            field = self.settings_fields.get(f"notification_color:{bundle_id}")
+            if field is not None:
+                field.setStringValue_(
+                    self.settings.notification_app_colors.get(bundle_id, "")
+                )
+        self.set_settings_message("Notification colors saved.")
 
     @objc.IBAction
     def openSettings_(self, _sender):
@@ -1387,7 +1489,12 @@ class StatusBarController(NSObject):
             return
         self.settings = self.settings.with_colors(colors)
         save_settings(self.settings)
-        refresh_blend_and_speed_fields(self)
+        # Full refresh, not just blend/speed: presets also change the
+        # animation style and every fade floor/ceiling. Refreshing only
+        # part of the window left those controls stale -- and the next
+        # fade-field edit committed the stale values back, silently
+        # reverting the preset the user just applied.
+        self.refresh_colors_window()
         self.refresh_colors_preview()
         if self.color_preview_enabled:
             self.push_colors_preview_to_device()
@@ -1622,6 +1729,11 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def redrawSetupDemo_(self, _sender):
         if self.setup_window is None or not self.setup_window.isVisible():
+            # The window closed: stop the 30 Hz timer instead of ticking
+            # forever (show_setup_window re-creates it next time).
+            if self.setup_demo_timer is not None:
+                self.setup_demo_timer.invalidate()
+                self.setup_demo_timer = None
             return
         demo_view = self.setup_fields.get("demo_view")
         if demo_view is not None:
@@ -1647,9 +1759,15 @@ class StatusBarController(NSObject):
             self.setup_fields.get("sleep_status"),
             "Installed" if sleep_installed else "Needs administrator setup",
         )
-        self.set_setup_checkbox("launch", True, enabled=not launch_installed)
-        self.set_setup_checkbox("eject_guard", True, enabled=not eject_installed)
-        self.set_setup_checkbox("sleep_helper", True, enabled=not sleep_installed)
+        # Enablement only -- never the checked STATE. Refresh runs after
+        # every provider Install click, and forcing these back to
+        # checked overrode a user's explicit opt-out (the sleep helper
+        # opens a sudo Terminal; re-checking it behind their back is the
+        # worst possible surprise). The initial checked state is set
+        # once, at window build.
+        self.set_setup_checkbox("launch", None, enabled=not launch_installed)
+        self.set_setup_checkbox("eject_guard", None, enabled=not eject_installed)
+        self.set_setup_checkbox("sleep_helper", None, enabled=not sleep_installed)
         eject_uninstall = self.setup_buttons.get("eject_guard_uninstall")
         if eject_uninstall is not None:
             eject_uninstall.setEnabled_(eject_installed)
@@ -1682,11 +1800,14 @@ class StatusBarController(NSObject):
             if install_button is not None:
                 install_button.setHidden_(installed)
 
-    def set_setup_checkbox(self, key: str, checked: bool, *, enabled: bool) -> None:
+    def set_setup_checkbox(self, key: str, checked: bool | None, *, enabled: bool) -> None:
+        """checked=None leaves the user's current choice alone (the
+        refresh path); a bool sets it (the build path)."""
         button = self.setup_buttons.get(key)
         if button is None:
             return
-        set_checkbox_state(button, checked)
+        if checked is not None:
+            set_checkbox_state(button, checked)
         button.setEnabled_(enabled)
 
     def run_first_launch_setup(self) -> None:
@@ -2690,6 +2811,12 @@ class StatusBarController(NSObject):
     ) -> str:
         if self.low_power_active(battery_snapshot):
             return LED_DISPLAY_LOW_BATTERY
+        if (
+            self.settings.notification_blinks_enabled
+            and self.notification_blink_color is not None
+            and time.monotonic() < self.notification_blink_until
+        ):
+            return LED_DISPLAY_NOTIFICATION
         if device.display == LED_DISPLAY_BATTERY:
             return LED_DISPLAY_BATTERY
         if battery_snapshot is not None and time.monotonic() < self.battery_preview_until:
@@ -2719,6 +2846,11 @@ class StatusBarController(NSObject):
             return
 
         if self.led_sync_in_flight:
+            # Coalesce, don't drop: a slow device write used to swallow
+            # the newest state entirely, leaving stale LEDs until the
+            # next event or the 15s poll. The worker triggers one fresh
+            # refresh when it finishes.
+            self.led_sync_dropped = True
             return
         self.led_sync_in_flight = True
         thread = threading.Thread(
@@ -2771,7 +2903,12 @@ class StatusBarController(NSObject):
         # any of them.
         brightness = self.effective_brightness_for_device(device)
         display = self.active_led_display_kind_for_device(device, battery_snapshot)
-        if display == LED_DISPLAY_LOW_BATTERY:
+        if display == LED_DISPLAY_NOTIFICATION and self.notification_blink_color:
+            self.virtual_status_device.set_program(
+                notification_blink_program(self.notification_blink_color, brightness),
+                started_at=started_at,
+            )
+        elif display == LED_DISPLAY_LOW_BATTERY:
             self.virtual_status_device.set_program(low_battery_program(brightness), started_at=started_at)
         elif display == LED_DISPLAY_BATTERY and battery_snapshot is not None:
             self.virtual_status_device.set_program(
@@ -2836,6 +2973,14 @@ class StatusBarController(NSObject):
             self.sync_leds_now(mode, battery_snapshot, display_kind, statuses)
         finally:
             self.led_sync_in_flight = False
+            if getattr(self, "led_sync_dropped", False):
+                # A newer state arrived mid-write; re-derive the freshest
+                # state on the main thread rather than replaying the
+                # (already stale) dropped payload.
+                self.led_sync_dropped = False
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "refresh:", None, False
+                )
 
     def sync_leds_now(
         self,
@@ -2871,7 +3016,20 @@ class StatusBarController(NSObject):
                 self.reset_led_controllers_for_device(device.device_id)
                 self.last_led_display_kind_by_device[device.device_id] = device_display_kind
 
-            if device_display_kind == LED_DISPLAY_LOW_BATTERY:
+            if device_display_kind == LED_DISPLAY_NOTIFICATION and self.notification_blink_color:
+                controller = self.agent_controller_for_device(device)
+                result = controller.sync_program(
+                    notification_blink_program(
+                        self.notification_blink_color, controller.brightness
+                    ),
+                    LedDisplayState.ASK,
+                )
+                label = f"{device.name} Notification blink"
+                if result.error:
+                    agent_write_failed = True
+                elif result.changed:
+                    agent_write_changed = True
+            elif device_display_kind == LED_DISPLAY_LOW_BATTERY:
                 controller = self.agent_controller_for_device(device)
                 result = controller.sync_program(
                     low_battery_program(controller.brightness), LedDisplayState.ASK
@@ -3587,6 +3745,11 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
             "sleep_helper": sleep_helper,
         }
     )
+    # Recommended defaults, set ONCE here -- refresh_setup_window only
+    # touches enablement, never the checked state, so a user's opt-out
+    # survives every refresh (each provider Install click triggers one).
+    for key in ("launch", "eject_guard", "sleep_helper"):
+        set_checkbox_state(setup_buttons[key], True)
     target.setup_fields = setup_fields
     target.setup_buttons = setup_buttons
     return window
@@ -4121,7 +4284,40 @@ def _build_led_behavior_pane(target: StatusBarController):
             fields[f"focus_rule_popup:{identifier}"] = popup
     stack.addArrangedSubview_(focus_outer)
 
-    buttons = {"idle_dim_enabled": idle_switch, "focus_sync_enabled": focus_switch}
+    # Notification blinks: a moment, not a state -- flash the app's own
+    # color, then agent status resumes on its own.
+    notif_outer, notif_inner = native_ui.make_card("Notification Blinks")
+    notif_row, notif_switch = native_ui.make_switch_row(
+        "Blink when a notification arrives",
+        target,
+        "toggleNotificationBlinks:",
+        help_text=(
+            "Reads the Notification Center store, so it needs the same "
+            "Full Disk Access grant as Focus dimming."
+        ),
+    )
+    notif_inner.addArrangedSubview_(notif_row)
+    for bundle_id, app_label in (
+        (NOTIFICATION_APP_IMESSAGE, "iMessage"),
+        (NOTIFICATION_APP_WHATSAPP, "WhatsApp"),
+        (NOTIFICATION_APP_TELEGRAM, "Telegram"),
+    ):
+        native_ui.add_separator(notif_inner)
+        color_field = native_ui.make_field(
+            target.settings.notification_app_colors.get(bundle_id, ""),
+            target=target,
+            action="applyNotificationColors:",
+        )
+        native_ui.constrain_width(color_field, 92.0)
+        notif_inner.addArrangedSubview_(native_ui.make_row(app_label, color_field))
+        fields[f"notification_color:{bundle_id}"] = color_field
+    stack.addArrangedSubview_(notif_outer)
+
+    buttons = {
+        "idle_dim_enabled": idle_switch,
+        "focus_sync_enabled": focus_switch,
+        "notification_blinks_enabled": notif_switch,
+    }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
@@ -4827,6 +5023,11 @@ def hex_from_nscolor(nscolor) -> str:
     try:
         rgb = nscolor.colorUsingColorSpace_(NSColor.sRGBColorSpace())
     except Exception:
+        rgb = nscolor
+    # colorUsingColorSpace_ returns None (no exception) for catalog and
+    # pattern colors -- fall back to the original rather than crashing
+    # the color-panel action mid-drag.
+    if rgb is None:
         rgb = nscolor
     return colors_module.rgb_to_hex(
         (rgb.redComponent() * 255.0, rgb.greenComponent() * 255.0, rgb.blueComponent() * 255.0)
