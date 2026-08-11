@@ -2311,6 +2311,19 @@ class StatusBarController(NSObject):
             "Screen Bar now extends along the menu bar." if enabled else "Screen Bar back to notch width only."
         )
 
+    @objc.IBAction
+    def setBracketStyle_(self, sender):
+        item = sender.selectedItem()
+        style = str(item.representedObject() or "auto") if item is not None else "auto"
+        try:
+            self.settings = self.settings.with_screen_bar_bracket_style(style)
+        except ValueError:
+            return
+        save_settings(self.settings)
+        self.virtual_status_device.set_bracket_style(style)
+        self.refresh_(None)
+        self.set_settings_message(f"Bracket colors: {item.title()}.")
+
     def reposition_virtual_status_device_now(self) -> None:
         """Alcove compatibility and wraps-menu-bar only change the Screen
         Bar's own geometry/drawing style -- they don't touch the LED
@@ -3595,6 +3608,7 @@ class StatusBarController(NSObject):
         self.virtual_status_device.set_geometry_overrides(
             self.settings.screen_bar_gap_width, self.settings.screen_bar_wing_length
         )
+        self.virtual_status_device.set_bracket_style(self.settings.screen_bar_bracket_style)
         device = next(
             (
                 item for item in self.status_bar_devices(remember=False)
@@ -4835,6 +4849,32 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         "Extend glow along the menu bar", target, "toggleScreenBarWrapsMenuBar:"
     )
     inner.addArrangedSubview_(wraps_row)
+    native_ui.add_separator(inner)
+    # Bracket coloring: Auto keeps the on-screen bracket in lockstep
+    # with the physical LEDs' ripple whenever a crowd is lit.
+    bracket_popup = native_ui.make_popup_button(target, "setBracketStyle:")
+    for label, style_key in (
+        ("Automatic", "auto"),
+        ("Match the LEDs (ripple)", "spatial"),
+        ("Single identity color", "identity"),
+    ):
+        bracket_popup.addItemWithTitle_(label)
+        item = bracket_popup.lastItem()
+        item.setRepresentedObject_(style_key)
+        if style_key == target.settings.screen_bar_bracket_style:
+            bracket_popup.selectItem_(item)
+    inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Bracket colors",
+            bracket_popup,
+            help_text=(
+                "Automatic mirrors the light bar's own per-LED animation "
+                "whenever two or more LEDs are lit, and falls back to one "
+                "blended identity color when a lone agent would leave the "
+                "bracket mostly dark."
+            ),
+        )
+    )
     stack.addArrangedSubview_(outer)
 
     # Manual bar geometry (Jonathan's ask): the gap between the risers
@@ -4900,6 +4940,7 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         "screen_bar_preview_container": preview_container,
         "screen_bar_gap_slider": gap_slider,
         "screen_bar_wing_slider": wing_slider,
+        "bracket_style_popup": bracket_popup,
     }
     buttons = {"screen_bar_wraps_menu_bar": wraps_switch}
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons

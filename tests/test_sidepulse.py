@@ -1283,6 +1283,38 @@ class AgentMonitorTests(unittest.TestCase):
         # = 2pt of room, below the usable minimum -> no wing at all.
         self.assertEqual(virtual_device.wing_width_for_screen(screen, 300.0), 0.0)
 
+    def test_bracket_style_auto_mirrors_leds_when_a_crowd_is_lit(self) -> None:
+        # "The screen bar isn't showing the same effect as the light
+        # bar": with 2+ lit LEDs the bracket must render the SAME
+        # per-LED colors (the relay ripple travels the underline); the
+        # identity collapse stays only for the lone-agent case where a
+        # spatial bracket would be mostly dark.
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (400.0, 37.0)))
+        crowd = [(0.2, 0.5, 1.0, 1.0), (1.0, 0.4, 0.7, 1.0)] + [(0.05, 0.02, 0.02, 0.05)] * 6
+        self.assertEqual(view._bracket_colors(crowd), crowd)
+        lone = [(0.2, 0.5, 1.0, 1.0)] + [(0.0, 0.0, 0.0, 0.0)] * 7
+        collapsed = view._bracket_colors(lone)
+        self.assertEqual(len(set(collapsed)), 1)
+        # Explicit styles override auto in both directions.
+        view.setBracketStyle_("spatial")
+        self.assertEqual(view._bracket_colors(lone), lone)
+        view.setBracketStyle_("identity")
+        self.assertEqual(len(set(view._bracket_colors(crowd))), 1)
+
+    def test_bracket_style_setting_round_trips(self) -> None:
+        configured = AgentMonitorSettings().with_screen_bar_bracket_style("spatial")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            reloaded = load_settings(path)
+        self.assertEqual(reloaded.screen_bar_bracket_style, "spatial")
+        with self.assertRaises(ValueError):
+            AgentMonitorSettings().with_screen_bar_bracket_style("plaid")
+
     def test_bracket_identity_color_survives_a_single_lit_led(self) -> None:
         # The Alcove bracket/accent paints ONE identity color -- with a
         # spatial per-LED render, one working agent lit 1 of 8 LEDs and

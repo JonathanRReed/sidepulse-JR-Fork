@@ -18,6 +18,7 @@ LED_DISPLAY_BATTERY = "battery"
 LED_DISPLAY_CHOICES = (LED_DISPLAY_AGENT, LED_DISPLAY_BATTERY)
 # Notification blink defaults: each app's own brand color, so the blink
 # says WHICH app without reading anything.
+BRACKET_STYLE_CHOICES = ("auto", "spatial", "identity")
 NOTIFICATION_APP_IMESSAGE = "com.apple.MobileSMS"
 NOTIFICATION_APP_WHATSAPP = "net.whatsapp.WhatsApp"
 NOTIFICATION_APP_TELEGRAM = "ru.keepcoder.Telegram"
@@ -215,6 +216,11 @@ class AgentMonitorSettings:
     # wing length is each horizontal stroke's reach beyond the gap.
     screen_bar_gap_width: float | None = None
     screen_bar_wing_length: float | None = None
+    # How the Alcove bracket colors itself: "auto" mirrors the physical
+    # LEDs whenever at least two are lit and collapses to one identity
+    # hue otherwise; "spatial" always mirrors; "identity" always
+    # collapses. Auto keeps the ripple in sync with the light bar.
+    screen_bar_bracket_style: str = "auto"
     # After this many continuous minutes with nothing active (idle), LED
     # brightness scales down by idle_dim_fraction -- a long-idle Mac
     # shouldn't keep a bright light going on the desk. Default on: dimming
@@ -615,6 +621,11 @@ class AgentMonitorSettings:
             length = max(0.0, min(400.0, float(length)))
         return replace(self, screen_bar_wing_length=length)
 
+    def with_screen_bar_bracket_style(self, style: str) -> "AgentMonitorSettings":
+        if style not in BRACKET_STYLE_CHOICES:
+            raise ValueError(f"Unknown bracket style: {style}")
+        return replace(self, screen_bar_bracket_style=style)
+
     def with_low_battery_alert_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, low_battery_alert_enabled=bool(enabled))
 
@@ -717,6 +728,7 @@ class AgentMonitorSettings:
             "virtual_status_device_wraps_menu_bar": self.virtual_status_device_wraps_menu_bar,
             "screen_bar_gap_width": self.screen_bar_gap_width,
             "screen_bar_wing_length": self.screen_bar_wing_length,
+            "screen_bar_bracket_style": self.screen_bar_bracket_style,
             "closed_lid_awake_policy": self.closed_lid_awake_policy,
             "closed_lid_system_override_enabled": self.closed_lid_system_override_enabled,
             "closed_lid_grace_minutes": self.closed_lid_grace_minutes,
@@ -885,6 +897,11 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         screen_bar_gap_width=_optional_dimension(data.get("screen_bar_gap_width"), 120.0, 1200.0),
         screen_bar_wing_length=_optional_dimension(data.get("screen_bar_wing_length"), 0.0, 400.0),
+        screen_bar_bracket_style=(
+            data.get("screen_bar_bracket_style")
+            if data.get("screen_bar_bracket_style") in BRACKET_STYLE_CHOICES
+            else "auto"
+        ),
         closed_lid_awake_policy=_closed_lid_awake_policy(
             data.get("closed_lid_awake_policy"),
         ),

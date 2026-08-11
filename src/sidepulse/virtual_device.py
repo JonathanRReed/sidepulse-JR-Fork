@@ -758,6 +758,24 @@ class VirtualLedView(NSView):
                 (1.0, 1.0, 1.0, 0.055),
             )
 
+    def _bracket_colors(self, colors):
+        """The colors the Alcove bracket paints. "spatial" mirrors the
+        physical LEDs exactly -- the relay ripple travels along the
+        underline in lockstep with the light bar. "identity" collapses
+        to one blended hue (the original visibility fix: one agent
+        lights 1 of 8 LEDs, and a spatial bracket was 7/8 black).
+        "auto" (default) picks spatial whenever at least two LEDs are
+        lit -- multi-agent blends have rest glow everywhere, so the
+        ripple reads -- and identity otherwise."""
+        style = getattr(self, "bracket_style", "auto")
+        lit = sum(1 for c in colors if max(c[0], c[1], c[2], c[3]) > 0.004)
+        if style == "spatial" or (style == "auto" and lit >= 2):
+            return list(colors)
+        return [self._bar_identity_color(colors)] * LED_COUNT
+
+    def setBracketStyle_(self, style):
+        self.bracket_style = str(style or "auto")
+
     def _bar_identity_color(self, colors):
         """ONE color representing the whole strip: the alpha-weighted
         blend of the lit LEDs, at the brightest lit LED's intensity.
@@ -791,7 +809,7 @@ class VirtualLedView(NSView):
         agent state, and the risers turn it into the |____| bracket.
         Painted in the single identity color (_bar_identity_color), not
         the spatial per-LED layout."""
-        colors = [self._bar_identity_color(self._colors_for_draw())] * LED_COUNT
+        colors = self._bracket_colors(self._colors_for_draw())
         width = self.bounds().size.width
         height = self.bounds().size.height
         notch_width, wing_offset = self._notch_geometry()
@@ -969,7 +987,7 @@ class VirtualLedView(NSView):
         widget. No body fill, no glow layers, no edge highlights.
         Painted in the single identity color -- see _bar_identity_color
         for why a spatial per-LED accent was mostly invisible."""
-        colors = [self._bar_identity_color(self._colors_for_draw())] * LED_COUNT
+        colors = self._bracket_colors(self._colors_for_draw())
         width = self.bounds().size.width
         cg_context = current_cg_context()
         notch_width, wing_offset = self._notch_geometry()
@@ -1005,6 +1023,10 @@ class VirtualStatusDevice(NSObject):
 
     def set_wraps_menu_bar(self, enabled: bool) -> None:
         self.wraps_menu_bar = bool(enabled)
+
+    def set_bracket_style(self, style: str) -> None:
+        if self.view is not None:
+            self.view.setBracketStyle_(style)
 
     def set_geometry_overrides(self, gap_width: float | None, wing_length: float | None) -> None:
         """The user's manual bar geometry (None = Automatic) -- see
