@@ -56,6 +56,15 @@ COMPACT_ACCENT_HEIGHT = 2.5
 WING_MAX_WIDTH = 110.0
 WING_SAFETY_MARGIN = 28.0
 WING_MIN_USABLE = 24.0
+# A wing that's just a flat horizontal strip fading sideways reads as a
+# line trailing off into nothing, not as light that's actually reaching
+# and wrapping the menu bar's own corner. A soft vertical riser at each
+# wing's *outer* edge -- brightest where it meets the horizontal glow,
+# fading upward -- turns the shape into a bracket ("|____|") instead,
+# which is what "extend the glow along the menu bar" is actually meant
+# to look like.
+WING_RISER_WIDTH = 6.0
+WING_RISER_SOLID_FRACTION = 0.45
 LED_BLEND_RADIUS_LEDS = 1.5
 BLEND_COLUMN_WIDTH = 2.0
 LED_GLOW_HEIGHT = 11.0
@@ -538,6 +547,18 @@ class VirtualLedView(NSView):
                 )
                 NSGraphicsContext.restoreGraphicsState()
 
+            # Pass 3: a vertical riser at each wing's own outer edge -- see
+            # WING_RISER_WIDTH's comment. Sampled at the notch's nearest
+            # edge LED (not the already-tapered-to-~0 color right at the
+            # true edge), since the riser is a new visual element in its
+            # own right, not a continuation of the horizontal taper.
+            left_edge_color = blended_led_color_at_x(colors, 0.0, led_width)
+            right_edge_color = blended_led_color_at_x(colors, notch_width, led_width)
+            self._draw_wing_riser(cg_context, left_edge_color, 0.0, min(WING_RISER_WIDTH, wing_offset), height)
+            self._draw_wing_riser(
+                cg_context, right_edge_color, max(width - WING_RISER_WIDTH, wing_offset + notch_width), width, height
+            )
+
         # Edge highlight/shadow: unclipped and full-width (as it always
         # was, before wings existed) -- with wings on, this reads as one
         # continuous strip rather than having a visible seam where the
@@ -602,6 +623,37 @@ class VirtualLedView(NSView):
                 ),
             )
             column_x += column_width
+
+    def _draw_wing_riser(self, cg_context, edge_color, x_start, x_end, height) -> None:
+        """A vertical glow at one wing's outer edge, solid for its lower
+        WING_RISER_SOLID_FRACTION and softly tapering above that -- see
+        WING_RISER_WIDTH's comment for why. `edge_color` is the nearest
+        notch LED's own blended color, not resampled per row -- only the
+        vertical taper changes going up. Solid rather than tapering the
+        *entire* height: over a real menu bar's actual height (well under
+        40pt), a taper starting at the very bottom reads as a faint hint
+        rather than a bracket you can actually see.
+        """
+        if x_end <= x_start or height <= 0.0:
+            return
+        red, green, blue, alpha = edge_color
+        if max(red, green, blue, alpha) <= 0.001:
+            return
+        solid_height = height * WING_RISER_SOLID_FRACTION
+        taper_height = max(1.0, height - solid_height)
+        steps = 16
+        for index in range(steps):
+            y_start = (height / steps) * index
+            y_end = (height / steps) * (index + 1)
+            phase = min(1.0, max(0.0, (y_start - solid_height) / taper_height))
+            taper = 0.5 + 0.5 * math.cos(math.pi * phase)
+            fill_rect_with_cg(
+                cg_context,
+                ((x_start, y_start), (x_end - x_start, y_end - y_start)),
+                tone_mapped_led_color(
+                    red, green, blue, alpha, boost=LED_HOTLINE_BOOST, alpha_scale=0.9 * taper
+                ),
+            )
 
     def _draw_compact_accent(self) -> None:
         """When another notch app (e.g. Alcove) is occupying the notch's

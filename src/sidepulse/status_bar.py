@@ -1593,7 +1593,14 @@ class StatusBarController(NSObject):
         preview.setCompactMode_(self.settings.alcove_compatibility_mode == ALCOVE_COMPAT_ALWAYS)
         wing_width = SCREEN_BAR_PREVIEW_WING_WIDTH if self.settings.virtual_status_device_wraps_menu_bar else 0.0
         total_width = SCREEN_BAR_PREVIEW_NOTCH_WIDTH + 2.0 * wing_width
-        container_width = container.frame().size.width
+        # container's own fixed width is known at construction time (see
+        # _build_colors_screen_bar_pane) -- reading it back via
+        # container.frame() instead is timing-dependent (this can run
+        # before the window's first real Auto Layout pass, when the
+        # frame is still its construction-time default) and previously
+        # centered the preview around a bogus width, clipping the left
+        # wing off entirely.
+        container_width = SCREEN_BAR_PREVIEW_NOTCH_WIDTH + 2.0 * SCREEN_BAR_PREVIEW_WING_WIDTH
         preview.setFrame_(
             (((container_width - total_width) / 2.0, 0.0), (total_width, SCREEN_BAR_PREVIEW_HEIGHT))
         )

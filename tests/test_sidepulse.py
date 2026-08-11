@@ -1211,6 +1211,39 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertGreater(red, 0.0)
         self.assertTrue(all(c == view.fixed_colors[0] for c in view.fixed_colors))
 
+    def test_wing_risers_are_symmetric_and_render_without_raising(self) -> None:
+        # "Extend glow along the menu bar" should read as a bracket
+        # ("|____|") hugging both corners, not a horizontal line that
+        # only visibly terminates on one side. glow_color_for_column's
+        # own symmetry (both edge samples equal, by construction, for a
+        # uniform-color state) feeds identical left/right risers; this
+        # also exercises drawRect_'s actual riser-drawing pass end to end
+        # (regression guard for it clipping the left one off entirely,
+        # see test_screen_bar_preview_is_centered_using_show_settings_
+        # windows_real_call_order for the unrelated bug that produced the
+        # same visible symptom in the Settings preview specifically).
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        notch_width, wing_offset = 200.0, 70.0
+        led_width = notch_width / virtual_device.LED_COUNT
+        colors = virtual_device.virtual_led_colors(virtual_device.LedDisplayState.DONE, 0.0, 255)
+        left_edge_color = virtual_device.blended_led_color_at_x(colors, 0.0, led_width)
+        right_edge_color = virtual_device.blended_led_color_at_x(colors, notch_width, led_width)
+        self.assertEqual(left_edge_color, right_edge_color)
+
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(
+            ((0, 0), (notch_width + 2.0 * wing_offset, 37.0))
+        )
+        view.setHasNotch_(True)
+        view.setNotchWidth_(notch_width)
+        view.setState_brightness_(virtual_device.LedDisplayState.DONE, 255)
+        # Must not raise -- exercises the wing-riser pass (only reached
+        # when wing_offset > 0) on top of the existing notch/wing passes.
+        view.drawRect_(view.bounds())
+
     def test_settings_persist_wraps_menu_bar_flag(self) -> None:
         settings = AgentMonitorSettings().with_virtual_status_device_wraps_menu_bar(True)
         self.assertTrue(settings.virtual_status_device_wraps_menu_bar)
@@ -7443,6 +7476,30 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
             self.controller.setDeviceBrightness_(slider)
         self.assertIsNot(self.controller.settings, before_settings)
         self.assertEqual(self.controller.settings.brightness_for_device(device_id), 40)
+
+    def test_screen_bar_preview_is_centered_using_show_settings_windows_real_call_order(self) -> None:
+        # Regression guard: refresh_screen_bar_preview used to center the
+        # preview against screen_bar_preview_container.frame().size.width
+        # -- but show_settings_window() calls refresh_settings_window()
+        # (and so this) *before* makeKeyAndOrderFront_, when the window
+        # has never had a real Auto Layout pass and the container's frame
+        # is still its construction-time default (0-width). That silently
+        # centered the preview around a width of 0, pushing it into
+        # negative x and clipping the entire left wing off-screen.
+        self.controller.show_settings_window()
+        preview = self.controller.settings_fields["screen_bar_preview_view"]
+        expected_total = (
+            self.status_bar.SCREEN_BAR_PREVIEW_NOTCH_WIDTH
+            if not self.controller.settings.virtual_status_device_wraps_menu_bar
+            else self.status_bar.SCREEN_BAR_PREVIEW_NOTCH_WIDTH
+            + 2.0 * self.status_bar.SCREEN_BAR_PREVIEW_WING_WIDTH
+        )
+        container_width = (
+            self.status_bar.SCREEN_BAR_PREVIEW_NOTCH_WIDTH + 2.0 * self.status_bar.SCREEN_BAR_PREVIEW_WING_WIDTH
+        )
+        expected_x = (container_width - expected_total) / 2.0
+        self.assertGreaterEqual(expected_x, 0.0)
+        self.assertEqual(preview.frame().origin.x, expected_x)
 
     def test_calibrate_button_opens_a_popover_with_the_full_controls(self) -> None:
         self.controller.show_settings_window()
