@@ -5734,6 +5734,16 @@ def _status(provider: str, mode: AgentMode, *, when: datetime | None = None) -> 
     )
 
 
+def _identity_color(statuses, agent_id: str) -> str:
+    """The effective color a multi-agent render gives this session --
+    since "color = agent" (phase 3), a crowd uses the identity palette,
+    not the provider brand colors."""
+    ordered = sorted(statuses, key=colors_module._stable_agent_sort_key)
+    if len(ordered) <= 1:
+        return ColorSettings.defaults().agent_color(ordered[0].provider)
+    return colors_module.identity_colors_for_agents([s.agent_id for s in ordered])[agent_id]
+
+
 def _program_body(program: str) -> list[str]:
     """The blend program's own lines, past any attention-takeover preamble
     (full-bar flash lines have no per-LED "N:" prefix)."""
@@ -5904,8 +5914,8 @@ class ColorSettingsTests(unittest.TestCase):
         _, program = program_for_snapshot(statuses, led_count=8, colors=settings)
         blended = colors_module.weighted_blend(
             [
-                (settings.agent_color("codex"), float(urgency_weight(AgentMode.WORKING))),
-                (settings.agent_color("claude"), float(urgency_weight(AgentMode.WORKING))),
+                (_identity_color(statuses, "codex"), float(urgency_weight(AgentMode.WORKING))),
+                (_identity_color(statuses, "claude"), float(urgency_weight(AgentMode.WORKING))),
             ]
         )
         # WORKING pulses between its fade floor/ceiling of the blended color,
@@ -5924,8 +5934,14 @@ class ColorSettingsTests(unittest.TestCase):
         _, program = program_for_snapshot(statuses, led_count=8, colors=settings)
         _floor, codex_ceiling = settings.fade_range(colors_module.MODE_WORKING)
         _floor, claude_ceiling = settings.fade_range(colors_module.MODE_IDLE)
-        self.assertIn(colors_module.scale_hex_brightness(settings.agent_color("codex"), codex_ceiling), program)
-        self.assertIn(colors_module.scale_hex_brightness(settings.agent_color("claude"), claude_ceiling), program)
+        self.assertIn(
+            colors_module.scale_hex_brightness(_identity_color(statuses, "codex"), codex_ceiling),
+            program,
+        )
+        self.assertIn(
+            colors_module.scale_hex_brightness(_identity_color(statuses, "claude"), claude_ceiling),
+            program,
+        )
         self.assertIn("repeat", program)
         self.assertIn("pulse", program)
 
@@ -6016,7 +6032,9 @@ class ColorSettingsTests(unittest.TestCase):
         # Devin (Ask, floor 0) resets to literal "off"; Codex (Working, floor
         # 0.2) resets to a scaled, non-off color.
         self.assertIn("off", reset_line)
-        working_floor_color = colors_module.scale_hex_brightness(settings.agent_color("codex"), 0.2)
+        working_floor_color = colors_module.scale_hex_brightness(
+            _identity_color(statuses, "codex"), 0.2
+        )
         self.assertIn(working_floor_color, reset_line)
 
 
@@ -6123,7 +6141,7 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         expected_agents = ["codex", "claude", "devin"]
         expected = [
             colors_module.scale_hex_brightness(
-                settings.agent_color(expected_agents[i % 3]),
+                _identity_color(statuses, expected_agents[i % 3]),
                 settings.fade_range(colors_module.MODE_WORKING)[1],
             )
             for i in range(8)
@@ -6678,7 +6696,9 @@ class SpeedOverrideAndUrgencyAlertTests(unittest.TestCase):
         statuses = (_status("codex", AgentMode.WORKING), _status("claude", AgentMode.BLOCKED_ERROR))
         _, program = program_for_snapshot(statuses, led_count=8, colors=settings)
         _floor, ask_ceiling = settings.fade_range(colors_module.MODE_ASK)
-        claude_own_color = colors_module.scale_hex_brightness(settings.agent_color("claude"), ask_ceiling)
+        claude_own_color = colors_module.scale_hex_brightness(
+            _identity_color(statuses, "claude"), ask_ceiling
+        )
         self.assertIn(claude_own_color, program)
 
     def test_urgency_alert_adds_takeover_but_never_recolors_spatial_split(self) -> None:
