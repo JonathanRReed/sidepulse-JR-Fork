@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import threading
 import time
@@ -1455,10 +1456,15 @@ class StatusBarController(NSObject):
             return
 
         for provider in HOOK_PROVIDERS:
-            set_field_value(
-                self.settings_fields.get(f"{provider}_hook_status"),
-                hook_status_text(provider_spec(provider).detector(None)),
-            )
+            config = provider_spec(provider).detector(None)
+            set_field_value(self.settings_fields.get(f"{provider}_hook_status"), hook_status_text(config))
+            installed = provider_hooks_installed(config)
+            install_button = self.settings_fields.get(f"{provider}_hook_install")
+            uninstall_button = self.settings_fields.get(f"{provider}_hook_uninstall")
+            if install_button is not None:
+                install_button.setHidden_(installed)
+            if uninstall_button is not None:
+                uninstall_button.setHidden_(not installed)
         set_field_value(
             self.settings_fields.get("settings_path"),
             f"Settings: {default_settings_path()}",
@@ -3268,8 +3274,14 @@ def _build_devices_pane(target: StatusBarController):
 
 
 def calibration_summary_text(auto_brightness_enabled: bool, red: float, green: float, blue: float) -> str:
-    auto = "on" if auto_brightness_enabled else "off"
-    return f"Auto-Brightness {auto} · R{round(red * 100)}% G{round(green * 100)}% B{round(blue * 100)}%"
+    """The at-a-glance summary next to the Calibrate button. Channel
+    percentages only appear once they differ from the default -- an
+    uncalibrated device just says what Auto-Brightness is doing, not a
+    wall of R100% G100% B100% that reads as debug output."""
+    parts = ["Auto-Brightness on" if auto_brightness_enabled else "Auto-Brightness off"]
+    if any(round(gain * 100) != 100 for gain in (red, green, blue)):
+        parts.append(f"R{round(red * 100)}% G{round(green * 100)}% B{round(blue * 100)}%")
+    return " · ".join(parts)
 
 
 def build_calibration_popover_content(device: StatusBarDevice, target: StatusBarController):
@@ -3450,22 +3462,27 @@ def _build_hooks_pane(target: StatusBarController):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
     outer, inner = native_ui.make_card()
 
-    hook_statuses: dict[str, object] = {}
+    fields: dict[str, object] = {}
     for index, provider in enumerate(HOOK_PROVIDERS):
         selector = provider.title()
         status_label = native_ui.make_label("", secondary=True, size=12.0)
+        install_button = native_ui.make_button("Install", target, f"install{selector}Hooks:")
+        uninstall_button = native_ui.make_button("Uninstall", target, f"uninstall{selector}Hooks:")
         controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
         controls.addArrangedSubview_(status_label)
-        controls.addArrangedSubview_(native_ui.make_button("Install", target, f"install{selector}Hooks:"))
-        controls.addArrangedSubview_(native_ui.make_button("Uninstall", target, f"uninstall{selector}Hooks:"))
+        # One state-appropriate action per provider, not both at once --
+        # refresh_settings_window hides whichever doesn't apply.
+        controls.addArrangedSubview_(install_button)
+        controls.addArrangedSubview_(uninstall_button)
         inner.addArrangedSubview_(native_ui.make_row(provider_spec(provider).label, controls))
 
         if index < len(HOOK_PROVIDERS) - 1:
             native_ui.add_separator(inner)
-        hook_statuses[provider] = status_label
+        fields[f"{provider}_hook_status"] = status_label
+        fields[f"{provider}_hook_install"] = install_button
+        fields[f"{provider}_hook_uninstall"] = uninstall_button
 
     stack.addArrangedSubview_(outer)
-    fields = {f"{provider}_hook_status": status for provider, status in hook_statuses.items()}
     return native_ui.wrap_in_scroll_pane(stack), fields
 
 
@@ -3473,12 +3490,16 @@ def _build_sessions_pane(target: StatusBarController):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
     outer, inner = native_ui.make_card()
 
+    fallback_help = (
+        "Reads the CLI's transcript files directly when hook events aren't "
+        "available -- a fallback, not the primary detection path."
+    )
     codex_row, codex_switch = native_ui.make_switch_row(
-        "CLI fallback: Codex transcripts", target, "toggleCodexTranscripts:"
+        "Watch Codex CLI transcripts", target, "toggleCodexTranscripts:", help_text=fallback_help
     )
     inner.addArrangedSubview_(codex_row)
     claude_row, claude_switch = native_ui.make_switch_row(
-        "CLI fallback: Claude transcripts", target, "toggleClaudeTranscripts:"
+        "Watch Claude CLI transcripts", target, "toggleClaudeTranscripts:", help_text=fallback_help
     )
     inner.addArrangedSubview_(claude_row)
     stack.addArrangedSubview_(outer)
@@ -3562,6 +3583,11 @@ def _build_debug_pane(target: StatusBarController):
 
     status_label = native_ui.make_label("", secondary=True, size=12.0)
     inner.addArrangedSubview_(status_label)
+    # The settings-file path lives here with the rest of the diagnostic
+    # detail -- not as a permanent footer under every pane, where it read
+    # as debug output leaking into a settings window.
+    settings_path_label = native_ui.make_label("", secondary=True, size=12.0)
+    inner.addArrangedSubview_(settings_path_label)
     buttons_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     buttons_row.addArrangedSubview_(native_ui.make_button("Export CSV", target, "exportDebugCsv:"))
     buttons_row.addArrangedSubview_(native_ui.make_button("Export HTML", target, "exportDebugHtml:"))
@@ -3569,7 +3595,7 @@ def _build_debug_pane(target: StatusBarController):
     inner.addArrangedSubview_(buttons_row)
 
     stack.addArrangedSubview_(outer)
-    fields = {"debug_log_status": status_label}
+    fields = {"debug_log_status": status_label, "settings_path": settings_path_label}
     return native_ui.wrap_in_scroll_pane(stack), fields
 
 
@@ -3634,11 +3660,11 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     sidebar_bg.widthAnchor().constraintGreaterThanOrEqualToConstant_(160.0).setActive_(True)
     split.setHoldingPriority_forSubviewAtIndex_(250, 0)
 
+    # The footer holds only the transient confirmation message ("Screen
+    # Bar now extends...") -- diagnostic paths live in the Debug pane.
     footer = native_ui.make_stack(orientation="vertical", spacing=2.0)
     message = native_ui.make_label("", secondary=True, size=12.0)
-    settings_path = native_ui.make_label("", secondary=True, size=11.0)
     footer.addArrangedSubview_(message)
-    footer.addArrangedSubview_(settings_path)
     root.addSubview_(footer)
 
     NSLayoutConstraint.activateConstraints_(
@@ -3698,7 +3724,6 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         **closed_lid_fields,
         **led_behavior_fields,
         "message": message,
-        "settings_path": settings_path,
     }
     target.settings_buttons = {
         **sessions_buttons,
@@ -3796,6 +3821,10 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
     preview_scenario_popup = make_preview_scenario_popup(target)
     preview_inner.addArrangedSubview_(native_ui.make_row("Scenario", preview_scenario_popup))
 
+    # One shared legend under both device previews -- the roster of
+    # agents is the same for both, and repeating it verbatim twice was
+    # pure noise.
+    shared_legend = native_ui.make_label("", secondary=True, size=11.0)
     preview_rows: list[dict[str, object]] = []
     for led_count, device_label in ((2, "SidePulse Dot (2 LEDs)"), (8, "SidePulse Pro (8 LEDs)")):
         device_stack = native_ui.make_stack(orientation="vertical", spacing=6.0)
@@ -3808,10 +3837,11 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
             dots.append(add_preview_dot(dots_container, dot_x, 0))
             dot_x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
         device_stack.addArrangedSubview_(dots_container)
-        legend = native_ui.make_label("", secondary=True, size=11.0)
-        device_stack.addArrangedSubview_(legend)
         preview_inner.addArrangedSubview_(device_stack)
-        preview_rows.append({"led_count": led_count, "dots": dots, "legend": legend})
+        preview_rows.append({"led_count": led_count, "dots": dots, "legend": shared_legend})
+    legend_holder = native_ui.make_stack(orientation="vertical", spacing=0.0)
+    legend_holder.addArrangedSubview_(shared_legend)
+    preview_inner.addArrangedSubview_(legend_holder)
 
     # Everything else scrolls independently below the pinned preview.
     scroll_stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
@@ -4273,7 +4303,13 @@ def colors_legend_text(statuses, *, is_live: bool, prefix: str | None = None) ->
         if explicit_prefix and prefix:
             return prefix.rstrip(": ")
         return f"{prefix}Idle -- no active agents" if prefix else "Idle -- no active agents"
-    parts = [f"{status.display_name or status.provider} ({MODE_LABELS.get(status.mode, status.mode.value)})" for status in statuses]
+    parts = []
+    for status in statuses:
+        name = status.display_name or status.provider
+        # Session-id fragments like "wtf (b5b4fbe4)" are debug detail --
+        # a color-preview legend needs the agent and its mode, not a hash.
+        name = re.sub(r"\s*\([0-9a-f]{6,}\)", "", str(name))
+        parts.append(f"{name} ({MODE_LABELS.get(status.mode, status.mode.value)})")
     return prefix + " · ".join(parts)
 
 
@@ -4575,13 +4611,15 @@ def restore_led_display(target, token_value) -> None:
         target.refresh_(None)
 
 
+def provider_hooks_installed(config: ProviderConfig) -> bool:
+    return bool(config.exists and config.hook_events)
+
+
 def hook_status_text(config: ProviderConfig) -> str:
-    if not config.exists:
-        return f"Not installed - config will be created at {config.config_path}"
-    if config.hook_events:
+    if provider_hooks_installed(config):
         event_count = len(config.hook_events)
         suffix = "event" if event_count == 1 else "events"
-        return f"Installed ({event_count} {suffix})"
+        return f"Installed · {event_count} {suffix}"
     return "Not installed"
 
 
