@@ -8395,6 +8395,67 @@ class SignalEngineTests(unittest.TestCase):
             )
 
 
+class IdentityColorTests(unittest.TestCase):
+    def test_assignment_is_deterministic_and_collision_free(self) -> None:
+        from sidepulse.colors import IDENTITY_PALETTE, identity_colors_for_agents
+
+        ids = [f"agent-{index}" for index in range(8)]
+        first = identity_colors_for_agents(ids)
+        second = identity_colors_for_agents(ids)
+        self.assertEqual(first, second)
+        # Eight sessions -> eight DISTINCT hues.
+        self.assertEqual(len(set(first.values())), 8)
+        for color in first.values():
+            self.assertIn(color, IDENTITY_PALETTE)
+        # A stable subset keeps its colors when others leave... for ids
+        # whose preferred slots never collided.
+        alone = identity_colors_for_agents([ids[0]])
+        self.assertEqual(alone[ids[0]], first[ids[0]])
+
+    def test_identity_palette_stays_clear_of_state_hues(self) -> None:
+        from sidepulse.colors import IDENTITY_PALETTE
+
+        for reserved in ("#00E5FF", "#00FF66", "#FF3A00", "#A45CFF", "#E01010"):
+            self.assertNotIn(reserved, IDENTITY_PALETTE)
+
+    def test_multiple_sessions_get_identity_colors_single_keeps_brand(self) -> None:
+        from sidepulse.colors import (
+            IDENTITY_PALETTE,
+            ColorSettings,
+            _active_agents,
+        )
+
+        one = (_status("codex", AgentMode.WORKING),)
+        two = (
+            _status("codex", AgentMode.WORKING),
+            _status("claude", AgentMode.WORKING),
+        )
+        settings = ColorSettings.defaults()
+        solo = _active_agents(one, settings)
+        self.assertEqual(solo[0].color, settings.agent_color("codex"))
+        crowd = _active_agents(two, settings)
+        self.assertEqual(len({agent.color for agent in crowd}), 2)
+        for agent in crowd:
+            self.assertIn(agent.color, IDENTITY_PALETTE)
+
+    def test_session_override_wins_and_round_trips(self) -> None:
+        from sidepulse.colors import ColorSettings, _active_agents
+
+        two = (
+            _status("codex", AgentMode.WORKING),
+            _status("claude", AgentMode.WORKING),
+        )
+        agent_id = two[0].agent_id
+        settings = ColorSettings.defaults().with_session_color(agent_id, "112233")
+        crowd = _active_agents(two, settings)
+        colors = [agent.color for agent in crowd]
+        self.assertIn("#112233", colors)
+        reloaded = ColorSettings.from_dict(settings.to_dict())
+        self.assertEqual(reloaded.session_color(agent_id), "#112233")
+        cleared = reloaded.with_session_color(agent_id, None)
+        self.assertIsNone(cleared.session_color(agent_id))
+
+
 class EscalationTests(unittest.TestCase):
     def test_stage_function_thresholds_and_tier_ceiling(self) -> None:
         from sidepulse import signals

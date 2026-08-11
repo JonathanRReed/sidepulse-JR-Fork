@@ -58,7 +58,14 @@ try:
         NSWindowStyleMaskTitled,
         NSVariableStatusItemLength,
     )
-    from Foundation import NSIndexSet, NSObject, NSString, NSTimer, NSURL
+    from Foundation import (
+        NSIndexSet,
+        NSMutableAttributedString,
+        NSObject,
+        NSString,
+        NSTimer,
+        NSURL,
+    )
 except ImportError as exc:  # pragma: no cover - only exercised on non-macOS setups.
     raise SystemExit(
         "The status-bar app requires PyObjC/AppKit:\n"
@@ -3751,8 +3758,24 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     if not statuses:
         menu.addItem_(disabled_menu_item("No recent sessions"))
     else:
+        # "Color = agent": with several sessions, each row leads with
+        # its identity dot -- the same hue the LEDs and Screen Bar use
+        # for that session -- so the mapping is learnable at a glance.
+        identity: dict[str, str] = {}
+        if len(statuses) > 1:
+            identity = colors_module.identity_colors_for_agents(
+                [status.agent_id for status in statuses]
+            )
         for status in statuses:
-            menu.addItem_(build_session_menu_item(status, snapshot.collected_at, target))
+            dot_color = None
+            if getattr(target, "settings", None) is not None:
+                dot_color = target.settings.colors.session_color(status.agent_id)
+            dot_color = dot_color or identity.get(status.agent_id)
+            menu.addItem_(
+                build_session_menu_item(
+                    status, snapshot.collected_at, target, identity_color=dot_color
+                )
+            )
 
     menu.addItem_(NSMenuItem.separatorItem())
     menu.addItem_(disabled_menu_item("Devices"))
@@ -6045,6 +6068,7 @@ def build_session_menu_item(
     target: StatusBarController,
     *,
     width: float | None = None,
+    identity_color: str | None = None,
 ) -> NSMenuItem:
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         native_session_menu_title(status),
@@ -6053,6 +6077,17 @@ def build_session_menu_item(
     )
     item.setTarget_(target)
     item.setRepresentedObject_(status)
+    if identity_color is not None:
+        # A colored bullet leading the title -- the session's identity
+        # hue, matching what the LEDs show for it.
+        title = f"● {native_session_menu_title(status)}"
+        attributed = NSMutableAttributedString.alloc().initWithString_(title)
+        attributed.addAttribute_value_range_(
+            NSForegroundColorAttributeName,
+            nscolor_from_hex(identity_color),
+            (0, 1),
+        )
+        item.setAttributedTitle_(attributed)
     image = session_row_icon_for_status(status)
     if image is not None:
         item.setImage_(image)

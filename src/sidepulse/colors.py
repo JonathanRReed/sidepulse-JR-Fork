@@ -15,6 +15,7 @@ this is a self-contained concern: given a set of active agent statuses and a
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -359,6 +360,46 @@ def _default_agent_colors() -> dict[str, str]:
     return {spec.provider: default_agent_color(spec.provider) for spec in PROVIDER_SPECS}
 
 
+# Session identity palette ("color = agent"): eight hues chosen to stay
+# clear of the STATE hues (working cyan #00E5FF, done green #00FF66,
+# ask red-orange #FF3A00, calendar purple #A45CFF) so an identity can
+# never be misread as a state. Identity kicks in when two or more
+# sessions are active at once -- a lone session keeps its provider's
+# brand color, since "which one is which" needs a which.
+IDENTITY_PALETTE: tuple[str, ...] = (
+    "#4C8DFF",  # blue
+    "#FF6FA9",  # pink
+    "#FFD60A",  # yellow
+    "#FF9F0A",  # amber
+    "#A8E34D",  # lime
+    "#00B3A4",  # deep teal
+    "#E44CFF",  # magenta
+    "#E6E6E6",  # silver
+)
+
+
+def identity_colors_for_agents(agent_ids: "list[str]") -> dict[str, str]:
+    """Deterministic palette assignment: each id hashes to a preferred
+    slot and probes forward past slots already taken this round, so the
+    same set of sessions always maps to the same colors, and two
+    sessions never share a hue while free slots remain."""
+    taken: set[int] = set()
+    assignment: dict[str, str] = {}
+    for agent_id in agent_ids:
+        if agent_id in assignment:
+            continue
+        start = int(hashlib.md5(agent_id.encode("utf-8")).hexdigest(), 16) % len(IDENTITY_PALETTE)
+        slot = start
+        for offset in range(len(IDENTITY_PALETTE)):
+            candidate = (start + offset) % len(IDENTITY_PALETTE)
+            if candidate not in taken:
+                slot = candidate
+                break
+        taken.add(slot)
+        assignment[agent_id] = IDENTITY_PALETTE[slot]
+    return assignment
+
+
 def _default_fade_floor() -> dict[str, float]:
     return {key: DEFAULT_FADE_FLOOR for key in FADE_MODE_KEYS}
 
@@ -390,6 +431,9 @@ def _default_mode_animation() -> dict[str, str]:
 class ColorSettings:
     mode_colors: dict[str, str] = field(default_factory=_default_mode_colors)
     agent_colors: dict[str, str] = field(default_factory=_default_agent_colors)
+    # Per-SESSION identity overrides (agent_id -> hex), on top of the
+    # auto-assigned IDENTITY_PALETTE. Empty by default.
+    session_colors: dict[str, str] = field(default_factory=dict)
     blend_mode: str = DEFAULT_BLEND_MODE
     fade_floor: dict[str, float] = field(default_factory=_default_fade_floor)
     fade_ceiling: dict[str, float] = field(default_factory=_default_fade_ceiling)
@@ -432,6 +476,25 @@ class ColorSettings:
     def agent_color(self, provider: str) -> str:
         fallback = default_agent_color(provider)
         return normalize_hex(self.agent_colors.get(provider), fallback)
+
+    def session_color(self, agent_id: str | None) -> str | None:
+        """The user's explicit identity override for one session, or
+        None (auto palette / provider color applies)."""
+        if not agent_id:
+            return None
+        raw = self.session_colors.get(agent_id)
+        if raw is None:
+            return None
+        return normalize_hex(raw, IDENTITY_PALETTE[0])
+
+    def with_session_color(self, agent_id: str, hex_value: str | None) -> "ColorSettings":
+        """hex_value=None removes the override (back to auto)."""
+        session_colors = dict(self.session_colors)
+        if hex_value is None:
+            session_colors.pop(agent_id, None)
+        else:
+            session_colors[agent_id] = normalize_hex(hex_value, IDENTITY_PALETTE[0])
+        return replace(self, session_colors=session_colors)
 
     def fade_range(self, key: str) -> tuple[float, float]:
         """Returns (floor, ceiling) as fractions 0.0-1.0 for a pulsing mode
@@ -540,6 +603,7 @@ class ColorSettings:
         return {
             "mode_colors": dict(self.mode_colors),
             "agent_colors": dict(self.agent_colors),
+            "session_colors": dict(sorted(self.session_colors.items())),
             "blend_mode": self.blend_mode,
             "fade_floor": dict(self.fade_floor),
             "fade_ceiling": dict(self.fade_ceiling),
@@ -569,6 +633,13 @@ class ColorSettings:
             for provider, value in raw_agents.items():
                 if isinstance(provider, str):
                     agent_colors[provider] = normalize_hex(value, default_agent_color(provider))
+
+        session_colors: dict[str, str] = {}
+        raw_sessions = data.get("session_colors")
+        if isinstance(raw_sessions, dict):
+            for agent_id, value in raw_sessions.items():
+                if isinstance(agent_id, str) and agent_id:
+                    session_colors[agent_id] = normalize_hex(value, IDENTITY_PALETTE[0])
 
         blend_mode = data.get("blend_mode")
         if blend_mode not in BLEND_MODE_CHOICES:
@@ -624,6 +695,7 @@ class ColorSettings:
         return cls(
             mode_colors=mode_colors,
             agent_colors=agent_colors,
+            session_colors=session_colors,
             blend_mode=blend_mode,
             fade_floor=fade_floor,
             fade_ceiling=fade_ceiling,
@@ -794,12 +866,20 @@ def _stable_agent_sort_key(status: AgentStatus) -> tuple[int, str]:
 
 
 def _active_agents(statuses: tuple[AgentStatus, ...], colors: ColorSettings) -> list[_ActiveAgent]:
+    ordered = sorted(statuses, key=_stable_agent_sort_key)
+    # Identity colors ("color = agent") apply only when there's a crowd
+    # to tell apart; a lone session keeps its provider's brand color.
+    identity: dict[str, str] = {}
+    if len(ordered) > 1:
+        identity = identity_colors_for_agents([status.agent_id for status in ordered])
     agents: list[_ActiveAgent] = []
-    for status in sorted(statuses, key=_stable_agent_sort_key):
+    for status in ordered:
+        override = colors.session_color(status.agent_id)
+        color = override or identity.get(status.agent_id) or colors.agent_color(status.provider)
         agents.append(
             _ActiveAgent(
                 provider=status.provider,
-                color=colors.agent_color(status.provider),
+                color=color,
                 state=display_state_for_mode(status.mode),
                 weight=urgency_weight(status.mode),
             )
