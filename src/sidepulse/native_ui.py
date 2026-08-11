@@ -212,6 +212,12 @@ SPACE_M = 12.0  # default row spacing inside a card
 SPACE_L = 24.0  # between cards / titled groups in a pane
 CARD_PADDING = 16.0
 ROW_MIN_HEIGHT = 26.0
+# System Settings caps its detail content at roughly this width and
+# centers the column -- form rows past ~620pt stop reading as rows and
+# start reading as a label lost on the left and a control lost on the
+# right, and a column hugging the leading edge of a wide pane looks
+# off-center (it is).
+CONTENT_MAX_WIDTH = 620.0
 
 
 class _FillWidthStackView(NSStackView):
@@ -466,11 +472,21 @@ def make_popup_button(target, selector: str) -> "NSPopUpButton":
     return popup
 
 
-def make_field(text: str = "") -> "NSTextField":
+def make_field(text: str = "", *, target=None, action: str | None = None) -> "NSTextField":
+    """An editable text field. Passing target/action wires the field to
+    commit on Return AND on end-of-editing (tabbing/clicking away) --
+    the instant-apply contract every field in this app follows: a Mac
+    settings surface has no Apply buttons, a value you typed is a value
+    that took effect the moment you left the field.
+    """
     field = NSTextField.alloc().init()
     field.setStringValue_(text)
     field.setEditable_(True)
     field.setSelectable_(True)
+    if target is not None and action:
+        field.setTarget_(target)
+        field.setAction_(action)
+        field.cell().setSendsActionOnEndEditing_(True)
     return field
 
 
@@ -554,11 +570,23 @@ def wrap_in_scroll_pane(stack: "NSStackView", *, padding: float = 20.0) -> "NSSc
     scroll.setContentView_(_FlippedClipView.alloc().init())
     scroll.setDocumentView_(padded)
     content_view = scroll.contentView()
+    # A centered column capped at CONTENT_MAX_WIDTH (preferring exactly
+    # that width when there's room -- the 749 preference loses only to
+    # the required minimum margins in a narrow pane). Pinning leading/
+    # trailing instead would stretch rows edge-to-edge in a wide window
+    # and leave the column hugging the leading edge -- visibly
+    # off-center -- in exactly the way System Settings never is.
+    width_preference = padded.widthAnchor().constraintEqualToConstant_(CONTENT_MAX_WIDTH)
+    width_preference.setPriority_(749)
     NSLayoutConstraint.activateConstraints_(
         [
-            padded.leadingAnchor().constraintEqualToAnchor_constant_(content_view.leadingAnchor(), padding),
-            padded.trailingAnchor().constraintEqualToAnchor_constant_(content_view.trailingAnchor(), -padding),
+            padded.centerXAnchor().constraintEqualToAnchor_(content_view.centerXAnchor()),
             padded.topAnchor().constraintEqualToAnchor_constant_(content_view.topAnchor(), padding),
+            padded.widthAnchor().constraintLessThanOrEqualToConstant_(CONTENT_MAX_WIDTH),
+            padded.leadingAnchor().constraintGreaterThanOrEqualToAnchor_constant_(
+                content_view.leadingAnchor(), padding
+            ),
+            width_preference,
         ]
     )
     # Deliberately no bottom-anchor constraint at all: padded's height

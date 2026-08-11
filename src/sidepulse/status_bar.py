@@ -50,7 +50,6 @@ try:
         NSWindow,
         NSWindowStyleMaskClosable,
         NSWindowStyleMaskMiniaturizable,
-        NSWindowStyleMaskResizable,
         NSWindowStyleMaskTitled,
         NSVariableStatusItemLength,
     )
@@ -763,6 +762,18 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def saveLidAnimations_(self, _sender):
         self.save_lid_animations_from_fields()
+
+    def textDidEndEditing_(self, notification):
+        """NSTextView delegate: the two lid-animation program editors are
+        the only text views that set us as delegate -- committing when
+        editing ends gives them the same instant-apply contract as every
+        text field (see native_ui.make_field)."""
+        editors = (
+            self.settings_fields.get("closed_animation_program"),
+            self.settings_fields.get("open_animation_program"),
+        )
+        if notification.object() in editors:
+            self.save_lid_animations_from_fields()
 
     @objc.IBAction
     def previewLidClosedAnimation_(self, _sender):
@@ -3369,12 +3380,13 @@ def _build_closed_lid_pane(target: StatusBarController):
     policy_popup = make_closed_lid_awake_policy_popup(target)
     inner.addArrangedSubview_(native_ui.make_row("Policy", policy_popup))
 
-    grace_field = native_ui.make_field(f"{target.settings.closed_lid_grace_minutes:g}")
+    grace_field = native_ui.make_field(
+        f"{target.settings.closed_lid_grace_minutes:g}", target=target, action="applyClosedLidGraceMinutes:"
+    )
     native_ui.constrain_width(grace_field, 56.0)
-    grace_controls = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    grace_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
     grace_controls.addArrangedSubview_(grace_field)
     grace_controls.addArrangedSubview_(native_ui.make_label("min", secondary=True))
-    grace_controls.addArrangedSubview_(native_ui.make_button("Apply", target, "applyClosedLidGraceMinutes:"))
     inner.addArrangedSubview_(
         native_ui.make_row(
             "Wait before releasing",
@@ -3400,16 +3412,19 @@ def _build_led_behavior_pane(target: StatusBarController):
     )
     inner.addArrangedSubview_(idle_row)
 
-    minutes_field = native_ui.make_field(f"{target.settings.idle_dim_after_minutes:g}")
+    minutes_field = native_ui.make_field(
+        f"{target.settings.idle_dim_after_minutes:g}", target=target, action="applyIdleDimSettings:"
+    )
     native_ui.constrain_width(minutes_field, 48.0)
-    fraction_field = native_ui.make_field(f"{round(target.settings.idle_dim_fraction * 100)}")
+    fraction_field = native_ui.make_field(
+        f"{round(target.settings.idle_dim_fraction * 100)}", target=target, action="applyIdleDimSettings:"
+    )
     native_ui.constrain_width(fraction_field, 48.0)
     idle_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
     idle_controls.addArrangedSubview_(minutes_field)
     idle_controls.addArrangedSubview_(native_ui.make_label("min, dim to", secondary=True))
     idle_controls.addArrangedSubview_(fraction_field)
     idle_controls.addArrangedSubview_(native_ui.make_label("%", secondary=True))
-    idle_controls.addArrangedSubview_(native_ui.make_button("Apply", target, "applyIdleDimSettings:"))
     inner.addArrangedSubview_(native_ui.make_row("After", idle_controls))
 
     native_ui.add_separator(inner)
@@ -3503,10 +3518,13 @@ def _build_lid_animations_pane(target: StatusBarController):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
 
     closed_outer, closed_inner = native_ui.make_card("Lid Closed")
-    closed_duration = native_ui.make_field("")
+    closed_duration = native_ui.make_field("", target=target, action="saveLidAnimations:")
     native_ui.constrain_width(closed_duration, 60.0)
     closed_inner.addArrangedSubview_(native_ui.make_row("Duration (sec)", closed_duration))
     closed_scroll, closed_program = native_ui.make_text_editor("")
+    # Programs commit when editing ends (see textDidEndEditing_), same
+    # instant-apply contract as every field -- no Save button.
+    closed_program.setDelegate_(target)
     closed_inner.addArrangedSubview_(closed_scroll)
     closed_buttons = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     closed_buttons.addArrangedSubview_(native_ui.make_button("Preview", target, "previewLidClosedAnimation:"))
@@ -3516,15 +3534,15 @@ def _build_lid_animations_pane(target: StatusBarController):
     stack.addArrangedSubview_(closed_outer)
 
     open_outer, open_inner = native_ui.make_card("Lid Open")
-    open_duration = native_ui.make_field("")
+    open_duration = native_ui.make_field("", target=target, action="saveLidAnimations:")
     native_ui.constrain_width(open_duration, 60.0)
     open_inner.addArrangedSubview_(native_ui.make_row("Duration (sec)", open_duration))
     open_scroll, open_program = native_ui.make_text_editor("")
+    open_program.setDelegate_(target)
     open_inner.addArrangedSubview_(open_scroll)
     open_buttons = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     open_buttons.addArrangedSubview_(native_ui.make_button("Preview", target, "previewLidOpenAnimation:"))
     open_buttons.addArrangedSubview_(native_ui.make_button("Reset", target, "resetLidOpenAnimation:"))
-    open_buttons.addArrangedSubview_(native_ui.make_button("Save Animations", target, "saveLidAnimations:"))
     open_buttons.addArrangedSubview_(native_ui.make_hspacer())
     open_inner.addArrangedSubview_(open_buttons)
     stack.addArrangedSubview_(open_outer)
@@ -3557,18 +3575,18 @@ def _build_debug_pane(target: StatusBarController):
 
 def build_settings_window(target: StatusBarController) -> NSWindow:
     width, height = 820, 560
-    style = (
-        NSWindowStyleMaskTitled
-        | NSWindowStyleMaskClosable
-        | NSWindowStyleMaskMiniaturizable
-        | NSWindowStyleMaskResizable
-    )
+    # Fixed-size, like a Mac settings window should be (System Settings
+    # itself is fixed-width): the panes are designed at this size, and a
+    # user-resizable frame combined with a pure-Auto-Layout content
+    # hierarchy is exactly the combination that produced both the
+    # shrink-to-fitting-width bug and a dead band above the sidebar on
+    # manual resize.
+    style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
     window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
         ((0, 0), (width, height)), style, NSBackingStoreBuffered, False,
     )
     window.setTitle_("SidePulse Agent Monitor Settings")
     window.setReleasedWhenClosed_(False)
-    window.setMinSize_((640, 420))
     window.center()
 
     root = NSView.alloc().init()
@@ -3579,9 +3597,13 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     # of natural-width form rows is well under the size this window is
     # designed at. Pin the design size explicitly; panes still lay out
     # freely inside it (and the window stays user-resizable above it).
+    # Equality, not >=: a floor without a ceiling lets any
+    # width-preferring content (wrap_in_scroll_pane's centered column)
+    # inflate the content view PAST the fixed window frame, which then
+    # clips it at the right edge instead of resizing.
     root.setTranslatesAutoresizingMaskIntoConstraints_(False)
-    root.widthAnchor().constraintGreaterThanOrEqualToConstant_(width).setActive_(True)
-    root.heightAnchor().constraintGreaterThanOrEqualToConstant_(height).setActive_(True)
+    root.widthAnchor().constraintEqualToConstant_(width).setActive_(True)
+    root.heightAnchor().constraintEqualToConstant_(height).setActive_(True)
 
     split = NSSplitView.alloc().init()
     split.setVertical_(True)
@@ -3738,18 +3760,15 @@ def _build_agent_or_mode_color_row(
 
 def build_colors_window(target: StatusBarController) -> NSWindow:
     width, height = 640, 700
-    style = (
-        NSWindowStyleMaskTitled
-        | NSWindowStyleMaskClosable
-        | NSWindowStyleMaskMiniaturizable
-        | NSWindowStyleMaskResizable
-    )
+    # Fixed-size for the same reasons build_settings_window documents --
+    # its required height constraint below never coexisted sanely with a
+    # user-resizable frame anyway.
+    style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
     window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
         ((0, 0), (width, height)), style, NSBackingStoreBuffered, False,
     )
     window.setTitle_("SidePulse Colors")
     window.setReleasedWhenClosed_(False)
-    window.setMinSize_((560, 420))
     window.center()
 
     root = NSView.alloc().init()
@@ -3762,8 +3781,10 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
     # unscrolled document size: a several-thousand-point-tall window
     # instead of one that scrolls. Giving root an explicit, required size
     # here breaks that pull; anything below still just scrolls normally.
+    # Equality on both axes -- see build_settings_window: a >= floor lets
+    # width-preferring content inflate past the fixed frame and clip.
     root.setTranslatesAutoresizingMaskIntoConstraints_(False)
-    root.widthAnchor().constraintGreaterThanOrEqualToConstant_(width).setActive_(True)
+    root.widthAnchor().constraintEqualToConstant_(width).setActive_(True)
     root.heightAnchor().constraintEqualToConstant_(height).setActive_(True)
 
     # Live Preview stays pinned at the top, outside the scroll area -- it's
@@ -3819,32 +3840,31 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
     behavior_inner.addArrangedSubview_(done_row)
     native_ui.add_separator(behavior_inner)
 
-    speed_field = native_ui.make_field("")
+    speed_field = native_ui.make_field("", target=target, action="applyCycleSpeed:")
     native_ui.constrain_width(speed_field, 56.0)
-    speed_controls = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    speed_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
     speed_controls.addArrangedSubview_(speed_field)
     speed_controls.addArrangedSubview_(native_ui.make_label("sec/breath", secondary=True))
-    speed_controls.addArrangedSubview_(native_ui.make_button("Apply", target, "applyCycleSpeed:"))
     behavior_inner.addArrangedSubview_(native_ui.make_row("Global Speed", speed_controls))
 
     round_robin_use_global = native_ui.make_checkbox(
         "Round-Robin: use global", target, "toggleRoundRobinUseGlobalSpeed:"
     )
-    round_robin_speed_field = native_ui.make_field("")
+    round_robin_speed_field = native_ui.make_field("", target=target, action="applyRoundRobinSpeed:")
     native_ui.constrain_width(round_robin_speed_field, 56.0)
-    round_robin_row = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    round_robin_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     round_robin_row.addArrangedSubview_(round_robin_use_global)
+    round_robin_row.addArrangedSubview_(native_ui.make_hspacer())
     round_robin_row.addArrangedSubview_(round_robin_speed_field)
-    round_robin_row.addArrangedSubview_(native_ui.make_button("Apply", target, "applyRoundRobinSpeed:"))
     behavior_inner.addArrangedSubview_(round_robin_row)
 
     cycle_use_global = native_ui.make_checkbox("Cycle: use global", target, "toggleCycleUseGlobalSpeed:")
-    cycle_speed_field = native_ui.make_field("")
+    cycle_speed_field = native_ui.make_field("", target=target, action="applyCycleModeSpeed:")
     native_ui.constrain_width(cycle_speed_field, 56.0)
-    cycle_row = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    cycle_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     cycle_row.addArrangedSubview_(cycle_use_global)
+    cycle_row.addArrangedSubview_(native_ui.make_hspacer())
     cycle_row.addArrangedSubview_(cycle_speed_field)
-    cycle_row.addArrangedSubview_(native_ui.make_button("Apply", target, "applyCycleModeSpeed:"))
     behavior_inner.addArrangedSubview_(cycle_row)
     scroll_stack.addArrangedSubview_(behavior_outer)
 
@@ -3913,18 +3933,21 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
         floor, ceiling = target.settings.colors.fade_range(key)
         controls = native_ui.make_stack(orientation="horizontal", spacing=6.0)
         controls.addArrangedSubview_(native_ui.make_label("Floor", secondary=True, size=11.0))
-        floor_field = native_ui.make_field(f"{round(floor * 100)}")
+        floor_field = native_ui.make_field(
+            f"{round(floor * 100)}", target=target, action="applyFadeIntensity:"
+        )
         native_ui.constrain_width(floor_field, 48.0)
         controls.addArrangedSubview_(floor_field)
         controls.addArrangedSubview_(native_ui.make_label("%", secondary=True, size=11.0))
         controls.addArrangedSubview_(native_ui.make_label("Ceiling", secondary=True, size=11.0))
-        ceiling_field = native_ui.make_field(f"{round(ceiling * 100)}")
+        ceiling_field = native_ui.make_field(
+            f"{round(ceiling * 100)}", target=target, action="applyFadeIntensity:"
+        )
         native_ui.constrain_width(ceiling_field, 48.0)
         controls.addArrangedSubview_(ceiling_field)
         controls.addArrangedSubview_(native_ui.make_label("%", secondary=True, size=11.0))
         fade_fields[key] = {"floor": floor_field, "ceiling": ceiling_field}
         fade_inner.addArrangedSubview_(native_ui.make_row(MODE_COLOR_DISPLAY_LABELS[key], controls))
-    fade_inner.addArrangedSubview_(native_ui.make_button("Apply Fade Intensity", target, "applyFadeIntensity:"))
     scroll_stack.addArrangedSubview_(fade_outer)
 
     scroll_pane = native_ui.wrap_in_scroll_pane(scroll_stack)
@@ -3955,12 +3978,13 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
 
     NSLayoutConstraint.activateConstraints_(
         [
-            # 20pt to match wrap_in_scroll_pane's own content padding --
-            # the pinned card and the scrolling cards below it share one
-            # left edge, so the pane reads as a single aligned column.
+            # The pinned card follows wrap_in_scroll_pane's own centered
+            # max-width column exactly, so it and the scrolling cards
+            # below read as one aligned column at any window size.
             preview_outer.topAnchor().constraintEqualToAnchor_constant_(root.topAnchor(), 20.0),
-            preview_outer.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 20.0),
-            preview_outer.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -20.0),
+            preview_outer.centerXAnchor().constraintEqualToAnchor_(root.centerXAnchor()),
+            preview_outer.widthAnchor().constraintLessThanOrEqualToConstant_(native_ui.CONTENT_MAX_WIDTH),
+            preview_outer.leadingAnchor().constraintGreaterThanOrEqualToAnchor_constant_(root.leadingAnchor(), 20.0),
             scroll_pane.topAnchor().constraintEqualToAnchor_constant_(preview_outer.bottomAnchor(), 16.0),
             scroll_pane.leadingAnchor().constraintEqualToAnchor_(root.leadingAnchor()),
             scroll_pane.trailingAnchor().constraintEqualToAnchor_(root.trailingAnchor()),
@@ -3970,6 +3994,14 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
             footer.bottomAnchor().constraintEqualToAnchor_constant_(root.bottomAnchor(), -14.0),
         ]
     )
+    # Prefer the full column width (see wrap_in_scroll_pane's identical
+    # 749 preference) -- without this the pinned card would shrink to its
+    # own fitting width instead of matching the cards scrolling under it.
+    preview_width_preference = preview_outer.widthAnchor().constraintEqualToConstant_(
+        native_ui.CONTENT_MAX_WIDTH
+    )
+    preview_width_preference.setPriority_(749)
+    preview_width_preference.setActive_(True)
 
     target.color_swatches = swatches
     target.color_hex_labels = hex_labels
