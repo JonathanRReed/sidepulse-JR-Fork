@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, replace as dataclass_replace
@@ -669,6 +670,17 @@ class StatusBarController(NSObject):
         NSWorkspace.sharedWorkspace().openURL_(
             NSURL.URLWithString_("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
         )
+
+    @objc.IBAction
+    def revealFocusBinaryInFinder_(self, _sender):
+        """Shows the exact interpreter binary Full Disk Access must be
+        granted to -- users can drag it straight from this Finder window
+        into the Privacy Settings list."""
+        interpreter = sys.executable or ""
+        if interpreter:
+            NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
+                [NSURL.fileURLWithPath_(interpreter)]
+            )
 
     @objc.IBAction
     def openSettings_(self, _sender):
@@ -3908,16 +3920,33 @@ def _build_led_behavior_pane(target: StatusBarController):
         focus_modes = None
     if not focus_modes:
         focus_inner.addArrangedSubview_(
-            native_ui.make_label(
-                "Per-Focus rules need Full Disk Access, so SidePulse can see "
-                "which Focus is on.",
+            native_ui.make_wrapping_label(
+                "Per-Focus rules need Full Disk Access — and macOS grants it "
+                "per program, so it must go to SidePulse's own background "
+                "process (not Terminal or the app you launched it from):",
                 secondary=True,
                 size=12.0,
+                max_width=500.0,
+            )
+        )
+        interpreter_label = native_ui.make_label(sys.executable or "python3", secondary=True, size=11.0)
+        interpreter_label.setSelectable_(True)
+        focus_inner.addArrangedSubview_(interpreter_label)
+        focus_inner.addArrangedSubview_(
+            native_ui.make_wrapping_label(
+                "In Privacy Settings, click +, press ⌘⇧G, and paste that path. "
+                "This pane fills with your Focus modes once granted.",
+                secondary=True,
+                size=11.0,
+                max_width=500.0,
             )
         )
         fda_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
         fda_controls.addArrangedSubview_(
             native_ui.make_button("Open Privacy Settings…", target, "openFullDiskAccessSettings:")
+        )
+        fda_controls.addArrangedSubview_(
+            native_ui.make_button("Reveal Program in Finder", target, "revealFocusBinaryInFinder:")
         )
         fda_controls.addArrangedSubview_(native_ui.make_hspacer())
         focus_inner.addArrangedSubview_(fda_controls)
@@ -4464,7 +4493,10 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
     scroll_stack.addArrangedSubview_(fade_outer)
 
     scroll_pane = native_ui.wrap_in_scroll_pane(scroll_stack)
-    root.addSubview_(scroll_pane)
+    # BELOW the pinned preview card in z -- scrolled rows must slide
+    # under the card's glass (which blurs them, toolbar-style), never
+    # render on top of it.
+    root.addSubview_positioned_relativeTo_(scroll_pane, -1, preview_outer)
 
     # Reset/Preview-live/Done stay pinned at the bottom too, matching every
     # native macOS dialog's own convention of action buttons that don't

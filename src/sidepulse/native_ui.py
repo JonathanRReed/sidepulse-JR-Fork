@@ -229,25 +229,41 @@ class _FillWidthStackView(NSStackView):
     NSStackView's default cross-axis alignment for a vertical stack is
     centerX, which is exactly the "content floating in the middle of the
     card with dead margins either side" look this exists to kill. The
-    width constraint is priority 999, not required: content that
-    declares its own required fixed width (a preview strip built on
-    make_fixed_area) simply wins, keeps its size, and -- since the
-    stack's centerX alignment still applies to anything not stretched --
-    stays centered, which is just right for visual previews.
+    width constraint is priority 500 -- deliberately BELOW the 749
+    column-width preference in wrap_in_scroll_pane. At 999 it sat above
+    it, and the solver then found it cheaper to collapse an entire pane
+    to its fitting width (breaking the one 749) than to stretch a card
+    whose content includes a required fixed-width preview (breaking one
+    999) -- the "card hugging the left of an empty pane" bug. At 500,
+    the column always prefers its full width, everything stretchy still
+    fills (500 beats the default 250 hugging), and required fixed-width
+    content simply keeps its size, centered by the stack's alignment.
     """
 
     def addArrangedSubview_(self, view):
         objc.super(_FillWidthStackView, self).addArrangedSubview_(view)
         constraint = view.widthAnchor().constraintEqualToAnchor_(self.widthAnchor())
-        constraint.setPriority_(999)
+        constraint.setPriority_(getattr(self, "fill_priority", 999))
         constraint.setActive_(True)
 
 
-def make_fill_stack(*, spacing: float = SPACE_M) -> "NSStackView":
-    """A vertical _FillWidthStackView with the shared stack defaults --
-    the standard container for a pane's column of cards and for card
-    content itself (make_card uses it for you)."""
+def make_fill_stack(*, spacing: float = SPACE_M, fill_priority: int = 999) -> "NSStackView":
+    """A vertical _FillWidthStackView with the shared stack defaults.
+
+    Two tiers of fill_priority, and the difference matters:
+    - 999 (default) for PANE-level columns of cards -- cards must always
+      stretch to the column, and nothing at that level ever declares a
+      required width, so 999 is safe.
+    - 500 (used by make_card for its CONTENT) -- card interiors can hold
+      required fixed-width previews, and a fill priority above the
+      column's own 749 width preference lets the solver collapse the
+      whole pane to fitting width rather than break one fill (the
+      "card hugging the left of an empty pane" bug). At 500 the column
+      wins, stretchy rows still fill (500 > default 250 hugging), and
+      fixed previews keep their size, centered.
+    """
     stack = _FillWidthStackView.alloc().init()
+    stack.fill_priority = fill_priority
     stack.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
     stack.setSpacing_(spacing)
     stack.setDistribution_(NSStackViewDistributionFill)
@@ -286,6 +302,19 @@ def make_label(text: str, *, secondary: bool = False, size: float = 13.0, bold: 
     label = NSTextField.labelWithString_(text)
     label.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
     label.setTextColor_(NSColor.secondaryLabelColor() if secondary else NSColor.labelColor())
+    return label
+
+
+def make_wrapping_label(
+    text: str, *, secondary: bool = False, size: float = 13.0, max_width: float = 520.0
+) -> "NSTextField":
+    """A label that word-wraps instead of clipping at its container's
+    edge -- for explanatory sentences (a plain make_label is single-line
+    and truncates)."""
+    label = make_label(text, secondary=secondary, size=size)
+    label.setUsesSingleLineMode_(False)
+    label.cell().setWraps_(True)
+    label.setPreferredMaxLayoutWidth_(max_width)
     return label
 
 
@@ -386,7 +415,7 @@ def make_card(title: str | None = None) -> tuple["NSView", "NSStackView"]:
     already says the same thing should pass no title at all.
     """
     panel, inner_container = make_glass_panel(corner_radius=14.0)
-    content = make_fill_stack(spacing=SPACE_M)
+    content = make_fill_stack(spacing=SPACE_M, fill_priority=500)
     inner_container.addSubview_(content)
     _pin_edges(
         content,

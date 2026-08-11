@@ -45,6 +45,14 @@ NOTCH_BOTTOM_RADIUS = 8.0
 # disconnected/floating rather than integrated).
 ALCOVE_BUNDLE_ID = "com.henrikruscon.Alcove"
 COMPACT_ACCENT_HEIGHT = 2.5
+# NSStatusWindowLevel without another SDK dependency; and the level the
+# wrap bracket rides at while Alcove is running -- kCGMaximumWindowLevel,
+# one above Alcove's own near-maximum overlay, so the bracket's glow
+# stays visible around the hardware notch instead of buried under
+# Alcove's opaque backdrop. The window ignores mouse events, so being
+# top-most is purely visual.
+STATUS_WINDOW_LEVEL = 25
+ABOVE_ALCOVE_WINDOW_LEVEL = 2147483630
 
 # "Wrap the menu bar" extends the LED glow beyond the notch's own width,
 # reaching toward the menu bar's edges on both sides -- opt-in (see
@@ -147,23 +155,14 @@ def window_height_for_notch_depth(notch_depth: float) -> float:
     return max(0.0, float(notch_depth)) + LED_BAND_HEIGHT
 
 
-def virtual_window_frame_for_screen(screen, *, wrap_menu_bar: bool = False, notch_width_override: float | None = None):
+def virtual_window_frame_for_screen(screen, *, wrap_menu_bar: bool = False):
     """The Screen Bar window's full frame. With ``wrap_menu_bar`` on, the
     window widens symmetrically to include room for the wing glow on each
     side (see wing_width_for_screen) -- the window stays centered on the
-    notch either way, since the added width is equal on both sides.
-    ``notch_width_override`` widens the treated-as-notch center (never
-    narrows it): the Alcove-aware wrap passes Alcove's own overlay width
-    so the wings land outside Alcove's window instead of buried under it.
-    """
+    notch either way, since the added width is equal on both sides."""
     frame = screen.frame()
     notch_width = slot_width_for_screen(screen)
     wing = wing_width_for_screen(screen, notch_width) if wrap_menu_bar else 0.0
-    if notch_width_override is not None:
-        # Cap so the widened center plus wings never runs the window past
-        # the safety margin wing_width_for_screen itself respects.
-        max_center = frame.size.width - 2.0 * (wing + WING_SAFETY_MARGIN)
-        notch_width = max(notch_width, min(float(notch_width_override), max_center))
     width = notch_width + 2.0 * wing
     height = window_height_for_notch_depth(notch_depth_for_screen(screen))
     x = frame.origin.x + (frame.size.width - width) / 2.0
@@ -187,37 +186,6 @@ def should_use_compact_layout(alcove_compatibility_mode: str) -> bool:
     if alcove_compatibility_mode == ALCOVE_COMPAT_NEVER:
         return False
     return is_alcove_running()
-
-
-def alcove_overlay_width() -> float | None:
-    """Width of Alcove's own on-screen notch overlay window, or None when
-    it can't be measured. Alcove paints an opaque extended-notch backdrop
-    much wider than the hardware notch and at near-maximum window level,
-    so anything SidePulse draws inside that footprint is simply buried --
-    the wrap glow has to move OUTSIDE it (see reposition), which needs
-    the real width, not a guess."""
-    try:
-        from Quartz import (
-            CGWindowListCopyWindowInfo,
-            kCGNullWindowID,
-            kCGWindowBounds,
-            kCGWindowListOptionOnScreenOnly,
-            kCGWindowOwnerName,
-        )
-
-        infos = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) or []
-        widths = []
-        for info in infos:
-            if str(info.get(kCGWindowOwnerName, "")) != "Alcove":
-                continue
-            bounds = dict(info.get(kCGWindowBounds, {}))
-            # Only the top-anchored notch overlay counts -- Alcove's own
-            # settings/auxiliary windows can be anywhere.
-            if float(bounds.get("Y", 1.0)) == 0.0 and float(bounds.get("Width", 0.0)) > 0.0:
-                widths.append(float(bounds["Width"]))
-        return max(widths) if widths else None
-    except Exception:
-        return None
 
 
 def led_band_rect(width: float):
@@ -835,42 +803,31 @@ class VirtualStatusDevice(NSObject):
         screen = NSScreen.mainScreen()
         if screen is None or self.window is None:
             return
-        # Alcove-aware wrap: Alcove's overlay is opaque and near-maximum
-        # window level, so with wrap enabled the wings must sit OUTSIDE
-        # its window to be visible at all. Treat Alcove's own overlay
-        # width as the notch (never narrower than the hardware notch),
-        # draw only the bracket, and let Alcove keep the center. Without
-        # wrap, the old compact-accent behavior stands unchanged.
+        # Alcove-aware wrap: the bar keeps its HARDWARE-notch geometry --
+        # measuring Alcove's own window width was tried first and is
+        # fundamentally unstable (a live activity balloons its window far
+        # past the visual pill, which pushed the bracket to the screen
+        # edges). Instead the bar draws only the bracket (wings + risers,
+        # never our black housing over Alcove's) and rides ABOVE Alcove's
+        # near-maximum window level, so the glow reads as light bleeding
+        # around the real notch. Without wrap, the compact-accent
+        # behavior stands unchanged at the normal status level.
         compact = should_use_compact_layout(self.alcove_compatibility_mode)
         wings_only = False
-        notch_width_override = None
         if self.wraps_menu_bar and compact and self.alcove_compatibility_mode != ALCOVE_COMPAT_ALWAYS:
-            overlay_width = alcove_overlay_width()
-            if overlay_width is not None:
-                wings_only = True
-                compact = False
-                notch_width_override = overlay_width
+            wings_only = True
+            compact = False
 
-        window_frame = virtual_window_frame_for_screen(
-            screen, wrap_menu_bar=self.wraps_menu_bar, notch_width_override=notch_width_override
-        )
+        window_frame = virtual_window_frame_for_screen(screen, wrap_menu_bar=self.wraps_menu_bar)
         self.window.setFrame_display_(window_frame, True)
+        self.window.setLevel_(ABOVE_ALCOVE_WINDOW_LEVEL if wings_only else STATUS_WINDOW_LEVEL)
         if self.view is not None:
             self.view.setHasNotch_(screen_has_notch(screen))
             self.view.setCompactMode_(compact)
             self.view.setWingsOnlyMode_(wings_only)
             self.view.setFrame_(((0, 0), window_frame[1]))
-            if self.wraps_menu_bar:
-                notch_width = slot_width_for_screen(screen)
-                if notch_width_override is not None:
-                    # Mirror virtual_window_frame_for_screen's own cap so
-                    # the view's wing geometry matches the window's.
-                    wing = wing_width_for_screen(screen, notch_width)
-                    max_center = screen.frame().size.width - 2.0 * (wing + WING_SAFETY_MARGIN)
-                    notch_width = max(notch_width, min(notch_width_override, max_center))
-                self.view.setNotchWidth_(notch_width)
-            else:
-                self.view.setNotchWidth_(None)
+            notch_width = slot_width_for_screen(screen) if self.wraps_menu_bar else None
+            self.view.setNotchWidth_(notch_width)
 
     def _build_window(self):
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -883,7 +840,7 @@ class VirtualStatusDevice(NSObject):
         self.window.setBackgroundColor_(NSColor.clearColor())
         self.window.setHasShadow_(False)
         self.window.setIgnoresMouseEvents_(True)
-        self.window.setLevel_(25)  # NSStatusWindowLevel without another SDK dependency.
+        self.window.setLevel_(STATUS_WINDOW_LEVEL)
         self.window.setCollectionBehavior_(
             NSWindowCollectionBehaviorCanJoinAllSpaces
             | NSWindowCollectionBehaviorFullScreenAuxiliary

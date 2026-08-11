@@ -1270,42 +1270,6 @@ class AgentMonitorTests(unittest.TestCase):
         view.setState_brightness_(virtual_device.LedDisplayState.DONE, 255)
         view.drawRect_(view.bounds())
 
-    def test_alcove_override_widens_the_window_and_keeps_it_centered(self) -> None:
-        try:
-            from sidepulse import virtual_device
-        except (ImportError, SystemExit) as exc:
-            self.skipTest(str(exc))
-
-        screen = SimpleNamespace(
-            frame=lambda: SimpleNamespace(
-                origin=SimpleNamespace(x=0.0, y=0.0),
-                size=SimpleNamespace(width=1512.0, height=982.0),
-            ),
-            safeAreaInsets=lambda: SimpleNamespace(top=32.0),
-            auxiliaryTopLeftArea=lambda: SimpleNamespace(
-                origin=SimpleNamespace(x=0.0, y=0.0),
-                size=SimpleNamespace(width=640.0, height=24.0),
-            ),
-            auxiliaryTopRightArea=lambda: SimpleNamespace(
-                origin=SimpleNamespace(x=872.0, y=0.0),
-                size=SimpleNamespace(width=640.0, height=24.0),
-            ),
-        )
-        plain = virtual_device.virtual_window_frame_for_screen(screen, wrap_menu_bar=True)
-        widened = virtual_device.virtual_window_frame_for_screen(
-            screen, wrap_menu_bar=True, notch_width_override=624.0
-        )
-        # Same wings, wider treated-as-notch center (Alcove's overlay).
-        self.assertEqual(widened[1][0], plain[1][0] - 232.0 + 624.0)
-        # Still centered on the screen.
-        self.assertEqual(widened[0][0], (1512.0 - widened[1][0]) / 2.0)
-        # The override can widen the center but never narrow it below the
-        # hardware notch.
-        narrow = virtual_device.virtual_window_frame_for_screen(
-            screen, wrap_menu_bar=True, notch_width_override=50.0
-        )
-        self.assertEqual(narrow, plain)
-
     def test_settings_persist_wraps_menu_bar_flag(self) -> None:
         settings = AgentMonitorSettings().with_virtual_status_device_wraps_menu_bar(True)
         self.assertTrue(settings.virtual_status_device_wraps_menu_bar)
