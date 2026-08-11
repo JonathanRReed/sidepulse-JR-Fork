@@ -15,7 +15,9 @@ from .session_actions import SESSION_OPEN_CHOICES
 
 LED_DISPLAY_AGENT = "agent"
 LED_DISPLAY_BATTERY = "battery"
-LED_DISPLAY_CHOICES = (LED_DISPLAY_AGENT, LED_DISPLAY_BATTERY)
+LED_DISPLAY_TIMER = "timer"
+LED_DISPLAY_CHOICES = (LED_DISPLAY_AGENT, LED_DISPLAY_BATTERY, LED_DISPLAY_TIMER)
+CALIBRATION_PROFILE_SLOTS = ("Day", "Night", "Travel")
 # Notification blink defaults: each app's own brand color, so the blink
 # says WHICH app without reading anything.
 BRACKET_STYLE_CHOICES = ("auto", "spatial", "identity")
@@ -124,6 +126,9 @@ class DeviceDisplaySetting:
     red_gain: float = DEFAULT_CHANNEL_GAIN
     green_gain: float = DEFAULT_CHANNEL_GAIN
     blue_gain: float = DEFAULT_CHANNEL_GAIN
+    # Per-device blend-mode override (None = the global Colors-window
+    # choice) -- the Pro can run Spatial Split while the Dot relays.
+    blend_mode: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -136,6 +141,7 @@ class DeviceDisplaySetting:
             "red_gain": self.red_gain,
             "green_gain": self.green_gain,
             "blue_gain": self.blue_gain,
+            "blend_mode": self.blend_mode,
         }
 
     def channel_gains(self) -> tuple[float, float, float]:
@@ -196,6 +202,13 @@ class AgentMonitorSettings:
     weather_alerts_enabled: bool = False
     weather_latitude: float | None = None
     weather_longitude: float | None = None
+    # Named calibration/brightness profiles (Day/Night/Travel slots),
+    # switchable from the dropdown -- slot -> {device_id: snapshot}.
+    calibration_profiles: dict[str, dict] = field(default_factory=dict)
+    # "Working timer" LED display: fill = elapsed working time against
+    # this many expected minutes. Honest: it's a TIMER, not task
+    # progress -- hooks deliver no truthful progress fraction.
+    timer_expected_minutes: float = 10.0
     # Per-signal look overrides (Signal Engine). Keys/values validated
     # by signals.SignalStyle; absent keys mean the built-in defaults.
     signal_styles: dict[str, dict] = field(default_factory=dict)
@@ -633,6 +646,56 @@ class AgentMonitorSettings:
             raise ValueError(f"Unknown bracket style: {style}")
         return replace(self, screen_bar_bracket_style=style)
 
+    def device_blend_mode(self, device_id: str) -> str | None:
+        for device in self.devices:
+            if device.device_id == device_id:
+                return device.blend_mode
+        return None
+
+    def with_device_blend_mode(self, device_id: str, mode: str | None) -> "AgentMonitorSettings":
+        """mode=None restores the global Colors-window blend choice."""
+        devices = tuple(
+            replace(device, blend_mode=mode) if device.device_id == device_id else device
+            for device in self.devices
+        )
+        return replace(self, devices=devices)
+
+    def with_saved_calibration_profile(self, slot: str) -> "AgentMonitorSettings":
+        """Snapshots every known device's brightness + channel gains
+        into a named profile slot."""
+        payload = {
+            device.device_id: {
+                "brightness": device.brightness,
+                "red_gain": device.red_gain,
+                "green_gain": device.green_gain,
+                "blue_gain": device.blue_gain,
+            }
+            for device in self.devices
+        }
+        profiles = dict(self.calibration_profiles)
+        profiles[slot] = payload
+        return replace(self, calibration_profiles=profiles)
+
+    def with_applied_calibration_profile(self, slot: str) -> "AgentMonitorSettings":
+        """Applies a saved profile onto matching devices; unknown ids in
+        the profile are ignored, devices missing from it are untouched."""
+        profile = self.calibration_profiles.get(slot)
+        if not isinstance(profile, dict):
+            return self
+        devices = []
+        for device in self.devices:
+            entry = profile.get(device.device_id)
+            if isinstance(entry, dict):
+                device = replace(
+                    device,
+                    brightness=normalize_brightness(entry.get("brightness", device.brightness)),
+                    red_gain=normalize_channel_gain(entry.get("red_gain", device.red_gain)),
+                    green_gain=normalize_channel_gain(entry.get("green_gain", device.green_gain)),
+                    blue_gain=normalize_channel_gain(entry.get("blue_gain", device.blue_gain)),
+                )
+            devices.append(device)
+        return replace(self, devices=tuple(devices))
+
     def with_low_battery_alert_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, low_battery_alert_enabled=bool(enabled))
 
@@ -650,6 +713,9 @@ class AgentMonitorSettings:
 
     def with_weather_alerts_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, weather_alerts_enabled=bool(enabled))
+
+    def with_timer_expected_minutes(self, minutes: float) -> "AgentMonitorSettings":
+        return replace(self, timer_expected_minutes=max(1.0, min(480.0, float(minutes))))
 
     def with_weather_location(
         self, latitude: float | None, longitude: float | None
@@ -773,6 +839,8 @@ class AgentMonitorSettings:
             "weather_alerts_enabled": self.weather_alerts_enabled,
             "weather_latitude": self.weather_latitude,
             "weather_longitude": self.weather_longitude,
+            "calibration_profiles": dict(sorted(self.calibration_profiles.items())),
+            "timer_expected_minutes": self.timer_expected_minutes,
             "signal_styles": dict(sorted(self.signal_styles.items())),
             "escalation_tier": self.escalation_tier,
             "escalation_ramp_seconds": self.escalation_ramp_seconds,
@@ -968,6 +1036,18 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         weather_alerts_enabled=_bool_setting(data.get("weather_alerts_enabled"), False),
         weather_latitude=_optional_dimension(data.get("weather_latitude"), -90.0, 90.0),
         weather_longitude=_optional_dimension(data.get("weather_longitude"), -180.0, 180.0),
+        calibration_profiles=(
+            {
+                str(slot): dict(entry)
+                for slot, entry in data.get("calibration_profiles", {}).items()
+                if isinstance(entry, dict)
+            }
+            if isinstance(data.get("calibration_profiles"), dict)
+            else {}
+        ),
+        timer_expected_minutes=max(
+            1.0, min(480.0, _float_setting(data.get("timer_expected_minutes"), 10.0))
+        ),
         signal_styles=_signal_styles(data.get("signal_styles")),
         escalation_tier=_escalation_tier(data.get("escalation_tier")),
         **_escalation_thresholds(data),
@@ -1087,6 +1167,11 @@ def _device_display_settings(value: object, default_display: str) -> tuple[Devic
                 red_gain=normalize_channel_gain(item.get("red_gain")),
                 green_gain=normalize_channel_gain(item.get("green_gain")),
                 blue_gain=normalize_channel_gain(item.get("blue_gain")),
+                blend_mode=(
+                    item.get("blend_mode")
+                    if isinstance(item.get("blend_mode"), str) and item.get("blend_mode")
+                    else None
+                ),
             )
         )
         seen.add(device_id)

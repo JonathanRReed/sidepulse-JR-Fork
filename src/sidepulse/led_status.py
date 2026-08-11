@@ -457,6 +457,35 @@ def low_battery_program(brightness: int | float = 255) -> str:
     return style_to_program(DEFAULT_SIGNAL_STYLES[SIGNAL_LOW_BATTERY], brightness)
 
 
+def timer_fill_program(
+    fraction: float,
+    *,
+    led_count: int = 8,
+    brightness: int | float = 255,
+    color: str = "#00E5FF",
+) -> str:
+    """LED fill from the left as elapsed working time crosses the
+    user's expected window -- deliberately a TIMER, never a claim about
+    task progress (hooks deliver no truthful progress fraction). The
+    partially-elapsed LED scales its own brightness for a smooth edge;
+    static program, rewritten by the ordinary sync cadence."""
+    fraction = max(0.0, min(1.0, float(fraction)))
+    filled = fraction * max(1, led_count)
+    stripped = color.lstrip("#")
+    red, green, blue = (int(stripped[i : i + 2], 16) for i in (0, 2, 4))
+    segments = []
+    for index in range(led_count):
+        amount = max(0.0, min(1.0, filled - index))
+        if amount <= 0.0:
+            segments.append(f"{index}:off")
+        else:
+            scaled = "#" + "".join(
+                f"{round(channel * amount):02X}" for channel in (red, green, blue)
+            )
+            segments.append(f"{index}:{scaled}")
+    return apply_brightness("; ".join(segments), brightness)
+
+
 def style_to_program(
     style,
     brightness: int | float = 255,

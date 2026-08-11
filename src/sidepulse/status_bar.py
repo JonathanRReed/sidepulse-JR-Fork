@@ -134,6 +134,7 @@ from .led_status import (
     normalize_brightness,
     normalized_device_name,
     style_to_program,
+    timer_fill_program,
     write_mode_to_leds,
 )
 from . import colors as colors_module
@@ -206,9 +207,12 @@ from .settings import (
     CLOSED_LID_AWAKE_ALWAYS,
     CLOSED_LID_AWAKE_CHOICES,
     CLOSED_LID_AWAKE_NEVER,
+    CALIBRATION_PROFILE_SLOTS,
     DEFAULT_NOTIFICATION_APP_COLORS,
     LED_DISPLAY_AGENT,
     LED_DISPLAY_BATTERY,
+    LED_DISPLAY_CHOICES,
+    LED_DISPLAY_TIMER,
     NOTIFICATION_APP_IMESSAGE,
     NOTIFICATION_APP_TELEGRAM,
     NOTIFICATION_APP_WHATSAPP,
@@ -784,6 +788,7 @@ class StatusBarController(NSObject):
         state = state_for_mode(snapshot.aggregate.mode)
         self.observe_connected_devices()
         self.track_ask_blocked(snapshot.statuses)
+        self.track_working(snapshot.statuses)
         self.set_status(state)
         self.sync_keep_awake(snapshot.aggregate.mode)
         self.sync_leds(
@@ -1216,6 +1221,52 @@ class StatusBarController(NSObject):
                 "Reminders access is denied — enable SidePulse under "
                 "Privacy & Security → Reminders."
             )
+
+    @objc.IBAction
+    def setDeviceDisplay_(self, sender):
+        device_id = str(sender.identifier() or "")
+        item = sender.selectedItem()
+        display = str(item.representedObject() or "") if item is not None else ""
+        if not device_id or display not in LED_DISPLAY_CHOICES:
+            return
+        self.settings = self.settings.with_device_display(device_id, display)
+        save_settings(self.settings)
+        self.refresh_(None)
+        self.set_settings_message(f"Display: {item.title()}.")
+
+    @objc.IBAction
+    def setDeviceBlendMode_(self, sender):
+        device_id = str(sender.identifier() or "")
+        item = sender.selectedItem()
+        mode = str(item.representedObject() or "") if item is not None else ""
+        if not device_id:
+            return
+        self.settings = self.settings.with_device_blend_mode(device_id, mode or None)
+        save_settings(self.settings)
+        self.refresh_(None)
+        self.set_settings_message(
+            f"{device_id} blend: {item.title() if item is not None else 'Global default'}."
+        )
+
+    @objc.IBAction
+    def saveCalibrationProfile_(self, sender):
+        slot = str(sender.representedObject() or "")
+        if slot not in CALIBRATION_PROFILE_SLOTS:
+            return
+        self.settings = self.settings.with_saved_calibration_profile(slot)
+        save_settings(self.settings)
+        self.set_settings_message(f"Saved current calibration as {slot}.")
+
+    @objc.IBAction
+    def applyCalibrationProfile_(self, sender):
+        slot = str(sender.representedObject() or "")
+        if slot not in CALIBRATION_PROFILE_SLOTS:
+            return
+        self.settings = self.settings.with_applied_calibration_profile(slot)
+        save_settings(self.settings)
+        self.refresh_settings_window()
+        self.refresh_(None)
+        self.set_settings_message(f"Applied the {slot} profile.")
 
     @objc.IBAction
     def toggleWeatherAlerts_(self, sender):
@@ -1668,6 +1719,38 @@ class StatusBarController(NSObject):
         else:
             self.ask_blocked_since = None
         self.apply_escalation()
+
+    def track_working(self, statuses) -> None:
+        """When the OLDEST currently-working agent started -- the clock
+        the working-timer fill display counts against."""
+        now = time.monotonic()
+        working_modes = (
+            AgentMode.WORKING,
+            AgentMode.TOOL_RUNNING,
+            AgentMode.LONG_TASK_PROGRESS,
+        )
+        current = {
+            status.agent_id
+            for status in (statuses or ())
+            if status.mode in working_modes and status.agent_id
+        }
+        tracked = getattr(self, "working_since_by_agent", {})
+        self.working_since_by_agent = {
+            agent_id: tracked.get(agent_id, now) for agent_id in current
+        }
+        self.working_since = (
+            min(self.working_since_by_agent.values())
+            if self.working_since_by_agent
+            else None
+        )
+
+    def timer_fill_fraction(self) -> float:
+        if getattr(self, "working_since", None) is None:
+            return 0.0
+        expected_seconds = self.settings.timer_expected_minutes * 60.0
+        if expected_seconds <= 0.0:
+            return 1.0
+        return min(1.0, (time.monotonic() - self.working_since) / expected_seconds)
 
     def current_escalation_stage(self) -> int:
         elapsed = (
@@ -3619,6 +3702,7 @@ class StatusBarController(NSObject):
                     or (battery_snapshot is not None and now < self.battery_preview_until)
                 ),
             ),
+            (LED_DISPLAY_TIMER, lambda: device.display == LED_DISPLAY_TIMER),
         )
         for key, active in claims:
             try:
@@ -3759,11 +3843,25 @@ class StatusBarController(NSObject):
                 ),
                 started_at=started_at,
             )
+        elif display == LED_DISPLAY_TIMER:
+            self.virtual_status_device.set_program(
+                timer_fill_program(
+                    self.timer_fill_fraction(),
+                    led_count=8,
+                    brightness=brightness,
+                    color=self.settings.colors.mode_colors.get("working", "#00E5FF"),
+                ),
+                started_at=started_at,
+            )
         else:
+            colors_for_render = self.agent_render_colors()
+            override = self.settings.device_blend_mode(VIRTUAL_DEVICE_ID)
+            if override:
+                colors_for_render = colors_for_render.with_blend_mode(override)
             _, program = program_for_snapshot(
                 statuses,
                 led_count=8,
-                colors=self.agent_render_colors(),
+                colors=colors_for_render,
                 brightness=brightness,
                 fallback_mode=mode,
             )
@@ -3952,9 +4050,29 @@ class StatusBarController(NSObject):
                     f"{device.name} Battery {battery_snapshot.percent}% "
                     f"{format_watts(battery_snapshot.adapter_power)}"
                 )
+            elif device_display_kind == LED_DISPLAY_TIMER:
+                controller = self.agent_controller_for_device(device)
+                result = controller.sync_program(
+                    timer_fill_program(
+                        self.timer_fill_fraction(),
+                        led_count=device_led_count,
+                        brightness=controller.brightness,
+                        color=self.settings.colors.mode_colors.get("working", "#00E5FF"),
+                    ),
+                    LedDisplayState.WORKING,
+                )
+                label = f"{device.name} Timer {round(self.timer_fill_fraction() * 100)}%"
+                if result.error:
+                    agent_write_failed = True
+                elif result.changed:
+                    agent_write_changed = True
             else:
+                colors_for_render = self.agent_render_colors()
+                override = self.settings.device_blend_mode(device.device_id)
+                if override:
+                    colors_for_render = colors_for_render.with_blend_mode(override)
                 result = self.agent_controller_for_device(device).sync_snapshot(
-                    statuses, self.agent_render_colors(), fallback_mode=mode
+                    statuses, colors_for_render, fallback_mode=mode
                 )
                 label = f"{device.name} {result.label}"
                 if result.error:
@@ -4283,6 +4401,30 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
 
     menu.addItem_(NSMenuItem.separatorItem())
     menu.addItem_(disabled_menu_item("Devices"))
+    # Calibration/brightness profiles: three named slots, applied or
+    # saved in two clicks from here.
+    profiles_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Profiles", None, "")
+    profiles_menu = NSMenu.alloc().init()
+    saved_profiles = getattr(target, "settings", None)
+    saved = saved_profiles.calibration_profiles if saved_profiles is not None else {}
+    for slot in CALIBRATION_PROFILE_SLOTS:
+        apply_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"Apply {slot}", "applyCalibrationProfile:", ""
+        )
+        apply_item.setTarget_(target)
+        apply_item.setRepresentedObject_(slot)
+        apply_item.setEnabled_(slot in saved)
+        profiles_menu.addItem_(apply_item)
+    profiles_menu.addItem_(NSMenuItem.separatorItem())
+    for slot in CALIBRATION_PROFILE_SLOTS:
+        save_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"Save Current as {slot}", "saveCalibrationProfile:", ""
+        )
+        save_item.setTarget_(target)
+        save_item.setRepresentedObject_(slot)
+        profiles_menu.addItem_(save_item)
+    profiles_item.setSubmenu_(profiles_menu)
+    menu.addItem_(profiles_item)
     devices = target.status_bar_devices()
     if devices:
         for device in devices:
@@ -4809,6 +4951,50 @@ def _build_devices_pane(target: StatusBarController):
         color_row_controls.addArrangedSubview_(calibrate_button)
         color_row_controls.addArrangedSubview_(calibration_label)
         inner.addArrangedSubview_(native_ui.make_row("Color", color_row_controls))
+        native_ui.add_separator(inner)
+
+        # Per-device display choice: agent status, battery fill, or the
+        # honest working-timer fill.
+        display_popup = native_ui.make_popup_button(target, "setDeviceDisplay:")
+        display_popup.setIdentifier_(device.device_id)
+        for label, display_key in (
+            ("Agent status", LED_DISPLAY_AGENT),
+            ("Battery fill", LED_DISPLAY_BATTERY),
+            ("Working timer fill", LED_DISPLAY_TIMER),
+        ):
+            display_popup.addItemWithTitle_(label)
+            item = display_popup.lastItem()
+            item.setRepresentedObject_(display_key)
+            if display_key == device.display:
+                display_popup.selectItem_(item)
+        inner.addArrangedSubview_(
+            native_ui.make_row(
+                "Display",
+                display_popup,
+                help_text=(
+                    "Working timer fill lights the strip as elapsed working "
+                    "time crosses your expected length -- a timer, not a "
+                    "claim about task progress."
+                ),
+            )
+        )
+
+        # Per-device blend override: the Pro can run Spatial Split while
+        # the Dot relays.
+        blend_popup = native_ui.make_popup_button(target, "setDeviceBlendMode:")
+        blend_popup.setIdentifier_(device.device_id)
+        current_blend = target.settings.device_blend_mode(device.device_id)
+        blend_popup.addItemWithTitle_("Global default")
+        blend_popup.lastItem().setRepresentedObject_("")
+        if current_blend is None:
+            blend_popup.selectItem_(blend_popup.lastItem())
+        for mode in BLEND_MODE_CHOICES:
+            blend_popup.addItemWithTitle_(BLEND_MODE_LABELS[mode])
+            item = blend_popup.lastItem()
+            item.setRepresentedObject_(mode)
+            if mode == current_blend:
+                blend_popup.selectItem_(item)
+        inner.addArrangedSubview_(native_ui.make_row("Blend Mode", blend_popup))
 
         stack.addArrangedSubview_(outer)
         device_controls[device.device_id] = {
@@ -4817,6 +5003,8 @@ def _build_devices_pane(target: StatusBarController):
             "brightness_dots": brightness_dots,
             "calibrate_button": calibrate_button,
             "calibration_label": calibration_label,
+            "display_popup": display_popup,
+            "blend_popup": blend_popup,
         }
     return native_ui.wrap_in_scroll_pane(stack), device_controls
 

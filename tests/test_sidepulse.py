@@ -8697,6 +8697,79 @@ class EscalationControllerTests(unittest.TestCase):
         self.assertGreater(boosted, baseline * 1.05)
 
 
+class DeferredRoadmapTests(unittest.TestCase):
+    def test_per_device_blend_override_round_trips(self) -> None:
+        from sidepulse.settings import DeviceDisplaySetting
+
+        device = DeviceDisplaySetting(device_id="pro", name="Pro", path="/Volumes/Pro")
+        configured = AgentMonitorSettings(devices=(device,)).with_device_blend_mode(
+            "pro", "relay"
+        )
+        self.assertEqual(configured.device_blend_mode("pro"), "relay")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            reloaded = load_settings(path)
+        self.assertEqual(reloaded.device_blend_mode("pro"), "relay")
+        cleared = reloaded.with_device_blend_mode("pro", None)
+        self.assertIsNone(cleared.device_blend_mode("pro"))
+
+    def test_calibration_profiles_save_and_apply(self) -> None:
+        from dataclasses import replace as dc_replace
+
+        from sidepulse.settings import DeviceDisplaySetting
+
+        device = DeviceDisplaySetting(
+            device_id="pro", name="Pro", path="/Volumes/Pro", brightness=200, red_gain=0.8
+        )
+        configured = AgentMonitorSettings(devices=(device,)).with_saved_calibration_profile("Night")
+        # Change the live values, then apply the profile back.
+        dimmed = dc_replace(configured, devices=(dc_replace(device, brightness=40, red_gain=1.0),))
+        restored = dimmed.with_applied_calibration_profile("Night")
+        self.assertEqual(restored.devices[0].brightness, 200)
+        self.assertAlmostEqual(restored.devices[0].red_gain, 0.8)
+        # Unknown slot is a no-op, never a crash.
+        self.assertEqual(dimmed.with_applied_calibration_profile("Nope"), dimmed)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            reloaded = load_settings(path)
+        self.assertIn("Night", reloaded.calibration_profiles)
+
+    def test_timer_fill_program_shape_and_limits(self) -> None:
+        from sidepulse.device_writer import MAX_LED_BYTES, MAX_LED_LINES
+        from sidepulse.led_status import timer_fill_program
+
+        empty = timer_fill_program(0.0, led_count=8)
+        self.assertEqual(empty.count(":off"), 8)
+        half = timer_fill_program(0.5, led_count=8)
+        self.assertEqual(half.count(":off"), 4)
+        full = timer_fill_program(1.0, led_count=8, color="#00E5FF")
+        self.assertEqual(full.count(":off"), 0)
+        self.assertIn("#00E5FF", full)
+        self.assertNotIn("repeat", full)
+        for led_count in (2, 8):
+            program = timer_fill_program(0.7, led_count=led_count, brightness=128)
+            self.assertLessEqual(len(program.encode()), MAX_LED_BYTES)
+            self.assertLessEqual(len(program.splitlines()), MAX_LED_LINES)
+
+    def test_timer_display_choice_round_trips(self) -> None:
+        from sidepulse.settings import LED_DISPLAY_TIMER, DeviceDisplaySetting
+
+        device = DeviceDisplaySetting(device_id="pro", name="Pro", path="/Volumes/Pro")
+        configured = (
+            AgentMonitorSettings(devices=(device,))
+            .with_device_display("pro", LED_DISPLAY_TIMER)
+            .with_timer_expected_minutes(25.0)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            reloaded = load_settings(path)
+        self.assertEqual(reloaded.devices[0].led_display, LED_DISPLAY_TIMER)
+        self.assertEqual(reloaded.timer_expected_minutes, 25.0)
+
+
 class WeatherAlertTests(unittest.TestCase):
     def test_only_severe_and_extreme_alerts_count(self) -> None:
         from sidepulse.weather_watch import alerts_from_payload
