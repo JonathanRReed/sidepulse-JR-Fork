@@ -218,6 +218,11 @@ STATUS_BAR_KEEPALIVE_VOLUME_NAMES = (
     "SidePulseDot",
 )
 STATUS_BAR_REFRESH_SECONDS = 15.0
+# How often the screen-brightness watcher samples (one cheap ctypes call)
+# and the minimum 0-255 delta that counts as a real change -- small enough
+# to feel continuous, large enough that sensor jitter never causes writes.
+BRIGHTNESS_WATCH_SECONDS = 3.0
+BRIGHTNESS_WATCH_MIN_DELTA = 3
 STATUS_BAR_DEVICE_POLL_SECONDS = 2.0
 SCREEN_BAR_FEATURE_ENABLED = True
 STATUS_BAR_MAX_LINES_PER_SOURCE = 500
@@ -340,6 +345,7 @@ class StatusBarController(NSObject):
         self.device_errors = {}
         self.leds_enabled = True
         self.led_sync_in_flight = False
+        self.last_watched_brightness = None
         self.last_led_error = None
         self.last_led_display_kind = LED_DISPLAY_AGENT
         self.last_connected_device_signature = None
@@ -395,11 +401,41 @@ class StatusBarController(NSObject):
             None,
             True,
         )
+        # Screen-brightness watcher: auto-brightness used to re-evaluate
+        # only when an agent state change happened to trigger an LED
+        # write, so dimming the screen during a steady state changed
+        # nothing -- "doesn't react at all". This cheap poll (one ctypes
+        # call) triggers a full re-sync only when the reading actually
+        # moves, so tracking feels immediate without extra LED writes.
+        self.brightness_watch_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            BRIGHTNESS_WATCH_SECONDS,
+            self,
+            "pollScreenBrightness:",
+            None,
+            True,
+        )
         self.show_setup_window_if_needed()
         if SCREEN_BAR_FEATURE_ENABLED and self.settings.virtual_status_device_enabled:
             self.virtual_status_device.show()
         else:
             self.virtual_status_device.hide()
+
+    @objc.IBAction
+    def pollScreenBrightness_(self, _sender):
+        """The screen-brightness watcher's tick (see the timer above): one
+        cheap reading, and a full re-sync only when it genuinely moved and
+        some device is actually tracking it."""
+        if not any(device.auto_brightness_enabled for device in self.settings.devices):
+            return
+        try:
+            reading = display_brightness.auto_led_brightness()
+        except display_brightness.DisplayBrightnessUnavailableError:
+            return
+        last = self.last_watched_brightness
+        self.last_watched_brightness = reading
+        if last is None or abs(reading - last) < BRIGHTNESS_WATCH_MIN_DELTA:
+            return
+        self.refresh_(None)
 
     @objc.IBAction
     def refresh_(self, _sender):
@@ -2425,13 +2461,19 @@ class StatusBarController(NSObject):
         )
         if device is None:
             return
+        # Effective, not raw: auto-brightness (screen tracking), idle dim,
+        # and Focus dim all apply to the Screen Bar exactly as they do to
+        # physical devices -- baking the raw configured value into the
+        # program here was why the most-visible surface never reacted to
+        # any of them.
+        brightness = self.effective_brightness_for_device(device)
         display = self.active_led_display_kind_for_device(device, battery_snapshot)
         if display == LED_DISPLAY_BATTERY and battery_snapshot is not None:
             self.virtual_status_device.set_program(
                 program_for_battery(
                     battery_snapshot,
                     led_count=8,
-                    brightness=device.brightness,
+                    brightness=brightness,
                 ),
                 started_at=started_at,
             )
@@ -2440,7 +2482,7 @@ class StatusBarController(NSObject):
                 statuses,
                 led_count=8,
                 colors=self.settings.colors,
-                brightness=device.brightness,
+                brightness=brightness,
                 fallback_mode=mode,
             )
             self.virtual_status_device.set_program(program, started_at=started_at)

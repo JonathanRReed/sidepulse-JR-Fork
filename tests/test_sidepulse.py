@@ -7496,6 +7496,42 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         self.status_bar = status_bar
         self.controller = status_bar.StatusBarController.alloc().init()
 
+    def test_brightness_watcher_resyncs_only_on_a_real_change(self) -> None:
+        # Auto-brightness used to re-evaluate only when an agent state
+        # change triggered an LED write -- dimming the screen during a
+        # steady state changed nothing. The watcher must (a) do nothing
+        # when no device tracks the screen, (b) record silently on its
+        # first sample, (c) ignore jitter below the threshold, and
+        # (d) trigger a full refresh on a real move.
+        status_bar = self.status_bar
+        controller = self.controller
+        refreshes = []
+        controller.refresh_ = lambda _sender: refreshes.append(True)
+
+        controller.settings = controller.settings.with_device_auto_brightness(
+            status_bar.VIRTUAL_DEVICE_ID, True, name="Screen Bar"
+        )
+        readings = iter([100, 101, 140])
+        with patch.object(status_bar.display_brightness, "auto_led_brightness", lambda: next(readings)):
+            controller.pollScreenBrightness_(None)  # first sample: record only
+            self.assertEqual(controller.last_watched_brightness, 100)
+            self.assertEqual(refreshes, [])
+            controller.pollScreenBrightness_(None)  # +1: jitter, ignored
+            self.assertEqual(controller.last_watched_brightness, 101)
+            self.assertEqual(refreshes, [])
+            controller.pollScreenBrightness_(None)  # +39: real change
+            self.assertEqual(controller.last_watched_brightness, 140)
+            self.assertEqual(refreshes, [True])
+
+        no_auto = status_bar.StatusBarController.alloc().init()
+        no_auto.refresh_ = lambda _sender: self.fail("refresh must not fire with no auto devices")
+        with patch.object(
+            status_bar.display_brightness,
+            "auto_led_brightness",
+            side_effect=AssertionError("must not even sample with no auto devices"),
+        ):
+            no_auto.pollScreenBrightness_(None)
+
     def test_settings_window_panes_have_no_overlapping_cards(self) -> None:
         # Regression guard for the bug class originally reported here (a
         # label that wrapped to two lines and spilled into the control
