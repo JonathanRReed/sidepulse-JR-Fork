@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -178,10 +179,6 @@ from .session_actions import (
     session_open_target,
 )
 from .settings import (
-    ALCOVE_COMPAT_ALWAYS,
-    ALCOVE_COMPAT_AUTO,
-    ALCOVE_COMPAT_CHOICES,
-    ALCOVE_COMPAT_NEVER,
     CLOSED_LID_AWAKE_AGENTS,
     CLOSED_LID_AWAKE_ALWAYS,
     CLOSED_LID_AWAKE_CHOICES,
@@ -679,7 +676,7 @@ class StatusBarController(NSObject):
         """Shows the exact interpreter binary Full Disk Access must be
         granted to -- users can drag it straight from this Finder window
         into the Privacy Settings list."""
-        interpreter = sys.executable or ""
+        interpreter = os.path.realpath(sys.executable or "")
         if interpreter:
             NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
                 [NSURL.fileURLWithPath_(interpreter)]
@@ -1502,20 +1499,6 @@ class StatusBarController(NSObject):
             self.colors_window.performClose_(None)
 
     @objc.IBAction
-    def setAlcoveCompatibilityMode_(self, sender):
-        payload = sender.selectedItem().representedObject() if sender.selectedItem() else None
-        if not payload or "alcove_mode" not in payload:
-            return
-        try:
-            self.settings = self.settings.with_alcove_compatibility_mode(payload["alcove_mode"])
-        except ValueError:
-            return
-        save_settings(self.settings)
-        self.reposition_virtual_status_device_now()
-        self.refresh_screen_bar_preview()
-        self.set_settings_message(f"Alcove compatibility: {payload['alcove_mode']}")
-
-    @objc.IBAction
     def setScreenBarGapWidth_(self, sender):
         self.settings = self.settings.with_screen_bar_gap_width(float(sender.doubleValue()))
         save_settings(self.settings)
@@ -1571,7 +1554,6 @@ class StatusBarController(NSObject):
         instant instead of "eventually, whenever something else happens to
         redraw it."
         """
-        self.virtual_status_device.set_alcove_compatibility_mode(self.settings.alcove_compatibility_mode)
         self.virtual_status_device.set_wraps_menu_bar(self.settings.virtual_status_device_wraps_menu_bar)
         self.virtual_status_device.set_geometry_overrides(
             self.settings.screen_bar_gap_width, self.settings.screen_bar_wing_length
@@ -1770,9 +1752,6 @@ class StatusBarController(NSObject):
             self.settings_fields.get("debug_log_status"),
             debug_log_status_text(),
         )
-        alcove_popup = self.settings_fields.get("alcove_compat_popup")
-        if alcove_popup is not None:
-            select_alcove_compat_mode(alcove_popup, self.settings.alcove_compatibility_mode)
         set_checkbox_state(
             self.settings_buttons.get("screen_bar_wraps_menu_bar"),
             self.settings.virtual_status_device_wraps_menu_bar,
@@ -1902,14 +1881,9 @@ class StatusBarController(NSObject):
         if preview is None or container is None:
             return
         preview.setPreviewWhiteBrightness_(self.settings.brightness_for_device(VIRTUAL_DEVICE_ID))
-        # Deliberately not should_use_compact_layout()'s real-time Alcove
-        # detection: "Auto" would then render this preview differently
-        # depending on whether some third-party app happens to be running
-        # on whatever Mac Settings is open on, which has nothing to do
-        # with what's being previewed here (the wrap/wing effect) and
-        # would make the preview inconsistent between machines. Only an
-        # explicit "Always" choice is a deliberate, predictable one.
-        preview.setCompactMode_(self.settings.alcove_compatibility_mode == ALCOVE_COMPAT_ALWAYS)
+        # The preview always shows the full wrap look -- Alcove handling
+        # is automatic on the real bar and needs no demonstration here.
+        preview.setCompactMode_(False)
         wing_width = SCREEN_BAR_PREVIEW_WING_WIDTH if self.settings.virtual_status_device_wraps_menu_bar else 0.0
         total_width = SCREEN_BAR_PREVIEW_NOTCH_WIDTH + 2.0 * wing_width
         # container's own fixed width is known at construction time (see
@@ -2734,9 +2708,6 @@ class StatusBarController(NSObject):
             return
         # Kept fresh here rather than scattered across every settings-mutation
         # call site -- always current right before any (re)positioning below.
-        self.virtual_status_device.set_alcove_compatibility_mode(
-            self.settings.alcove_compatibility_mode
-        )
         self.virtual_status_device.set_wraps_menu_bar(
             self.settings.virtual_status_device_wraps_menu_bar
         )
@@ -3837,9 +3808,6 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
     inner.addArrangedSubview_(
         native_ui.make_row("Colors", native_ui.make_button("Customize Colors…", target, "openColorsWindow:"))
     )
-    alcove_popup = make_alcove_compat_popup(target)
-    inner.addArrangedSubview_(native_ui.make_row("Alcove Compatibility", alcove_popup))
-
     native_ui.add_separator(inner)
 
     # A live, real miniature of the Screen Bar itself -- the same drawing
@@ -3911,7 +3879,6 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
     size_inner.addArrangedSubview_(auto_cluster)
     stack.addArrangedSubview_(size_outer)
     fields = {
-        "alcove_compat_popup": alcove_popup,
         "screen_bar_preview_view": preview_view,
         "screen_bar_preview_container": preview_container,
         "screen_bar_gap_slider": gap_slider,
@@ -4054,7 +4021,11 @@ def _build_led_behavior_pane(target: StatusBarController):
                 max_width=500.0,
             )
         )
-        interpreter_label = native_ui.make_label(sys.executable or "python3", secondary=True, size=11.0)
+        # The RESOLVED binary, not the venv symlink -- macOS attributes
+        # file access to the real executable, so granting the symlink (or
+        # any other "python" in the list) does nothing.
+        resolved_interpreter = os.path.realpath(sys.executable or "python3")
+        interpreter_label = native_ui.make_label(resolved_interpreter, secondary=True, size=11.0)
         interpreter_label.setSelectable_(True)
         focus_inner.addArrangedSubview_(interpreter_label)
         focus_inner.addArrangedSubview_(
@@ -4868,27 +4839,6 @@ def select_animation_style(popup, style: str) -> None:
     for index in range(popup.numberOfItems()):
         payload = popup.itemAtIndex_(index).representedObject()
         if isinstance(payload, dict) and payload.get("style") == style:
-            popup.selectItemAtIndex_(index)
-            return
-
-
-def make_alcove_compat_popup(target):
-    popup = native_ui.make_popup_button(target, "setAlcoveCompatibilityMode:")
-    labels = {
-        ALCOVE_COMPAT_AUTO: "Auto",
-        ALCOVE_COMPAT_ALWAYS: "Always",
-        ALCOVE_COMPAT_NEVER: "Never",
-    }
-    for mode in ALCOVE_COMPAT_CHOICES:
-        popup.addItemWithTitle_(labels[mode])
-        popup.lastItem().setRepresentedObject_({"alcove_mode": mode})
-    return popup
-
-
-def select_alcove_compat_mode(popup, mode: str) -> None:
-    for index in range(popup.numberOfItems()):
-        payload = popup.itemAtIndex_(index).representedObject()
-        if isinstance(payload, dict) and payload.get("alcove_mode") == mode:
             popup.selectItemAtIndex_(index)
             return
 

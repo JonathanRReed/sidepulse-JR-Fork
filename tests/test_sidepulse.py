@@ -1300,28 +1300,6 @@ class AgentMonitorTests(unittest.TestCase):
         device.set_wraps_menu_bar(True)
         self.assertTrue(device.wraps_menu_bar)
 
-    def test_should_use_compact_layout_respects_explicit_override(self) -> None:
-        try:
-            from sidepulse import virtual_device
-        except (ImportError, SystemExit) as exc:
-            self.skipTest(str(exc))
-
-        with patch.object(virtual_device, "is_alcove_running", return_value=False):
-            self.assertTrue(virtual_device.should_use_compact_layout("always"))
-        with patch.object(virtual_device, "is_alcove_running", return_value=True):
-            self.assertFalse(virtual_device.should_use_compact_layout("never"))
-
-    def test_should_use_compact_layout_auto_follows_detection(self) -> None:
-        try:
-            from sidepulse import virtual_device
-        except (ImportError, SystemExit) as exc:
-            self.skipTest(str(exc))
-
-        with patch.object(virtual_device, "is_alcove_running", return_value=True):
-            self.assertTrue(virtual_device.should_use_compact_layout("auto"))
-        with patch.object(virtual_device, "is_alcove_running", return_value=False):
-            self.assertFalse(virtual_device.should_use_compact_layout("auto"))
-
     def test_is_alcove_running_fails_safe_on_workspace_error(self) -> None:
         try:
             from sidepulse import virtual_device
@@ -8124,18 +8102,6 @@ class ScreenBarSettingsTakeEffectImmediatelyTests(unittest.TestCase):
         self.assertTrue(self.controller.virtual_status_device.wraps_menu_bar)
         self.assertGreaterEqual(after, before)
 
-    def test_toggling_alcove_mode_repositions_immediately(self) -> None:
-        popup = self.status_bar.native_ui.make_popup_button(None, None)
-        popup.addItemWithTitle_("Always")
-        popup.lastItem().setRepresentedObject_({"alcove_mode": ALCOVE_COMPAT_ALWAYS})
-        with patch.object(self.status_bar.StatusBarController, "sync_leds") as sync_leds:
-            self.controller.setAlcoveCompatibilityMode_(popup)
-            sync_leds.assert_not_called()
-        self.assertEqual(self.controller.settings.alcove_compatibility_mode, ALCOVE_COMPAT_ALWAYS)
-        self.assertEqual(self.controller.virtual_status_device.alcove_compatibility_mode, ALCOVE_COMPAT_ALWAYS)
-
-
-class SettingsColorPersistenceTests(unittest.TestCase):
     def test_settings_round_trip_persists_colors_and_alcove_mode(self) -> None:
         settings = AgentMonitorSettings().with_colors(
             ColorSettings.defaults().with_agent_color("codex", "#123456")

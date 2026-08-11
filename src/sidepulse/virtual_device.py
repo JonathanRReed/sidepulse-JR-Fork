@@ -22,7 +22,6 @@ from Quartz import CGContextFillRect, CGContextSetRGBFillColor
 
 from .led_status import LedDisplayState, normalize_brightness, program_for_display_state
 from .led_wasm import LedWasmUnavailableError, SdLedWasmController
-from .settings import ALCOVE_COMPAT_ALWAYS, ALCOVE_COMPAT_AUTO, ALCOVE_COMPAT_NEVER
 
 
 VIRTUAL_DEVICE_ID = "virtual:status-bar"
@@ -194,13 +193,6 @@ def is_alcove_running() -> bool:
         # full-width layout, never to a crash.
         return False
 
-
-def should_use_compact_layout(alcove_compatibility_mode: str) -> bool:
-    if alcove_compatibility_mode == ALCOVE_COMPAT_ALWAYS:
-        return True
-    if alcove_compatibility_mode == ALCOVE_COMPAT_NEVER:
-        return False
-    return is_alcove_running()
 
 
 def led_band_rect(width: float):
@@ -767,14 +759,8 @@ class VirtualStatusDevice(NSObject):
             self.window = None
             self.view = None
             self.timer = None
-            self.alcove_compatibility_mode = ALCOVE_COMPAT_AUTO
             self.wraps_menu_bar = False
         return self
-
-    def set_alcove_compatibility_mode(self, mode: str) -> None:
-        if mode not in (ALCOVE_COMPAT_AUTO, ALCOVE_COMPAT_ALWAYS, ALCOVE_COMPAT_NEVER):
-            return
-        self.alcove_compatibility_mode = mode
 
     def set_wraps_menu_bar(self, enabled: bool) -> None:
         self.wraps_menu_bar = bool(enabled)
@@ -824,20 +810,20 @@ class VirtualStatusDevice(NSObject):
         screen = NSScreen.mainScreen()
         if screen is None or self.window is None:
             return
-        # Alcove-aware wrap: the bar keeps its HARDWARE-notch geometry --
-        # measuring Alcove's own window width was tried first and is
-        # fundamentally unstable (a live activity balloons its window far
-        # past the visual pill, which pushed the bracket to the screen
-        # edges). Instead the bar draws only the bracket (wings + risers,
-        # never our black housing over Alcove's) and rides ABOVE Alcove's
-        # near-maximum window level, so the glow reads as light bleeding
-        # around the real notch. Without wrap, the compact-accent
-        # behavior stands unchanged at the normal status level.
-        compact = should_use_compact_layout(self.alcove_compatibility_mode)
-        wings_only = False
-        if self.wraps_menu_bar and compact and self.alcove_compatibility_mode != ALCOVE_COMPAT_ALWAYS:
-            wings_only = True
-            compact = False
+        # Alcove coexistence is AUTOMATIC now -- the old three-way
+        # compatibility setting was removed because with Alcove running,
+        # every rendering style except the wings drew UNDERNEATH Alcove's
+        # opaque backdrop, so the setting visibly did nothing. Semantics:
+        # while Alcove runs, SidePulse always rides one level above it,
+        # drawing the bracket (wings + risers) when wrap is on or a thin
+        # accent underline when it's off; without Alcove, the normal full
+        # render at the normal status level. The bar keeps hardware-notch
+        # geometry by default (measuring Alcove's window was tried and is
+        # unstable -- live activities balloon it) and the user's Bar Size
+        # sliders override it precisely.
+        alcove_active = is_alcove_running()
+        wings_only = alcove_active and self.wraps_menu_bar
+        compact = alcove_active and not self.wraps_menu_bar
 
         gap_override = getattr(self, "gap_width_override", None)
         wing_override = getattr(self, "wing_length_override", None)
@@ -848,7 +834,7 @@ class VirtualStatusDevice(NSObject):
             wing_length=wing_override,
         )
         self.window.setFrame_display_(window_frame, True)
-        self.window.setLevel_(ABOVE_ALCOVE_WINDOW_LEVEL if wings_only else STATUS_WINDOW_LEVEL)
+        self.window.setLevel_(ABOVE_ALCOVE_WINDOW_LEVEL if alcove_active else STATUS_WINDOW_LEVEL)
         if self.view is not None:
             self.view.setHasNotch_(screen_has_notch(screen))
             self.view.setCompactMode_(compact)
