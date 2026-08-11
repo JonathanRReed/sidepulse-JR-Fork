@@ -21,16 +21,28 @@
 > (Cursor / Hermes Agent / OpenClaw, each speaking its real config
 > dialect), the Welcome onboarding window with a live LED demo.
 >
-> **NEXT ARCHITECTURAL STEP — app bundle.** The single highest-leverage
-> remaining change: package the launchd process inside a real
-> `SidePulse.app` bundle (py2app/briefcase, executable must be the
-> actual interpreter binary inside the bundle, not a shell shim — TCC
-> attributes file access to the process's real executable). It fixes,
-> at once: Full Disk Access appearing as "SidePulse" by name in the
-> Privacy list (today the venv `python` symlink resolves into
-> Homebrew's Cellar, which no reasonable person can find), plus unlocks
-> the EventKit-calendar and notification-observation features that
-> require a bundle to even present their permission prompts.
+> **APP BUNDLE — SHIPPED (2026-08-11).** The launchd process now runs
+> inside `~/Applications/SidePulse.app` (`app_bundle.py`, built
+> automatically by `build_launch_agent_plist`). The bundle's executable
+> is a byte-for-byte copy of the framework's GUI Mach-O
+> (`Resources/Python.app/Contents/MacOS/Python` — NOT the `bin/`
+> stub, which re-execs and escapes TCC attribution), with
+> `Contents/pyvenv.cfg` + a `Contents/lib` symlink resolving the venv.
+> Privacy Settings now shows "SidePulse" by name; the Focus Dimming
+> card walks the user through picking the app instead of pasting a
+> Cellar path. This also unlocks the EventKit-calendar and
+> notification-observation features (they need a bundle to present
+> their permission prompts). FDA itself is still ungranted — that's
+> Jonathan's click to make.
+>
+> **Off-center panes — root-caused and fixed (2026-08-11).**
+> NSClipView constrains its bounds to the document view's frame; the
+> padded column WAS the document view, so the clip scrolled to the
+> column's own origin and deleted the left/top padding on every pane.
+> Padding now lives inside a full-clip-width document container
+> (`wrap_in_scroll_pane`), locked by a regression test that forces the
+> clip's constrain pass. Measured live: 19.5pt/19.5pt margins on all
+> seven panes (was 0/40).
 >
 > **Deferred, with reasons:**
 > - *Calendar alerts (EventKit):* calendar TCC permission requires an
