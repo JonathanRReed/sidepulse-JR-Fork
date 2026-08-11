@@ -18,7 +18,12 @@ from .device_writer import (
     write_led_program,
 )
 from .led_status import led_count_for_target
-from .led_status import apply_brightness, normalize_brightness
+from .led_status import (
+    NEUTRAL_CHANNEL_GAINS,
+    apply_brightness,
+    apply_channel_gain_to_program,
+    normalize_brightness,
+)
 
 
 BATTERY_LOW_RED = "#FF2600"
@@ -412,12 +417,17 @@ class BatteryLedController:
         dry_run: bool = False,
         error_retry_seconds: float = 10.0,
         brightness: int | float = 255,
+        channel_gains: tuple[float, float, float] = NEUTRAL_CHANNEL_GAINS,
     ) -> None:
         self.device_path = device_path
         self.file_name = file_name
         self.dry_run = dry_run
         self.error_retry_seconds = error_retry_seconds
         self.brightness = normalize_brightness(brightness)
+        # Same per-physical-device LED die correction as AgentLedController
+        # -- a battery-mode green/amber/red indicator is drawn by the same
+        # hardware and needs the same compensation.
+        self.channel_gains = channel_gains
         self.last_program: str | None = None
         self.last_error: str | None = None
         self.last_target: Path | None = None
@@ -440,6 +450,7 @@ class BatteryLedController:
                 led_count=led_count_for_target(target),
                 brightness=self.brightness,
             )
+            program = apply_channel_gain_to_program(program, self.channel_gains)
         except (DeviceWriteError, OSError) as exc:
             self.last_error = str(exc)
             return BatteryLedWrite(

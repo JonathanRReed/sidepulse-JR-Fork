@@ -15,12 +15,14 @@ from AppKit import (
     NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSWindowCollectionBehaviorFullScreenAuxiliary,
     NSWindowStyleMaskBorderless,
+    NSWorkspace,
 )
 from Foundation import NSObject, NSTimer
 from Quartz import CGContextFillRect, CGContextSetRGBFillColor
 
 from .led_status import LedDisplayState, normalize_brightness, program_for_display_state
 from .led_wasm import LedWasmUnavailableError, SdLedWasmController
+from .settings import ALCOVE_COMPAT_ALWAYS, ALCOVE_COMPAT_AUTO, ALCOVE_COMPAT_NEVER
 
 
 VIRTUAL_DEVICE_ID = "virtual:status-bar"
@@ -31,6 +33,29 @@ FALLBACK_NOTCH_DEPTH = 32.0
 LED_BAND_HEIGHT = 5.0
 WINDOW_HEIGHT = FALLBACK_NOTCH_DEPTH + LED_BAND_HEIGHT
 NOTCH_BOTTOM_RADIUS = 8.0
+
+# Alcove (https://henrikruscon.com) renders a Dynamic-Island-style notch
+# overlay and has no published compatibility API. Rather than compete with
+# it for the same black backdrop shape at the same position, SidePulse
+# drops its own camera-housing rectangle and glow layers entirely and draws
+# just a thin colored accent line at the same position -- reads as a status
+# accent under Alcove's own shape, not a second competing widget. See
+# docs/superpowers/specs/2026-08-10-agent-color-customizer-design.md
+# section 6 (superseded from an earlier offset-pill attempt that read as
+# disconnected/floating rather than integrated).
+ALCOVE_BUNDLE_ID = "com.henrikruscon.Alcove"
+COMPACT_ACCENT_HEIGHT = 2.5
+
+# "Wrap the menu bar" extends the LED glow beyond the notch's own width,
+# reaching toward the menu bar's edges on both sides -- opt-in (see
+# AgentMonitorSettings.virtual_status_device_wraps_menu_bar) since the safe
+# amount of room genuinely depends on how cluttered the user's own menu bar
+# is (app menu titles on the left, status icons on the right). Rather than
+# guess a fixed width, wing_width_for_screen() measures the real per-user
+# gap the system itself reports and stays comfortably inside it.
+WING_MAX_WIDTH = 110.0
+WING_SAFETY_MARGIN = 28.0
+WING_MIN_USABLE = 24.0
 LED_BLEND_RADIUS_LEDS = 1.5
 BLEND_COLUMN_WIDTH = 2.0
 LED_GLOW_HEIGHT = 11.0
@@ -59,6 +84,40 @@ def slot_width_for_screen(screen) -> float:
     return WINDOW_WIDTH
 
 
+def wing_width_for_screen(screen, notch_width: float) -> float:
+    """How far the LED glow can safely extend beyond each side of the
+    notch, toward the menu bar's own edges.
+
+    Uses the same system-reported auxiliary areas as slot_width_for_screen
+    (the actual, per-user gap beside the notch) rather than a fixed
+    constant -- a user with a spartan menu bar and one with a dozen
+    menu-bar apps crammed in have very different amounts of real safe
+    space, and guessing wrong means drawing over an app menu's title or a
+    status icon. Falls back to 0.0 (no wing) on any screen that doesn't
+    report a notch gap at all -- external displays and non-notched
+    MacBooks included, where "wrap the menu bar" has nothing to attach to.
+    """
+    try:
+        left = screen.auxiliaryTopLeftArea()
+        right = screen.auxiliaryTopRightArea()
+    except Exception:
+        return 0.0
+    if left.size.width <= 0.0 or right.size.width <= 0.0:
+        return 0.0
+    # Each auxiliary area spans from the notch's edge to the safe-area
+    # boundary; the *gap* itself (slot_width_for_screen's basis) already
+    # consumes the middle, so it's not double counted here -- this reads
+    # each area's own remaining width after backing off a safety margin
+    # from its outer edge, where a menu extra or status icon is most
+    # likely to start.
+    left_room = left.size.width - WING_SAFETY_MARGIN
+    right_room = right.size.width - WING_SAFETY_MARGIN
+    room = min(left_room, right_room)
+    if room < WING_MIN_USABLE:
+        return 0.0
+    return max(0.0, min(WING_MAX_WIDTH, room))
+
+
 def notch_depth_for_screen(screen) -> float:
     try:
         notch_depth = float(screen.safeAreaInsets().top)
@@ -75,13 +134,37 @@ def window_height_for_notch_depth(notch_depth: float) -> float:
     return max(0.0, float(notch_depth)) + LED_BAND_HEIGHT
 
 
-def virtual_window_frame_for_screen(screen):
+def virtual_window_frame_for_screen(screen, *, wrap_menu_bar: bool = False):
+    """The Screen Bar window's full frame. With ``wrap_menu_bar`` on, the
+    window widens symmetrically to include room for the wing glow on each
+    side (see wing_width_for_screen) -- the window stays centered on the
+    notch either way, since the added width is equal on both sides."""
     frame = screen.frame()
-    width = slot_width_for_screen(screen)
+    notch_width = slot_width_for_screen(screen)
+    wing = wing_width_for_screen(screen, notch_width) if wrap_menu_bar else 0.0
+    width = notch_width + 2.0 * wing
     height = window_height_for_notch_depth(notch_depth_for_screen(screen))
     x = frame.origin.x + (frame.size.width - width) / 2.0
     y = frame.origin.y + frame.size.height - height
     return ((x, y), (width, height))
+
+
+def is_alcove_running() -> bool:
+    try:
+        apps = NSWorkspace.sharedWorkspace().runningApplications()
+        return any(app.bundleIdentifier() == ALCOVE_BUNDLE_ID for app in apps)
+    except Exception:
+        # Fail safe to "not running" -- the caller falls back to the normal
+        # full-width layout, never to a crash.
+        return False
+
+
+def should_use_compact_layout(alcove_compatibility_mode: str) -> bool:
+    if alcove_compatibility_mode == ALCOVE_COMPAT_ALWAYS:
+        return True
+    if alcove_compatibility_mode == ALCOVE_COMPAT_NEVER:
+        return False
+    return is_alcove_running()
 
 
 def led_band_rect(width: float):
@@ -233,39 +316,76 @@ class VirtualLedView(NSView):
             self.wasm_controller = None
             self.wasm_error = None
             self.has_notch = True
+            self.compact_mode = False
+            # None means "no wing" -- the notch silhouette fills the whole
+            # view, today's exact behavior. Set to a value smaller than the
+            # view's own width to inset the notch body and let the LED glow
+            # spill into the remaining width on each side (see setNotchWidth_).
+            self.notch_width = None
         return self
 
     def setHasNotch_(self, has_notch):
         self.has_notch = bool(has_notch)
         self.setNeedsDisplay_(True)
 
-    def setState_brightness_(self, state, brightness):
+    def setCompactMode_(self, compact_mode):
+        self.compact_mode = bool(compact_mode)
+        self.setNeedsDisplay_(True)
+
+    def setNotchWidth_(self, notch_width):
+        self.notch_width = None if notch_width is None else float(notch_width)
+        self.setNeedsDisplay_(True)
+
+    def _notch_geometry(self):
+        """(notch_width, wing_offset) for the current bounds -- notch_width
+        never exceeds the view's own width even if told otherwise (a stale
+        value from a screen change is the only way that could happen), and
+        wing_offset is how far in from each edge the notch body starts."""
+        total_width = self.bounds().size.width
+        notch_width = total_width if self.notch_width is None else min(self.notch_width, total_width)
+        wing_offset = max(0.0, (total_width - notch_width) / 2.0)
+        return notch_width, wing_offset
+
+    def setState_brightness_startedAt_(self, state, brightness, started_at):
         if state != self.state:
-            self.started_at = time.monotonic()
+            self.started_at = started_at if started_at is not None else time.monotonic()
         self.state = state
         self.brightness = normalize_brightness(brightness)
         self.fixed_colors = None
-        self.setProgram_(
+        self.setProgram_startedAt_(
             program_for_display_state(
                 state,
                 led_count=LED_COUNT,
                 brightness=self.brightness,
-            )
+            ),
+            started_at,
         )
 
-    def setProgram_(self, program):
+    def setState_brightness_(self, state, brightness):
+        self.setState_brightness_startedAt_(state, brightness, None)
+
+    def setProgram_startedAt_(self, program, started_at):
         if program == self.current_program:
             self.setNeedsDisplay_(True)
             return
         self.current_program = str(program)
         self.fixed_colors = None
-        self.started_at = time.monotonic()
+        # started_at lets a caller anchor this program's animation phase to a
+        # real-world instant that already happened (e.g. the moment a
+        # physical device's write completed) instead of "now". Omitted, this
+        # behaves exactly as before: phase-zero is the moment this method
+        # runs.
+        self.started_at = started_at if started_at is not None else time.monotonic()
         if self._ensure_wasm_controller():
             try:
-                self.wasm_controller.parse(self.current_program, monotonic_ms())
+                parse_epoch_ms = int(self.started_at * 1000.0)
+                self.wasm_controller.parse(self.current_program, parse_epoch_ms)
             except Exception as exc:
                 self.wasm_error = str(exc)
         self.setNeedsDisplay_(True)
+
+    def setProgram_(self, program):
+        self.setProgram_startedAt_(program, None)
 
     def setBatteryPercent_brightness_(self, percent, brightness):
         self.current_program = None
@@ -318,29 +438,80 @@ class VirtualLedView(NSView):
         )
 
     def drawRect_(self, _rect):
+        if self.compact_mode:
+            self._draw_compact_accent()
+            return
+
         colors = self._colors_for_draw()
         width = self.bounds().size.width
         height = self.bounds().size.height
-        body = notch_bar_path(((0.0, 0.0), (width, height)))
+        notch_width, wing_offset = self._notch_geometry()
+        body = notch_bar_path(((wing_offset, 0.0), (notch_width, height)))
+        led_width = notch_width / LED_COUNT
+        glow_height = min(LED_GLOW_HEIGHT, max(0.0, height - LED_BAND_HEIGHT))
 
         # A MacBook gets the black camera-housing continuation. On a notchless
         # display the window remains transparent and contains only LED color.
+        # This shape always matches the *real* notch width -- wings (below)
+        # only ever extend the LED glow past it, never the housing itself.
         if self.has_notch:
             NSColor.colorWithCalibratedRed_green_blue_alpha_(
                 0.006, 0.007, 0.010, 0.93
             ).set()
             body.fill()
 
-        NSGraphicsContext.saveGraphicsState()
-        body.addClip()
         cg_context = current_cg_context()
 
-        led_width = width / LED_COUNT
-        glow_height = min(LED_GLOW_HEIGHT, max(0.0, height - LED_BAND_HEIGHT))
-        column_x = 0.0
-        while column_x < width:
-            column_width = min(BLEND_COLUMN_WIDTH, width - column_x)
-            sample_x = column_x + column_width / 2.0
+        # Pass 1: the notch's own LED row, clipped to the housing's rounded
+        # silhouette -- unchanged from before wings existed.
+        NSGraphicsContext.saveGraphicsState()
+        body.addClip()
+        self._fill_glow_row(
+            cg_context, colors, led_width, glow_height, height,
+            x_start=wing_offset, x_end=wing_offset + notch_width, wing_offset=wing_offset,
+        )
+        NSGraphicsContext.restoreGraphicsState()
+
+        # Pass 2: the wings, if any -- a plain (unrounded) clip since
+        # there's no housing shape to match out here; the glow's own
+        # falloff already tapers it to nothing well before the wing's own
+        # far edge, so the hard clip edge is never actually visible.
+        if wing_offset > 0.0:
+            for x_start, x_end in ((0.0, wing_offset), (wing_offset + notch_width, width)):
+                NSGraphicsContext.saveGraphicsState()
+                NSBezierPath.bezierPathWithRect_(((x_start, 0.0), (x_end - x_start, height))).addClip()
+                self._fill_glow_row(
+                    cg_context, colors, led_width, glow_height, height,
+                    x_start=x_start, x_end=x_end, wing_offset=wing_offset,
+                )
+                NSGraphicsContext.restoreGraphicsState()
+
+        # Edge highlight/shadow: unclipped and full-width (as it always
+        # was, before wings existed) -- with wings on, this reads as one
+        # continuous strip rather than having a visible seam where the
+        # notch's own housing ends and the wing begins.
+        if self.has_notch:
+            fill_rect_with_cg(
+                cg_context,
+                ((0.0, LED_BAND_HEIGHT - 0.55), (width, 0.55)),
+                (0.0, 0.0, 0.0, 0.18),
+            )
+            fill_rect_with_cg(
+                cg_context,
+                ((0.0, 0.0), (width, 0.45)),
+                (1.0, 1.0, 1.0, 0.055),
+            )
+
+    def _fill_glow_row(self, cg_context, colors, led_width, glow_height, _height, *, x_start, x_end, wing_offset):
+        """Draws the 4-layer LED glow (bloom / soft falloff / core / hotline)
+        across [x_start, x_end), sampling colors in notch-local coordinates
+        (wing_offset subtracted) so a wing's glow is a continuous
+        extrapolation of the notch's own nearest LED rather than resetting
+        to a separate coordinate space at the wing boundary."""
+        column_x = x_start
+        while column_x < x_end:
+            column_width = min(BLEND_COLUMN_WIDTH, x_end - column_x)
+            sample_x = column_x + column_width / 2.0 - wing_offset
             red, green, blue, alpha = blended_led_color_at_x(colors, sample_x, led_width)
             if max(red, green, blue, alpha) <= 0.001:
                 column_x += column_width
@@ -381,17 +552,33 @@ class VirtualLedView(NSView):
             )
             column_x += column_width
 
-        if self.has_notch:
-            fill_rect_with_cg(
-                cg_context,
-                ((0.0, LED_BAND_HEIGHT - 0.55), (width, 0.55)),
-                (0.0, 0.0, 0.0, 0.18),
-            )
-            fill_rect_with_cg(
-                cg_context,
-                ((0.0, 0.0), (width, 0.45)),
-                (1.0, 1.0, 1.0, 0.055),
-            )
+    def _draw_compact_accent(self) -> None:
+        """When another notch app (e.g. Alcove) is occupying the notch's
+        own black shape, don't draw a second competing black backdrop --
+        just a clean, thin colored line at the same position the normal
+        bar would use, reading as a status accent rather than a floating
+        widget. No body fill, no glow layers, no edge highlights."""
+        colors = self._colors_for_draw()
+        width = self.bounds().size.width
+        cg_context = current_cg_context()
+        notch_width, wing_offset = self._notch_geometry()
+        led_width = notch_width / LED_COUNT
+
+        NSGraphicsContext.saveGraphicsState()
+        column_x = 0.0
+        while column_x < width:
+            column_width = min(BLEND_COLUMN_WIDTH, width - column_x)
+            sample_x = column_x + column_width / 2.0 - wing_offset
+            red, green, blue, alpha = blended_led_color_at_x(colors, sample_x, led_width)
+            if max(red, green, blue, alpha) > 0.001:
+                fill_rect_with_cg(
+                    cg_context,
+                    ((column_x, 0.0), (column_width, COMPACT_ACCENT_HEIGHT)),
+                    tone_mapped_led_color(
+                        red, green, blue, alpha, boost=LED_CORE_BOOST, alpha_scale=0.95
+                    ),
+                )
+            column_x += column_width
         NSGraphicsContext.restoreGraphicsState()
 
 
@@ -402,7 +589,17 @@ class VirtualStatusDevice(NSObject):
             self.window = None
             self.view = None
             self.timer = None
+            self.alcove_compatibility_mode = ALCOVE_COMPAT_AUTO
+            self.wraps_menu_bar = False
         return self
+
+    def set_alcove_compatibility_mode(self, mode: str) -> None:
+        if mode not in (ALCOVE_COMPAT_AUTO, ALCOVE_COMPAT_ALWAYS, ALCOVE_COMPAT_NEVER):
+            return
+        self.alcove_compatibility_mode = mode
+
+    def set_wraps_menu_bar(self, enabled: bool) -> None:
+        self.wraps_menu_bar = bool(enabled)
 
     def show(self):
         if self.window is None:
@@ -421,27 +618,42 @@ class VirtualStatusDevice(NSObject):
         if self.window is not None:
             self.window.orderOut_(None)
 
-    def set_state(self, state: LedDisplayState, brightness: int | float):
+    def set_state(
+        self,
+        state: LedDisplayState,
+        brightness: int | float,
+        *,
+        started_at: float | None = None,
+    ):
         self.show()
-        self.view.setState_brightness_(state, brightness)
+        self.view.setState_brightness_startedAt_(state, brightness, started_at)
 
     def set_battery(self, percent: int, brightness: int | float):
         self.show()
         self.view.setBatteryPercent_brightness_(percent, brightness)
 
-    def set_program(self, program: str):
+    def set_program(self, program: str, *, started_at: float | None = None):
         self.show()
-        self.view.setProgram_(program)
+        self.view.setProgram_startedAt_(program, started_at)
 
     def reposition(self):
         screen = NSScreen.mainScreen()
         if screen is None or self.window is None:
             return
-        window_frame = virtual_window_frame_for_screen(screen)
+        # Same position regardless of Alcove -- only the drawing style
+        # changes (see VirtualLedView._draw_compact_accent). Moving it
+        # elsewhere read as a disconnected floating widget rather than an
+        # integrated accent. Width can grow with wraps_menu_bar (the notch's
+        # own width is unaffected -- see setNotchWidth_ below), still
+        # centered on the notch either way.
+        window_frame = virtual_window_frame_for_screen(screen, wrap_menu_bar=self.wraps_menu_bar)
         self.window.setFrame_display_(window_frame, True)
         if self.view is not None:
             self.view.setHasNotch_(screen_has_notch(screen))
+            self.view.setCompactMode_(should_use_compact_layout(self.alcove_compatibility_mode))
             self.view.setFrame_(((0, 0), window_frame[1]))
+            notch_width = slot_width_for_screen(screen) if self.wraps_menu_bar else None
+            self.view.setNotchWidth_(notch_width)
 
     def _build_window(self):
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(

@@ -8,12 +8,18 @@ from pathlib import Path
 from typing import Any
 
 from .battery import DEFAULT_POWER_CHANGE_PREVIEW_SECONDS
+from .colors import ColorSettings
+from .led_status import DEFAULT_CHANNEL_GAIN, normalize_channel_gain
 from .session_actions import SESSION_OPEN_CHOICES
 
 
 LED_DISPLAY_AGENT = "agent"
 LED_DISPLAY_BATTERY = "battery"
 LED_DISPLAY_CHOICES = (LED_DISPLAY_AGENT, LED_DISPLAY_BATTERY)
+ALCOVE_COMPAT_AUTO = "auto"
+ALCOVE_COMPAT_ALWAYS = "always"
+ALCOVE_COMPAT_NEVER = "never"
+ALCOVE_COMPAT_CHOICES = (ALCOVE_COMPAT_AUTO, ALCOVE_COMPAT_ALWAYS, ALCOVE_COMPAT_NEVER)
 CLOSED_LID_AWAKE_NEVER = "never"
 CLOSED_LID_AWAKE_AGENTS = "agents"
 CLOSED_LID_AWAKE_ALWAYS = "always"
@@ -25,6 +31,20 @@ CLOSED_LID_AWAKE_CHOICES = (
 LID_ANIMATION_CLOSED = "closed"
 LID_ANIMATION_OPEN = "open"
 LID_ANIMATION_CHOICES = (LID_ANIMATION_CLOSED, LID_ANIMATION_OPEN)
+
+DEFAULT_IDLE_DIM_AFTER_MINUTES = 10.0
+MIN_IDLE_DIM_AFTER_MINUTES = 1.0
+MAX_IDLE_DIM_AFTER_MINUTES = 180.0
+DEFAULT_IDLE_DIM_FRACTION = 0.3
+MIN_IDLE_DIM_FRACTION = 0.05
+MAX_IDLE_DIM_FRACTION = 1.0
+
+# Matches keep_awake.AWAKE_GRACE_SECONDS's own long-standing default (300s)
+# exactly, so making this adjustable doesn't change anyone's existing
+# behavior until they actually touch the setting.
+DEFAULT_CLOSED_LID_GRACE_MINUTES = 5.0
+MIN_CLOSED_LID_GRACE_MINUTES = 0.0
+MAX_CLOSED_LID_GRACE_MINUTES = 60.0
 DEFAULT_LID_CLOSED_ANIMATION_PROGRAM = "\n".join(
     [
         "off 90ms cosine",
@@ -77,6 +97,22 @@ class DeviceDisplaySetting:
     path: str
     led_display: str = LED_DISPLAY_AGENT
     brightness: int = 255
+    # When on, `brightness` above stays as the manual fallback/baseline, but
+    # actual LED writes use a brightness derived from the current screen
+    # brightness instead (see display_brightness.py) -- dim to match a dark
+    # room, brighten in daylight. Off by default: it depends on an
+    # undocumented technique, so it's opt-in rather than silently changing
+    # existing brightness behavior.
+    auto_brightness_enabled: bool = False
+    # Per-channel gain correction for this specific physical device's own
+    # LED die response (e.g. an over-bright green die making blues read
+    # greenish) -- applied only when writing to this device, never to the
+    # "true" hex shown in the Colors window or the Screen Bar preview. All
+    # default to 1.0 (no correction) so an uncalibrated device behaves
+    # exactly as before this existed. See led_status.apply_channel_gain_to_program.
+    red_gain: float = DEFAULT_CHANNEL_GAIN
+    green_gain: float = DEFAULT_CHANNEL_GAIN
+    blue_gain: float = DEFAULT_CHANNEL_GAIN
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -85,7 +121,14 @@ class DeviceDisplaySetting:
             "path": self.path,
             "led_display": self.led_display,
             "brightness": self.brightness,
+            "auto_brightness_enabled": self.auto_brightness_enabled,
+            "red_gain": self.red_gain,
+            "green_gain": self.green_gain,
+            "blue_gain": self.blue_gain,
         }
+
+    def channel_gains(self) -> tuple[float, float, float]:
+        return (self.red_gain, self.green_gain, self.blue_gain)
 
 
 @dataclass(frozen=True)
@@ -97,6 +140,13 @@ class AgentMonitorSettings:
     virtual_status_device_enabled: bool = False
     closed_lid_awake_policy: str = CLOSED_LID_AWAKE_NEVER
     closed_lid_system_override_enabled: bool = False
+    # How long (minutes) to keep holding the lid-closed awake state after
+    # agent activity *looks* like it stopped, before actually letting the
+    # policy release -- a buffer against a false "done" reading (e.g. a
+    # command still running with no events emitted for a stretch) closing
+    # the lid into sleep and losing the agent's work. See
+    # keep_awake.KeepAwakeController.should_hold_for_mode.
+    closed_lid_grace_minutes: float = DEFAULT_CLOSED_LID_GRACE_MINUTES
     lid_closed_animation: LedAnimationSetting = field(
         default_factory=lambda: default_lid_animation(LID_ANIMATION_CLOSED)
     )
@@ -108,6 +158,31 @@ class AgentMonitorSettings:
     battery_power_change_preview_seconds: float = DEFAULT_POWER_CHANGE_PREVIEW_SECONDS
     session_open_preferences: dict[str, str] = field(default_factory=dict)
     setup_screen_completed: bool = False
+    colors: ColorSettings = field(default_factory=ColorSettings.defaults)
+    alcove_compatibility_mode: str = ALCOVE_COMPAT_AUTO
+    # Extends the Screen Bar's glow beyond the notch's own width, reaching
+    # toward the menu bar's edges on both sides -- an opt-in look (default
+    # off) since how much room is actually safe to use depends on how
+    # cluttered the user's own menu bar is (see virtual_device.wing_width_
+    # for_screen, which measures the real per-user safe area rather than
+    # assuming a fixed amount).
+    virtual_status_device_wraps_menu_bar: bool = False
+    # After this many continuous minutes with nothing active (idle), LED
+    # brightness scales down by idle_dim_fraction -- a long-idle Mac
+    # shouldn't keep a bright light going on the desk. Default on: dimming
+    # further while genuinely idle is a straightforward improvement with
+    # no real downside, unlike a change that could surprise someone
+    # mid-work.
+    idle_dim_enabled: bool = True
+    idle_dim_after_minutes: float = DEFAULT_IDLE_DIM_AFTER_MINUTES
+    idle_dim_fraction: float = DEFAULT_IDLE_DIM_FRACTION
+    # Dims/quiets the LEDs while a macOS Focus (Do Not Disturb, Work,
+    # Sleep, etc.) is active, matching the same "don't be a nagging light"
+    # spirit as idle dimming. Off by default -- detecting the active Focus
+    # requires reading a TCC-protected file the user must grant Full Disk
+    # Access to (see focus_sync.py); silently defaulting this on would
+    # look "broken" (no visible effect) for anyone who hasn't done that.
+    focus_sync_enabled: bool = False
 
     def transcript_enabled(self, provider: str) -> bool:
         if provider == "codex":
@@ -155,13 +230,16 @@ class AgentMonitorSettings:
         updated = False
         for device in self.devices:
             if device.device_id == device_id:
+                # replace(device, ...) carries over every field not
+                # explicitly overridden (e.g. auto_brightness_enabled) --
+                # rebuilding from scratch here previously dropped any field
+                # added after this method was first written.
                 devices.append(
-                    DeviceDisplaySetting(
-                        device_id=device.device_id,
+                    replace(
+                        device,
                         name=name or device.name,
                         path=path or device.path,
                         led_display=display,
-                        brightness=device.brightness,
                     )
                 )
                 updated = True
@@ -193,11 +271,10 @@ class AgentMonitorSettings:
         for device in self.devices:
             if device.device_id == device_id:
                 devices.append(
-                    DeviceDisplaySetting(
-                        device_id=device.device_id,
+                    replace(
+                        device,
                         name=name or device.name,
                         path=path or device.path,
-                        led_display=device.led_display,
                         brightness=value,
                     )
                 )
@@ -215,6 +292,111 @@ class AgentMonitorSettings:
                 )
             )
         return replace(self, devices=tuple(devices))
+
+    def auto_brightness_enabled_for_device(self, device_id: str) -> bool:
+        for device in self.devices:
+            if device.device_id == device_id:
+                return device.auto_brightness_enabled
+        return False
+
+    def with_device_auto_brightness(
+        self,
+        device_id: str,
+        enabled: bool,
+        *,
+        name: str | None = None,
+        path: str | None = None,
+    ) -> "AgentMonitorSettings":
+        devices: list[DeviceDisplaySetting] = []
+        updated = False
+        for device in self.devices:
+            if device.device_id == device_id:
+                devices.append(
+                    replace(
+                        device,
+                        name=name or device.name,
+                        path=path or device.path,
+                        auto_brightness_enabled=bool(enabled),
+                    )
+                )
+                updated = True
+            else:
+                devices.append(device)
+        if not updated:
+            devices.append(
+                DeviceDisplaySetting(
+                    device_id=device_id,
+                    name=name or device_id,
+                    path=path or device_id,
+                    led_display=self.display_for_device(device_id),
+                    brightness=self.brightness_for_device(device_id),
+                    auto_brightness_enabled=bool(enabled),
+                )
+            )
+        return replace(self, devices=tuple(devices))
+
+    def channel_gains_for_device(self, device_id: str) -> tuple[float, float, float]:
+        for device in self.devices:
+            if device.device_id == device_id:
+                return device.channel_gains()
+        return (DEFAULT_CHANNEL_GAIN, DEFAULT_CHANNEL_GAIN, DEFAULT_CHANNEL_GAIN)
+
+    def with_device_channel_gain(
+        self,
+        device_id: str,
+        channel: str,
+        value: float,
+        *,
+        name: str | None = None,
+        path: str | None = None,
+    ) -> "AgentMonitorSettings":
+        """Sets one of "red"/"green"/"blue" gain for a device, leaving the
+        other two untouched. Three separate calls (one per slider) rather
+        than one method taking all three, since each slider in the menu
+        fires its own action independently."""
+        field_name = {"red": "red_gain", "green": "green_gain", "blue": "blue_gain"}.get(channel)
+        if field_name is None:
+            raise ValueError(f"Unknown channel: {channel}")
+        gain = normalize_channel_gain(value)
+        devices: list[DeviceDisplaySetting] = []
+        updated = False
+        for device in self.devices:
+            if device.device_id == device_id:
+                devices.append(
+                    replace(
+                        device,
+                        name=name or device.name,
+                        path=path or device.path,
+                        **{field_name: gain},
+                    )
+                )
+                updated = True
+            else:
+                devices.append(device)
+        if not updated:
+            devices.append(
+                DeviceDisplaySetting(
+                    device_id=device_id,
+                    name=name or device_id,
+                    path=path or device_id,
+                    led_display=self.display_for_device(device_id),
+                    brightness=self.brightness_for_device(device_id),
+                    auto_brightness_enabled=self.auto_brightness_enabled_for_device(device_id),
+                    **{field_name: gain},
+                )
+            )
+        return replace(self, devices=tuple(devices))
+
+    def with_device_channel_gains_reset(self, device_id: str) -> "AgentMonitorSettings":
+        """Back to (1.0, 1.0, 1.0) -- a no-op correction, i.e. write the
+        true hex unmodified."""
+        devices = tuple(
+            replace(device, red_gain=DEFAULT_CHANNEL_GAIN, green_gain=DEFAULT_CHANNEL_GAIN, blue_gain=DEFAULT_CHANNEL_GAIN)
+            if device.device_id == device_id
+            else device
+            for device in self.devices
+        )
+        return replace(self, devices=devices)
 
     def with_remembered_device(
         self,
@@ -320,6 +502,9 @@ class AgentMonitorSettings:
     def with_closed_lid_system_override(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, closed_lid_system_override_enabled=bool(enabled))
 
+    def with_closed_lid_grace_minutes(self, minutes: float) -> "AgentMonitorSettings":
+        return replace(self, closed_lid_grace_minutes=normalize_closed_lid_grace_minutes(minutes))
+
     def with_lid_animation(
         self,
         kind: str,
@@ -343,13 +528,38 @@ class AgentMonitorSettings:
     def with_virtual_status_device(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, virtual_status_device_enabled=bool(enabled))
 
+    def with_virtual_status_device_wraps_menu_bar(self, enabled: bool) -> "AgentMonitorSettings":
+        return replace(self, virtual_status_device_wraps_menu_bar=bool(enabled))
+
+    def with_colors(self, colors: ColorSettings) -> "AgentMonitorSettings":
+        return replace(self, colors=colors)
+
+    def with_alcove_compatibility_mode(self, mode: str) -> "AgentMonitorSettings":
+        if mode not in ALCOVE_COMPAT_CHOICES:
+            raise ValueError(f"Unknown Alcove compatibility mode: {mode}")
+        return replace(self, alcove_compatibility_mode=mode)
+
+    def with_idle_dim_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+        return replace(self, idle_dim_enabled=bool(enabled))
+
+    def with_idle_dim_after_minutes(self, minutes: float) -> "AgentMonitorSettings":
+        return replace(self, idle_dim_after_minutes=normalize_idle_dim_after_minutes(minutes))
+
+    def with_idle_dim_fraction(self, fraction: float) -> "AgentMonitorSettings":
+        return replace(self, idle_dim_fraction=normalize_idle_dim_fraction(fraction))
+
+    def with_focus_sync_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+        return replace(self, focus_sync_enabled=bool(enabled))
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "led_display": self.led_display,
             "devices": [device.to_dict() for device in self.devices],
             "virtual_status_device_enabled": self.virtual_status_device_enabled,
+            "virtual_status_device_wraps_menu_bar": self.virtual_status_device_wraps_menu_bar,
             "closed_lid_awake_policy": self.closed_lid_awake_policy,
             "closed_lid_system_override_enabled": self.closed_lid_system_override_enabled,
+            "closed_lid_grace_minutes": self.closed_lid_grace_minutes,
             "lid_closed_animation": self.lid_closed_animation.to_dict(),
             "lid_open_animation": self.lid_open_animation.to_dict(),
             "transcript_monitoring": {
@@ -363,6 +573,12 @@ class AgentMonitorSettings:
             },
             "session_open_preferences": dict(sorted(self.session_open_preferences.items())),
             "setup_screen_completed": self.setup_screen_completed,
+            "colors": self.colors.to_dict(),
+            "alcove_compatibility_mode": self.alcove_compatibility_mode,
+            "idle_dim_enabled": self.idle_dim_enabled,
+            "idle_dim_after_minutes": self.idle_dim_after_minutes,
+            "idle_dim_fraction": self.idle_dim_fraction,
+            "focus_sync_enabled": self.focus_sync_enabled,
         }
 
 
@@ -410,12 +626,18 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         virtual_status_device_enabled=_bool_setting(
             data.get("virtual_status_device_enabled"), False
         ),
+        virtual_status_device_wraps_menu_bar=_bool_setting(
+            data.get("virtual_status_device_wraps_menu_bar"), False
+        ),
         closed_lid_awake_policy=_closed_lid_awake_policy(
             data.get("closed_lid_awake_policy"),
         ),
         closed_lid_system_override_enabled=_bool_setting(
             data.get("closed_lid_system_override_enabled"),
             False,
+        ),
+        closed_lid_grace_minutes=normalize_closed_lid_grace_minutes(
+            data.get("closed_lid_grace_minutes"), default=DEFAULT_CLOSED_LID_GRACE_MINUTES
         ),
         lid_closed_animation=_lid_animation_setting(
             data.get("lid_closed_animation"),
@@ -438,6 +660,18 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         session_open_preferences=_session_open_preferences(data.get("session_open_preferences")),
         setup_screen_completed=_bool_setting(data.get("setup_screen_completed"), False),
+        colors=ColorSettings.from_dict(data.get("colors")),
+        alcove_compatibility_mode=_alcove_compatibility_mode_setting(
+            data.get("alcove_compatibility_mode")
+        ),
+        idle_dim_enabled=_bool_setting(data.get("idle_dim_enabled"), True),
+        idle_dim_after_minutes=normalize_idle_dim_after_minutes(
+            data.get("idle_dim_after_minutes"), default=DEFAULT_IDLE_DIM_AFTER_MINUTES
+        ),
+        idle_dim_fraction=normalize_idle_dim_fraction(
+            data.get("idle_dim_fraction"), default=DEFAULT_IDLE_DIM_FRACTION
+        ),
+        focus_sync_enabled=_bool_setting(data.get("focus_sync_enabled"), False),
     )
 
 
@@ -457,6 +691,28 @@ def _bool_setting(value: object, default: bool) -> bool:
     return default
 
 
+def normalize_idle_dim_after_minutes(
+    value: object, *, default: float = DEFAULT_IDLE_DIM_AFTER_MINUTES
+) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return default
+    return max(MIN_IDLE_DIM_AFTER_MINUTES, min(MAX_IDLE_DIM_AFTER_MINUTES, float(value)))
+
+
+def normalize_idle_dim_fraction(value: object, *, default: float = DEFAULT_IDLE_DIM_FRACTION) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return default
+    return max(MIN_IDLE_DIM_FRACTION, min(MAX_IDLE_DIM_FRACTION, float(value)))
+
+
+def normalize_closed_lid_grace_minutes(
+    value: object, *, default: float = DEFAULT_CLOSED_LID_GRACE_MINUTES
+) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return default
+    return max(MIN_CLOSED_LID_GRACE_MINUTES, min(MAX_CLOSED_LID_GRACE_MINUTES, float(value)))
+
+
 def _led_display_setting(value: object, default: str) -> str:
     if isinstance(value, str) and value in LED_DISPLAY_CHOICES:
         return value
@@ -467,6 +723,12 @@ def _closed_lid_awake_policy(value: object) -> str:
     if isinstance(value, str) and value in CLOSED_LID_AWAKE_CHOICES:
         return value
     return CLOSED_LID_AWAKE_NEVER
+
+
+def _alcove_compatibility_mode_setting(value: object) -> str:
+    if isinstance(value, str) and value in ALCOVE_COMPAT_CHOICES:
+        return value
+    return ALCOVE_COMPAT_AUTO
 
 
 def _device_display_settings(value: object, default_display: str) -> tuple[DeviceDisplaySetting, ...]:
@@ -491,6 +753,7 @@ def _device_display_settings(value: object, default_display: str) -> tuple[Devic
             name = Path(path).name or device_id
         display = _led_display_setting(item.get("led_display"), default_display)
         brightness = normalize_brightness(item.get("brightness"))
+        auto_brightness_enabled = _bool_setting(item.get("auto_brightness_enabled"), False)
         devices.append(
             DeviceDisplaySetting(
                 device_id=device_id,
@@ -498,6 +761,10 @@ def _device_display_settings(value: object, default_display: str) -> tuple[Devic
                 path=path,
                 led_display=display,
                 brightness=brightness,
+                auto_brightness_enabled=auto_brightness_enabled,
+                red_gain=normalize_channel_gain(item.get("red_gain")),
+                green_gain=normalize_channel_gain(item.get("green_gain")),
+                blue_gain=normalize_channel_gain(item.get("blue_gain")),
             )
         )
         seen.add(device_id)

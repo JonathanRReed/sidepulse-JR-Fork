@@ -4,7 +4,7 @@ import json
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +20,7 @@ try:
         NSButton,
         NSButtonTypeSwitch,
         NSColor,
+        NSColorPanel,
         NSCompositingOperationSourceOver,
         NSFont,
         NSFontAttributeName,
@@ -37,10 +38,13 @@ try:
         NSTextField,
         NSTextView,
         NSView,
+        NSViewHeightSizable,
+        NSViewWidthSizable,
         NSWorkspace,
         NSWindow,
         NSWindowStyleMaskClosable,
         NSWindowStyleMaskMiniaturizable,
+        NSWindowStyleMaskResizable,
         NSWindowStyleMaskTitled,
         NSVariableStatusItemLength,
     )
@@ -58,6 +62,8 @@ from .battery import (
     program_for_battery,
     read_battery_snapshot,
 )
+from . import display_brightness
+from . import focus_sync
 from .audit import (
     default_status_audit_log_path,
     export_status_audit_csv,
@@ -83,16 +89,32 @@ from .install import (
     uninstall_provider_hooks,
 )
 from .led_status import (
+    ANIMATION_STYLE_CHOICES,
+    MAX_CHANNEL_GAIN,
+    MIN_CHANNEL_GAIN,
     AgentLedController,
     apply_brightness,
     brightness_percent,
     normalize_brightness,
     normalized_device_name,
-    program_for_display_state,
     write_mode_to_leds,
-    display_state_for_mode,
 )
-from .virtual_device import VIRTUAL_DEVICE_ID, VIRTUAL_DEVICE_NAME, VirtualStatusDevice
+from . import colors as colors_module
+from .colors import (
+    ANIMATION_MODE_KEYS,
+    BLEND_MODE_CHOICES,
+    BLEND_MODE_CYCLE,
+    BLEND_MODE_DESCRIPTIONS,
+    BLEND_MODE_LABELS,
+    BLEND_MODE_ROUND_ROBIN,
+    CURATED_PALETTE,
+    FADE_MODE_KEYS,
+    MODE_COLOR_KEYS,
+    ColorSettings,
+    program_for_snapshot,
+)
+from .virtual_device import VIRTUAL_DEVICE_ID, VIRTUAL_DEVICE_NAME, VirtualStatusDevice, monotonic_ms
+from .led_wasm import LedWasmUnavailableError, SdLedWasmController
 from .lid_sleep import (
     LID_POLL_SECONDS,
     ClosedLidAwakeController,
@@ -100,9 +122,10 @@ from .lid_sleep import (
     sleep_helper_install_command,
     sleep_helper_installed,
 )
-from .models import AgentMode, AgentStatus
+from .models import AgentMode, AgentStatus, MODE_LABELS
 from .providers import (
     HOOK_PROVIDERS,
+    PROVIDER_SPECS,
     ProviderConfig,
     detect_log_path,
     default_state_dir,
@@ -126,6 +149,10 @@ from .session_actions import (
     session_open_target,
 )
 from .settings import (
+    ALCOVE_COMPAT_ALWAYS,
+    ALCOVE_COMPAT_AUTO,
+    ALCOVE_COMPAT_CHOICES,
+    ALCOVE_COMPAT_NEVER,
     CLOSED_LID_AWAKE_AGENTS,
     CLOSED_LID_AWAKE_ALWAYS,
     CLOSED_LID_AWAKE_CHOICES,
@@ -160,6 +187,8 @@ class StatusBarDevice:
     connected: bool
     display: str
     brightness: int = 255
+    auto_brightness_enabled: bool = False
+    channel_gains: tuple[float, float, float] = (1.0, 1.0, 1.0)
     reason: str = ""
 
 
@@ -242,16 +271,48 @@ class StatusBarController(NSObject):
         self.device_timer = None
         self.settings_window = None
         self.setup_window = None
+        self.colors_window = None
         self.settings_fields = {}
         self.settings_buttons = {}
+        self.device_settings_controls = {}
         self.setup_fields = {}
         self.setup_buttons = {}
+        self.color_swatches = {}
+        self.color_hex_labels = {}
+        self.color_fields = {}
+        self.color_preview_rows = []
+        # Native apps apply changes immediately -- picking a color that
+        # doesn't visibly do anything until you find and flip a separate
+        # toggle reads as broken. Live-apply defaults on; the checkbox is an
+        # opt-out (e.g. to audition several changes before committing them
+        # to the physical device), not an opt-in.
+        self.color_preview_enabled = True
+        # In-window animated preview: one WASM controller per device row
+        # (led_count -> controller), stepped on a timer while the Colors
+        # window is open, so Round-Robin/Cycle/pulse actually animate in
+        # the preview instead of showing one static frame.
+        self.color_preview_wasm = {}
+        self.color_preview_programs = {}
+        self.color_preview_timer = None
+        # Which canned situation the preview shows -- Live Activity (the
+        # default) prefers whatever's really running and only falls back to
+        # a fixed demo when nothing is; any other choice always shows that
+        # scenario regardless of real activity, so a new user with nothing
+        # running yet (or a curious existing user) can see every blend mode
+        # against a busy team, a lone agent, two sessions of the same
+        # provider, etc. Transient UI state -- never persisted to settings.
+        self.color_preview_scenario = colors_module.PREVIEW_SCENARIO_LIVE
+        self.active_color_target = None
         self.last_snapshot = None
         self.last_battery_snapshot = None
         self.last_battery_error = None
         self.last_power_connected = None
         self.battery_preview_until = 0.0
         self.current_state = STATE_IDLE
+        # None until set_status() actually confirms Idle -- avoids assuming
+        # "idle since launch" if the real initial state turns out to be
+        # something else once the first real snapshot arrives.
+        self.idle_since_monotonic: float | None = None
         self.led_controller = AgentLedController()
         self.battery_led_controller = BatteryLedController()
         self.agent_led_controllers_by_device = {}
@@ -329,8 +390,13 @@ class StatusBarController(NSObject):
             log_status_bar(f"refresh error: {exc}")
             self.set_status(STATE_ASK)
             self.sync_keep_awake(AgentMode.BLOCKED_ERROR)
-            self.sync_leds(AgentMode.BLOCKED_ERROR, None, LED_DISPLAY_AGENT)
-            self.status_item.setMenu_(build_error_menu(exc))
+            self.sync_leds(AgentMode.BLOCKED_ERROR, None, LED_DISPLAY_AGENT, ())
+            # status_item is None before applicationDidFinishLaunching_ has
+            # run (e.g. a settings action invoked in a headless/test
+            # context) -- everything else above is still meaningful to do,
+            # only the actual menu bar UI needs the real status item.
+            if self.status_item is not None:
+                self.status_item.setMenu_(build_error_menu(exc))
             return
 
         self.last_snapshot = snapshot
@@ -343,8 +409,10 @@ class StatusBarController(NSObject):
             snapshot.aggregate.mode,
             battery_snapshot,
             self.active_led_display_kind(battery_snapshot),
+            snapshot.statuses,
         )
-        self.status_item.setMenu_(build_menu(snapshot, state, self))
+        if self.status_item is not None:
+            self.status_item.setMenu_(build_menu(snapshot, state, self))
 
     @objc.IBAction
     def forceRefresh_(self, _sender):
@@ -440,6 +508,64 @@ class StatusBarController(NSObject):
         self.set_closed_lid_awake_policy(sender.representedObject())
 
     @objc.IBAction
+    def setClosedLidAwakePolicyFromPopup_(self, sender):
+        payload = sender.selectedItem().representedObject() if sender.selectedItem() else None
+        if not payload or "policy" not in payload:
+            return
+        self.set_closed_lid_awake_policy(payload["policy"])
+
+    @objc.IBAction
+    def applyClosedLidGraceMinutes_(self, _sender):
+        field = self.settings_fields.get("closed_lid_grace_field")
+        minutes = parse_seconds_field(field)
+        if minutes is None:
+            return
+        try:
+            self.settings = self.settings.with_closed_lid_grace_minutes(minutes)
+            save_settings(self.settings)
+        except Exception as exc:
+            self.set_settings_message(f"Could not save grace period: {exc}")
+            self.settings = load_settings()
+            return
+        self.refresh_settings_window()
+        self.set_settings_message(f"Closed-lid grace period: {self.settings.closed_lid_grace_minutes:g} min.")
+
+    @objc.IBAction
+    def toggleIdleDim_(self, sender):
+        self.settings = self.settings.with_idle_dim_enabled(checkbox_is_on(sender))
+        save_settings(self.settings)
+        self.refresh_settings_window()
+
+    @objc.IBAction
+    def applyIdleDimSettings_(self, _sender):
+        minutes_field = self.settings_fields.get("idle_dim_minutes_field")
+        fraction_field = self.settings_fields.get("idle_dim_fraction_field")
+        minutes = parse_seconds_field(minutes_field)
+        fraction_percent = parse_seconds_field(fraction_field)
+        if minutes is None or fraction_percent is None:
+            return
+        try:
+            settings = self.settings.with_idle_dim_after_minutes(minutes)
+            settings = settings.with_idle_dim_fraction(fraction_percent / 100.0)
+            self.settings = settings
+            save_settings(self.settings)
+        except Exception as exc:
+            self.set_settings_message(f"Could not save idle dimming: {exc}")
+            self.settings = load_settings()
+            return
+        self.refresh_settings_window()
+        self.set_settings_message(
+            f"Idle dimming: after {self.settings.idle_dim_after_minutes:g} min, "
+            f"dim to {round(self.settings.idle_dim_fraction * 100)}%."
+        )
+
+    @objc.IBAction
+    def toggleFocusSync_(self, sender):
+        self.settings = self.settings.with_focus_sync_enabled(checkbox_is_on(sender))
+        save_settings(self.settings)
+        self.refresh_settings_window()
+
+    @objc.IBAction
     def openSettings_(self, _sender):
         self.show_settings_window()
 
@@ -531,6 +657,42 @@ class StatusBarController(NSObject):
         self.set_device_brightness(str(device_id), sender.doubleValue())
 
     @objc.IBAction
+    def toggleDeviceAutoBrightness_(self, sender):
+        device_id = sender.representedObject()
+        if device_id is None:
+            return
+        currently_enabled = self.settings.auto_brightness_enabled_for_device(str(device_id))
+        self.set_device_auto_brightness(str(device_id), not currently_enabled)
+
+    @objc.IBAction
+    def setDeviceRedGain_(self, sender):
+        device_id = sender.identifier()
+        if device_id is None:
+            return
+        self.set_device_channel_gain(str(device_id), "red", sender.doubleValue() / 100.0)
+
+    @objc.IBAction
+    def setDeviceGreenGain_(self, sender):
+        device_id = sender.identifier()
+        if device_id is None:
+            return
+        self.set_device_channel_gain(str(device_id), "green", sender.doubleValue() / 100.0)
+
+    @objc.IBAction
+    def setDeviceBlueGain_(self, sender):
+        device_id = sender.identifier()
+        if device_id is None:
+            return
+        self.set_device_channel_gain(str(device_id), "blue", sender.doubleValue() / 100.0)
+
+    @objc.IBAction
+    def resetDeviceColorCalibration_(self, sender):
+        device_id = sender.representedObject()
+        if device_id is None:
+            return
+        self.set_device_channel_gains_reset(str(device_id))
+
+    @objc.IBAction
     def toggleVirtualStatusDevice_(self, _sender):
         if not SCREEN_BAR_FEATURE_ENABLED:
             self.set_virtual_status_device(False)
@@ -579,6 +741,11 @@ class StatusBarController(NSObject):
     def set_status(self, state: StatusBarState) -> None:
         previous = self.current_state
         self.current_state = state
+        if state == STATE_IDLE:
+            if previous != STATE_IDLE or self.idle_since_monotonic is None:
+                self.idle_since_monotonic = time.monotonic()
+        else:
+            self.idle_since_monotonic = None
         if self.status_item is None:
             return
         button = self.status_item.button()
@@ -654,6 +821,403 @@ class StatusBarController(NSObject):
         self.refresh_settings_window()
         self.settings_window.makeKeyAndOrderFront_(None)
         NSApp.activateIgnoringOtherApps_(True)
+
+    @objc.IBAction
+    def openColorsWindow_(self, _sender):
+        self.show_colors_window()
+
+    def show_colors_window(self) -> None:
+        if self.colors_window is None:
+            self.colors_window = build_colors_window(self)
+        self.refresh_colors_window()
+        self.colors_window.makeKeyAndOrderFront_(None)
+        NSApp.activateIgnoringOtherApps_(True)
+
+    def refresh_colors_window(self) -> None:
+        if self.colors_window is None:
+            return
+        scenario_popup = self.color_fields.get("preview_scenario_popup")
+        if scenario_popup is not None:
+            select_preview_scenario(scenario_popup, self.color_preview_scenario)
+        colors = self.settings.colors
+        for key in MODE_COLOR_KEYS:
+            self.refresh_color_row(("mode", key), colors.mode_color(key))
+        for spec in PROVIDER_SPECS:
+            self.refresh_color_row(("agent", spec.provider), colors.agent_color(spec.provider))
+        refresh_blend_and_speed_fields(self)
+        fade_fields = self.color_fields.get("fade_fields") or {}
+        for key, fields in fade_fields.items():
+            floor, ceiling = colors.fade_range(key)
+            set_field_value(fields.get("floor"), f"{round(floor * 100)}")
+            set_field_value(fields.get("ceiling"), f"{round(ceiling * 100)}")
+        animation_popups = self.color_fields.get("animation_popups") or {}
+        for key, animation_popup in animation_popups.items():
+            select_animation_style(animation_popup, colors.animation_style(key))
+        self.refresh_colors_preview()
+
+    def refresh_color_row(self, key: tuple[str, str], hex_value: str) -> None:
+        for swatch_key, button in self.color_swatches.items():
+            row_key, swatch_hex = swatch_key
+            if row_key != key:
+                continue
+            is_selected = swatch_hex.upper() == hex_value.upper()
+            set_swatch_selected(button, is_selected)
+        label = self.color_hex_labels.get(key)
+        if label is not None:
+            label.setStringValue_(hex_value)
+
+    def refresh_colors_preview(self) -> None:
+        if not self.color_preview_rows:
+            return
+        if self.color_preview_scenario == colors_module.PREVIEW_SCENARIO_LIVE:
+            snapshot = self.last_snapshot
+            statuses = snapshot.statuses if snapshot is not None else ()
+            is_live = bool(statuses)
+            if not is_live:
+                # Nothing real happening right now -- show a fixed demo
+                # scenario instead of a blank/idle strip, so color and
+                # blend-mode choices are always visible, not just when an
+                # agent happens to be active.
+                statuses = colors_module.demo_statuses_for_preview()
+        else:
+            # A specific scenario was picked -- always show it, regardless
+            # of what's really running, so it can be compared side by side
+            # with other choices on demand.
+            statuses = colors_module.preview_statuses_for_scenario(self.color_preview_scenario)
+            is_live = False
+        legend_prefix = None
+        if self.color_preview_scenario != colors_module.PREVIEW_SCENARIO_LIVE:
+            label = colors_module.PREVIEW_SCENARIO_LABELS.get(self.color_preview_scenario, "Preview")
+            legend_prefix = f"{label}: "
+        for row in self.color_preview_rows:
+            led_count = row["led_count"]
+            legend = row["legend"]
+            _, program = colors_module.program_for_snapshot(
+                statuses, led_count=led_count, colors=self.settings.colors
+            )
+            controller = self.ensure_colors_preview_wasm(led_count, program)
+            if controller is None:
+                # WASM unavailable -- fall back to one static peak-color
+                # frame rather than nothing (matches the Screen Bar's own
+                # fallback for the same rare case).
+                static_colors = colors_module.preview_led_colors(
+                    statuses, led_count=led_count, colors=self.settings.colors
+                )
+                for dot, hex_color in zip(row["dots"], static_colors):
+                    set_preview_dot_color(dot, hex_color)
+            legend.setStringValue_(colors_legend_text(statuses, is_live=is_live, prefix=legend_prefix))
+        self.animate_colors_preview_once()
+        self.start_colors_preview_animation()
+
+    def ensure_colors_preview_wasm(self, led_count: int, program: str):
+        """Parses `program` into this row's WASM controller (creating it on
+        first use), skipping the reparse if the program text hasn't changed
+        so an in-progress breath doesn't restart on every refresh tick.
+        Returns None if the WASM engine is unavailable."""
+        if self.color_preview_programs.get(led_count) == program:
+            return self.color_preview_wasm.get(led_count)
+        self.color_preview_programs[led_count] = program
+        controller = self.color_preview_wasm.get(led_count)
+        if controller is None:
+            try:
+                controller = SdLedWasmController(led_count)
+            except LedWasmUnavailableError:
+                self.color_preview_wasm[led_count] = None
+                return None
+            self.color_preview_wasm[led_count] = controller
+        try:
+            controller.parse(program, monotonic_ms())
+        except Exception:
+            return None
+        return controller
+
+    def start_colors_preview_animation(self) -> None:
+        if self.color_preview_timer is not None:
+            return
+        self.color_preview_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            1.0 / 20.0, self, "animateColorsPreviewTick:", None, True
+        )
+
+    def stop_colors_preview_animation(self) -> None:
+        if self.color_preview_timer is not None:
+            self.color_preview_timer.invalidate()
+            self.color_preview_timer = None
+
+    @objc.IBAction
+    def animateColorsPreviewTick_(self, _sender):
+        self.animate_colors_preview_once()
+
+    def animate_colors_preview_once(self) -> None:
+        if self.colors_window is None or not self.colors_window.isVisible():
+            self.stop_colors_preview_animation()
+            return
+        now_ms = monotonic_ms()
+        for row in self.color_preview_rows:
+            controller = self.color_preview_wasm.get(row["led_count"])
+            if controller is None:
+                continue
+            try:
+                pixels = controller.step(now_ms)
+            except Exception:
+                continue
+            for dot, pixel in zip(row["dots"], pixels[: row["led_count"]]):
+                set_preview_dot_rgb(dot, *pixel)
+
+    def push_colors_preview_to_device(self) -> None:
+        snapshot = self.last_snapshot
+        statuses = snapshot.statuses if snapshot is not None else ()
+        self.sync_leds(
+            snapshot.aggregate.mode if snapshot is not None else AgentMode.IDLE_READY,
+            None,
+            LED_DISPLAY_AGENT,
+            statuses,
+        )
+
+    @objc.IBAction
+    def toggleColorPreviewLive_(self, sender):
+        self.color_preview_enabled = checkbox_is_on(sender)
+        if self.color_preview_enabled:
+            self.push_colors_preview_to_device()
+
+    @objc.IBAction
+    def selectAgentColorSwatch_(self, sender):
+        payload = sender.representedObject() or {}
+        provider = payload.get("provider")
+        hex_value = payload.get("hex")
+        if not provider or not hex_value:
+            return
+        self.apply_color_change(("agent", provider), hex_value)
+
+    @objc.IBAction
+    def selectModeColorSwatch_(self, sender):
+        payload = sender.representedObject() or {}
+        key = payload.get("key")
+        hex_value = payload.get("hex")
+        if not key or not hex_value:
+            return
+        self.apply_color_change(("mode", key), hex_value)
+
+    @objc.IBAction
+    def openCustomAgentColor_(self, sender):
+        payload = sender.representedObject() or {}
+        provider = payload.get("provider")
+        if not provider:
+            return
+        self.open_custom_color_panel(("agent", provider), self.settings.colors.agent_color(provider))
+
+    @objc.IBAction
+    def openCustomModeColor_(self, sender):
+        payload = sender.representedObject() or {}
+        key = payload.get("key")
+        if not key:
+            return
+        self.open_custom_color_panel(("mode", key), self.settings.colors.mode_color(key))
+
+    def open_custom_color_panel(self, target_key: tuple[str, str], current_hex: str) -> None:
+        self.active_color_target = target_key
+        panel = NSColorPanel.sharedColorPanel()
+        panel.setColor_(nscolor_from_hex(current_hex))
+        panel.setTarget_(self)
+        panel.setAction_("applyCustomColorFromPanel:")
+        panel.orderFront_(None)
+
+    @objc.IBAction
+    def applyCustomColorFromPanel_(self, sender):
+        if self.active_color_target is None:
+            return
+        hex_value = hex_from_nscolor(sender.color())
+        self.apply_color_change(self.active_color_target, hex_value)
+
+    def apply_color_change(self, target_key: tuple[str, str], hex_value: str) -> None:
+        kind, key = target_key
+        colors = self.settings.colors
+        if kind == "agent":
+            colors = colors.with_agent_color(key, hex_value)
+        else:
+            colors = colors.with_mode_color(key, hex_value)
+        self.settings = self.settings.with_colors(colors)
+        save_settings(self.settings)
+        self.refresh_colors_window()
+        if self.color_preview_enabled:
+            self.push_colors_preview_to_device()
+
+    @objc.IBAction
+    def setPreviewScenario_(self, sender):
+        payload = sender.selectedItem().representedObject() if sender.selectedItem() else None
+        if not payload or "scenario" not in payload:
+            return
+        scenario = payload["scenario"]
+        if scenario not in colors_module.PREVIEW_SCENARIO_CHOICES:
+            return
+        self.color_preview_scenario = scenario
+        self.refresh_colors_preview()
+
+    @objc.IBAction
+    def setBlendMode_(self, sender):
+        payload = sender.selectedItem().representedObject() if sender.selectedItem() else None
+        if not payload or "blend_mode" not in payload:
+            return
+        try:
+            colors = self.settings.colors.with_blend_mode(payload["blend_mode"])
+        except ValueError:
+            return
+        self.settings = self.settings.with_colors(colors)
+        save_settings(self.settings)
+        description = self.color_fields.get("blend_description")
+        if description is not None:
+            description.setStringValue_(BLEND_MODE_DESCRIPTIONS.get(payload["blend_mode"], ""))
+            description.setToolTip_(colors_module.BLEND_MODE_TOOLTIPS.get(payload["blend_mode"], ""))
+        self.refresh_colors_preview()
+        if self.color_preview_enabled:
+            self.push_colors_preview_to_device()
+
+    @objc.IBAction
+    def applyCycleSpeed_(self, _sender):
+        field = self.color_fields.get("speed_field")
+        seconds = parse_seconds_field(field)
+        if seconds is None:
+            return
+        colors = self.settings.colors.with_cycle_speed(seconds)
+        self._commit_colors_and_refresh(colors)
+
+    @objc.IBAction
+    def toggleUrgencyAlert_(self, sender):
+        colors = self.settings.colors.with_round_robin_urgency_alert(checkbox_is_on(sender))
+        self._commit_colors_and_refresh(colors)
+
+    @objc.IBAction
+    def toggleDoneCelebration_(self, sender):
+        colors = self.settings.colors.with_done_celebration_enabled(checkbox_is_on(sender))
+        self._commit_colors_and_refresh(colors)
+
+    @objc.IBAction
+    def toggleRoundRobinUseGlobalSpeed_(self, sender):
+        self._toggle_speed_override(BLEND_MODE_ROUND_ROBIN, use_global=checkbox_is_on(sender))
+
+    @objc.IBAction
+    def toggleCycleUseGlobalSpeed_(self, sender):
+        self._toggle_speed_override(BLEND_MODE_CYCLE, use_global=checkbox_is_on(sender))
+
+    def _toggle_speed_override(self, mode_key: str, *, use_global: bool) -> None:
+        colors = self.settings.colors
+        if use_global:
+            colors = colors.with_global_speed_for_mode(mode_key)
+        else:
+            # Switching on: seed the override with the mode's current
+            # effective speed (i.e. whatever the global was showing) rather
+            # than silently jumping to some other default the moment the
+            # checkbox is unchecked.
+            colors = colors.with_speed_override(mode_key, colors.effective_speed_seconds(mode_key))
+        self._commit_colors_and_refresh(colors)
+
+    @objc.IBAction
+    def applyRoundRobinSpeed_(self, _sender):
+        self._apply_mode_speed(BLEND_MODE_ROUND_ROBIN, "round_robin_speed_field")
+
+    @objc.IBAction
+    def applyCycleModeSpeed_(self, _sender):
+        self._apply_mode_speed(BLEND_MODE_CYCLE, "cycle_speed_field")
+
+    def _apply_mode_speed(self, mode_key: str, field_key: str) -> None:
+        field = self.color_fields.get(field_key)
+        seconds = parse_seconds_field(field)
+        if seconds is None:
+            return
+        colors = self.settings.colors.with_speed_override(mode_key, seconds)
+        self._commit_colors_and_refresh(colors)
+
+    def _commit_colors_and_refresh(self, colors: ColorSettings) -> None:
+        self.settings = self.settings.with_colors(colors)
+        save_settings(self.settings)
+        refresh_blend_and_speed_fields(self)
+        self.refresh_colors_preview()
+        if self.color_preview_enabled:
+            self.push_colors_preview_to_device()
+
+    @objc.IBAction
+    def setAnimationStyle_(self, sender):
+        payload = sender.selectedItem().representedObject() if sender.selectedItem() else None
+        if not payload or "mode_key" not in payload or "style" not in payload:
+            return
+        try:
+            colors = self.settings.colors.with_mode_animation(payload["mode_key"], payload["style"])
+        except ValueError:
+            return
+        self.settings = self.settings.with_colors(colors)
+        save_settings(self.settings)
+        self.refresh_colors_preview()
+        if self.color_preview_enabled:
+            self.push_colors_preview_to_device()
+
+    @objc.IBAction
+    def resetColorsToDefaults_(self, _sender):
+        self.settings = self.settings.with_colors(ColorSettings.defaults())
+        save_settings(self.settings)
+        self.refresh_colors_window()
+        if self.color_preview_enabled:
+            self.push_colors_preview_to_device()
+
+    @objc.IBAction
+    def applyFadeIntensity_(self, _sender):
+        fade_fields = self.color_fields.get("fade_fields") or {}
+        colors = self.settings.colors
+        for key, fields in fade_fields.items():
+            floor_fraction = parse_percent_field(fields.get("floor"))
+            ceiling_fraction = parse_percent_field(fields.get("ceiling"))
+            if floor_fraction is not None:
+                colors = colors.with_fade_floor(key, floor_fraction)
+            if ceiling_fraction is not None:
+                colors = colors.with_fade_ceiling(key, ceiling_fraction)
+        self.settings = self.settings.with_colors(colors)
+        save_settings(self.settings)
+        self.refresh_colors_window()
+        if self.color_preview_enabled:
+            self.push_colors_preview_to_device()
+
+    @objc.IBAction
+    def closeColorsWindow_(self, _sender):
+        self.stop_colors_preview_animation()
+        if self.colors_window is not None:
+            self.colors_window.performClose_(None)
+
+    @objc.IBAction
+    def setAlcoveCompatibilityMode_(self, sender):
+        payload = sender.selectedItem().representedObject() if sender.selectedItem() else None
+        if not payload or "alcove_mode" not in payload:
+            return
+        try:
+            self.settings = self.settings.with_alcove_compatibility_mode(payload["alcove_mode"])
+        except ValueError:
+            return
+        save_settings(self.settings)
+        self.reposition_virtual_status_device_now()
+        self.set_settings_message(f"Alcove compatibility: {payload['alcove_mode']}")
+
+    @objc.IBAction
+    def toggleScreenBarWrapsMenuBar_(self, sender):
+        enabled = checkbox_is_on(sender)
+        self.settings = self.settings.with_virtual_status_device_wraps_menu_bar(enabled)
+        save_settings(self.settings)
+        self.reposition_virtual_status_device_now()
+        self.set_settings_message(
+            "Screen Bar now extends along the menu bar." if enabled else "Screen Bar back to notch width only."
+        )
+
+    def reposition_virtual_status_device_now(self) -> None:
+        """Alcove compatibility and wraps-menu-bar only change the Screen
+        Bar's own geometry/drawing style -- they don't touch the LED
+        program, so sync_virtual_status_device (the normal place these get
+        read fresh) is never called again on its own here: with a physical
+        device connected, that only runs when a real LED write happens
+        (see schedule_screen_bar_sync), which -- especially now that agent
+        layout no longer thrashes -- can be a long time after the setting
+        was actually changed. Repositioning directly makes the toggle feel
+        instant instead of "eventually, whenever something else happens to
+        redraw it."
+        """
+        self.virtual_status_device.set_alcove_compatibility_mode(self.settings.alcove_compatibility_mode)
+        self.virtual_status_device.set_wraps_menu_bar(self.settings.virtual_status_device_wraps_menu_bar)
+        self.virtual_status_device.reposition()
 
     def show_setup_window_if_needed(self) -> None:
         if should_show_setup_window(self.settings):
@@ -799,6 +1363,38 @@ class StatusBarController(NSObject):
             self.settings_fields.get("debug_log_status"),
             debug_log_status_text(),
         )
+        alcove_popup = self.settings_fields.get("alcove_compat_popup")
+        if alcove_popup is not None:
+            select_alcove_compat_mode(alcove_popup, self.settings.alcove_compatibility_mode)
+        set_checkbox_state(
+            self.settings_buttons.get("screen_bar_wraps_menu_bar"),
+            self.settings.virtual_status_device_wraps_menu_bar,
+        )
+        closed_lid_policy_popup = self.settings_fields.get("closed_lid_awake_policy_popup")
+        if closed_lid_policy_popup is not None:
+            select_closed_lid_awake_policy(closed_lid_policy_popup, self.settings.closed_lid_awake_policy)
+        set_field_value(
+            self.settings_fields.get("closed_lid_grace_field"),
+            f"{self.settings.closed_lid_grace_minutes:g}",
+        )
+        set_checkbox_state(
+            self.settings_buttons.get("idle_dim_enabled"),
+            self.settings.idle_dim_enabled,
+        )
+        set_field_value(
+            self.settings_fields.get("idle_dim_minutes_field"),
+            f"{self.settings.idle_dim_after_minutes:g}",
+        )
+        set_field_value(
+            self.settings_fields.get("idle_dim_fraction_field"),
+            f"{round(self.settings.idle_dim_fraction * 100)}",
+        )
+        set_checkbox_state(
+            self.settings_buttons.get("focus_sync_enabled"),
+            self.settings.focus_sync_enabled,
+        )
+        for device_id, controls in self.device_settings_controls.items():
+            self.refresh_device_settings_controls(device_id, controls)
         set_checkbox_state(
             self.settings_buttons.get("codex_transcripts"),
             self.settings.codex_transcripts_enabled,
@@ -841,6 +1437,31 @@ class StatusBarController(NSObject):
             self.settings_fields.get("open_animation_duration"),
             f"{opened.duration_seconds:g}",
         )
+
+    def refresh_device_settings_controls(self, device_id: str, controls: dict[str, object]) -> None:
+        """Keeps one device's Brightness/Auto-Brightness/Color Calibration
+        block (in the Settings window) in sync with whatever the menu bar
+        icon's own device submenu last set -- the same settings, two
+        places to change them, so either one changing must be reflected
+        in the other."""
+        brightness = self.settings.brightness_for_device(device_id)
+        slider = controls.get("brightness_slider")
+        if slider is not None:
+            slider.setDoubleValue_(float(normalize_brightness(brightness)))
+        set_field_value(controls.get("brightness_label"), f"{brightness_percent(brightness)}%")
+        set_checkbox_state(
+            controls.get("auto_brightness_checkbox"),
+            self.settings.auto_brightness_enabled_for_device(device_id),
+        )
+        red, green, blue = self.settings.channel_gains_for_device(device_id)
+        set_field_value(
+            controls.get("calibration_label"),
+            f"Color Calibration -- R{round(red * 100)}% G{round(green * 100)}% B{round(blue * 100)}%",
+        )
+        for key, gain in (("red_slider", red), ("green_slider", green), ("blue_slider", blue)):
+            slider = controls.get(key)
+            if slider is not None:
+                slider.setDoubleValue_(gain * 100.0)
 
     def set_settings_message(self, message: str) -> None:
         set_field_value(self.settings_fields.get("message"), message)
@@ -981,6 +1602,112 @@ class StatusBarController(NSObject):
         self.set_settings_message(
             f"{device.name if device else device_id}: brightness {brightness_percent(value)}%."
         )
+        self.refresh_settings_window()
+        if self.last_snapshot is not None:
+            self.sync_leds(
+                self.last_snapshot.aggregate.mode,
+                self.last_battery_snapshot,
+                self.active_led_display_kind(self.last_battery_snapshot),
+            )
+
+    def set_device_auto_brightness(self, device_id: str | None, enabled: bool) -> None:
+        if not device_id:
+            return
+        device = next(
+            (
+                entry
+                for entry in self.status_bar_devices(remember=False)
+                if entry.device_id == str(device_id)
+            ),
+            None,
+        )
+        try:
+            self.settings = self.settings.with_device_auto_brightness(
+                str(device_id),
+                enabled,
+                name=device.name if device else None,
+                path=str(device.root) if device else None,
+            )
+            save_settings(self.settings)
+        except Exception as exc:
+            self.set_settings_message(f"Could not save auto-brightness: {exc}")
+            self.settings = load_settings()
+            return
+
+        self.reset_led_controllers_for_device(str(device_id))
+        label = "on" if enabled else "off"
+        self.set_settings_message(
+            f"{device.name if device else device_id}: auto-brightness {label}."
+        )
+        self.refresh_settings_window()
+        if self.last_snapshot is not None:
+            self.sync_leds(
+                self.last_snapshot.aggregate.mode,
+                self.last_battery_snapshot,
+                self.active_led_display_kind(self.last_battery_snapshot),
+            )
+
+    def set_device_channel_gain(self, device_id: str | None, channel: str, value: float) -> None:
+        if not device_id:
+            return
+        device = next(
+            (
+                entry
+                for entry in self.status_bar_devices(remember=False)
+                if entry.device_id == str(device_id)
+            ),
+            None,
+        )
+        try:
+            self.settings = self.settings.with_device_channel_gain(
+                str(device_id),
+                channel,
+                value,
+                name=device.name if device else None,
+                path=str(device.root) if device else None,
+            )
+            save_settings(self.settings)
+        except Exception as exc:
+            self.set_settings_message(f"Could not save color calibration: {exc}")
+            self.settings = load_settings()
+            return
+
+        self.reset_led_controllers_for_device(str(device_id))
+        gain = self.settings.channel_gains_for_device(str(device_id))
+        red, green, blue = gain
+        self.set_settings_message(
+            f"{device.name if device else device_id}: calibration R{round(red * 100)}% "
+            f"G{round(green * 100)}% B{round(blue * 100)}%."
+        )
+        self.refresh_settings_window()
+        if self.last_snapshot is not None:
+            self.sync_leds(
+                self.last_snapshot.aggregate.mode,
+                self.last_battery_snapshot,
+                self.active_led_display_kind(self.last_battery_snapshot),
+            )
+
+    def set_device_channel_gains_reset(self, device_id: str | None) -> None:
+        if not device_id:
+            return
+        device = next(
+            (
+                entry
+                for entry in self.status_bar_devices(remember=False)
+                if entry.device_id == str(device_id)
+            ),
+            None,
+        )
+        try:
+            self.settings = self.settings.with_device_channel_gains_reset(str(device_id))
+            save_settings(self.settings)
+        except Exception as exc:
+            self.set_settings_message(f"Could not reset color calibration: {exc}")
+            self.settings = load_settings()
+            return
+
+        self.reset_led_controllers_for_device(str(device_id))
+        self.set_settings_message(f"{device.name if device else device_id}: calibration reset.")
         self.refresh_settings_window()
         if self.last_snapshot is not None:
             self.sync_leds(
@@ -1257,7 +1984,8 @@ class StatusBarController(NSObject):
             controller = AgentLedController(device_path=device.target)
             self.agent_led_controllers_by_device[device.device_id] = controller
         controller.device_path = device.target
-        controller.brightness = device.brightness
+        controller.brightness = self.effective_brightness_for_device(device)
+        controller.channel_gains = device.channel_gains
         return controller
 
     def battery_controller_for_device(self, device: StatusBarDevice) -> BatteryLedController:
@@ -1266,8 +1994,61 @@ class StatusBarController(NSObject):
             controller = BatteryLedController(device_path=device.target)
             self.battery_led_controllers_by_device[device.device_id] = controller
         controller.device_path = device.target
-        controller.brightness = device.brightness
+        controller.brightness = self.effective_brightness_for_device(device)
+        controller.channel_gains = device.channel_gains
         return controller
+
+    def effective_brightness_for_device(self, device: StatusBarDevice) -> int:
+        """The brightness to actually use for this write right now: the
+        manually configured value, unless auto-brightness is on for this
+        device and a screen-brightness reading is currently available (see
+        display_brightness.py) -- an undocumented technique, so any failure
+        falls back to the manual value rather than blocking the LED sync --
+        further scaled down if idle-timeout dimming and/or Focus sync have
+        kicked in (both multiply in, so if both happen to apply at once
+        the effect compounds rather than one silently overriding the
+        other).
+        """
+        if not device.auto_brightness_enabled:
+            base = device.brightness
+        else:
+            try:
+                base = display_brightness.auto_led_brightness()
+            except display_brightness.DisplayBrightnessUnavailableError:
+                base = device.brightness
+        return normalize_brightness(base * self.idle_dim_scale_factor() * self.focus_sync_scale_factor())
+
+    def idle_dim_scale_factor(self) -> float:
+        """1.0 normally; idle_dim_fraction once idle_dim_after_minutes of
+        continuous Idle has elapsed -- a long-idle Mac shouldn't keep a
+        bright light going on the desk. Uses set_status()'s own idle-since
+        tracking rather than re-deriving "is it idle" here, so this stays
+        correct regardless of which display kind (agent/battery) is
+        actually showing."""
+        if not self.settings.idle_dim_enabled or self.idle_since_monotonic is None:
+            return 1.0
+        threshold_seconds = self.settings.idle_dim_after_minutes * 60.0
+        if time.monotonic() - self.idle_since_monotonic < threshold_seconds:
+            return 1.0
+        return self.settings.idle_dim_fraction
+
+    def focus_sync_scale_factor(self) -> float:
+        """1.0 normally; idle_dim_fraction (the same "how much to dim"
+        amount idle-timeout dimming uses -- one shared dial rather than a
+        second near-duplicate setting) while a macOS Focus is active and
+        focus_sync_enabled is on. See focus_sync.py for what this depends
+        on and why it can be legitimately unavailable (no Full Disk
+        Access granted) -- that's treated as "not active" here, same as
+        any other fail-safe in this file, never as an error that blocks
+        the LED sync.
+        """
+        if not self.settings.focus_sync_enabled:
+            return 1.0
+        try:
+            active = focus_sync.is_focus_active()
+        except focus_sync.FocusSyncUnavailableError:
+            return 1.0
+        return self.settings.idle_dim_fraction if active else 1.0
 
     def status_bar_devices(self, *, remember: bool = True) -> list[StatusBarDevice]:
         entries_by_id: dict[str, StatusBarDevice] = {}
@@ -1288,6 +2069,8 @@ class StatusBarController(NSObject):
                 connected=True,
                 display=self.settings.display_for_device(device_id),
                 brightness=self.settings.brightness_for_device(device_id),
+                auto_brightness_enabled=self.settings.auto_brightness_enabled_for_device(device_id),
+                channel_gains=self.settings.channel_gains_for_device(device_id),
                 reason=candidate.reason,
             )
 
@@ -1305,6 +2088,8 @@ class StatusBarController(NSObject):
                         connected=True,
                         display=device.led_display,
                         brightness=device.brightness,
+                        auto_brightness_enabled=device.auto_brightness_enabled,
+                        channel_gains=device.channel_gains(),
                         reason="on-screen device",
                     )
                 continue
@@ -1319,6 +2104,8 @@ class StatusBarController(NSObject):
                 connected=False,
                 display=device.led_display,
                 brightness=device.brightness,
+                auto_brightness_enabled=device.auto_brightness_enabled,
+                channel_gains=device.channel_gains(),
                 reason="previously connected",
             )
 
@@ -1363,21 +2150,40 @@ class StatusBarController(NSObject):
         return True
 
     def remember_connected_devices(self, devices: list[StatusBarDevice]) -> None:
-        settings = self.settings
-        for device in devices:
-            if not device.connected:
-                continue
-            settings = settings.with_remembered_device(
-                device_id=device.device_id,
-                name=device.name,
-                path=str(device.root),
-            )
-        if settings != self.settings:
-            self.settings = settings
+        """Optimistic compare-and-set rather than a blind read-modify-write:
+        this runs on the background LED-sync worker thread (via
+        status_bar_devices(remember=True)) and can otherwise race against a
+        settings change made from a UI action on the main thread in the
+        same narrow window -- whichever write landed last would silently
+        win, discarding the other. AgentMonitorSettings is a frozen
+        dataclass, so every with_*() call produces a new object; comparing
+        `self.settings is before` (an atomic, GIL-protected check) reliably
+        detects whether anything else reassigned self.settings while this
+        was computing its own update, and retries against the fresh value
+        instead of clobbering it.
+        """
+        for _ in range(5):
+            before = self.settings
+            updated = before
+            for device in devices:
+                if not device.connected:
+                    continue
+                updated = updated.with_remembered_device(
+                    device_id=device.device_id,
+                    name=device.name,
+                    path=str(device.root),
+                )
+            if updated == before:
+                return
+            if self.settings is not before:
+                continue  # something else changed settings mid-computation -- retry fresh
+            self.settings = updated
             try:
                 save_settings(self.settings)
             except Exception as exc:
                 log_status_bar(f"device remember error: {exc}")
+            return
+        log_status_bar("device remember: skipped after repeated concurrent settings changes")
 
     def active_led_display_kind_for_device(
         self,
@@ -1395,11 +2201,19 @@ class StatusBarController(NSObject):
         mode: AgentMode,
         battery_snapshot: BatterySnapshot | None,
         display_kind: str,
+        statuses: tuple[AgentStatus, ...] = (),
     ) -> None:
         if not self.leds_enabled:
             return
 
-        self.sync_virtual_status_device(mode, battery_snapshot)
+        if not self.has_connected_physical_device():
+            # Nothing physical to stay phase-locked to -- update the Screen
+            # Bar immediately, same as before this device had a fix for
+            # syncing to real hardware. When a physical device IS connected,
+            # this update is deferred until that write actually completes
+            # (see sync_leds_now/schedule_screen_bar_sync) so the two clocks
+            # start from the same real-world instant instead of drifting.
+            self.sync_virtual_status_device(mode, battery_snapshot, statuses)
 
         if time.monotonic() < self.led_animation_until_monotonic:
             return
@@ -1409,21 +2223,38 @@ class StatusBarController(NSObject):
         self.led_sync_in_flight = True
         thread = threading.Thread(
             target=self.sync_leds_worker,
-            args=(mode, battery_snapshot, display_kind),
+            args=(mode, battery_snapshot, display_kind, statuses),
             daemon=True,
         )
         thread.start()
+
+    def has_connected_physical_device(self) -> bool:
+        return any(
+            device.connected and device.device_id != VIRTUAL_DEVICE_ID
+            for device in self.status_bar_devices(remember=False)
+        )
 
     def sync_virtual_status_device(
         self,
         mode: AgentMode,
         battery_snapshot: BatterySnapshot | None,
+        statuses: tuple[AgentStatus, ...] = (),
+        *,
+        started_at: float | None = None,
     ) -> None:
         if not SCREEN_BAR_FEATURE_ENABLED:
             self.virtual_status_device.hide()
             return
         if not self.settings.virtual_status_device_enabled:
             return
+        # Kept fresh here rather than scattered across every settings-mutation
+        # call site -- always current right before any (re)positioning below.
+        self.virtual_status_device.set_alcove_compatibility_mode(
+            self.settings.alcove_compatibility_mode
+        )
+        self.virtual_status_device.set_wraps_menu_bar(
+            self.settings.virtual_status_device_wraps_menu_bar
+        )
         device = next(
             (
                 item for item in self.status_bar_devices(remember=False)
@@ -1440,25 +2271,61 @@ class StatusBarController(NSObject):
                     battery_snapshot,
                     led_count=8,
                     brightness=device.brightness,
-                )
+                ),
+                started_at=started_at,
             )
         else:
-            self.virtual_status_device.set_program(
-                program_for_display_state(
-                    display_state_for_mode(mode),
-                    led_count=8,
-                    brightness=device.brightness,
-                )
+            _, program = program_for_snapshot(
+                statuses,
+                led_count=8,
+                colors=self.settings.colors,
+                brightness=device.brightness,
+                fallback_mode=mode,
             )
+            self.virtual_status_device.set_program(program, started_at=started_at)
+
+    def schedule_screen_bar_sync(
+        self,
+        mode: AgentMode,
+        battery_snapshot: BatterySnapshot | None,
+        statuses: tuple[AgentStatus, ...],
+        started_at: float,
+    ) -> None:
+        """Called from the LED worker thread right after a real device write
+        completes. Dispatches back to the main thread (Screen Bar is an
+        NSView and must be touched there) with the write's own completion
+        time as phase-zero, so the on-screen replica's animation starts in
+        lockstep with the physical device instead of independently."""
+        payload = {
+            "mode": mode,
+            "battery_snapshot": battery_snapshot,
+            "statuses": statuses,
+            "started_at": started_at,
+        }
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "applyScreenBarSync:",
+            payload,
+            False,
+        )
+
+    @objc.IBAction
+    def applyScreenBarSync_(self, payload):
+        self.sync_virtual_status_device(
+            payload["mode"],
+            payload["battery_snapshot"],
+            payload["statuses"],
+            started_at=payload["started_at"],
+        )
 
     def sync_leds_worker(
         self,
         mode: AgentMode,
         battery_snapshot: BatterySnapshot | None,
         display_kind: str,
+        statuses: tuple[AgentStatus, ...] = (),
     ) -> None:
         try:
-            self.sync_leds_now(mode, battery_snapshot, display_kind)
+            self.sync_leds_now(mode, battery_snapshot, display_kind, statuses)
         finally:
             self.led_sync_in_flight = False
 
@@ -1467,6 +2334,7 @@ class StatusBarController(NSObject):
         mode: AgentMode,
         battery_snapshot: BatterySnapshot | None,
         display_kind: str,
+        statuses: tuple[AgentStatus, ...] = (),
     ) -> None:
         devices = [
             device for device in self.status_bar_devices()
@@ -1484,6 +2352,8 @@ class StatusBarController(NSObject):
             return
 
         active_errors: dict[str, str] = {}
+        agent_write_changed = False
+        agent_write_failed = False
         for device in devices:
             device_display_kind = self.active_led_display_kind_for_device(
                 device,
@@ -1500,8 +2370,14 @@ class StatusBarController(NSObject):
                     f"{format_watts(battery_snapshot.adapter_power)}"
                 )
             else:
-                result = self.agent_controller_for_device(device).sync_mode(mode)
+                result = self.agent_controller_for_device(device).sync_snapshot(
+                    statuses, self.settings.colors, fallback_mode=mode
+                )
                 label = f"{device.name} {result.label}"
+                if result.error:
+                    agent_write_failed = True
+                elif result.changed:
+                    agent_write_changed = True
 
             if result.error:
                 active_errors[device.device_id] = result.error
@@ -1517,6 +2393,27 @@ class StatusBarController(NSObject):
 
         self.device_errors.update(active_errors)
         self.last_led_error = next(iter(self.device_errors.values()), None)
+
+        if agent_write_changed:
+            # The physical write(s) just completed on this worker thread --
+            # use this instant as the Screen Bar's phase-zero instead of
+            # letting it start independently on the next main-thread tick.
+            self.schedule_screen_bar_sync(mode, battery_snapshot, statuses, time.monotonic())
+        elif agent_write_failed:
+            # The physical write failed -- there's no real completion to
+            # sync to, so fall back to an immediate (unsynced) update rather
+            # than leaving the Screen Bar stuck showing stale state forever.
+            payload = {
+                "mode": mode,
+                "battery_snapshot": battery_snapshot,
+                "statuses": statuses,
+                "started_at": None,
+            }
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "applyScreenBarSync:",
+                payload,
+                False,
+            )
 
     def play_lid_animation(
         self,
@@ -1707,6 +2604,10 @@ class StatusBarController(NSObject):
 
     def sync_keep_awake(self, mode: AgentMode) -> None:
         was_running = self.keep_awake.process_running()
+        # Kept fresh here (rather than only at construction) so adjusting
+        # the grace period in Settings takes effect on the very next poll
+        # instead of needing a restart.
+        self.keep_awake.set_grace_seconds(self.settings.closed_lid_grace_minutes * 60.0)
         self.keep_awake.update(mode)
         is_running = self.keep_awake.process_running()
         if was_running != is_running:
@@ -1817,6 +2718,14 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     setup.setTarget_(target)
     menu.addItem_(setup)
 
+    colors_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Customize Colors...",
+        "openColorsWindow:",
+        "",
+    )
+    colors_item.setTarget_(target)
+    menu.addItem_(colors_item)
+
     settings = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         "Settings...",
         "openSettings:",
@@ -1876,6 +2785,41 @@ def build_device_menu_item(device: StatusBarDevice, target: StatusBarController)
     submenu.addItem_(NSMenuItem.separatorItem())
     submenu.addItem_(disabled_menu_item(f"Brightness {brightness_percent(device.brightness)}%"))
     submenu.addItem_(build_brightness_slider_item(device, target))
+    auto_brightness = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Auto-Brightness (matches screen)",
+        "toggleDeviceAutoBrightness:",
+        "",
+    )
+    auto_brightness.setTarget_(target)
+    auto_brightness.setRepresentedObject_(device.device_id)
+    auto_brightness.setState_(1 if device.auto_brightness_enabled else 0)
+    submenu.addItem_(auto_brightness)
+
+    submenu.addItem_(NSMenuItem.separatorItem())
+    red_gain, green_gain, blue_gain = device.channel_gains
+    submenu.addItem_(
+        disabled_menu_item(
+            f"Color Calibration -- R{round(red_gain * 100)}% "
+            f"G{round(green_gain * 100)}% B{round(blue_gain * 100)}%"
+        )
+    )
+    submenu.addItem_(
+        build_channel_gain_slider_item(device, target, "Red", red_gain, "setDeviceRedGain:")
+    )
+    submenu.addItem_(
+        build_channel_gain_slider_item(device, target, "Green", green_gain, "setDeviceGreenGain:")
+    )
+    submenu.addItem_(
+        build_channel_gain_slider_item(device, target, "Blue", blue_gain, "setDeviceBlueGain:")
+    )
+    reset_calibration = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Reset Calibration",
+        "resetDeviceColorCalibration:",
+        "",
+    )
+    reset_calibration.setTarget_(target)
+    reset_calibration.setRepresentedObject_(device.device_id)
+    submenu.addItem_(reset_calibration)
 
     if not device.connected:
         submenu.addItem_(NSMenuItem.separatorItem())
@@ -1910,6 +2854,126 @@ def build_brightness_slider_item(
     view.addSubview_(slider)
     item.setView_(view)
     return item
+
+
+def build_channel_gain_slider_item(
+    device: StatusBarDevice,
+    target: StatusBarController,
+    label: str,
+    current_gain: float,
+    action_selector: str,
+) -> NSMenuItem:
+    """A compact labeled slider for one RGB channel's write-time gain
+    correction (see led_status.apply_channel_gain_to_program) -- same
+    layout convention as build_brightness_slider_item, just with a short
+    channel-name label since three of these stack in the same submenu."""
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("", None, "")
+    view = NSView.alloc().initWithFrame_(((0, 0), (230, 34)))
+    label_field = NSTextField.alloc().initWithFrame_(((14, 8), (40, 18)))
+    label_field.setStringValue_(label)
+    label_field.setBezeled_(False)
+    label_field.setDrawsBackground_(False)
+    label_field.setEditable_(False)
+    label_field.setSelectable_(False)
+    label_field.setFont_(NSFont.systemFontOfSize_(11))
+    view.addSubview_(label_field)
+    slider = NSSlider.alloc().initWithFrame_(((54, 6), (162, 22)))
+    slider.setMinValue_(MIN_CHANNEL_GAIN * 100.0)
+    slider.setMaxValue_(MAX_CHANNEL_GAIN * 100.0)
+    slider.setDoubleValue_(float(current_gain) * 100.0)
+    slider.setContinuous_(False)
+    slider.setTarget_(target)
+    slider.setAction_(action_selector)
+    slider.setIdentifier_(device.device_id)
+    view.addSubview_(slider)
+    item.setView_(view)
+    return item
+
+
+# Total vertical space one device's block consumes in build_settings_window,
+# below -- kept in exact sync with the row heights used in
+# build_device_settings_block itself (same convention as build_colors_
+# window's fixed_layout_height/COLOR_ROW_HEIGHT), with a small margin so a
+# future one-line addition doesn't reopen the exact overlap bug this
+# replaced (a label that wrapped to two lines inside a 22px-tall box,
+# spilling into the control below it).
+DEVICE_SETTINGS_BLOCK_HEIGHT = 240
+
+
+def build_device_settings_block(
+    content,
+    device: StatusBarDevice,
+    target: StatusBarController,
+    y: float,
+    width: int,
+) -> tuple[float, dict[str, object]]:
+    """Renders one device's Brightness / Auto-Brightness / Color
+    Calibration controls directly into the Settings window (the same
+    controls that live in the menu bar icon's device submenu -- surfaced
+    here too since that submenu is not where someone looking in Settings
+    would think to check). Reuses the exact same IBActions either UI's
+    controls fire, so both stay correct without any separate plumbing --
+    see refresh_settings_window for how the two stay in sync when the
+    other one is used instead.
+
+    Returns (new_y, controls) -- controls is registered by the caller so
+    refresh_settings_window can keep this block's values current if the
+    device's settings change from the menu bar submenu while this window
+    is also open.
+    """
+    controls: dict[str, object] = {}
+    red, green, blue = device.channel_gains
+
+    add_label(content, device.name, 32, y, 300, 22)
+    y -= 30
+
+    add_label(content, "Brightness", 32, y + 3, 90, 20)
+    controls["brightness_slider"] = add_slider(
+        content, 130, y, 220, 22,
+        min_value=0.0, max_value=255.0, value=float(normalize_brightness(device.brightness)),
+        target=target, action="setDeviceBrightness:", identifier=device.device_id,
+    )
+    controls["brightness_label"] = add_label(
+        content, f"{brightness_percent(device.brightness)}%", 360, y + 3, 60, 20
+    )
+    y -= 34
+
+    auto_brightness = add_checkbox(
+        content, "Auto-Brightness (matches screen)", 32, y, 320, 24, target, "toggleDeviceAutoBrightness:"
+    )
+    auto_brightness.setRepresentedObject_(device.device_id)
+    auto_brightness.setState_(1 if device.auto_brightness_enabled else 0)
+    controls["auto_brightness_checkbox"] = auto_brightness
+    y -= 34
+
+    controls["calibration_label"] = add_label(
+        content,
+        f"Color Calibration -- R{round(red * 100)}% G{round(green * 100)}% B{round(blue * 100)}%",
+        32,
+        y + 3,
+        360,
+        20,
+    )
+    reset_button = add_button(content, "Reset", 500, y - 2, 90, 26, target, "resetDeviceColorCalibration:")
+    reset_button.setRepresentedObject_(device.device_id)
+    controls["reset_button"] = reset_button
+    y -= 30
+
+    for label, channel, gain, action in (
+        ("R", "red", red, "setDeviceRedGain:"),
+        ("G", "green", green, "setDeviceGreenGain:"),
+        ("B", "blue", blue, "setDeviceBlueGain:"),
+    ):
+        add_label(content, label, 32, y + 3, 20, 20)
+        controls[f"{channel}_slider"] = add_slider(
+            content, 60, y, 220, 22,
+            min_value=MIN_CHANNEL_GAIN * 100.0, max_value=MAX_CHANNEL_GAIN * 100.0, value=gain * 100.0,
+            target=target, action=action, identifier=device.device_id,
+        )
+        y -= 28
+
+    y -= 10  # trailing gap before the next device or the next section
+    return y, controls
 
 
 def build_setup_window(target: StatusBarController) -> NSWindow:
@@ -2031,23 +3095,147 @@ def format_byte_count(size: int) -> str:
 
 def build_settings_window(target: StatusBarController) -> NSWindow:
     width = 680
-    height = 1054
+    # The whole top of this window (everything above the "Agent Hooks"
+    # separator at ANCHOR_Y) is laid out fresh here rather than as another
+    # stacked "+N strip" patch -- an earlier round of those patches ended
+    # up with a label that wrapped to two lines inside a box sized for
+    # one, spilling into the checkbox below it, and per-device controls
+    # (Brightness/Auto-Brightness/Color Calibration) that lived only in
+    # the menu bar icon's own submenu, nowhere a user looking in Settings
+    # would find them. Section heights are named constants used both in
+    # this arithmetic and in the matching y -= ... decrements below, so
+    # they can't drift out of sync the way hand-computed offsets did
+    # before (same convention as build_colors_window's COLOR_ROW_HEIGHT).
+    devices = target.status_bar_devices(remember=False)
+    device_count = len(devices)
+
+    SETTINGS_TOP_MARGIN = 30
+    SETTINGS_SECTION_HEADER = 34
+    SETTINGS_SECTION_GAP = 26
+    DEVICES_SECTION_HEIGHT = SETTINGS_SECTION_HEADER + device_count * DEVICE_SETTINGS_BLOCK_HEIGHT
+    COLORS_SECTION_HEIGHT = 106
+    CLOSED_LID_SECTION_HEIGHT = 110
+    LED_BEHAVIOR_SECTION_HEIGHT = 132
+    # Where the unchanged, below-here layout starts (the "Agent Hooks"
+    # separator) -- everything from here down uses the exact same
+    # absolute coordinates it always has, untouched by this section.
+    SETTINGS_LOWER_SECTION_ANCHOR_Y = 1048
+
+    doc_height = SETTINGS_LOWER_SECTION_ANCHOR_Y + (
+        SETTINGS_TOP_MARGIN
+        + DEVICES_SECTION_HEIGHT
+        + SETTINGS_SECTION_GAP
+        + COLORS_SECTION_HEIGHT
+        + SETTINGS_SECTION_GAP
+        + CLOSED_LID_SECTION_HEIGHT
+        + SETTINGS_SECTION_GAP
+        + LED_BEHAVIOR_SECTION_HEIGHT
+        + SETTINGS_SECTION_GAP
+    )
+    visible_height = 760
     style = (
         NSWindowStyleMaskTitled
         | NSWindowStyleMaskClosable
         | NSWindowStyleMaskMiniaturizable
+        | NSWindowStyleMaskResizable
     )
     window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-        ((0, 0), (width, height)),
+        ((0, 0), (width, visible_height)),
         style,
         NSBackingStoreBuffered,
         False,
     )
     window.setTitle_("SidePulse Agent Monitor Settings")
     window.setReleasedWhenClosed_(False)
+    window.setMinSize_((width, 360))
     window.center()
-    content = window.contentView()
 
+    scroll_view = NSScrollView.alloc().initWithFrame_(((0, 0), (width, visible_height)))
+    scroll_view.setHasVerticalScroller_(True)
+    scroll_view.setHasHorizontalScroller_(False)
+    scroll_view.setAutohidesScrollers_(True)
+    scroll_view.setDrawsBackground_(False)
+    try:
+        scroll_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+    except Exception:
+        pass
+
+    content = NSView.alloc().initWithFrame_(((0, 0), (width, doc_height)))
+    scroll_view.setDocumentView_(content)
+    window.setContentView_(scroll_view)
+
+    y = doc_height - SETTINGS_TOP_MARGIN
+
+    # --- Devices -------------------------------------------------------
+    add_label(content, "Devices", 24, y, 240, 24)
+    y -= SETTINGS_SECTION_HEADER
+    device_controls: dict[str, dict[str, object]] = {}
+    for device in devices:
+        y, controls = build_device_settings_block(content, device, target, y, width)
+        device_controls[device.device_id] = controls
+    if not devices:
+        add_label(content, "No devices connected yet.", 32, y, 300, 20)
+    y -= SETTINGS_SECTION_GAP
+
+    # --- Colors & Screen Bar --------------------------------------------
+    add_label(content, "Colors & Screen Bar", 24, y, 240, 24)
+    y -= SETTINGS_SECTION_HEADER
+    add_button(content, "Customize Colors...", 32, y, 170, 28, target, "openColorsWindow:")
+    add_label(content, "Alcove Compatibility", 220, y + 6, 150, 22)
+    alcove_popup = add_alcove_compat_popup(content, 380, y, target)
+    y -= 38
+    wraps_menu_bar_checkbox = add_checkbox(
+        content, "Screen Bar: extend glow along the menu bar", 32, y, 340, 24, target,
+        "toggleScreenBarWrapsMenuBar:",
+    )
+    y -= SETTINGS_SECTION_GAP
+
+    # --- Closed-Lid Awake -------------------------------------------------
+    add_label(content, "Closed-Lid Awake", 24, y, 240, 24)
+    y -= SETTINGS_SECTION_HEADER
+    add_label(content, "Policy", 32, y + 3, 90, 20)
+    closed_lid_policy_popup = add_closed_lid_awake_policy_popup(content, 130, y, target)
+    y -= 38
+    grace_label = add_label(content, "Wait before releasing", 32, y + 3, 150, 20)
+    grace_label.setToolTip_(
+        "A buffer against a false “done” reading -- e.g. a command "
+        "still running with no events for a stretch -- closing the lid into sleep."
+    )
+    closed_lid_grace_field = add_editable_field(
+        content, f"{target.settings.closed_lid_grace_minutes:g}", 190, y, 56, 24
+    )
+    add_label(content, "min", 254, y + 3, 40, 18)
+    add_button(content, "Apply", 300, y, 70, 26, target, "applyClosedLidGraceMinutes:")
+    y -= SETTINGS_SECTION_GAP
+
+    # --- LED Behavior -----------------------------------------------------
+    add_label(content, "LED Behavior", 24, y, 240, 24)
+    y -= SETTINGS_SECTION_HEADER
+    idle_dim_checkbox = add_checkbox(
+        content, "Dim further after being idle", 32, y, 260, 24, target, "toggleIdleDim:"
+    )
+    y -= 30
+    add_label(content, "After", 32, y + 3, 40, 20)
+    idle_dim_minutes_field = add_editable_field(
+        content, f"{target.settings.idle_dim_after_minutes:g}", 74, y, 48, 24
+    )
+    add_label(content, "min, dim to", 128, y + 3, 76, 20)
+    idle_dim_fraction_field = add_editable_field(
+        content, f"{round(target.settings.idle_dim_fraction * 100)}", 210, y, 48, 24
+    )
+    add_label(content, "%", 262, y + 3, 16, 18)
+    add_button(content, "Apply", 300, y, 70, 26, target, "applyIdleDimSettings:")
+    y -= 38
+    focus_sync_checkbox = add_checkbox(
+        content, "Dim while a macOS Focus is active", 32, y, 300, 24, target, "toggleFocusSync:"
+    )
+    focus_sync_checkbox.setToolTip_(
+        "Requires granting Full Disk Access to SidePulse's background process "
+        "in System Settings -- otherwise this has no effect."
+    )
+    y -= SETTINGS_SECTION_GAP
+
+    add_separator(content, 24, SETTINGS_LOWER_SECTION_ANCHOR_Y - 26, width - 48)
     add_label(content, "Agent Hooks", 24, 1006, 200, 24)
     hook_statuses = {}
     for index, provider in enumerate(HOOK_PROVIDERS):
@@ -2147,14 +3335,557 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         "open_animation_duration": open_duration,
         "message": message,
         "settings_path": settings_path,
+        "alcove_compat_popup": alcove_popup,
+        "closed_lid_awake_policy_popup": closed_lid_policy_popup,
+        "closed_lid_grace_field": closed_lid_grace_field,
+        "idle_dim_minutes_field": idle_dim_minutes_field,
+        "idle_dim_fraction_field": idle_dim_fraction_field,
     }
     target.settings_buttons = {
         "codex_transcripts": codex_transcripts,
         "claude_transcripts": claude_transcripts,
         "battery_leds": battery_leds,
         "battery_power_preview": battery_power_preview,
+        "screen_bar_wraps_menu_bar": wraps_menu_bar_checkbox,
+        "idle_dim_enabled": idle_dim_checkbox,
+        "focus_sync_enabled": focus_sync_checkbox,
     }
+    target.device_settings_controls = device_controls
     return window
+
+
+MODE_COLOR_DISPLAY_LABELS: dict[str, str] = {
+    "idle": "Idle",
+    "working": "Working",
+    "done": "Done",
+    "ask": "Ask (waiting / blocked)",
+}
+
+COLOR_SWATCH_SIZE = 22
+COLOR_SWATCH_GAP = 8
+COLOR_ROW_HEIGHT = 40
+
+
+def build_colors_window(target: StatusBarController) -> NSWindow:
+    width = 620
+    provider_count = len(PROVIDER_SPECS)
+    mode_count = len(MODE_COLOR_KEYS)
+    # Preview strip + Agent/Mode/Fade sections (COLOR_ROW_HEIGHT per row)
+    # + headers/separators/bottom bar. This is the full absolute-positioned
+    # document height: fixed_layout_height is every non-row-loop
+    # y-decrement in this function summed up (plus a safety margin), and
+    # each *_count term accounts for one COLOR_ROW_HEIGHT-tall row per item
+    # in that section's loop below. It grows automatically as providers are
+    # added, so the window scrolls (rather than clipping) once it no longer
+    # fits on screen. If you add/remove a row below, update this sum to
+    # match, or the bottom bar can end up unreachable (as build_settings_
+    # window's fixed, unscrollable height once did).
+    fixed_layout_height = 836
+    doc_height = (
+        fixed_layout_height
+        + (provider_count + mode_count + len(FADE_MODE_KEYS) + len(ANIMATION_MODE_KEYS)) * COLOR_ROW_HEIGHT
+    )
+    visible_height = min(doc_height, 760)
+    style = (
+        NSWindowStyleMaskTitled
+        | NSWindowStyleMaskClosable
+        | NSWindowStyleMaskMiniaturizable
+        | NSWindowStyleMaskResizable
+    )
+    window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        ((0, 0), (width, visible_height)),
+        style,
+        NSBackingStoreBuffered,
+        False,
+    )
+    window.setTitle_("SidePulse Colors")
+    window.setReleasedWhenClosed_(False)
+    window.setMinSize_((width, 360))
+    window.center()
+
+    scroll_view = NSScrollView.alloc().initWithFrame_(((0, 0), (width, visible_height)))
+    scroll_view.setHasVerticalScroller_(True)
+    scroll_view.setHasHorizontalScroller_(False)
+    scroll_view.setAutohidesScrollers_(True)
+    scroll_view.setDrawsBackground_(False)
+    try:
+        scroll_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+    except Exception:
+        pass
+
+    content = NSView.alloc().initWithFrame_(((0, 0), (width, doc_height)))
+    scroll_view.setDocumentView_(content)
+    window.setContentView_(scroll_view)
+    height = doc_height
+
+    y = height - 40
+    add_label(content, "Live Preview", 24, y, 240, 24)
+    y -= 28
+    add_label(content, "Scenario", 32, y, 90, 22)
+    preview_scenario_popup = add_preview_scenario_popup(content, 140, y - 4, target)
+    y -= 30
+    preview_rows: list[dict[str, object]] = []
+    for led_count, device_label in ((2, "SidePulse Dot (2 LEDs)"), (8, "SidePulse Pro (8 LEDs)")):
+        add_label(content, device_label, 32, y, 300, 20)
+        dot_y = y - 26
+        dots = []
+        dot_x = 32
+        for _index in range(led_count):
+            dots.append(add_preview_dot(content, dot_x, dot_y))
+            dot_x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
+        legend = add_label(content, "", 32, dot_y - 20, width - 64, 16)
+        preview_rows.append({"led_count": led_count, "dots": dots, "legend": legend})
+        y = dot_y - 42
+
+    add_label(content, "Blend Mode", 32, y, 100, 22)
+    blend_popup = add_blend_mode_popup(content, 140, y - 4, target)
+    y -= 22
+    blend_description = add_label(content, "", 32, y, width - 64, 16)
+    y -= 24
+
+    urgency_alert_checkbox = add_checkbox(
+        content, "Alert when blocked or waiting", 32, y, width - 64, 22, target, "toggleUrgencyAlert:",
+    )
+    urgency_alert_checkbox.setToolTip_(
+        "In Round-Robin/Cycle, a blocked or waiting agent shows the Ask color "
+        "instead of its own, so it stands out."
+    )
+    y -= 30
+
+    done_celebration_checkbox = add_checkbox(
+        content, "Celebrate when finished", 32, y, width - 64, 22, target, "toggleDoneCelebration:",
+    )
+    done_celebration_checkbox.setToolTip_("A brief twinkle plays before settling into the Done color.")
+    y -= 34
+
+    add_label(content, "Global Speed", 32, y + 3, 100, 18)
+    speed_field = add_editable_field(content, "", 140, y, 56, 24)
+    add_label(content, "sec/breath", 200, y + 3, 90, 18)
+    add_button(content, "Apply", 300, y, 70, 26, target, "applyCycleSpeed:")
+    y -= 36
+
+    round_robin_use_global = add_checkbox(
+        content, "Round-Robin: use global", 32, y, 170, 22, target, "toggleRoundRobinUseGlobalSpeed:"
+    )
+    round_robin_speed_field = add_editable_field(content, "", 210, y, 56, 24)
+    add_button(content, "Apply", 274, y, 70, 26, target, "applyRoundRobinSpeed:")
+    y -= 36
+
+    cycle_use_global = add_checkbox(
+        content, "Cycle: use global", 32, y, 170, 22, target, "toggleCycleUseGlobalSpeed:"
+    )
+    cycle_speed_field = add_editable_field(content, "", 210, y, 56, 24)
+    add_button(content, "Apply", 274, y, 70, 26, target, "applyCycleModeSpeed:")
+    y -= 40
+
+    add_separator(content, 24, y, width - 48)
+    y -= 30
+
+    add_label(content, "Agent Colors", 24, y, 240, 24)
+    y -= 34
+    swatches: dict[tuple[tuple[str, str], str], object] = {}
+    hex_labels: dict[tuple[str, str], object] = {}
+    for spec in PROVIDER_SPECS:
+        row_key = ("agent", spec.provider)
+        add_label(content, spec.label, 32, y + 6, 90, 20)
+        current = target.settings.colors.agent_color(spec.provider)
+        x = 130
+        for palette_hex in CURATED_PALETTE:
+            button = add_color_swatch(
+                content,
+                palette_hex,
+                x,
+                y,
+                target,
+                "selectAgentColorSwatch:",
+                {"provider": spec.provider, "hex": palette_hex},
+            )
+            set_swatch_selected(button, palette_hex.upper() == current.upper())
+            swatches[(row_key, palette_hex)] = button
+            x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
+        add_custom_color_swatch(
+            content, x, y, target, "openCustomAgentColor:", {"provider": spec.provider}
+        )
+        x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
+        hex_label = add_label(content, current, x, y + 2, 80, 18)
+        hex_labels[row_key] = hex_label
+        y -= COLOR_ROW_HEIGHT
+
+    add_separator(content, 24, y, width - 48)
+    y -= 30
+
+    add_label(content, "Mode Colors", 24, y, 300, 24)
+    y -= 34
+    for key in MODE_COLOR_KEYS:
+        row_key = ("mode", key)
+        add_label(content, MODE_COLOR_DISPLAY_LABELS[key], 32, y + 6, 150, 20)
+        current = target.settings.colors.mode_color(key)
+        x = 190
+        for palette_hex in CURATED_PALETTE[:6]:
+            button = add_color_swatch(
+                content,
+                palette_hex,
+                x,
+                y,
+                target,
+                "selectModeColorSwatch:",
+                {"key": key, "hex": palette_hex},
+            )
+            set_swatch_selected(button, palette_hex.upper() == current.upper())
+            swatches[(row_key, palette_hex)] = button
+            x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
+        add_custom_color_swatch(
+            content, x, y, target, "openCustomModeColor:", {"key": key}
+        )
+        x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
+        hex_label = add_label(content, current, x, y + 2, 80, 18)
+        hex_labels[row_key] = hex_label
+        y -= COLOR_ROW_HEIGHT
+
+    add_separator(content, 24, y, width - 48)
+    y -= 30
+
+    add_label(content, "Animation Style", 24, y, 300, 24)
+    y -= 34
+    animation_popups: dict[str, object] = {}
+    for key in ANIMATION_MODE_KEYS:
+        add_label(content, MODE_COLOR_DISPLAY_LABELS[key], 32, y + 3, 150, 20)
+        popup = add_animation_style_popup(content, 190, y - 2, target, key)
+        select_animation_style(popup, target.settings.colors.animation_style(key))
+        animation_popups[key] = popup
+        y -= COLOR_ROW_HEIGHT
+
+    add_separator(content, 24, y, width - 48)
+    y -= 30
+
+    add_label(
+        content,
+        "Fade Intensity",
+        24,
+        y,
+        300,
+        24,
+    )
+    y -= 20
+    add_label(
+        content,
+        "How far each pulsing mode dims down and brightens up, as % of its color",
+        32,
+        y,
+        width - 64,
+        16,
+    )
+    y -= 28
+    add_label(content, "Mode", 32, y, 90, 18)
+    add_label(content, "Floor %", 190, y, 70, 18)
+    add_label(content, "Ceiling %", 300, y, 70, 18)
+    y -= 26
+    fade_fields: dict[str, dict[str, object]] = {}
+    for key in FADE_MODE_KEYS:
+        floor, ceiling = target.settings.colors.fade_range(key)
+        add_label(content, MODE_COLOR_DISPLAY_LABELS[key], 32, y + 3, 150, 20)
+        floor_field = add_editable_field(content, f"{round(floor * 100)}", 190, y, 60, 24)
+        add_label(content, "%", 254, y + 3, 14, 18)
+        ceiling_field = add_editable_field(content, f"{round(ceiling * 100)}", 300, y, 60, 24)
+        add_label(content, "%", 364, y + 3, 14, 18)
+        fade_fields[key] = {"floor": floor_field, "ceiling": ceiling_field}
+        y -= COLOR_ROW_HEIGHT
+    add_button(content, "Apply Fade Intensity", 32, y, 180, 28, target, "applyFadeIntensity:")
+    y -= COLOR_ROW_HEIGHT
+
+    add_button(content, "Reset to Defaults", 24, y, 160, 28, target, "resetColorsToDefaults:")
+    live_toggle = add_checkbox(
+        content, "Preview live on device", 200, y + 4, 220, 24, target, "toggleColorPreviewLive:"
+    )
+    add_button(content, "Done", width - 100, y, 76, 28, target, "closeColorsWindow:")
+
+    target.color_swatches = swatches
+    target.color_hex_labels = hex_labels
+    target.color_fields = {
+        "preview_scenario_popup": preview_scenario_popup,
+        "blend_mode_popup": blend_popup,
+        "blend_description": blend_description,
+        "urgency_alert_checkbox": urgency_alert_checkbox,
+        "done_celebration_checkbox": done_celebration_checkbox,
+        "speed_field": speed_field,
+        "round_robin_use_global": round_robin_use_global,
+        "round_robin_speed_field": round_robin_speed_field,
+        "cycle_use_global": cycle_use_global,
+        "cycle_speed_field": cycle_speed_field,
+        "live_toggle": live_toggle,
+        "fade_fields": fade_fields,
+        "animation_popups": animation_popups,
+    }
+    target.color_preview_rows = preview_rows
+    refresh_blend_and_speed_fields(target)
+    return window
+
+
+def refresh_blend_and_speed_fields(target: StatusBarController) -> None:
+    colors = target.settings.colors
+    fields = target.color_fields
+    popup = fields.get("blend_mode_popup")
+    if popup is not None:
+        select_blend_mode(popup, colors.blend_mode)
+    description = fields.get("blend_description")
+    if description is not None:
+        description.setStringValue_(BLEND_MODE_DESCRIPTIONS.get(colors.blend_mode, ""))
+        description.setToolTip_(colors_module.BLEND_MODE_TOOLTIPS.get(colors.blend_mode, ""))
+    checkbox = fields.get("urgency_alert_checkbox")
+    if checkbox is not None:
+        set_checkbox_state(checkbox, colors.round_robin_urgency_alert)
+    celebration_checkbox = fields.get("done_celebration_checkbox")
+    if celebration_checkbox is not None:
+        set_checkbox_state(celebration_checkbox, colors.done_celebration_enabled)
+    speed_field = fields.get("speed_field")
+    if speed_field is not None:
+        set_field_value(speed_field, f"{colors.cycle_speed_seconds:g}")
+    for mode_key, use_global_key, field_key in (
+        (BLEND_MODE_ROUND_ROBIN, "round_robin_use_global", "round_robin_speed_field"),
+        (BLEND_MODE_CYCLE, "cycle_use_global", "cycle_speed_field"),
+    ):
+        uses_global = colors.uses_global_speed(mode_key)
+        use_global_checkbox = fields.get(use_global_key)
+        mode_field = fields.get(field_key)
+        if use_global_checkbox is not None:
+            set_checkbox_state(use_global_checkbox, uses_global)
+        if mode_field is not None:
+            set_field_value(mode_field, f"{colors.effective_speed_seconds(mode_key):g}")
+            mode_field.setEnabled_(not uses_global)
+
+
+def add_color_swatch(parent, hex_color: str, x: int, y: int, target, selector: str, represented: dict):
+    button = NSButton.alloc().initWithFrame_(((x, y), (COLOR_SWATCH_SIZE, COLOR_SWATCH_SIZE)))
+    button.setTitle_("")
+    button.setBordered_(False)
+    button.setTarget_(target)
+    button.setAction_(selector)
+    button.setRepresentedObject_(dict(represented))
+    try:
+        button.setWantsLayer_(True)
+        layer = button.layer()
+        layer.setBackgroundColor_(nscolor_from_hex(hex_color).CGColor())
+        layer.setCornerRadius_(COLOR_SWATCH_SIZE / 2.0)
+        layer.setBorderWidth_(0.0)
+    except Exception:
+        pass
+    parent.addSubview_(button)
+    return button
+
+
+def add_custom_color_swatch(parent, x: int, y: int, target, selector: str, represented: dict):
+    button = NSButton.alloc().initWithFrame_(((x, y), (COLOR_SWATCH_SIZE, COLOR_SWATCH_SIZE)))
+    button.setTitle_("+")
+    button.setBordered_(False)
+    button.setTarget_(target)
+    button.setAction_(selector)
+    button.setRepresentedObject_(dict(represented))
+    try:
+        button.setWantsLayer_(True)
+        layer = button.layer()
+        layer.setBackgroundColor_(NSColor.controlColor().CGColor())
+        layer.setCornerRadius_(COLOR_SWATCH_SIZE / 2.0)
+        layer.setBorderWidth_(1.0)
+        layer.setBorderColor_(NSColor.separatorColor().CGColor())
+    except Exception:
+        pass
+    parent.addSubview_(button)
+    return button
+
+
+def set_swatch_selected(button, selected: bool) -> None:
+    try:
+        button.setWantsLayer_(True)
+        layer = button.layer()
+        layer.setBorderWidth_(2.5 if selected else 0.0)
+        layer.setBorderColor_(NSColor.controlAccentColor().CGColor())
+    except Exception:
+        pass
+
+
+def nscolor_from_hex(hex_value: str) -> "NSColor":
+    red, green, blue = colors_module.hex_to_rgb(colors_module.normalize_hex(hex_value, "#000000"))
+    return NSColor.colorWithCalibratedRed_green_blue_alpha_(red / 255.0, green / 255.0, blue / 255.0, 1.0)
+
+
+def hex_from_nscolor(nscolor) -> str:
+    try:
+        rgb = nscolor.colorUsingColorSpace_(NSColor.sRGBColorSpace())
+    except Exception:
+        rgb = nscolor
+    return colors_module.rgb_to_hex(
+        (rgb.redComponent() * 255.0, rgb.greenComponent() * 255.0, rgb.blueComponent() * 255.0)
+    )
+
+
+def add_blend_mode_popup(parent, x: int, y: int, target):
+    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(((x, y), (240, 26)), False)
+    popup.setTarget_(target)
+    popup.setAction_("setBlendMode:")
+    for mode in BLEND_MODE_CHOICES:
+        popup.addItemWithTitle_(BLEND_MODE_LABELS[mode])
+        popup.lastItem().setRepresentedObject_({"blend_mode": mode})
+    parent.addSubview_(popup)
+    return popup
+
+
+def select_blend_mode(popup, blend_mode: str) -> None:
+    for index in range(popup.numberOfItems()):
+        payload = popup.itemAtIndex_(index).representedObject()
+        if isinstance(payload, dict) and payload.get("blend_mode") == blend_mode:
+            popup.selectItemAtIndex_(index)
+            return
+
+
+def add_preview_scenario_popup(parent, x: int, y: int, target):
+    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(((x, y), (300, 26)), False)
+    popup.setTarget_(target)
+    popup.setAction_("setPreviewScenario:")
+    for scenario in colors_module.PREVIEW_SCENARIO_CHOICES:
+        popup.addItemWithTitle_(colors_module.PREVIEW_SCENARIO_LABELS[scenario])
+        popup.lastItem().setRepresentedObject_({"scenario": scenario})
+    parent.addSubview_(popup)
+    return popup
+
+
+def select_preview_scenario(popup, scenario: str) -> None:
+    for index in range(popup.numberOfItems()):
+        payload = popup.itemAtIndex_(index).representedObject()
+        if isinstance(payload, dict) and payload.get("scenario") == scenario:
+            popup.selectItemAtIndex_(index)
+            return
+
+
+ANIMATION_STYLE_DISPLAY_LABELS: dict[str, str] = {
+    "pulse": "Pulse (breathe)",
+    "roll": "Roll (chase)",
+    "solid": "Solid (no animation)",
+    "blink": "Blink (hard on/off)",
+}
+
+
+def add_animation_style_popup(parent, x: int, y: int, target, mode_key: str):
+    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(((x, y), (220, 26)), False)
+    popup.setTarget_(target)
+    popup.setAction_("setAnimationStyle:")
+    for style in ANIMATION_STYLE_CHOICES:
+        popup.addItemWithTitle_(ANIMATION_STYLE_DISPLAY_LABELS.get(style, style.title()))
+        popup.lastItem().setRepresentedObject_({"mode_key": mode_key, "style": style})
+    parent.addSubview_(popup)
+    return popup
+
+
+def select_animation_style(popup, style: str) -> None:
+    for index in range(popup.numberOfItems()):
+        payload = popup.itemAtIndex_(index).representedObject()
+        if isinstance(payload, dict) and payload.get("style") == style:
+            popup.selectItemAtIndex_(index)
+            return
+
+
+def add_alcove_compat_popup(parent, x: int, y: int, target):
+    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(((x, y), (140, 26)), False)
+    popup.setTarget_(target)
+    popup.setAction_("setAlcoveCompatibilityMode:")
+    labels = {
+        ALCOVE_COMPAT_AUTO: "Auto",
+        ALCOVE_COMPAT_ALWAYS: "Always",
+        ALCOVE_COMPAT_NEVER: "Never",
+    }
+    for mode in ALCOVE_COMPAT_CHOICES:
+        popup.addItemWithTitle_(labels[mode])
+        popup.lastItem().setRepresentedObject_({"alcove_mode": mode})
+    parent.addSubview_(popup)
+    return popup
+
+
+def select_alcove_compat_mode(popup, mode: str) -> None:
+    for index in range(popup.numberOfItems()):
+        payload = popup.itemAtIndex_(index).representedObject()
+        if isinstance(payload, dict) and payload.get("alcove_mode") == mode:
+            popup.selectItemAtIndex_(index)
+            return
+
+
+def add_closed_lid_awake_policy_popup(parent, x: int, y: int, target):
+    """A Settings-window popup for the same policy the status-bar menu's
+    build_closed_lid_awake_policy_item radio-style items control -- a
+    separate control (not reused menu items) since it lives in a
+    completely different part of the UI, but both write the same
+    settings.closed_lid_awake_policy and take effect immediately either
+    way."""
+    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(((x, y), (200, 26)), False)
+    popup.setTarget_(target)
+    popup.setAction_("setClosedLidAwakePolicyFromPopup:")
+    for policy in CLOSED_LID_AWAKE_CHOICES:
+        popup.addItemWithTitle_(CLOSED_LID_AWAKE_LABELS[policy])
+        popup.lastItem().setRepresentedObject_({"policy": policy})
+    parent.addSubview_(popup)
+    return popup
+
+
+def select_closed_lid_awake_policy(popup, policy: str) -> None:
+    for index in range(popup.numberOfItems()):
+        payload = popup.itemAtIndex_(index).representedObject()
+        if isinstance(payload, dict) and payload.get("policy") == policy:
+            popup.selectItemAtIndex_(index)
+            return
+
+
+def add_preview_dot(parent, x: int, y: int):
+    """A purely decorative colored circle. Deliberately a plain NSView, not
+    a disabled NSButton -- a disabled NSControl's cell dims/grays its own
+    drawing regardless of a custom layer background color, which made the
+    first version of this effectively invisible. A plain layer-backed NSView
+    has no control state to fight with."""
+    dot = NSView.alloc().initWithFrame_(((x, y), (COLOR_SWATCH_SIZE, COLOR_SWATCH_SIZE)))
+    dot.setWantsLayer_(True)
+    layer = dot.layer()
+    layer.setBackgroundColor_(NSColor.blackColor().CGColor())
+    layer.setCornerRadius_(COLOR_SWATCH_SIZE / 2.0)
+    layer.setBorderWidth_(1.0)
+    layer.setBorderColor_(NSColor.separatorColor().CGColor())
+    parent.addSubview_(dot)
+    return dot
+
+
+def set_preview_dot_color(dot, hex_color: str) -> None:
+    try:
+        dot.setWantsLayer_(True)
+        dot.layer().setBackgroundColor_(nscolor_from_hex(hex_color).CGColor())
+    except Exception:
+        pass
+
+
+def set_preview_dot_rgb(dot, red: int, green: int, blue: int) -> None:
+    """Like set_preview_dot_color, but takes raw 0-255 ints -- the shape the
+    WASM controller's step() returns, for the animated preview."""
+    try:
+        dot.setWantsLayer_(True)
+        color = NSColor.colorWithCalibratedRed_green_blue_alpha_(
+            max(0, min(255, red)) / 255.0,
+            max(0, min(255, green)) / 255.0,
+            max(0, min(255, blue)) / 255.0,
+            1.0,
+        )
+        dot.layer().setBackgroundColor_(color.CGColor())
+    except Exception:
+        pass
+
+
+def colors_legend_text(statuses, *, is_live: bool, prefix: str | None = None) -> str:
+    explicit_prefix = prefix is not None
+    if prefix is None:
+        prefix = "" if is_live else "Demo: "
+    if not statuses:
+        # A caller-supplied prefix (a named scenario) already says everything
+        # there is to say about an empty roster -- appending the generic
+        # "Idle -- no active agents" on top just repeats itself.
+        if explicit_prefix and prefix:
+            return prefix.rstrip(": ")
+        return f"{prefix}Idle -- no active agents" if prefix else "Idle -- no active agents"
+    parts = [f"{status.display_name or status.provider} ({MODE_LABELS.get(status.mode, status.mode.value)})" for status in statuses]
+    return prefix + " · ".join(parts)
 
 
 def add_label(parent, text: str, x: int, y: int, width: int, height: int):
@@ -2255,6 +3986,42 @@ def select_popup_action(popup, action: str) -> None:
             return
 
 
+def add_slider(
+    parent,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    *,
+    min_value: float,
+    max_value: float,
+    value: float,
+    target: StatusBarController,
+    action: str,
+    identifier: str | None = None,
+):
+    """A plain NSSlider placed directly in a window's content view --
+    unlike build_brightness_slider_item/build_channel_gain_slider_item,
+    which wrap a slider in an NSView because NSMenuItem requires a custom
+    view for anything beyond a title+action, a normal window content view
+    can host the control directly. identifier is set so the existing
+    setDeviceBrightness:/setDeviceRedGain:/etc. IBActions (which read
+    sender.identifier() for the device id) work unmodified regardless of
+    which container the slider lives in.
+    """
+    slider = NSSlider.alloc().initWithFrame_(((x, y), (width, height)))
+    slider.setMinValue_(min_value)
+    slider.setMaxValue_(max_value)
+    slider.setDoubleValue_(value)
+    slider.setContinuous_(False)
+    slider.setTarget_(target)
+    slider.setAction_(action)
+    if identifier is not None:
+        slider.setIdentifier_(identifier)
+    parent.addSubview_(slider)
+    return slider
+
+
 def add_editable_field(parent, text: str, x: int, y: int, width: int, height: int):
     field = NSTextField.alloc().initWithFrame_(((x, y), (width, height)))
     field.setStringValue_(text)
@@ -2311,6 +4078,34 @@ def text_control_value(control) -> str:
     if hasattr(control, "string"):
         return str(control.string())
     return str(control.stringValue())
+
+
+def parse_percent_field(control) -> float | None:
+    """Parses an editable field's text as a 0-100 percent into a 0.0-1.0
+    fraction. Returns None (leave the setting unchanged) for blank/invalid
+    input rather than silently coercing it to 0%."""
+    text = text_control_value(control).strip().rstrip("%")
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    return max(0.0, min(100.0, value)) / 100.0
+
+
+def parse_seconds_field(control) -> float | None:
+    """Parses an editable field's text as seconds. Returns None (leave the
+    setting unchanged) for blank/invalid input; the actual clamp to
+    [MIN_CYCLE_SPEED_SECONDS, MAX_CYCLE_SPEED_SECONDS] happens in
+    ColorSettings.with_cycle_speed()."""
+    text = text_control_value(control).strip().rstrip("s")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 def set_checkbox_state(button, enabled: bool) -> None:
@@ -2468,16 +4263,15 @@ def disambiguate_device_names(devices: list[StatusBarDevice]) -> list[StatusBarD
             result.append(device)
             continue
         suffix = duplicate_device_suffix(device)
+        # dataclass_replace() carries over every field not explicitly
+        # overridden (e.g. channel_gains) -- rebuilding from scratch here
+        # previously dropped any field added after this call site was
+        # first written (the same bug class fixed for DeviceDisplaySetting
+        # in settings.py; see with_device_display there).
         result.append(
-            StatusBarDevice(
-                device_id=device.device_id,
+            dataclass_replace(
+                device,
                 name=f"{device.name} {suffix}" if suffix else device.name,
-                root=device.root,
-                target=device.target,
-                connected=device.connected,
-                display=device.display,
-                brightness=device.brightness,
-                reason=device.reason,
             )
         )
     return result
@@ -2812,6 +4606,8 @@ def build_error_menu(exc: Exception) -> NSMenu:
 
 def recent_statuses(snapshot) -> list[AgentStatus]:
     statuses = list(snapshot.statuses)
+    if not statuses:
+        statuses = list(snapshot.stale_statuses)
     statuses.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
     return statuses[:12]
 

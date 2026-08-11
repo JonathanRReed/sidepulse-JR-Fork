@@ -60,6 +60,13 @@ class KeepAwakeController:
             self.last_status_read_monotonic_by_path.clear()
             self.status_read_in_flight_by_path.clear()
 
+    def set_grace_seconds(self, seconds: float) -> None:
+        """Live-adjustable -- called every poll with the current setting
+        value (see StatusBarController.sync_keep_awake) rather than fixed
+        once at construction, so changing it in Settings takes effect on
+        the very next tick instead of needing a restart."""
+        self.grace_seconds = max(0.0, float(seconds))
+
     def update(self, mode: AgentMode, *, now: float | None = None) -> bool:
         current = time.monotonic() if now is None else now
         should_hold = self.should_hold_for_mode(mode, current)
@@ -82,16 +89,19 @@ class KeepAwakeController:
             self.grace_until_monotonic = None
             return True
 
-        if mode in {
-            AgentMode.COMPLETED,
-            AgentMode.WAITING_FOR_INPUT,
-            AgentMode.BLOCKED_ERROR,
-        }:
-            if self.last_mode != mode or self.grace_until_monotonic is None:
-                self.grace_until_monotonic = now + self.grace_seconds
-            return now < self.grace_until_monotonic
-
-        return self.grace_until_monotonic is not None and now < self.grace_until_monotonic
+        # Anything else -- Completed, Waiting for Input, Blocked/Error,
+        # Idle, or Unknown -- starts (or continues) the same grace window
+        # instead of releasing immediately. This used to only apply to the
+        # three explicitly-tracked "looks done" modes; a momentary "looks
+        # idle" blip that never reports one of those (e.g. a brief gap
+        # between tool calls that the collector reports as a bare
+        # IDLE_READY fallback rather than an explicit Completed) got zero
+        # grace at all, immediately releasing the lid-closed hold -- which
+        # is exactly the "it thinks the agent is done when it's just
+        # running a command" symptom this fixes.
+        if self.last_mode != mode or self.grace_until_monotonic is None:
+            self.grace_until_monotonic = now + self.grace_seconds
+        return now < self.grace_until_monotonic
 
     def ensure_awake(self) -> None:
         if self.process_running():
