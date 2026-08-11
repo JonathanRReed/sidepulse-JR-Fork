@@ -7276,18 +7276,16 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         self.status_bar = status_bar
         self.controller = status_bar.StatusBarController.alloc().init()
 
-    def test_settings_window_layout_has_no_overlapping_controls(self) -> None:
-        # Regression guard for the exact bug class reported: a label that
-        # wrapped to two lines inside a box sized for one, spilling into
-        # the checkbox below it. A benign 1px separator/header overlap is
-        # pre-existing and expected; anything beyond that is a real bug.
+    def test_settings_window_panes_have_no_overlapping_cards(self) -> None:
+        # Regression guard for the bug class originally reported here (a
+        # label that wrapped to two lines and spilled into the control
+        # below it). Each pane is now built from NSStackView, which lays
+        # out its arranged subviews (the cards) without overlap by
+        # construction -- this forces a real layout pass and checks it,
+        # rather than trusting a hand-written height formula the way the
+        # old single-column window had to.
         self.controller.show_settings_window()
-        doc = self.controller.settings_window.contentView().documentView()
-        frames = [
-            v.frame()
-            for v in doc.subviews()
-            if v.frame().size.width > 0 and v.frame().size.height > 0
-        ]
+        self.controller.settings_window.contentView().layoutSubtreeIfNeeded()
 
         def overlaps(a, b):
             ax0, ay0 = a.origin.x, a.origin.y
@@ -7296,42 +7294,69 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
             bx1, by1 = bx0 + b.size.width, by0 + b.size.height
             return ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1
 
-        overlap_count = sum(
-            1
-            for i in range(len(frames))
-            for j in range(i + 1, len(frames))
-            if overlaps(frames[i], frames[j])
-        )
-        self.assertLessEqual(overlap_count, 1, "unexpected overlapping controls in the Settings window")
+        for key, pane in self.controller.settings_panes.items():
+            pane.layoutSubtreeIfNeeded()
+            content_stack = pane.documentView().arrangedSubviews()[0]
+            frames = [
+                v.frame()
+                for v in content_stack.arrangedSubviews()
+                if v.frame().size.width > 0 and v.frame().size.height > 0
+            ]
+            overlap_count = sum(
+                1
+                for i in range(len(frames))
+                for j in range(i + 1, len(frames))
+                if overlaps(frames[i], frames[j])
+            )
+            self.assertEqual(overlap_count, 0, f"unexpected overlapping cards in the {key!r} pane")
 
-    def test_settings_window_content_never_overflows_the_document_view(self) -> None:
+    def test_settings_window_panes_render_with_real_content_height(self) -> None:
+        # wrap_in_scroll_pane's soft bottom constraint makes a
+        # content-taller-than-window overflow structurally impossible now
+        # (the scroll view just grows its document view to fit); this
+        # guards that each pane actually produced non-degenerate content
+        # rather than an empty/zero-height document view.
         self.controller.show_settings_window()
-        doc = self.controller.settings_window.contentView().documentView()
-        subviews = list(doc.subviews())
-        max_y = max(v.frame().origin.y + v.frame().size.height for v in subviews)
-        min_y = min(v.frame().origin.y for v in subviews)
-        self.assertLessEqual(max_y, doc.frame().size.height + 2)
-        self.assertGreater(min_y, -5)
+        self.controller.settings_window.contentView().layoutSubtreeIfNeeded()
+        for key, pane in self.controller.settings_panes.items():
+            pane.layoutSubtreeIfNeeded()
+            self.assertGreater(
+                pane.documentView().frame().size.height, 0, f"{key!r} pane has no content height"
+            )
 
     def test_devices_section_exists_for_each_connected_device(self) -> None:
         self.controller.show_settings_window()
         devices = self.controller.status_bar_devices(remember=False)
         self.assertEqual(set(self.controller.device_settings_controls.keys()), {d.device_id for d in devices})
 
-    def test_device_controls_include_brightness_auto_brightness_and_calibration(self) -> None:
+    def test_device_controls_include_brightness_and_a_calibrate_button(self) -> None:
+        # Auto-Brightness and the R/G/B sliders no longer sit inline in the
+        # Devices pane -- they live behind "Calibrate..." (see
+        # test_calibrate_button_opens_a_popover_with_the_full_controls
+        # below), which is what per-device calibration was too weird
+        # about. Brightness itself stays inline, since it's something
+        # you'd actually adjust often.
         self.controller.show_settings_window()
         for controls in self.controller.device_settings_controls.values():
-            for key in (
-                "brightness_slider",
-                "brightness_label",
-                "auto_brightness_checkbox",
-                "calibration_label",
-                "reset_button",
-                "red_slider",
-                "green_slider",
-                "blue_slider",
-            ):
+            for key in ("brightness_slider", "brightness_label", "calibrate_button", "calibration_label"):
                 self.assertIn(key, controls)
+
+    def test_calibrate_button_opens_a_popover_with_the_full_controls(self) -> None:
+        self.controller.show_settings_window()
+        device_id = next(iter(self.controller.device_settings_controls))
+        button = self.controller.device_settings_controls[device_id]["calibrate_button"]
+
+        self.controller.openDeviceCalibrationPopover_(button)
+
+        controls = self.controller.device_settings_controls[device_id]
+        for key in (
+            "auto_brightness_checkbox",
+            "reset_button",
+            "red_slider",
+            "green_slider",
+            "blue_slider",
+        ):
+            self.assertIn(key, controls)
 
     def test_menu_bar_change_is_reflected_in_the_open_settings_window(self) -> None:
         self.controller.show_settings_window()
@@ -7360,6 +7385,8 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
     def test_calibration_change_via_settings_window_persists(self) -> None:
         self.controller.show_settings_window()
         device_id = next(iter(self.controller.device_settings_controls))
+        button = self.controller.device_settings_controls[device_id]["calibrate_button"]
+        self.controller.openDeviceCalibrationPopover_(button)
         controls = self.controller.device_settings_controls[device_id]
 
         controls["green_slider"].setDoubleValue_(60.0)
@@ -7449,7 +7476,7 @@ class ScreenBarSettingsTakeEffectImmediatelyTests(unittest.TestCase):
         self.assertGreaterEqual(after, before)
 
     def test_toggling_alcove_mode_repositions_immediately(self) -> None:
-        popup = self.status_bar.NSPopUpButton.alloc().init()
+        popup = self.status_bar.native_ui.make_popup_button(None, None)
         popup.addItemWithTitle_("Always")
         popup.lastItem().setRepresentedObject_({"alcove_mode": ALCOVE_COMPAT_ALWAYS})
         with patch.object(self.status_bar.StatusBarController, "sync_leds") as sync_leds:

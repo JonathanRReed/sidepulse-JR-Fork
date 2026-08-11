@@ -26,20 +26,24 @@ try:
         NSFontAttributeName,
         NSForegroundColorAttributeName,
         NSImage,
+        NSLayoutConstraint,
+        NSMaxYEdge,
         NSMenu,
         NSMenuItem,
         NSOffState,
         NSOnState,
-        NSPopUpButton,
+        NSPopover,
+        NSPopoverBehaviorTransient,
         NSScrollView,
         NSSavePanel,
         NSSlider,
+        NSSplitView,
+        NSSplitViewDividerStyleThin,
         NSStatusBar,
         NSTextField,
         NSTextView,
         NSView,
-        NSViewHeightSizable,
-        NSViewWidthSizable,
+        NSViewController,
         NSWorkspace,
         NSWindow,
         NSWindowStyleMaskClosable,
@@ -48,7 +52,7 @@ try:
         NSWindowStyleMaskTitled,
         NSVariableStatusItemLength,
     )
-    from Foundation import NSObject, NSString, NSTimer, NSURL
+    from Foundation import NSIndexSet, NSObject, NSString, NSTimer, NSURL
 except ImportError as exc:  # pragma: no cover - only exercised on non-macOS setups.
     raise SystemExit(
         "The status-bar app requires PyObjC/AppKit:\n"
@@ -64,6 +68,7 @@ from .battery import (
 )
 from . import display_brightness
 from . import focus_sync
+from . import native_ui
 from .audit import (
     default_status_audit_log_path,
     export_status_audit_csv,
@@ -275,6 +280,9 @@ class StatusBarController(NSObject):
         self.settings_fields = {}
         self.settings_buttons = {}
         self.device_settings_controls = {}
+        self.settings_sidebar_table = None
+        self.settings_panes = {}
+        self._device_calibration_popover = None
         self.setup_fields = {}
         self.setup_buttons = {}
         self.color_swatches = {}
@@ -693,6 +701,32 @@ class StatusBarController(NSObject):
         self.set_device_channel_gains_reset(str(device_id))
 
     @objc.IBAction
+    def openDeviceCalibrationPopover_(self, sender):
+        device_id = sender.representedObject()
+        if device_id is None:
+            return
+        device_id = str(device_id)
+        device = next(
+            (d for d in self.status_bar_devices(remember=False) if d.device_id == device_id),
+            None,
+        )
+        if device is None:
+            return
+        stack, controls = build_calibration_popover_content(device, self)
+        content_view = NSView.alloc().init()
+        content_view.addSubview_(stack)
+        native_ui._pin_edges(stack, content_view, insets=(16.0, 16.0, 16.0, 16.0))
+        view_controller = NSViewController.alloc().init()
+        view_controller.setView_(content_view)
+        popover = NSPopover.alloc().init()
+        popover.setContentViewController_(view_controller)
+        popover.setBehavior_(NSPopoverBehaviorTransient)
+        popover.showRelativeToRect_ofView_preferredEdge_(sender.bounds(), sender, NSMaxYEdge)
+        self._device_calibration_popover = popover
+        self.device_settings_controls.setdefault(device_id, {}).update(controls)
+        self.refresh_device_settings_controls(device_id, controls)
+
+    @objc.IBAction
     def toggleVirtualStatusDevice_(self, _sender):
         if not SCREEN_BAR_FEATURE_ENABLED:
             self.set_virtual_status_device(False)
@@ -818,9 +852,39 @@ class StatusBarController(NSObject):
     def show_settings_window(self) -> None:
         if self.settings_window is None:
             self.settings_window = build_settings_window(self)
+            if self.settings_sidebar_table is not None:
+                self.settings_sidebar_table.selectRowIndexes_byExtendingSelection_(
+                    NSIndexSet.indexSetWithIndex_(0), False
+                )
         self.refresh_settings_window()
         self.settings_window.makeKeyAndOrderFront_(None)
         NSApp.activateIgnoringOtherApps_(True)
+
+    # --- Settings sidebar (NSTableViewDataSource / NSTableViewDelegate) ---
+    #
+    # native_ui.build_sidebar_table() only builds the view; PyObjC's
+    # Objective-C bridge dispatches dataSource/delegate calls via
+    # respondsToSelector:, which only a real NSObject subclass (this one)
+    # can satisfy -- see native_ui's module docstring.
+
+    def numberOfRowsInTableView_(self, _table_view) -> int:
+        return len(SETTINGS_SIDEBAR_ITEMS)
+
+    def tableView_viewForTableColumn_row_(self, _table_view, _column, row):
+        _key, label = SETTINGS_SIDEBAR_ITEMS[row]
+        return native_ui.sidebar_cell_view(label)
+
+    def tableView_isGroupRow_(self, _table_view, _row) -> bool:
+        return False
+
+    def tableViewSelectionDidChange_(self, notification):
+        table = notification.object()
+        row = table.selectedRow()
+        if row < 0 or row >= len(SETTINGS_SIDEBAR_ITEMS):
+            return
+        selected_key = SETTINGS_SIDEBAR_ITEMS[row][0]
+        for key, pane in self.settings_panes.items():
+            pane.setHidden_(key != selected_key)
 
     @objc.IBAction
     def openColorsWindow_(self, _sender):
@@ -1454,9 +1518,10 @@ class StatusBarController(NSObject):
             self.settings.auto_brightness_enabled_for_device(device_id),
         )
         red, green, blue = self.settings.channel_gains_for_device(device_id)
+        auto_enabled = self.settings.auto_brightness_enabled_for_device(device_id)
         set_field_value(
             controls.get("calibration_label"),
-            f"Color Calibration -- R{round(red * 100)}% G{round(green * 100)}% B{round(blue * 100)}%",
+            calibration_summary_text(auto_enabled, red, green, blue),
         )
         for key, gain in (("red_slider", red), ("green_slider", green), ("blue_slider", blue)):
             slider = controls.get(key)
@@ -2890,92 +2955,6 @@ def build_channel_gain_slider_item(
     return item
 
 
-# Total vertical space one device's block consumes in build_settings_window,
-# below -- kept in exact sync with the row heights used in
-# build_device_settings_block itself (same convention as build_colors_
-# window's fixed_layout_height/COLOR_ROW_HEIGHT), with a small margin so a
-# future one-line addition doesn't reopen the exact overlap bug this
-# replaced (a label that wrapped to two lines inside a 22px-tall box,
-# spilling into the control below it).
-DEVICE_SETTINGS_BLOCK_HEIGHT = 240
-
-
-def build_device_settings_block(
-    content,
-    device: StatusBarDevice,
-    target: StatusBarController,
-    y: float,
-    width: int,
-) -> tuple[float, dict[str, object]]:
-    """Renders one device's Brightness / Auto-Brightness / Color
-    Calibration controls directly into the Settings window (the same
-    controls that live in the menu bar icon's device submenu -- surfaced
-    here too since that submenu is not where someone looking in Settings
-    would think to check). Reuses the exact same IBActions either UI's
-    controls fire, so both stay correct without any separate plumbing --
-    see refresh_settings_window for how the two stay in sync when the
-    other one is used instead.
-
-    Returns (new_y, controls) -- controls is registered by the caller so
-    refresh_settings_window can keep this block's values current if the
-    device's settings change from the menu bar submenu while this window
-    is also open.
-    """
-    controls: dict[str, object] = {}
-    red, green, blue = device.channel_gains
-
-    add_label(content, device.name, 32, y, 300, 22)
-    y -= 30
-
-    add_label(content, "Brightness", 32, y + 3, 90, 20)
-    controls["brightness_slider"] = add_slider(
-        content, 130, y, 220, 22,
-        min_value=0.0, max_value=255.0, value=float(normalize_brightness(device.brightness)),
-        target=target, action="setDeviceBrightness:", identifier=device.device_id,
-    )
-    controls["brightness_label"] = add_label(
-        content, f"{brightness_percent(device.brightness)}%", 360, y + 3, 60, 20
-    )
-    y -= 34
-
-    auto_brightness = add_checkbox(
-        content, "Auto-Brightness (matches screen)", 32, y, 320, 24, target, "toggleDeviceAutoBrightness:"
-    )
-    auto_brightness.setRepresentedObject_(device.device_id)
-    auto_brightness.setState_(1 if device.auto_brightness_enabled else 0)
-    controls["auto_brightness_checkbox"] = auto_brightness
-    y -= 34
-
-    controls["calibration_label"] = add_label(
-        content,
-        f"Color Calibration -- R{round(red * 100)}% G{round(green * 100)}% B{round(blue * 100)}%",
-        32,
-        y + 3,
-        360,
-        20,
-    )
-    reset_button = add_button(content, "Reset", 500, y - 2, 90, 26, target, "resetDeviceColorCalibration:")
-    reset_button.setRepresentedObject_(device.device_id)
-    controls["reset_button"] = reset_button
-    y -= 30
-
-    for label, channel, gain, action in (
-        ("R", "red", red, "setDeviceRedGain:"),
-        ("G", "green", green, "setDeviceGreenGain:"),
-        ("B", "blue", blue, "setDeviceBlueGain:"),
-    ):
-        add_label(content, label, 32, y + 3, 20, 20)
-        controls[f"{channel}_slider"] = add_slider(
-            content, 60, y, 220, 22,
-            min_value=MIN_CHANNEL_GAIN * 100.0, max_value=MAX_CHANNEL_GAIN * 100.0, value=gain * 100.0,
-            target=target, action=action, identifier=device.device_id,
-        )
-        y -= 28
-
-    y -= 10  # trailing gap before the next device or the next section
-    return y, controls
-
-
 def build_setup_window(target: StatusBarController) -> NSWindow:
     width = 620
     height = 330
@@ -3093,46 +3072,352 @@ def format_byte_count(size: int) -> str:
         value /= 1024
 
 
-def build_settings_window(target: StatusBarController) -> NSWindow:
-    width = 680
-    # The whole top of this window (everything above the "Agent Hooks"
-    # separator at ANCHOR_Y) is laid out fresh here rather than as another
-    # stacked "+N strip" patch -- an earlier round of those patches ended
-    # up with a label that wrapped to two lines inside a box sized for
-    # one, spilling into the checkbox below it, and per-device controls
-    # (Brightness/Auto-Brightness/Color Calibration) that lived only in
-    # the menu bar icon's own submenu, nowhere a user looking in Settings
-    # would find them. Section heights are named constants used both in
-    # this arithmetic and in the matching y -= ... decrements below, so
-    # they can't drift out of sync the way hand-computed offsets did
-    # before (same convention as build_colors_window's COLOR_ROW_HEIGHT).
+# --- Settings window: sidebar + detail pane ---------------------------
+#
+# Rebuilt from a single hand-positioned scrolling column into a System-
+# Settings-style shell: a translucent sidebar of categories next to a
+# detail pane that shows only the one selected. Each pane is built from
+# native_ui's NSStackView-based cards/rows and scrolls independently, so
+# there's no shared "document height" formula left to keep in sync by
+# hand -- the recurring source of every layout bug this window has had.
+
+SETTINGS_SIDEBAR_ITEMS: tuple[tuple[str, str], ...] = (
+    ("devices", "Devices"),
+    ("colors_screen_bar", "Colors & Screen Bar"),
+    ("closed_lid", "Closed-Lid Awake"),
+    ("led_behavior", "LED Behavior"),
+    ("hooks", "Agent Hooks"),
+    ("sessions", "Sessions"),
+    ("battery", "Battery"),
+    ("lid_animations", "Lid Animations"),
+    ("debug", "Debug"),
+)
+
+
+def _build_devices_pane(target: StatusBarController):
+    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
     devices = target.status_bar_devices(remember=False)
-    device_count = len(devices)
+    device_controls: dict[str, dict[str, object]] = {}
+    if not devices:
+        outer, inner = native_ui.make_card("Devices")
+        inner.addArrangedSubview_(native_ui.make_label("No devices connected yet.", secondary=True))
+        stack.addArrangedSubview_(outer)
+    for device in devices:
+        outer, inner = native_ui.make_card(device.name)
 
-    SETTINGS_TOP_MARGIN = 30
-    SETTINGS_SECTION_HEADER = 34
-    SETTINGS_SECTION_GAP = 26
-    DEVICES_SECTION_HEIGHT = SETTINGS_SECTION_HEADER + device_count * DEVICE_SETTINGS_BLOCK_HEIGHT
-    COLORS_SECTION_HEIGHT = 106
-    CLOSED_LID_SECTION_HEIGHT = 110
-    LED_BEHAVIOR_SECTION_HEIGHT = 132
-    # Where the unchanged, below-here layout starts (the "Agent Hooks"
-    # separator) -- everything from here down uses the exact same
-    # absolute coordinates it always has, untouched by this section.
-    SETTINGS_LOWER_SECTION_ANCHOR_Y = 1048
+        brightness_slider = native_ui.make_slider(
+            min_value=0.0,
+            max_value=255.0,
+            value=float(normalize_brightness(device.brightness)),
+            target=target,
+            action="setDeviceBrightness:",
+            identifier=device.device_id,
+        )
+        native_ui.constrain_width(brightness_slider, 200)
+        brightness_label = native_ui.make_label(f"{brightness_percent(device.brightness)}%", secondary=True)
+        native_ui.constrain_width(brightness_label, 44)
+        brightness_row_controls = native_ui.make_stack(orientation="horizontal", spacing=10.0)
+        brightness_row_controls.addArrangedSubview_(brightness_slider)
+        brightness_row_controls.addArrangedSubview_(brightness_label)
+        inner.addArrangedSubview_(native_ui.make_row("Brightness", brightness_row_controls))
 
-    doc_height = SETTINGS_LOWER_SECTION_ANCHOR_Y + (
-        SETTINGS_TOP_MARGIN
-        + DEVICES_SECTION_HEIGHT
-        + SETTINGS_SECTION_GAP
-        + COLORS_SECTION_HEIGHT
-        + SETTINGS_SECTION_GAP
-        + CLOSED_LID_SECTION_HEIGHT
-        + SETTINGS_SECTION_GAP
-        + LED_BEHAVIOR_SECTION_HEIGHT
-        + SETTINGS_SECTION_GAP
+        calibrate_button = native_ui.make_button("Calibrate…", target, "openDeviceCalibrationPopover:")
+        calibrate_button.setRepresentedObject_(device.device_id)
+        red, green, blue = device.channel_gains
+        calibration_label = native_ui.make_label(
+            calibration_summary_text(device.auto_brightness_enabled, red, green, blue),
+            secondary=True,
+            size=11.0,
+        )
+        color_row_controls = native_ui.make_stack(orientation="horizontal", spacing=10.0)
+        color_row_controls.addArrangedSubview_(calibrate_button)
+        color_row_controls.addArrangedSubview_(calibration_label)
+        inner.addArrangedSubview_(native_ui.make_row("Color", color_row_controls))
+
+        stack.addArrangedSubview_(outer)
+        device_controls[device.device_id] = {
+            "brightness_slider": brightness_slider,
+            "brightness_label": brightness_label,
+            "calibrate_button": calibrate_button,
+            "calibration_label": calibration_label,
+        }
+    return native_ui.wrap_in_scroll_pane(stack), device_controls
+
+
+def calibration_summary_text(auto_brightness_enabled: bool, red: float, green: float, blue: float) -> str:
+    auto = "on" if auto_brightness_enabled else "off"
+    return f"Auto-Brightness {auto} · R{round(red * 100)}% G{round(green * 100)}% B{round(blue * 100)}%"
+
+
+def build_calibration_popover_content(device: StatusBarDevice, target: StatusBarController):
+    """The content shown inside the "Calibrate…" popover for one device:
+    Auto-Brightness + the three per-channel gain sliders + Reset. Kept out
+    of the main Devices pane row (where three bare "R"/"G"/"B" sliders
+    previously sat inline all the time) -- calibration is something you
+    set once and rarely touch again, not something that should occupy
+    permanent space in the list.
+    """
+    stack = native_ui.make_stack(orientation="vertical", spacing=14.0)
+    native_ui.constrain_width(stack, 300.0)
+
+    auto_checkbox = native_ui.make_checkbox(
+        "Auto-Brightness (matches screen)", target, "toggleDeviceAutoBrightness:"
     )
-    visible_height = 760
+    auto_checkbox.setRepresentedObject_(device.device_id)
+    auto_checkbox.setState_(1 if device.auto_brightness_enabled else 0)
+    stack.addArrangedSubview_(auto_checkbox)
+
+    native_ui.add_separator(stack)
+    stack.addArrangedSubview_(native_ui.make_label("Color Calibration", bold=True, size=13.0))
+
+    controls: dict[str, object] = {"auto_brightness_checkbox": auto_checkbox}
+    red, green, blue = device.channel_gains
+    for label, channel, gain, action, tint in (
+        ("Red", "red", red, "setDeviceRedGain:", NSColor.systemRedColor()),
+        ("Green", "green", green, "setDeviceGreenGain:", NSColor.systemGreenColor()),
+        ("Blue", "blue", blue, "setDeviceBlueGain:", NSColor.systemBlueColor()),
+    ):
+        slider = native_ui.make_slider(
+            min_value=MIN_CHANNEL_GAIN * 100.0,
+            max_value=MAX_CHANNEL_GAIN * 100.0,
+            value=gain * 100.0,
+            target=target,
+            action=action,
+            identifier=device.device_id,
+        )
+        native_ui.constrain_width(slider, 200.0)
+        try:
+            slider.setTrackFillColor_(tint)
+        except Exception:
+            pass
+        stack.addArrangedSubview_(native_ui.make_row(label, slider))
+        controls[f"{channel}_slider"] = slider
+
+    reset_button = native_ui.make_button("Reset to Default", target, "resetDeviceColorCalibration:")
+    reset_button.setRepresentedObject_(device.device_id)
+    stack.addArrangedSubview_(reset_button)
+    controls["reset_button"] = reset_button
+
+    return stack, controls
+
+
+def _build_colors_screen_bar_pane(target: StatusBarController):
+    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
+    outer, inner = native_ui.make_card("Colors & Screen Bar")
+
+    inner.addArrangedSubview_(
+        native_ui.make_row("Colors", native_ui.make_button("Customize Colors…", target, "openColorsWindow:"))
+    )
+    alcove_popup = make_alcove_compat_popup(target)
+    inner.addArrangedSubview_(native_ui.make_row("Alcove Compatibility", alcove_popup))
+    native_ui.add_separator(inner)
+    wraps_checkbox = native_ui.make_checkbox(
+        "Extend glow along the menu bar", target, "toggleScreenBarWrapsMenuBar:"
+    )
+    inner.addArrangedSubview_(wraps_checkbox)
+
+    stack.addArrangedSubview_(outer)
+    fields = {"alcove_compat_popup": alcove_popup}
+    buttons = {"screen_bar_wraps_menu_bar": wraps_checkbox}
+    return native_ui.wrap_in_scroll_pane(stack), fields, buttons
+
+
+def _build_closed_lid_pane(target: StatusBarController):
+    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
+    outer, inner = native_ui.make_card("Closed-Lid Awake")
+
+    policy_popup = make_closed_lid_awake_policy_popup(target)
+    inner.addArrangedSubview_(native_ui.make_row("Policy", policy_popup))
+
+    grace_field = native_ui.make_field(f"{target.settings.closed_lid_grace_minutes:g}")
+    native_ui.constrain_width(grace_field, 56.0)
+    grace_controls = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    grace_controls.addArrangedSubview_(grace_field)
+    grace_controls.addArrangedSubview_(native_ui.make_label("min", secondary=True))
+    grace_controls.addArrangedSubview_(native_ui.make_button("Apply", target, "applyClosedLidGraceMinutes:"))
+    inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Wait before releasing",
+            grace_controls,
+            help_text=(
+                "A buffer against a false “done” reading -- e.g. a command still "
+                "running with no events for a stretch -- closing the lid into sleep."
+            ),
+        )
+    )
+
+    stack.addArrangedSubview_(outer)
+    fields = {"closed_lid_awake_policy_popup": policy_popup, "closed_lid_grace_field": grace_field}
+    return native_ui.wrap_in_scroll_pane(stack), fields
+
+
+def _build_led_behavior_pane(target: StatusBarController):
+    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
+    outer, inner = native_ui.make_card("LED Behavior")
+
+    idle_checkbox = native_ui.make_checkbox("Dim further after being idle", target, "toggleIdleDim:")
+    inner.addArrangedSubview_(idle_checkbox)
+
+    minutes_field = native_ui.make_field(f"{target.settings.idle_dim_after_minutes:g}")
+    native_ui.constrain_width(minutes_field, 48.0)
+    fraction_field = native_ui.make_field(f"{round(target.settings.idle_dim_fraction * 100)}")
+    native_ui.constrain_width(fraction_field, 48.0)
+    idle_controls = native_ui.make_stack(orientation="horizontal", spacing=6.0)
+    idle_controls.addArrangedSubview_(native_ui.make_label("After", secondary=True))
+    idle_controls.addArrangedSubview_(minutes_field)
+    idle_controls.addArrangedSubview_(native_ui.make_label("min, dim to", secondary=True))
+    idle_controls.addArrangedSubview_(fraction_field)
+    idle_controls.addArrangedSubview_(native_ui.make_label("%", secondary=True))
+    idle_controls.addArrangedSubview_(native_ui.make_button("Apply", target, "applyIdleDimSettings:"))
+    inner.addArrangedSubview_(idle_controls)
+
+    native_ui.add_separator(inner)
+
+    focus_checkbox = native_ui.make_checkbox(
+        "Dim while a macOS Focus is active",
+        target,
+        "toggleFocusSync:",
+        help_text=(
+            "Requires granting Full Disk Access to SidePulse's background process "
+            "in System Settings -- otherwise this has no effect."
+        ),
+    )
+    inner.addArrangedSubview_(focus_checkbox)
+
+    stack.addArrangedSubview_(outer)
+    fields = {"idle_dim_minutes_field": minutes_field, "idle_dim_fraction_field": fraction_field}
+    buttons = {"idle_dim_enabled": idle_checkbox, "focus_sync_enabled": focus_checkbox}
+    return native_ui.wrap_in_scroll_pane(stack), fields, buttons
+
+
+def _build_hooks_pane(target: StatusBarController):
+    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
+    outer, inner = native_ui.make_card("Agent Hooks")
+
+    hook_statuses: dict[str, object] = {}
+    for index, provider in enumerate(HOOK_PROVIDERS):
+        status_label = native_ui.make_label("", secondary=True, size=12.0)
+        inner.addArrangedSubview_(native_ui.make_row(provider_spec(provider).label, status_label))
+
+        selector = provider.title()
+        buttons_row = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+        buttons_row.addArrangedSubview_(native_ui.make_button("Install", target, f"install{selector}Hooks:"))
+        buttons_row.addArrangedSubview_(native_ui.make_button("Uninstall", target, f"uninstall{selector}Hooks:"))
+        indent_row = native_ui.make_stack(orientation="horizontal", spacing=12.0)
+        spacer = native_ui.make_label("")
+        native_ui.constrain_width(spacer, native_ui.ROW_LABEL_WIDTH)
+        indent_row.addArrangedSubview_(spacer)
+        indent_row.addArrangedSubview_(buttons_row)
+        inner.addArrangedSubview_(indent_row)
+
+        if index < len(HOOK_PROVIDERS) - 1:
+            native_ui.add_separator(inner)
+        hook_statuses[provider] = status_label
+
+    stack.addArrangedSubview_(outer)
+    fields = {f"{provider}_hook_status": status for provider, status in hook_statuses.items()}
+    return native_ui.wrap_in_scroll_pane(stack), fields
+
+
+def _build_sessions_pane(target: StatusBarController):
+    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
+    outer, inner = native_ui.make_card("Sessions")
+
+    codex_checkbox = native_ui.make_checkbox(
+        "CLI fallback: Codex transcripts", target, "toggleCodexTranscripts:"
+    )
+    inner.addArrangedSubview_(codex_checkbox)
+    claude_checkbox = native_ui.make_checkbox(
+        "CLI fallback: Claude transcripts", target, "toggleClaudeTranscripts:"
+    )
+    inner.addArrangedSubview_(claude_checkbox)
+
+    native_ui.add_separator(inner)
+    inner.addArrangedSubview_(native_ui.make_label("Open Sessions With", bold=True, size=14.0))
+
+    provider_openers: dict[str, object] = {}
+    for provider in provider_session_opener_providers():
+        popup = make_provider_opener_popup(provider, target)
+        inner.addArrangedSubview_(native_ui.make_row(provider_spec(provider).label, popup))
+        provider_openers[provider] = popup
+
+    stack.addArrangedSubview_(outer)
+    fields = {f"{provider}_session_opener": popup for provider, popup in provider_openers.items()}
+    buttons = {"codex_transcripts": codex_checkbox, "claude_transcripts": claude_checkbox}
+    return native_ui.wrap_in_scroll_pane(stack), fields, buttons
+
+
+def _build_battery_pane(target: StatusBarController):
+    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
+    outer, inner = native_ui.make_card("Battery")
+
+    battery_leds = native_ui.make_checkbox("Show battery on LEDs", target, "setBatteryLedDisplayFromCheckbox:")
+    inner.addArrangedSubview_(battery_leds)
+    battery_power_preview = native_ui.make_checkbox(
+        "Show battery for 7s on plug/unplug", target, "setBatteryPowerPreviewFromCheckbox:"
+    )
+    inner.addArrangedSubview_(battery_power_preview)
+
+    stack.addArrangedSubview_(outer)
+    buttons = {"battery_leds": battery_leds, "battery_power_preview": battery_power_preview}
+    return native_ui.wrap_in_scroll_pane(stack), buttons
+
+
+def _build_lid_animations_pane(target: StatusBarController):
+    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
+
+    closed_outer, closed_inner = native_ui.make_card("Lid Closed")
+    closed_duration = native_ui.make_field("")
+    native_ui.constrain_width(closed_duration, 60.0)
+    closed_inner.addArrangedSubview_(native_ui.make_row("Duration (sec)", closed_duration))
+    closed_scroll, closed_program = native_ui.make_text_editor("")
+    closed_inner.addArrangedSubview_(closed_scroll)
+    closed_buttons = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    closed_buttons.addArrangedSubview_(native_ui.make_button("Preview", target, "previewLidClosedAnimation:"))
+    closed_buttons.addArrangedSubview_(native_ui.make_button("Reset", target, "resetLidClosedAnimation:"))
+    closed_inner.addArrangedSubview_(closed_buttons)
+    stack.addArrangedSubview_(closed_outer)
+
+    open_outer, open_inner = native_ui.make_card("Lid Open")
+    open_duration = native_ui.make_field("")
+    native_ui.constrain_width(open_duration, 60.0)
+    open_inner.addArrangedSubview_(native_ui.make_row("Duration (sec)", open_duration))
+    open_scroll, open_program = native_ui.make_text_editor("")
+    open_inner.addArrangedSubview_(open_scroll)
+    open_buttons = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    open_buttons.addArrangedSubview_(native_ui.make_button("Preview", target, "previewLidOpenAnimation:"))
+    open_buttons.addArrangedSubview_(native_ui.make_button("Reset", target, "resetLidOpenAnimation:"))
+    open_buttons.addArrangedSubview_(native_ui.make_button("Save Animations", target, "saveLidAnimations:"))
+    open_inner.addArrangedSubview_(open_buttons)
+    stack.addArrangedSubview_(open_outer)
+
+    fields = {
+        "closed_animation_program": closed_program,
+        "closed_animation_duration": closed_duration,
+        "open_animation_program": open_program,
+        "open_animation_duration": open_duration,
+    }
+    return native_ui.wrap_in_scroll_pane(stack), fields
+
+
+def _build_debug_pane(target: StatusBarController):
+    stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
+    outer, inner = native_ui.make_card("Debug Log")
+
+    status_label = native_ui.make_label("", secondary=True, size=12.0)
+    inner.addArrangedSubview_(status_label)
+    buttons_row = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    buttons_row.addArrangedSubview_(native_ui.make_button("Export CSV", target, "exportDebugCsv:"))
+    buttons_row.addArrangedSubview_(native_ui.make_button("Export HTML", target, "exportDebugHtml:"))
+    inner.addArrangedSubview_(buttons_row)
+
+    stack.addArrangedSubview_(outer)
+    fields = {"debug_log_status": status_label}
+    return native_ui.wrap_in_scroll_pane(stack), fields
+
+
+def build_settings_window(target: StatusBarController) -> NSWindow:
+    width, height = 820, 560
     style = (
         NSWindowStyleMaskTitled
         | NSWindowStyleMaskClosable
@@ -3140,215 +3425,116 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         | NSWindowStyleMaskResizable
     )
     window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-        ((0, 0), (width, visible_height)),
-        style,
-        NSBackingStoreBuffered,
-        False,
+        ((0, 0), (width, height)), style, NSBackingStoreBuffered, False,
     )
     window.setTitle_("SidePulse Agent Monitor Settings")
     window.setReleasedWhenClosed_(False)
-    window.setMinSize_((width, 360))
+    window.setMinSize_((640, 420))
     window.center()
 
-    scroll_view = NSScrollView.alloc().initWithFrame_(((0, 0), (width, visible_height)))
-    scroll_view.setHasVerticalScroller_(True)
-    scroll_view.setHasHorizontalScroller_(False)
-    scroll_view.setAutohidesScrollers_(True)
-    scroll_view.setDrawsBackground_(False)
-    try:
-        scroll_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
-    except Exception:
-        pass
+    root = NSView.alloc().init()
+    window.setContentView_(root)
 
-    content = NSView.alloc().initWithFrame_(((0, 0), (width, doc_height)))
-    scroll_view.setDocumentView_(content)
-    window.setContentView_(scroll_view)
+    split = NSSplitView.alloc().init()
+    split.setVertical_(True)
+    split.setDividerStyle_(NSSplitViewDividerStyleThin)
+    split.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    root.addSubview_(split)
 
-    y = doc_height - SETTINGS_TOP_MARGIN
+    sidebar_bg = native_ui.make_sidebar_background()
+    sidebar_scroll, sidebar_table = native_ui.build_sidebar_table(width=220.0)
+    sidebar_bg.addSubview_(sidebar_scroll)
+    NSLayoutConstraint.activateConstraints_(
+        [
+            sidebar_scroll.topAnchor().constraintEqualToAnchor_(sidebar_bg.topAnchor()),
+            sidebar_scroll.leadingAnchor().constraintEqualToAnchor_(sidebar_bg.leadingAnchor()),
+            sidebar_scroll.trailingAnchor().constraintEqualToAnchor_(sidebar_bg.trailingAnchor()),
+            sidebar_scroll.bottomAnchor().constraintEqualToAnchor_(sidebar_bg.bottomAnchor()),
+        ]
+    )
+    sidebar_table.setDataSource_(target)
+    sidebar_table.setDelegate_(target)
 
-    # --- Devices -------------------------------------------------------
-    add_label(content, "Devices", 24, y, 240, 24)
-    y -= SETTINGS_SECTION_HEADER
-    device_controls: dict[str, dict[str, object]] = {}
-    for device in devices:
-        y, controls = build_device_settings_block(content, device, target, y, width)
-        device_controls[device.device_id] = controls
-    if not devices:
-        add_label(content, "No devices connected yet.", 32, y, 300, 20)
-    y -= SETTINGS_SECTION_GAP
+    content_container = NSView.alloc().init()
+    content_container.setTranslatesAutoresizingMaskIntoConstraints_(False)
 
-    # --- Colors & Screen Bar --------------------------------------------
-    add_label(content, "Colors & Screen Bar", 24, y, 240, 24)
-    y -= SETTINGS_SECTION_HEADER
-    add_button(content, "Customize Colors...", 32, y, 170, 28, target, "openColorsWindow:")
-    add_label(content, "Alcove Compatibility", 220, y + 6, 150, 22)
-    alcove_popup = add_alcove_compat_popup(content, 380, y, target)
-    y -= 38
-    wraps_menu_bar_checkbox = add_checkbox(
-        content, "Screen Bar: extend glow along the menu bar", 32, y, 340, 24, target,
-        "toggleScreenBarWrapsMenuBar:",
-    )
-    y -= SETTINGS_SECTION_GAP
+    split.addSubview_(sidebar_bg)
+    split.addSubview_(content_container)
+    sidebar_bg.widthAnchor().constraintEqualToConstant_(220.0).setActive_(True)
+    sidebar_bg.widthAnchor().constraintGreaterThanOrEqualToConstant_(160.0).setActive_(True)
+    split.setHoldingPriority_forSubviewAtIndex_(250, 0)
 
-    # --- Closed-Lid Awake -------------------------------------------------
-    add_label(content, "Closed-Lid Awake", 24, y, 240, 24)
-    y -= SETTINGS_SECTION_HEADER
-    add_label(content, "Policy", 32, y + 3, 90, 20)
-    closed_lid_policy_popup = add_closed_lid_awake_policy_popup(content, 130, y, target)
-    y -= 38
-    grace_label = add_label(content, "Wait before releasing", 32, y + 3, 150, 20)
-    grace_label.setToolTip_(
-        "A buffer against a false “done” reading -- e.g. a command "
-        "still running with no events for a stretch -- closing the lid into sleep."
-    )
-    closed_lid_grace_field = add_editable_field(
-        content, f"{target.settings.closed_lid_grace_minutes:g}", 190, y, 56, 24
-    )
-    add_label(content, "min", 254, y + 3, 40, 18)
-    add_button(content, "Apply", 300, y, 70, 26, target, "applyClosedLidGraceMinutes:")
-    y -= SETTINGS_SECTION_GAP
+    footer = native_ui.make_stack(orientation="vertical", spacing=2.0)
+    message = native_ui.make_label("", secondary=True, size=12.0)
+    settings_path = native_ui.make_label("", secondary=True, size=11.0)
+    footer.addArrangedSubview_(message)
+    footer.addArrangedSubview_(settings_path)
+    root.addSubview_(footer)
 
-    # --- LED Behavior -----------------------------------------------------
-    add_label(content, "LED Behavior", 24, y, 240, 24)
-    y -= SETTINGS_SECTION_HEADER
-    idle_dim_checkbox = add_checkbox(
-        content, "Dim further after being idle", 32, y, 260, 24, target, "toggleIdleDim:"
-    )
-    y -= 30
-    add_label(content, "After", 32, y + 3, 40, 20)
-    idle_dim_minutes_field = add_editable_field(
-        content, f"{target.settings.idle_dim_after_minutes:g}", 74, y, 48, 24
-    )
-    add_label(content, "min, dim to", 128, y + 3, 76, 20)
-    idle_dim_fraction_field = add_editable_field(
-        content, f"{round(target.settings.idle_dim_fraction * 100)}", 210, y, 48, 24
-    )
-    add_label(content, "%", 262, y + 3, 16, 18)
-    add_button(content, "Apply", 300, y, 70, 26, target, "applyIdleDimSettings:")
-    y -= 38
-    focus_sync_checkbox = add_checkbox(
-        content, "Dim while a macOS Focus is active", 32, y, 300, 24, target, "toggleFocusSync:"
-    )
-    focus_sync_checkbox.setToolTip_(
-        "Requires granting Full Disk Access to SidePulse's background process "
-        "in System Settings -- otherwise this has no effect."
-    )
-    y -= SETTINGS_SECTION_GAP
-
-    add_separator(content, 24, SETTINGS_LOWER_SECTION_ANCHOR_Y - 26, width - 48)
-    add_label(content, "Agent Hooks", 24, 1006, 200, 24)
-    hook_statuses = {}
-    for index, provider in enumerate(HOOK_PROVIDERS):
-        y = 964 - index * 42
-        label = provider_spec(provider).label
-        add_label(content, label, 32, y, 80, 22)
-        hook_statuses[provider] = add_label(content, "", 112, y, 270, 22)
-        selector = provider.title()
-        add_button(content, "Install", 432, y - 4, 90, 28, target, f"install{selector}Hooks:")
-        add_button(content, "Uninstall", 532, y - 4, 100, 28, target, f"uninstall{selector}Hooks:")
-
-    add_separator(content, 24, 808, width - 48)
-    add_label(content, "Transcript Monitoring", 24, 774, 240, 24)
-    add_label(content, "Open Sessions With", 352, 774, 240, 24)
-    codex_transcripts = add_checkbox(
-        content,
-        "CLI fallback: Codex transcripts",
-        32,
-        740,
-        260,
-        24,
-        target,
-        "toggleCodexTranscripts:",
-    )
-    claude_transcripts = add_checkbox(
-        content,
-        "CLI fallback: Claude transcripts",
-        32,
-        708,
-        260,
-        24,
-        target,
-        "toggleClaudeTranscripts:",
-    )
-    provider_openers = {}
-    for index, provider in enumerate(provider_session_opener_providers()):
-        y = 746 - index * 28
-        add_label(content, provider_spec(provider).label, 360, y + 2, 62, 22)
-        provider_openers[provider] = add_provider_opener_popup(content, provider, 424, y, target)
-
-    add_separator(content, 24, 660, width - 48)
-    add_label(content, "Debug Log", 24, 622, 240, 24)
-    debug_log_status = add_label(content, "", 32, 592, 606, 22)
-    add_button(content, "Export CSV", 32, 554, 110, 28, target, "exportDebugCsv:")
-    add_button(content, "Export HTML", 152, 554, 120, 28, target, "exportDebugHtml:")
-
-    add_separator(content, 24, 534, width - 48)
-    add_label(content, "LED Display", 24, 500, 240, 24)
-    battery_leds = add_checkbox(
-        content,
-        "Show battery on LEDs",
-        32,
-        466,
-        260,
-        24,
-        target,
-        "setBatteryLedDisplayFromCheckbox:",
-    )
-    battery_power_preview = add_checkbox(
-        content,
-        "Show battery for 7s on plug/unplug",
-        32,
-        434,
-        320,
-        24,
-        target,
-        "setBatteryPowerPreviewFromCheckbox:",
+    NSLayoutConstraint.activateConstraints_(
+        [
+            split.topAnchor().constraintEqualToAnchor_(root.topAnchor()),
+            split.leadingAnchor().constraintEqualToAnchor_(root.leadingAnchor()),
+            split.trailingAnchor().constraintEqualToAnchor_(root.trailingAnchor()),
+            split.bottomAnchor().constraintEqualToAnchor_constant_(footer.topAnchor(), -8.0),
+            footer.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 16.0),
+            footer.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -16.0),
+            footer.bottomAnchor().constraintEqualToAnchor_constant_(root.bottomAnchor(), -10.0),
+        ]
     )
 
-    add_separator(content, 24, 414, width - 48)
-    add_label(content, "Lid & Sleep", 24, 380, 240, 24)
-    add_label(content, "Lid Closed", 32, 346, 120, 22)
-    add_label(content, "Duration", 520, 346, 70, 22)
-    closed_duration = add_editable_field(content, "", 590, 344, 48, 24)
-    closed_program = add_text_view(content, "", 32, 254, 606, 82)
-    add_button(content, "Preview", 32, 216, 90, 28, target, "previewLidClosedAnimation:")
-    add_button(content, "Reset", 132, 216, 90, 28, target, "resetLidClosedAnimation:")
+    devices_pane, device_controls = _build_devices_pane(target)
+    colors_pane, colors_fields, colors_buttons = _build_colors_screen_bar_pane(target)
+    closed_lid_pane, closed_lid_fields = _build_closed_lid_pane(target)
+    led_behavior_pane, led_behavior_fields, led_behavior_buttons = _build_led_behavior_pane(target)
+    hooks_pane, hooks_fields = _build_hooks_pane(target)
+    sessions_pane, sessions_fields, sessions_buttons = _build_sessions_pane(target)
+    battery_pane, battery_buttons = _build_battery_pane(target)
+    lid_animations_pane, lid_animations_fields = _build_lid_animations_pane(target)
+    debug_pane, debug_fields = _build_debug_pane(target)
 
-    add_label(content, "Lid Open", 32, 180, 120, 22)
-    add_label(content, "Duration", 520, 180, 70, 22)
-    open_duration = add_editable_field(content, "", 590, 178, 48, 24)
-    open_program = add_text_view(content, "", 32, 88, 606, 82)
-    add_button(content, "Preview", 32, 50, 90, 28, target, "previewLidOpenAnimation:")
-    add_button(content, "Reset", 132, 50, 90, 28, target, "resetLidOpenAnimation:")
-    add_button(content, "Save Animations", 492, 50, 146, 28, target, "saveLidAnimations:")
+    panes = {
+        "devices": devices_pane,
+        "colors_screen_bar": colors_pane,
+        "closed_lid": closed_lid_pane,
+        "led_behavior": led_behavior_pane,
+        "hooks": hooks_pane,
+        "sessions": sessions_pane,
+        "battery": battery_pane,
+        "lid_animations": lid_animations_pane,
+        "debug": debug_pane,
+    }
+    for key, pane in panes.items():
+        content_container.addSubview_(pane)
+        NSLayoutConstraint.activateConstraints_(
+            [
+                pane.topAnchor().constraintEqualToAnchor_(content_container.topAnchor()),
+                pane.leadingAnchor().constraintEqualToAnchor_(content_container.leadingAnchor()),
+                pane.trailingAnchor().constraintEqualToAnchor_(content_container.trailingAnchor()),
+                pane.bottomAnchor().constraintEqualToAnchor_(content_container.bottomAnchor()),
+            ]
+        )
+        pane.setHidden_(key != SETTINGS_SIDEBAR_ITEMS[0][0])
 
-    message = add_label(content, "", 24, 22, width - 48, 22)
-    settings_path = add_label(content, "", 24, 4, width - 48, 18)
+    target.settings_sidebar_table = sidebar_table
+    target.settings_panes = panes
 
     target.settings_fields = {
-        **{f"{provider}_hook_status": status for provider, status in hook_statuses.items()},
-        "debug_log_status": debug_log_status,
-        **{f"{provider}_session_opener": popup for provider, popup in provider_openers.items()},
-        "closed_animation_program": closed_program,
-        "closed_animation_duration": closed_duration,
-        "open_animation_program": open_program,
-        "open_animation_duration": open_duration,
+        **hooks_fields,
+        **sessions_fields,
+        **lid_animations_fields,
+        **debug_fields,
+        **colors_fields,
+        **closed_lid_fields,
+        **led_behavior_fields,
         "message": message,
         "settings_path": settings_path,
-        "alcove_compat_popup": alcove_popup,
-        "closed_lid_awake_policy_popup": closed_lid_policy_popup,
-        "closed_lid_grace_field": closed_lid_grace_field,
-        "idle_dim_minutes_field": idle_dim_minutes_field,
-        "idle_dim_fraction_field": idle_dim_fraction_field,
     }
     target.settings_buttons = {
-        "codex_transcripts": codex_transcripts,
-        "claude_transcripts": claude_transcripts,
-        "battery_leds": battery_leds,
-        "battery_power_preview": battery_power_preview,
-        "screen_bar_wraps_menu_bar": wraps_menu_bar_checkbox,
-        "idle_dim_enabled": idle_dim_checkbox,
-        "focus_sync_enabled": focus_sync_checkbox,
+        **sessions_buttons,
+        **battery_buttons,
+        **colors_buttons,
+        **led_behavior_buttons,
     }
     target.device_settings_controls = device_controls
     return window
@@ -3366,26 +3552,44 @@ COLOR_SWATCH_GAP = 8
 COLOR_ROW_HEIGHT = 40
 
 
+def _build_agent_or_mode_color_row(
+    row_key: tuple[str, str],
+    row_label: str,
+    current: str,
+    palette: tuple[str, ...],
+    target,
+    swatch_selector: str,
+    swatch_represented: dict,
+    custom_selector: str,
+    custom_represented: dict,
+    swatches: dict,
+    hex_labels: dict,
+):
+    """One "label ... [swatch swatch swatch ... + hex] " row shared by the
+    Agent Colors and Mode Colors cards. The swatch strip is a fixed-size
+    area (see native_ui.make_fixed_area) holding frame-positioned swatch
+    buttons -- a palette grid is inherently a custom-drawn strip, not a
+    column of stock controls, so this is the sanctioned escape hatch from
+    Auto Layout rather than a rewrite of add_color_swatch/
+    add_custom_color_swatch themselves."""
+    width = len(palette) * (COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP) + COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP + 80
+    container = native_ui.make_fixed_area(width, 24.0)
+    x = 0
+    for palette_hex in palette:
+        button = add_color_swatch(
+            container, palette_hex, x, 1, target, swatch_selector, {**swatch_represented, "hex": palette_hex}
+        )
+        set_swatch_selected(button, palette_hex.upper() == current.upper())
+        swatches[(row_key, palette_hex)] = button
+        x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
+    add_custom_color_swatch(container, x, 1, target, custom_selector, custom_represented)
+    x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
+    hex_labels[row_key] = add_label(container, current, x, 3, 80, 18)
+    return native_ui.make_row(row_label, container)
+
+
 def build_colors_window(target: StatusBarController) -> NSWindow:
-    width = 620
-    provider_count = len(PROVIDER_SPECS)
-    mode_count = len(MODE_COLOR_KEYS)
-    # Preview strip + Agent/Mode/Fade sections (COLOR_ROW_HEIGHT per row)
-    # + headers/separators/bottom bar. This is the full absolute-positioned
-    # document height: fixed_layout_height is every non-row-loop
-    # y-decrement in this function summed up (plus a safety margin), and
-    # each *_count term accounts for one COLOR_ROW_HEIGHT-tall row per item
-    # in that section's loop below. It grows automatically as providers are
-    # added, so the window scrolls (rather than clipping) once it no longer
-    # fits on screen. If you add/remove a row below, update this sum to
-    # match, or the bottom bar can end up unreachable (as build_settings_
-    # window's fixed, unscrollable height once did).
-    fixed_layout_height = 836
-    doc_height = (
-        fixed_layout_height
-        + (provider_count + mode_count + len(FADE_MODE_KEYS) + len(ANIMATION_MODE_KEYS)) * COLOR_ROW_HEIGHT
-    )
-    visible_height = min(doc_height, 760)
+    width, height = 640, 700
     style = (
         NSWindowStyleMaskTitled
         | NSWindowStyleMaskClosable
@@ -3393,211 +3597,233 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
         | NSWindowStyleMaskResizable
     )
     window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-        ((0, 0), (width, visible_height)),
-        style,
-        NSBackingStoreBuffered,
-        False,
+        ((0, 0), (width, height)), style, NSBackingStoreBuffered, False,
     )
     window.setTitle_("SidePulse Colors")
     window.setReleasedWhenClosed_(False)
-    window.setMinSize_((width, 360))
+    window.setMinSize_((560, 420))
     window.center()
 
-    scroll_view = NSScrollView.alloc().initWithFrame_(((0, 0), (width, visible_height)))
-    scroll_view.setHasVerticalScroller_(True)
-    scroll_view.setHasHorizontalScroller_(False)
-    scroll_view.setAutohidesScrollers_(True)
-    scroll_view.setDrawsBackground_(False)
-    try:
-        scroll_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
-    except Exception:
-        pass
+    root = NSView.alloc().init()
+    window.setContentView_(root)
+    # A window whose entire content view hierarchy is pure Auto Layout
+    # (true here, unlike the Settings window's NSSplitView, which imposes
+    # a real frame on its children outside the constraint solver) fits
+    # its own size to that content's computed fitting size -- and for a
+    # scroll view with nothing else bounding it, that "fit" is its full,
+    # unscrolled document size: a several-thousand-point-tall window
+    # instead of one that scrolls. Giving root an explicit, required size
+    # here breaks that pull; anything below still just scrolls normally.
+    root.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    root.widthAnchor().constraintGreaterThanOrEqualToConstant_(width).setActive_(True)
+    root.heightAnchor().constraintEqualToConstant_(height).setActive_(True)
 
-    content = NSView.alloc().initWithFrame_(((0, 0), (width, doc_height)))
-    scroll_view.setDocumentView_(content)
-    window.setContentView_(scroll_view)
-    height = doc_height
+    # Live Preview stays pinned at the top, outside the scroll area -- it's
+    # a continuous creative-feedback tool you check while adjusting colors
+    # below, not a "setting" you visit once and move past.
+    preview_outer, preview_inner = native_ui.make_card("Live Preview")
+    root.addSubview_(preview_outer)
 
-    y = height - 40
-    add_label(content, "Live Preview", 24, y, 240, 24)
-    y -= 28
-    add_label(content, "Scenario", 32, y, 90, 22)
-    preview_scenario_popup = add_preview_scenario_popup(content, 140, y - 4, target)
-    y -= 30
+    preview_scenario_popup = make_preview_scenario_popup(target)
+    preview_inner.addArrangedSubview_(native_ui.make_row("Scenario", preview_scenario_popup))
+
     preview_rows: list[dict[str, object]] = []
     for led_count, device_label in ((2, "SidePulse Dot (2 LEDs)"), (8, "SidePulse Pro (8 LEDs)")):
-        add_label(content, device_label, 32, y, 300, 20)
-        dot_y = y - 26
+        device_stack = native_ui.make_stack(orientation="vertical", spacing=6.0)
+        device_stack.addArrangedSubview_(native_ui.make_label(device_label, size=13.0))
+        dots_width = led_count * (COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP) - COLOR_SWATCH_GAP
+        dots_container = native_ui.make_fixed_area(dots_width, COLOR_SWATCH_SIZE)
         dots = []
-        dot_x = 32
+        dot_x = 0
         for _index in range(led_count):
-            dots.append(add_preview_dot(content, dot_x, dot_y))
+            dots.append(add_preview_dot(dots_container, dot_x, 0))
             dot_x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
-        legend = add_label(content, "", 32, dot_y - 20, width - 64, 16)
+        device_stack.addArrangedSubview_(dots_container)
+        legend = native_ui.make_label("", secondary=True, size=11.0)
+        device_stack.addArrangedSubview_(legend)
+        preview_inner.addArrangedSubview_(device_stack)
         preview_rows.append({"led_count": led_count, "dots": dots, "legend": legend})
-        y = dot_y - 42
 
-    add_label(content, "Blend Mode", 32, y, 100, 22)
-    blend_popup = add_blend_mode_popup(content, 140, y - 4, target)
-    y -= 22
-    blend_description = add_label(content, "", 32, y, width - 64, 16)
-    y -= 24
+    # Everything else scrolls independently below the pinned preview.
+    scroll_stack = native_ui.make_stack(orientation="vertical", spacing=16.0)
 
-    urgency_alert_checkbox = add_checkbox(
-        content, "Alert when blocked or waiting", 32, y, width - 64, 22, target, "toggleUrgencyAlert:",
+    behavior_outer, behavior_inner = native_ui.make_card("Blend Mode & Behavior")
+    blend_popup = make_blend_mode_popup(target)
+    behavior_inner.addArrangedSubview_(native_ui.make_row("Blend Mode", blend_popup))
+    blend_description = native_ui.make_label("", secondary=True, size=12.0)
+    behavior_inner.addArrangedSubview_(blend_description)
+    urgency_alert_checkbox = native_ui.make_checkbox(
+        "Alert when blocked or waiting",
+        target,
+        "toggleUrgencyAlert:",
+        help_text=(
+            "In Round-Robin/Cycle, a blocked or waiting agent shows the Ask "
+            "color instead of its own, so it stands out."
+        ),
     )
-    urgency_alert_checkbox.setToolTip_(
-        "In Round-Robin/Cycle, a blocked or waiting agent shows the Ask color "
-        "instead of its own, so it stands out."
+    behavior_inner.addArrangedSubview_(urgency_alert_checkbox)
+    done_celebration_checkbox = native_ui.make_checkbox(
+        "Celebrate when finished",
+        target,
+        "toggleDoneCelebration:",
+        help_text="A brief twinkle plays before settling into the Done color.",
     )
-    y -= 30
+    behavior_inner.addArrangedSubview_(done_celebration_checkbox)
+    native_ui.add_separator(behavior_inner)
 
-    done_celebration_checkbox = add_checkbox(
-        content, "Celebrate when finished", 32, y, width - 64, 22, target, "toggleDoneCelebration:",
+    speed_field = native_ui.make_field("")
+    native_ui.constrain_width(speed_field, 56.0)
+    speed_controls = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    speed_controls.addArrangedSubview_(speed_field)
+    speed_controls.addArrangedSubview_(native_ui.make_label("sec/breath", secondary=True))
+    speed_controls.addArrangedSubview_(native_ui.make_button("Apply", target, "applyCycleSpeed:"))
+    behavior_inner.addArrangedSubview_(native_ui.make_row("Global Speed", speed_controls))
+
+    round_robin_use_global = native_ui.make_checkbox(
+        "Round-Robin: use global", target, "toggleRoundRobinUseGlobalSpeed:"
     )
-    done_celebration_checkbox.setToolTip_("A brief twinkle plays before settling into the Done color.")
-    y -= 34
+    round_robin_speed_field = native_ui.make_field("")
+    native_ui.constrain_width(round_robin_speed_field, 56.0)
+    round_robin_row = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    round_robin_row.addArrangedSubview_(round_robin_use_global)
+    round_robin_row.addArrangedSubview_(round_robin_speed_field)
+    round_robin_row.addArrangedSubview_(native_ui.make_button("Apply", target, "applyRoundRobinSpeed:"))
+    behavior_inner.addArrangedSubview_(round_robin_row)
 
-    add_label(content, "Global Speed", 32, y + 3, 100, 18)
-    speed_field = add_editable_field(content, "", 140, y, 56, 24)
-    add_label(content, "sec/breath", 200, y + 3, 90, 18)
-    add_button(content, "Apply", 300, y, 70, 26, target, "applyCycleSpeed:")
-    y -= 36
+    cycle_use_global = native_ui.make_checkbox("Cycle: use global", target, "toggleCycleUseGlobalSpeed:")
+    cycle_speed_field = native_ui.make_field("")
+    native_ui.constrain_width(cycle_speed_field, 56.0)
+    cycle_row = native_ui.make_stack(orientation="horizontal", spacing=8.0)
+    cycle_row.addArrangedSubview_(cycle_use_global)
+    cycle_row.addArrangedSubview_(cycle_speed_field)
+    cycle_row.addArrangedSubview_(native_ui.make_button("Apply", target, "applyCycleModeSpeed:"))
+    behavior_inner.addArrangedSubview_(cycle_row)
+    scroll_stack.addArrangedSubview_(behavior_outer)
+    native_ui.stretch_to_stack_width(scroll_stack, behavior_outer)
 
-    round_robin_use_global = add_checkbox(
-        content, "Round-Robin: use global", 32, y, 170, 22, target, "toggleRoundRobinUseGlobalSpeed:"
-    )
-    round_robin_speed_field = add_editable_field(content, "", 210, y, 56, 24)
-    add_button(content, "Apply", 274, y, 70, 26, target, "applyRoundRobinSpeed:")
-    y -= 36
-
-    cycle_use_global = add_checkbox(
-        content, "Cycle: use global", 32, y, 170, 22, target, "toggleCycleUseGlobalSpeed:"
-    )
-    cycle_speed_field = add_editable_field(content, "", 210, y, 56, 24)
-    add_button(content, "Apply", 274, y, 70, 26, target, "applyCycleModeSpeed:")
-    y -= 40
-
-    add_separator(content, 24, y, width - 48)
-    y -= 30
-
-    add_label(content, "Agent Colors", 24, y, 240, 24)
-    y -= 34
     swatches: dict[tuple[tuple[str, str], str], object] = {}
     hex_labels: dict[tuple[str, str], object] = {}
+
+    agent_outer, agent_inner = native_ui.make_card("Agent Colors")
     for spec in PROVIDER_SPECS:
-        row_key = ("agent", spec.provider)
-        add_label(content, spec.label, 32, y + 6, 90, 20)
         current = target.settings.colors.agent_color(spec.provider)
-        x = 130
-        for palette_hex in CURATED_PALETTE:
-            button = add_color_swatch(
-                content,
-                palette_hex,
-                x,
-                y,
+        agent_inner.addArrangedSubview_(
+            _build_agent_or_mode_color_row(
+                ("agent", spec.provider),
+                spec.label,
+                current,
+                CURATED_PALETTE,
                 target,
                 "selectAgentColorSwatch:",
-                {"provider": spec.provider, "hex": palette_hex},
+                {"provider": spec.provider},
+                "openCustomAgentColor:",
+                {"provider": spec.provider},
+                swatches,
+                hex_labels,
             )
-            set_swatch_selected(button, palette_hex.upper() == current.upper())
-            swatches[(row_key, palette_hex)] = button
-            x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
-        add_custom_color_swatch(
-            content, x, y, target, "openCustomAgentColor:", {"provider": spec.provider}
         )
-        x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
-        hex_label = add_label(content, current, x, y + 2, 80, 18)
-        hex_labels[row_key] = hex_label
-        y -= COLOR_ROW_HEIGHT
+    scroll_stack.addArrangedSubview_(agent_outer)
+    native_ui.stretch_to_stack_width(scroll_stack, agent_outer)
 
-    add_separator(content, 24, y, width - 48)
-    y -= 30
-
-    add_label(content, "Mode Colors", 24, y, 300, 24)
-    y -= 34
+    mode_outer, mode_inner = native_ui.make_card("Mode Colors")
     for key in MODE_COLOR_KEYS:
-        row_key = ("mode", key)
-        add_label(content, MODE_COLOR_DISPLAY_LABELS[key], 32, y + 6, 150, 20)
         current = target.settings.colors.mode_color(key)
-        x = 190
-        for palette_hex in CURATED_PALETTE[:6]:
-            button = add_color_swatch(
-                content,
-                palette_hex,
-                x,
-                y,
+        mode_inner.addArrangedSubview_(
+            _build_agent_or_mode_color_row(
+                ("mode", key),
+                MODE_COLOR_DISPLAY_LABELS[key],
+                current,
+                CURATED_PALETTE[:6],
                 target,
                 "selectModeColorSwatch:",
-                {"key": key, "hex": palette_hex},
+                {"key": key},
+                "openCustomModeColor:",
+                {"key": key},
+                swatches,
+                hex_labels,
             )
-            set_swatch_selected(button, palette_hex.upper() == current.upper())
-            swatches[(row_key, palette_hex)] = button
-            x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
-        add_custom_color_swatch(
-            content, x, y, target, "openCustomModeColor:", {"key": key}
         )
-        x += COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP
-        hex_label = add_label(content, current, x, y + 2, 80, 18)
-        hex_labels[row_key] = hex_label
-        y -= COLOR_ROW_HEIGHT
+    scroll_stack.addArrangedSubview_(mode_outer)
+    native_ui.stretch_to_stack_width(scroll_stack, mode_outer)
 
-    add_separator(content, 24, y, width - 48)
-    y -= 30
-
-    add_label(content, "Animation Style", 24, y, 300, 24)
-    y -= 34
+    anim_outer, anim_inner = native_ui.make_card("Animation Style")
     animation_popups: dict[str, object] = {}
     for key in ANIMATION_MODE_KEYS:
-        add_label(content, MODE_COLOR_DISPLAY_LABELS[key], 32, y + 3, 150, 20)
-        popup = add_animation_style_popup(content, 190, y - 2, target, key)
+        popup = make_animation_style_popup(target, key)
         select_animation_style(popup, target.settings.colors.animation_style(key))
         animation_popups[key] = popup
-        y -= COLOR_ROW_HEIGHT
+        anim_inner.addArrangedSubview_(native_ui.make_row(MODE_COLOR_DISPLAY_LABELS[key], popup))
+    scroll_stack.addArrangedSubview_(anim_outer)
+    native_ui.stretch_to_stack_width(scroll_stack, anim_outer)
 
-    add_separator(content, 24, y, width - 48)
-    y -= 30
-
-    add_label(
-        content,
-        "Fade Intensity",
-        24,
-        y,
-        300,
-        24,
+    fade_outer, fade_inner = native_ui.make_card("Fade Intensity")
+    fade_inner.addArrangedSubview_(
+        native_ui.make_label(
+            "How far each pulsing mode dims down and brightens up, as % of its color",
+            secondary=True,
+            size=11.0,
+        )
     )
-    y -= 20
-    add_label(
-        content,
-        "How far each pulsing mode dims down and brightens up, as % of its color",
-        32,
-        y,
-        width - 64,
-        16,
-    )
-    y -= 28
-    add_label(content, "Mode", 32, y, 90, 18)
-    add_label(content, "Floor %", 190, y, 70, 18)
-    add_label(content, "Ceiling %", 300, y, 70, 18)
-    y -= 26
     fade_fields: dict[str, dict[str, object]] = {}
     for key in FADE_MODE_KEYS:
         floor, ceiling = target.settings.colors.fade_range(key)
-        add_label(content, MODE_COLOR_DISPLAY_LABELS[key], 32, y + 3, 150, 20)
-        floor_field = add_editable_field(content, f"{round(floor * 100)}", 190, y, 60, 24)
-        add_label(content, "%", 254, y + 3, 14, 18)
-        ceiling_field = add_editable_field(content, f"{round(ceiling * 100)}", 300, y, 60, 24)
-        add_label(content, "%", 364, y + 3, 14, 18)
+        controls = native_ui.make_stack(orientation="horizontal", spacing=6.0)
+        controls.addArrangedSubview_(native_ui.make_label("Floor", secondary=True, size=11.0))
+        floor_field = native_ui.make_field(f"{round(floor * 100)}")
+        native_ui.constrain_width(floor_field, 48.0)
+        controls.addArrangedSubview_(floor_field)
+        controls.addArrangedSubview_(native_ui.make_label("%", secondary=True, size=11.0))
+        controls.addArrangedSubview_(native_ui.make_label("Ceiling", secondary=True, size=11.0))
+        ceiling_field = native_ui.make_field(f"{round(ceiling * 100)}")
+        native_ui.constrain_width(ceiling_field, 48.0)
+        controls.addArrangedSubview_(ceiling_field)
+        controls.addArrangedSubview_(native_ui.make_label("%", secondary=True, size=11.0))
         fade_fields[key] = {"floor": floor_field, "ceiling": ceiling_field}
-        y -= COLOR_ROW_HEIGHT
-    add_button(content, "Apply Fade Intensity", 32, y, 180, 28, target, "applyFadeIntensity:")
-    y -= COLOR_ROW_HEIGHT
+        fade_inner.addArrangedSubview_(native_ui.make_row(MODE_COLOR_DISPLAY_LABELS[key], controls))
+    fade_inner.addArrangedSubview_(native_ui.make_button("Apply Fade Intensity", target, "applyFadeIntensity:"))
+    scroll_stack.addArrangedSubview_(fade_outer)
+    native_ui.stretch_to_stack_width(scroll_stack, fade_outer)
 
-    add_button(content, "Reset to Defaults", 24, y, 160, 28, target, "resetColorsToDefaults:")
-    live_toggle = add_checkbox(
-        content, "Preview live on device", 200, y + 4, 220, 24, target, "toggleColorPreviewLive:"
+    scroll_pane = native_ui.wrap_in_scroll_pane(scroll_stack)
+    root.addSubview_(scroll_pane)
+
+    # Reset/Preview-live/Done stay pinned at the bottom too, matching every
+    # native macOS dialog's own convention of action buttons that don't
+    # scroll away with the content above them.
+    footer = NSView.alloc().init()
+    footer.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    footer_left = native_ui.make_stack(orientation="horizontal", spacing=12.0)
+    footer_left.addArrangedSubview_(native_ui.make_button("Reset to Defaults", target, "resetColorsToDefaults:"))
+    live_toggle = native_ui.make_checkbox("Preview live on device", target, "toggleColorPreviewLive:")
+    footer_left.addArrangedSubview_(live_toggle)
+    done_button = native_ui.make_button("Done", target, "closeColorsWindow:")
+    footer.addSubview_(footer_left)
+    footer.addSubview_(done_button)
+    NSLayoutConstraint.activateConstraints_(
+        [
+            footer_left.leadingAnchor().constraintEqualToAnchor_(footer.leadingAnchor()),
+            footer_left.centerYAnchor().constraintEqualToAnchor_(footer.centerYAnchor()),
+            done_button.trailingAnchor().constraintEqualToAnchor_(footer.trailingAnchor()),
+            done_button.centerYAnchor().constraintEqualToAnchor_(footer.centerYAnchor()),
+            footer.heightAnchor().constraintGreaterThanOrEqualToConstant_(28.0),
+        ]
     )
-    add_button(content, "Done", width - 100, y, 76, 28, target, "closeColorsWindow:")
+    root.addSubview_(footer)
+
+    NSLayoutConstraint.activateConstraints_(
+        [
+            preview_outer.topAnchor().constraintEqualToAnchor_constant_(root.topAnchor(), 16.0),
+            preview_outer.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 16.0),
+            preview_outer.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -16.0),
+            scroll_pane.topAnchor().constraintEqualToAnchor_constant_(preview_outer.bottomAnchor(), 16.0),
+            scroll_pane.leadingAnchor().constraintEqualToAnchor_(root.leadingAnchor()),
+            scroll_pane.trailingAnchor().constraintEqualToAnchor_(root.trailingAnchor()),
+            scroll_pane.bottomAnchor().constraintEqualToAnchor_constant_(footer.topAnchor(), -12.0),
+            footer.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 16.0),
+            footer.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -16.0),
+            footer.bottomAnchor().constraintEqualToAnchor_constant_(root.bottomAnchor(), -14.0),
+        ]
+    )
 
     target.color_swatches = swatches
     target.color_hex_labels = hex_labels
@@ -3718,14 +3944,11 @@ def hex_from_nscolor(nscolor) -> str:
     )
 
 
-def add_blend_mode_popup(parent, x: int, y: int, target):
-    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(((x, y), (240, 26)), False)
-    popup.setTarget_(target)
-    popup.setAction_("setBlendMode:")
+def make_blend_mode_popup(target):
+    popup = native_ui.make_popup_button(target, "setBlendMode:")
     for mode in BLEND_MODE_CHOICES:
         popup.addItemWithTitle_(BLEND_MODE_LABELS[mode])
         popup.lastItem().setRepresentedObject_({"blend_mode": mode})
-    parent.addSubview_(popup)
     return popup
 
 
@@ -3737,14 +3960,11 @@ def select_blend_mode(popup, blend_mode: str) -> None:
             return
 
 
-def add_preview_scenario_popup(parent, x: int, y: int, target):
-    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(((x, y), (300, 26)), False)
-    popup.setTarget_(target)
-    popup.setAction_("setPreviewScenario:")
+def make_preview_scenario_popup(target):
+    popup = native_ui.make_popup_button(target, "setPreviewScenario:")
     for scenario in colors_module.PREVIEW_SCENARIO_CHOICES:
         popup.addItemWithTitle_(colors_module.PREVIEW_SCENARIO_LABELS[scenario])
         popup.lastItem().setRepresentedObject_({"scenario": scenario})
-    parent.addSubview_(popup)
     return popup
 
 
@@ -3764,14 +3984,11 @@ ANIMATION_STYLE_DISPLAY_LABELS: dict[str, str] = {
 }
 
 
-def add_animation_style_popup(parent, x: int, y: int, target, mode_key: str):
-    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(((x, y), (220, 26)), False)
-    popup.setTarget_(target)
-    popup.setAction_("setAnimationStyle:")
+def make_animation_style_popup(target, mode_key: str):
+    popup = native_ui.make_popup_button(target, "setAnimationStyle:")
     for style in ANIMATION_STYLE_CHOICES:
         popup.addItemWithTitle_(ANIMATION_STYLE_DISPLAY_LABELS.get(style, style.title()))
         popup.lastItem().setRepresentedObject_({"mode_key": mode_key, "style": style})
-    parent.addSubview_(popup)
     return popup
 
 
@@ -3783,10 +4000,8 @@ def select_animation_style(popup, style: str) -> None:
             return
 
 
-def add_alcove_compat_popup(parent, x: int, y: int, target):
-    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(((x, y), (140, 26)), False)
-    popup.setTarget_(target)
-    popup.setAction_("setAlcoveCompatibilityMode:")
+def make_alcove_compat_popup(target):
+    popup = native_ui.make_popup_button(target, "setAlcoveCompatibilityMode:")
     labels = {
         ALCOVE_COMPAT_AUTO: "Auto",
         ALCOVE_COMPAT_ALWAYS: "Always",
@@ -3795,7 +4010,6 @@ def add_alcove_compat_popup(parent, x: int, y: int, target):
     for mode in ALCOVE_COMPAT_CHOICES:
         popup.addItemWithTitle_(labels[mode])
         popup.lastItem().setRepresentedObject_({"alcove_mode": mode})
-    parent.addSubview_(popup)
     return popup
 
 
@@ -3807,20 +4021,17 @@ def select_alcove_compat_mode(popup, mode: str) -> None:
             return
 
 
-def add_closed_lid_awake_policy_popup(parent, x: int, y: int, target):
+def make_closed_lid_awake_policy_popup(target):
     """A Settings-window popup for the same policy the status-bar menu's
     build_closed_lid_awake_policy_item radio-style items control -- a
     separate control (not reused menu items) since it lives in a
     completely different part of the UI, but both write the same
     settings.closed_lid_awake_policy and take effect immediately either
     way."""
-    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(((x, y), (200, 26)), False)
-    popup.setTarget_(target)
-    popup.setAction_("setClosedLidAwakePolicyFromPopup:")
+    popup = native_ui.make_popup_button(target, "setClosedLidAwakePolicyFromPopup:")
     for policy in CLOSED_LID_AWAKE_CHOICES:
         popup.addItemWithTitle_(CLOSED_LID_AWAKE_LABELS[policy])
         popup.lastItem().setRepresentedObject_({"policy": policy})
-    parent.addSubview_(popup)
     return popup
 
 
@@ -3939,18 +4150,13 @@ def add_checkbox(
     return checkbox
 
 
-def add_provider_opener_popup(parent, provider: str, x: int, y: int, target):
-    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-        ((x, y), (180, 26)), False
-    )
-    popup.setTarget_(target)
-    popup.setAction_("setProviderOpenPreference:")
+def make_provider_opener_popup(provider: str, target):
+    popup = native_ui.make_popup_button(target, "setProviderOpenPreference:")
     for action in provider_open_actions(provider):
         popup.addItemWithTitle_(provider_open_action_label(provider, action))
         popup.lastItem().setRepresentedObject_(
             {"provider": provider, "action": action}
         )
-    parent.addSubview_(popup)
     return popup
 
 
