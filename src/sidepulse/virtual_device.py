@@ -61,6 +61,12 @@ ABOVE_ALCOVE_WINDOW_LEVEL = 2147483630
 # guess a fixed width, wing_width_for_screen() measures the real per-user
 # gap the system itself reports and stays comfortably inside it.
 WING_MAX_WIDTH = 110.0
+# Automatic wings are a TIGHT hug: the risers land just past the notch's
+# own corners and the bar reads as the size of the actual notch. Auto
+# wings at the full 110pt made the bracket twice the notch's width --
+# "nowhere near the correct size". Anyone who wants longer wings has
+# the Wing Length slider (up to 400pt).
+WING_AUTO_LENGTH = 28.0
 WING_SAFETY_MARGIN = 28.0
 WING_MIN_USABLE = 24.0
 # A wing that's just a flat horizontal strip fading sideways reads as a
@@ -144,7 +150,7 @@ def wing_width_for_screen(screen, notch_width: float) -> float:
     room = min(left_room, right_room)
     if room < WING_MIN_USABLE:
         return 0.0
-    return max(0.0, min(WING_MAX_WIDTH, room))
+    return max(0.0, min(WING_AUTO_LENGTH, room))
 
 
 def notch_depth_for_screen(screen) -> float:

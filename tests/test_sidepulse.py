@@ -1269,22 +1269,19 @@ class AgentMonitorTests(unittest.TestCase):
 
         class Screen:
             def auxiliaryTopLeftArea(self):
-                return Area(0.0, 160.0)
+                return Area(0.0, 80.0)
 
             def auxiliaryTopRightArea(self):
-                return Area(360.0, 160.0)
+                return Area(280.0, 80.0)
 
-        # Hardware slot = 360 - 160 = 200pt; each side has 160pt of room.
+        # Hardware slot = 280 - 80 = 200pt; each side has 80pt of room.
         screen = Screen()
         at_notch = virtual_device.wing_width_for_screen(screen, 200.0)
-        widened = virtual_device.wing_width_for_screen(screen, 400.0)
-        self.assertGreater(at_notch, 0.0)
-        # 200pt of widening = 100pt of overhang per side: 160 - 28 - 100
-        # = 32pt of room left, versus 110 (capped) at the notch.
-        self.assertAlmostEqual(widened, 32.0, delta=0.5)
-        self.assertLess(widened, at_notch)
-        # Widen past all the room and the wing collapses to zero.
-        self.assertEqual(virtual_device.wing_width_for_screen(screen, 520.0), 0.0)
+        # Auto wings are the tight bracket hug, never the whole room.
+        self.assertEqual(at_notch, virtual_device.WING_AUTO_LENGTH)
+        # 100pt of widening = 50pt of overhang per side: 80 - 28 - 50
+        # = 2pt of room, below the usable minimum -> no wing at all.
+        self.assertEqual(virtual_device.wing_width_for_screen(screen, 300.0), 0.0)
 
     def test_bracket_identity_color_survives_a_single_lit_led(self) -> None:
         # The Alcove bracket/accent paints ONE identity color -- with a
