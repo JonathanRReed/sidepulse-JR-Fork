@@ -173,6 +173,13 @@ class AgentMonitorSettings:
     # for_screen, which measures the real per-user safe area rather than
     # assuming a fixed amount).
     virtual_status_device_wraps_menu_bar: bool = False
+    # Manual Screen Bar geometry, both None = Automatic. Jonathan's ask,
+    # and the durable answer to notch-adjacent apps (Alcove) whose visual
+    # width changes at runtime, plus future Macs with different notches:
+    # the gap is the treated-as-notch span between the two risers; the
+    # wing length is each horizontal stroke's reach beyond the gap.
+    screen_bar_gap_width: float | None = None
+    screen_bar_wing_length: float | None = None
     # After this many continuous minutes with nothing active (idle), LED
     # brightness scales down by idle_dim_fraction -- a long-idle Mac
     # shouldn't keep a bright light going on the desk. Default on: dimming
@@ -563,6 +570,16 @@ class AgentMonitorSettings:
     def with_focus_sync_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, focus_sync_enabled=bool(enabled))
 
+    def with_screen_bar_gap_width(self, width: float | None) -> "AgentMonitorSettings":
+        if width is not None:
+            width = max(120.0, min(1200.0, float(width)))
+        return replace(self, screen_bar_gap_width=width)
+
+    def with_screen_bar_wing_length(self, length: float | None) -> "AgentMonitorSettings":
+        if length is not None:
+            length = max(0.0, min(400.0, float(length)))
+        return replace(self, screen_bar_wing_length=length)
+
     def with_low_battery_alert_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, low_battery_alert_enabled=bool(enabled))
 
@@ -593,6 +610,8 @@ class AgentMonitorSettings:
             "devices": [device.to_dict() for device in self.devices],
             "virtual_status_device_enabled": self.virtual_status_device_enabled,
             "virtual_status_device_wraps_menu_bar": self.virtual_status_device_wraps_menu_bar,
+            "screen_bar_gap_width": self.screen_bar_gap_width,
+            "screen_bar_wing_length": self.screen_bar_wing_length,
             "closed_lid_awake_policy": self.closed_lid_awake_policy,
             "closed_lid_system_override_enabled": self.closed_lid_system_override_enabled,
             "closed_lid_grace_minutes": self.closed_lid_grace_minutes,
@@ -633,6 +652,13 @@ def default_config_dir(home: Path | None = None) -> Path:
 
 def default_settings_path(home: Path | None = None) -> Path:
     return default_config_dir(home) / "settings.json"
+
+
+def _optional_dimension(raw: object, minimum: float, maximum: float) -> float | None:
+    """None means Automatic; a number is clamped to a sane range."""
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return max(minimum, min(maximum, float(raw)))
+    return None
 
 
 def _focus_dim_rules(raw: object) -> dict[str, float]:
@@ -682,6 +708,8 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         virtual_status_device_wraps_menu_bar=_bool_setting(
             data.get("virtual_status_device_wraps_menu_bar"), False
         ),
+        screen_bar_gap_width=_optional_dimension(data.get("screen_bar_gap_width"), 120.0, 1200.0),
+        screen_bar_wing_length=_optional_dimension(data.get("screen_bar_wing_length"), 0.0, 400.0),
         closed_lid_awake_policy=_closed_lid_awake_policy(
             data.get("closed_lid_awake_policy"),
         ),

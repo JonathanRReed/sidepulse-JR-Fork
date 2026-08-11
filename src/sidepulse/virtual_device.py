@@ -155,14 +155,29 @@ def window_height_for_notch_depth(notch_depth: float) -> float:
     return max(0.0, float(notch_depth)) + LED_BAND_HEIGHT
 
 
-def virtual_window_frame_for_screen(screen, *, wrap_menu_bar: bool = False):
+def virtual_window_frame_for_screen(
+    screen,
+    *,
+    wrap_menu_bar: bool = False,
+    gap_width: float | None = None,
+    wing_length: float | None = None,
+):
     """The Screen Bar window's full frame. With ``wrap_menu_bar`` on, the
     window widens symmetrically to include room for the wing glow on each
-    side (see wing_width_for_screen) -- the window stays centered on the
-    notch either way, since the added width is equal on both sides."""
+    side -- centered on the notch either way. ``gap_width`` and
+    ``wing_length`` are the user's manual geometry (None = Automatic):
+    the durable answer to notch companions like Alcove whose visual
+    width changes at runtime, and to future Macs with different notches.
+    """
     frame = screen.frame()
-    notch_width = slot_width_for_screen(screen)
-    wing = wing_width_for_screen(screen, notch_width) if wrap_menu_bar else 0.0
+    notch_width = float(gap_width) if gap_width else slot_width_for_screen(screen)
+    if wrap_menu_bar:
+        wing = float(wing_length) if wing_length is not None else wing_width_for_screen(screen, notch_width)
+    else:
+        wing = 0.0
+    # Never wider than the screen itself, whatever the user typed.
+    notch_width = min(notch_width, frame.size.width - 8.0)
+    wing = min(wing, max(0.0, (frame.size.width - notch_width) / 2.0 - 4.0))
     width = notch_width + 2.0 * wing
     height = window_height_for_notch_depth(notch_depth_for_screen(screen))
     x = frame.origin.x + (frame.size.width - width) / 2.0
@@ -764,6 +779,12 @@ class VirtualStatusDevice(NSObject):
     def set_wraps_menu_bar(self, enabled: bool) -> None:
         self.wraps_menu_bar = bool(enabled)
 
+    def set_geometry_overrides(self, gap_width: float | None, wing_length: float | None) -> None:
+        """The user's manual bar geometry (None = Automatic) -- see
+        virtual_window_frame_for_screen."""
+        self.gap_width_override = gap_width
+        self.wing_length_override = wing_length
+
     def show(self):
         if self.window is None:
             self._build_window()
@@ -818,7 +839,14 @@ class VirtualStatusDevice(NSObject):
             wings_only = True
             compact = False
 
-        window_frame = virtual_window_frame_for_screen(screen, wrap_menu_bar=self.wraps_menu_bar)
+        gap_override = getattr(self, "gap_width_override", None)
+        wing_override = getattr(self, "wing_length_override", None)
+        window_frame = virtual_window_frame_for_screen(
+            screen,
+            wrap_menu_bar=self.wraps_menu_bar,
+            gap_width=gap_override,
+            wing_length=wing_override,
+        )
         self.window.setFrame_display_(window_frame, True)
         self.window.setLevel_(ABOVE_ALCOVE_WINDOW_LEVEL if wings_only else STATUS_WINDOW_LEVEL)
         if self.view is not None:
@@ -826,7 +854,10 @@ class VirtualStatusDevice(NSObject):
             self.view.setCompactMode_(compact)
             self.view.setWingsOnlyMode_(wings_only)
             self.view.setFrame_(((0, 0), window_frame[1]))
-            notch_width = slot_width_for_screen(screen) if self.wraps_menu_bar else None
+            if self.wraps_menu_bar:
+                notch_width = float(gap_override) if gap_override else slot_width_for_screen(screen)
+            else:
+                notch_width = None
             self.view.setNotchWidth_(notch_width)
 
     def _build_window(self):

@@ -40,6 +40,7 @@ try:
         NSPopoverBehaviorTransient,
         NSScrollView,
         NSSavePanel,
+        NSScreen,
         NSSlider,
         NSSwitch,
         NSSplitView,
@@ -139,6 +140,8 @@ from .virtual_device import (
     VirtualLedView,
     VirtualStatusDevice,
     monotonic_ms,
+    slot_width_for_screen,
+    wing_width_for_screen,
 )
 from .led_wasm import LedWasmUnavailableError, SdLedWasmController
 from .lid_sleep import (
@@ -1513,6 +1516,39 @@ class StatusBarController(NSObject):
         self.set_settings_message(f"Alcove compatibility: {payload['alcove_mode']}")
 
     @objc.IBAction
+    def setScreenBarGapWidth_(self, sender):
+        self.settings = self.settings.with_screen_bar_gap_width(float(sender.doubleValue()))
+        save_settings(self.settings)
+        self.reposition_virtual_status_device_now()
+        self.set_settings_message(f"Bar gap: {self.settings.screen_bar_gap_width:g} pt.")
+
+    @objc.IBAction
+    def setScreenBarWingLength_(self, sender):
+        self.settings = self.settings.with_screen_bar_wing_length(float(sender.doubleValue()))
+        save_settings(self.settings)
+        self.reposition_virtual_status_device_now()
+        self.set_settings_message(f"Wing length: {self.settings.screen_bar_wing_length:g} pt.")
+
+    @objc.IBAction
+    def resetScreenBarGeometry_(self, _sender):
+        self.settings = self.settings.with_screen_bar_gap_width(None).with_screen_bar_wing_length(None)
+        save_settings(self.settings)
+        self.reposition_virtual_status_device_now()
+        # Snap the sliders back to what Automatic computes right now.
+        try:
+            auto_gap = slot_width_for_screen(NSScreen.mainScreen())
+            auto_wing = wing_width_for_screen(NSScreen.mainScreen(), auto_gap)
+        except Exception:
+            auto_gap, auto_wing = 232.0, 90.0
+        gap_slider = self.settings_fields.get("screen_bar_gap_slider")
+        if gap_slider is not None:
+            gap_slider.setDoubleValue_(float(auto_gap))
+        wing_slider = self.settings_fields.get("screen_bar_wing_slider")
+        if wing_slider is not None:
+            wing_slider.setDoubleValue_(float(auto_wing))
+        self.set_settings_message("Bar size back to Automatic.")
+
+    @objc.IBAction
     def toggleScreenBarWrapsMenuBar_(self, sender):
         enabled = checkbox_is_on(sender)
         self.settings = self.settings.with_virtual_status_device_wraps_menu_bar(enabled)
@@ -1537,6 +1573,9 @@ class StatusBarController(NSObject):
         """
         self.virtual_status_device.set_alcove_compatibility_mode(self.settings.alcove_compatibility_mode)
         self.virtual_status_device.set_wraps_menu_bar(self.settings.virtual_status_device_wraps_menu_bar)
+        self.virtual_status_device.set_geometry_overrides(
+            self.settings.screen_bar_gap_width, self.settings.screen_bar_wing_length
+        )
         self.virtual_status_device.reposition()
 
     def show_setup_window_if_needed(self) -> None:
@@ -1592,6 +1631,19 @@ class StatusBarController(NSObject):
         if eject_uninstall is not None:
             eject_uninstall.setEnabled_(eject_installed)
             eject_uninstall.setHidden_(not eject_installed)
+
+        fda_status = self.setup_fields.get("fda_status")
+        fda_button = self.setup_buttons.get("fda_grant")
+        if fda_status is not None or fda_button is not None:
+            try:
+                focus_sync.configured_focus_modes()
+                fda_granted = True
+            except focus_sync.FocusSyncUnavailableError:
+                fda_granted = False
+            if fda_status is not None:
+                set_field_value(fda_status, "Granted ✓" if fda_granted else "Not granted")
+            if fda_button is not None:
+                fda_button.setHidden_(fda_granted)
 
         # The welcome window's provider rows mirror the Settings Agents
         # pane: one contextual action, honest status.
@@ -2688,6 +2740,9 @@ class StatusBarController(NSObject):
         self.virtual_status_device.set_wraps_menu_bar(
             self.settings.virtual_status_device_wraps_menu_bar
         )
+        self.virtual_status_device.set_geometry_overrides(
+            self.settings.screen_bar_gap_width, self.settings.screen_bar_wing_length
+        )
         device = next(
             (
                 item for item in self.status_bar_devices(remember=False)
@@ -3457,6 +3512,24 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
         "Opens a one-time administrator setup in Terminal.",
     )
     mac_inner.addArrangedSubview_(sleep_row)
+    # Full Disk Access unlocks Focus features (dimming per Focus mode).
+    # It can't be granted programmatically -- the row states the status
+    # and hands the user the Privacy pane.
+    fda_status = native_ui.make_label("", secondary=True, size=12.0)
+    fda_button = native_ui.make_button("Grant…", target, "openFullDiskAccessSettings:")
+    fda_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    fda_cluster.addArrangedSubview_(fda_status)
+    fda_cluster.addArrangedSubview_(fda_button)
+    mac_inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Focus Detection (Full Disk Access)",
+            fda_cluster,
+            help_text=(
+                "Lets SidePulse see which macOS Focus is active, so LEDs can "
+                "dim or turn off per Focus. Details in Settings > LED Behavior."
+            ),
+        )
+    )
     eject_uninstall = native_ui.make_button("Uninstall", target, "uninstallSdEjectGuard:")
     eject_uninstall.setHidden_(True)
     uninstall_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
@@ -3489,9 +3562,11 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
             "launch_status": launch_status,
             "eject_status": eject_status,
             "sleep_status": sleep_status,
+            "fda_status": fda_status,
             "message": message,
         }
     )
+    setup_buttons["fda_grant"] = fda_button
     setup_buttons.update(
         {
             "launch": launch,
@@ -3785,12 +3860,62 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         "Extend glow along the menu bar", target, "toggleScreenBarWrapsMenuBar:"
     )
     inner.addArrangedSubview_(wraps_row)
-
     stack.addArrangedSubview_(outer)
+
+    # Manual bar geometry (Jonathan's ask): the gap between the risers
+    # and the wings' reach, adjustable for notch companions like Alcove
+    # whose visual width changes at runtime -- and for whatever notch
+    # future Macs ship with. Automatic uses the hardware measurements.
+    size_outer, size_inner = native_ui.make_card("Bar Size")
+    try:
+        auto_gap = slot_width_for_screen(NSScreen.mainScreen())
+    except Exception:
+        auto_gap = 232.0
+    try:
+        auto_wing = wing_width_for_screen(NSScreen.mainScreen(), auto_gap)
+    except Exception:
+        auto_wing = 90.0
+    gap_value = target.settings.screen_bar_gap_width or auto_gap
+    wing_value = (
+        target.settings.screen_bar_wing_length
+        if target.settings.screen_bar_wing_length is not None
+        else auto_wing
+    )
+    gap_slider = native_ui.make_slider(
+        min_value=140.0, max_value=900.0, value=float(gap_value), target=target, action="setScreenBarGapWidth:"
+    )
+    size_inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Gap width",
+            gap_slider,
+            fill_control=True,
+            help_text="How wide the dark center is -- widen it to clear Alcove's pill.",
+        )
+    )
+    wing_slider = native_ui.make_slider(
+        min_value=0.0, max_value=300.0, value=float(wing_value), target=target, action="setScreenBarWingLength:"
+    )
+    size_inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Wing length",
+            wing_slider,
+            fill_control=True,
+            help_text="How far each horizontal stroke reaches along the menu bar.",
+        )
+    )
+    auto_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    auto_cluster.addArrangedSubview_(
+        native_ui.make_button("Use Automatic Size", target, "resetScreenBarGeometry:")
+    )
+    auto_cluster.addArrangedSubview_(native_ui.make_hspacer())
+    size_inner.addArrangedSubview_(auto_cluster)
+    stack.addArrangedSubview_(size_outer)
     fields = {
         "alcove_compat_popup": alcove_popup,
         "screen_bar_preview_view": preview_view,
         "screen_bar_preview_container": preview_container,
+        "screen_bar_gap_slider": gap_slider,
+        "screen_bar_wing_slider": wing_slider,
     }
     buttons = {"screen_bar_wraps_menu_bar": wraps_switch}
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
