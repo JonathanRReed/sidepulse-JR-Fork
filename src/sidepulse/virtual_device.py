@@ -17,7 +17,7 @@ from AppKit import (
     NSWindowStyleMaskBorderless,
     NSWorkspace,
 )
-from Foundation import NSObject, NSTimer
+from Foundation import NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 from Quartz import CGContextFillRect, CGContextSetRGBFillColor
 
 from .led_status import LedDisplayState, normalize_brightness, program_for_display_state
@@ -61,12 +61,13 @@ ABOVE_ALCOVE_WINDOW_LEVEL = 2147483630
 # guess a fixed width, wing_width_for_screen() measures the real per-user
 # gap the system itself reports and stays comfortably inside it.
 WING_MAX_WIDTH = 110.0
-# Automatic wings are a TIGHT hug: the risers land just past the notch's
-# own corners and the bar reads as the size of the actual notch. Auto
-# wings at the full 110pt made the bracket twice the notch's width --
-# "nowhere near the correct size". Anyone who wants longer wings has
-# the Wing Length slider (up to 400pt).
-WING_AUTO_LENGTH = 28.0
+# Automatic wings are a TIGHT hug: the risers land essentially flush
+# with the notch's own corners and the bar reads as the size of the
+# actual notch. Auto wings at the full 110pt made the bracket twice
+# the notch's width -- "nowhere near the correct size" -- and even
+# 28pt read as overhang against the measured notch. Anyone who wants
+# longer wings has the Wing Length slider (up to 400pt).
+WING_AUTO_LENGTH = 10.0
 WING_SAFETY_MARGIN = 28.0
 WING_MIN_USABLE = 24.0
 # A wing that's just a flat horizontal strip fading sideways reads as a
@@ -96,6 +97,77 @@ REPOSITION_EVERY_N_FRAMES = int(FRAME_RATE * 2)
 
 def monotonic_ms() -> int:
     return int(time.monotonic() * 1000.0)
+
+
+def measured_notch_bounds(screen, below_window_number: int = 0):
+    """The hardware notch's EXACT horizontal bounds, measured from the
+    screen's own pixels: the notch is the only pure-black (0, 0, 0) run
+    in the menu bar's top rows (the menu bar itself never composites to
+    true black -- measured (1, 1, 1) even over a black wallpaper).
+    Verified against the 14-inch panel: pixels say 663..849 (186.0pt)
+    where the aux-area slot said 185 -- this is the ground truth the
+    user actually sees, needs no per-model lookup table, and works on
+    future Macs unseen. ``below_window_number`` excludes SidePulse's
+    own bar window from the composite so it can never contaminate the
+    measurement. Returns (x, width) in points, or None (no notch, or
+    anything unexpected -- callers fall back to the aux-area slot)."""
+    try:
+        import Quartz
+        from AppKit import NSBitmapImageRep
+
+        frame = screen.frame()
+        rect = Quartz.CGRectMake(float(frame.origin.x), 0.0, float(frame.size.width), 2.0)
+        option = (
+            Quartz.kCGWindowListOptionOnScreenBelowWindow
+            if below_window_number
+            else Quartz.kCGWindowListOptionOnScreenOnly
+        )
+        image = Quartz.CGWindowListCreateImage(
+            rect, option, int(below_window_number), Quartz.kCGWindowImageNominalResolution
+        )
+        if image is None:
+            return None
+        rep = NSBitmapImageRep.alloc().initWithCGImage_(image)
+        if rep is None:
+            return None
+        width_px = int(rep.pixelsWide())
+        if width_px <= 0:
+            return None
+        scale = width_px / float(frame.size.width)
+        y = min(1, int(rep.pixelsHigh()) - 1)
+        center_px = width_px / 2.0
+        run_start = None
+        best = None
+        for x in range(width_px):
+            color = rep.colorAtX_y_(x, y)
+            is_black = (
+                color is not None
+                and color.redComponent() == 0.0
+                and color.greenComponent() == 0.0
+                and color.blueComponent() == 0.0
+            )
+            if is_black:
+                if run_start is None:
+                    run_start = x
+                continue
+            if run_start is not None:
+                if run_start <= center_px <= x:
+                    best = (run_start, x)
+                run_start = None
+        if run_start is not None and run_start <= center_px:
+            best = (run_start, width_px)
+        if best is None:
+            return None
+        notch_x = best[0] / scale
+        notch_width = (best[1] - best[0]) / scale
+        # Sanity band: MacBook notches live in roughly 150-260pt; a run
+        # outside that is a black wallpaper edge or a screen-saver, not
+        # the notch.
+        if not (120.0 <= notch_width <= 320.0):
+            return None
+        return (float(frame.origin.x) + notch_x, notch_width)
+    except Exception:
+        return None
 
 
 def slot_width_for_screen(screen) -> float:
@@ -537,6 +609,36 @@ class VirtualLedView(NSView):
             return False
 
     def _colors_for_draw(self):
+        """The colors actually painted this frame: the engine's target
+        colors run through a short exponential low-pass (~90ms). The
+        WASM engine emits 8-bit channel values, and at slow pulse speeds
+        the deepest part of a breath crosses single-digit channel values
+        where each 1/255 step is a visible luminance JUMP -- the "kind
+        of glitchy, not smooth" look. The filter turns those steps into
+        ramps while staying fast enough that attention flashes (240ms)
+        still read as flashes. Snaps (no filtering) on the first frame
+        after a pause so a long-hidden bar never visibly slews."""
+        target = self._target_colors_for_draw()
+        now = time.monotonic()
+        previous = getattr(self, "_smoothed_colors", None)
+        last_time = getattr(self, "_smoothed_at", None)
+        self._smoothed_at = now
+        if (
+            previous is None
+            or last_time is None
+            or len(previous) != len(target)
+            or (now - last_time) > 0.5
+        ):
+            self._smoothed_colors = [tuple(color) for color in target]
+            return self._smoothed_colors
+        blend = 1.0 - math.exp(-(now - last_time) / 0.09)
+        self._smoothed_colors = [
+            tuple(p + (t - p) * blend for p, t in zip(prev, tgt))
+            for prev, tgt in zip(previous, target)
+        ]
+        return self._smoothed_colors
+
+    def _target_colors_for_draw(self):
         if self.fixed_colors is not None:
             return self.fixed_colors
         if self.current_program is not None and self._ensure_wasm_controller():
@@ -902,6 +1004,10 @@ class VirtualStatusDevice(NSObject):
             self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 FRAME_INTERVAL, self, "redraw:", None, True
             )
+            # Common modes too: a timer only in the default mode PAUSES
+            # during menu tracking and window drags -- every opened menu
+            # visibly froze the pulse mid-breath ("glitchy at times").
+            NSRunLoop.currentRunLoop().addTimer_forMode_(self.timer, NSRunLoopCommonModes)
 
     def hide(self):
         if self.timer is not None:
@@ -951,10 +1057,27 @@ class VirtualStatusDevice(NSObject):
 
         gap_override = getattr(self, "gap_width_override", None)
         wing_override = getattr(self, "wing_length_override", None)
+        effective_gap = gap_override
+        if gap_override is None:
+            # Pixel-exact notch, measured once per screen configuration
+            # (the notch can't change at runtime) -- see
+            # measured_notch_bounds for why this beats a model table.
+            frame = screen.frame()
+            cache_key = (round(frame.size.width), round(frame.size.height))
+            cache = getattr(self, "_notch_measure_cache", None)
+            if cache is None or cache[0] != cache_key:
+                bounds = measured_notch_bounds(
+                    screen,
+                    below_window_number=int(self.window.windowNumber() or 0),
+                )
+                self._notch_measure_cache = (cache_key, bounds)
+                cache = self._notch_measure_cache
+            if cache[1] is not None:
+                effective_gap = cache[1][1]
         window_frame = virtual_window_frame_for_screen(
             screen,
             wrap_menu_bar=self.wraps_menu_bar,
-            gap_width=gap_override,
+            gap_width=effective_gap,
             wing_length=wing_override,
         )
         current = self.window.frame()
@@ -974,7 +1097,7 @@ class VirtualStatusDevice(NSObject):
             if frame_changed:
                 self.view.setFrame_(((0, 0), window_frame[1]))
             if self.wraps_menu_bar:
-                notch_width = float(gap_override) if gap_override else slot_width_for_screen(screen)
+                notch_width = float(effective_gap) if effective_gap else slot_width_for_screen(screen)
             else:
                 notch_width = None
             self.view.setNotchWidth_(notch_width)
