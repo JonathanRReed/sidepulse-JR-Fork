@@ -315,6 +315,7 @@ STATUS_BAR_DEVICE_POLL_SECONDS = 2.0
 # Event-driven refreshes run at most this often; bursts coalesce into
 # one trailing refresh. Direct refresh_(None) calls stay synchronous.
 EVENT_REFRESH_FLOOR_SECONDS = 0.25
+MIN_ESCALATION_VISIBLE_BRIGHTNESS = 12
 # A completion may only ring/sweep while this fresh; older ones repaint
 # without celebrating (T3's TERMINAL_NOTIFICATION_FRESHNESS).
 COMPLETION_NOTIFY_FRESHNESS_SECONDS = 120.0
@@ -3091,9 +3092,41 @@ class StatusBarController(NSObject):
         selected_key = SETTINGS_SIDEBAR_ITEMS[row][0]
         if selected_key.startswith("header:"):
             return
+        outgoing_key = getattr(self, "current_settings_pane", None)
         self.current_settings_pane = selected_key
+        # Crossfade instead of a hard swap -- and a generation counter so
+        # rapid pane-hopping never queues stale hide callbacks.
+        generation = getattr(self, "_pane_transition_generation", 0) + 1
+        self._pane_transition_generation = generation
+        from AppKit import NSAnimationContext
+
         for key, pane in self.settings_panes.items():
-            pane.setHidden_(key != selected_key)
+            if key == selected_key:
+                pane.setAlphaValue_(0.0)
+                pane.setHidden_(False)
+
+                def _fade_in(context, view=pane):
+                    context.setDuration_(0.16)
+                    view.animator().setAlphaValue_(1.0)
+
+                NSAnimationContext.runAnimationGroup_completionHandler_(_fade_in, None)
+            elif key == outgoing_key and outgoing_key is not None:
+
+                def _hide(view=pane, expected=generation):
+                    if self._pane_transition_generation == expected:
+                        view.setHidden_(True)
+                    view.setAlphaValue_(1.0)
+
+                def _fade_out(context, view=pane):
+                    context.setDuration_(0.14)
+                    view.animator().setAlphaValue_(0.0)
+
+                NSAnimationContext.runAnimationGroup_completionHandler_(
+                    _fade_out, _hide
+                )
+            else:
+                pane.setHidden_(key != selected_key)
+                pane.setAlphaValue_(1.0)
         if selected_key == "color_studio":
             self.refresh_colors_window()
         # Gated sections (provider probes, signal cards) refresh as
@@ -4122,9 +4155,38 @@ class StatusBarController(NSObject):
         preview.setNotchWidth_(SCREEN_BAR_PREVIEW_NOTCH_WIDTH)
 
     def set_settings_message(self, message: str) -> None:
-        set_field_value(self.settings_fields.get("message"), message)
+        label = self.settings_fields.get("message")
+        set_field_value(label, message)
         if message:
             log_status_bar(f"settings: {message}")
+        # Toast semantics: the confirmation fades away after a beat
+        # instead of sitting as a stale label forever. 102 call sites,
+        # zero of them changed.
+        if label is not None:
+            label.setAlphaValue_(1.0)
+            timer = getattr(self, "_settings_message_timer", None)
+            if timer is not None:
+                timer.invalidate()
+            if message:
+                self._settings_message_timer = (
+                    NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                        3.5, self, "dismissSettingsMessage:", None, False
+                    )
+                )
+
+    @objc.IBAction
+    def dismissSettingsMessage_(self, _timer):
+        self._settings_message_timer = None
+        label = self.settings_fields.get("message")
+        if label is None:
+            return
+        from AppKit import NSAnimationContext
+
+        def _animate(context):
+            context.setDuration_(0.6)
+            label.animator().setAlphaValue_(0.0)
+
+        NSAnimationContext.runAnimationGroup_completionHandler_(_animate, None)
 
     @objc.IBAction
     def exportDebugCsv_(self, _sender):
@@ -4733,6 +4795,11 @@ class StatusBarController(NSObject):
             else 1.0
         )
         scaled = base * self.idle_dim_scale_factor() * self.focus_sync_scale_factor() * boost
+        if boost > 1.0:
+            # An escalation ramp must survive the darkest stack: with
+            # idle-dim AND Focus both at their floors, multiplication
+            # alone rounds to 0 -- an invisible "ramp".
+            scaled = max(scaled, float(MIN_ESCALATION_VISIBLE_BRIGHTNESS))
         if device.device_id == VIRTUAL_DEVICE_ID and scaled > 0.0:
             # The Screen Bar gets a visibility FLOOR: shared Focus dim
             # stacked with nighttime auto-brightness multiplied it down
@@ -4757,6 +4824,22 @@ class StatusBarController(NSObject):
             return 1.0
         return self.settings.idle_dim_fraction
 
+    def active_focus_ids_cached(self) -> list[str]:
+        """1s-TTL cache over the Focus assertions read -- the LED path
+        called the uncached read ~4.7x/second on the main thread when
+        Focus sync was on. Unavailability (no FDA) is cached too, so an
+        ungranted machine stops paying the OSError path every call."""
+        cached = getattr(self, "_focus_ids_cache", None)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < 1.0:
+            return cached[1]
+        try:
+            active = focus_sync.active_focus_mode_identifiers()
+        except focus_sync.FocusSyncUnavailableError:
+            active = []
+        self._focus_ids_cache = (now, active)
+        return active
+
     def focus_sync_scale_factor(self) -> float:
         """1.0 normally; idle_dim_fraction (the same "how much to dim"
         amount idle-timeout dimming uses -- one shared dial rather than a
@@ -4769,10 +4852,7 @@ class StatusBarController(NSObject):
         """
         if not self.settings.focus_sync_enabled:
             return 1.0
-        try:
-            active = focus_sync.active_focus_mode_identifiers()
-        except focus_sync.FocusSyncUnavailableError:
-            return 1.0
+        active = self.active_focus_ids_cached()
         if not active:
             return 1.0
         # With several Focuses somehow active at once, the strictest rule
@@ -4787,11 +4867,30 @@ class StatusBarController(NSObject):
         discover = discover_devices
         cached = getattr(self, "_device_discovery_cache", None)
         now = time.monotonic()
-        if (
-            cached is not None
-            and cached[0] is discover
-            and now - cached[1] < DEVICE_DISCOVERY_CACHE_SECONDS
-        ):
+        if cached is not None and cached[0] is discover:
+            if now - cached[1] >= DEVICE_DISCOVERY_CACHE_SECONDS and not getattr(
+                self, "_discovery_revalidating", False
+            ):
+                # Stale-while-revalidate: the /Volumes stat can BLOCK for
+                # seconds on a busy SD card, so after the first call the
+                # main thread only ever reads the cache; a worker keeps
+                # it fresh.
+                self._discovery_revalidating = True
+
+                def _revalidate():
+                    try:
+                        fresh = discover()
+                    except Exception as exc:
+                        log_status_bar(f"device discovery error: {exc}")
+                        fresh = cached[2]
+                    self._device_discovery_cache = (
+                        discover,
+                        time.monotonic(),
+                        fresh,
+                    )
+                    self._discovery_revalidating = False
+
+                threading.Thread(target=_revalidate, daemon=True).start()
             return cached[2]
         try:
             candidates = discover()
@@ -6032,16 +6131,38 @@ class StatusBarController(NSObject):
 
         if not self.leds_enabled:
             return
-        read_any = False
-        for target in self.status_keepalive_targets():
-            status_path = self.keep_awake.poke_status_file(target)
-            if status_path is not None:
-                read_any = True
-                log_status_bar(f"sd_keepalive touch={status_path}")
-        if not read_any and self.keep_awake.last_status_error != self.last_status_read_error:
-            self.last_status_read_error = self.keep_awake.last_status_error
-            if self.last_status_read_error:
-                log_status_bar(f"sd_keepalive error: {self.last_status_read_error}")
+        # SD-card pokes were file I/O ON THE MAIN THREAD up to 4x/s --
+        # a busy or slow card froze the whole UI ("clicked Devices, took
+        # five seconds to register a scroll"). Worker thread, in-flight
+        # guarded; the card can be as slow as it likes now.
+        if getattr(self, "_keepalive_poke_in_flight", False):
+            return
+        targets = self.status_keepalive_targets()
+        if not targets:
+            return
+        self._keepalive_poke_in_flight = True
+
+        def _poke():
+            try:
+                read_any = False
+                for target in targets:
+                    status_path = self.keep_awake.poke_status_file(target)
+                    if status_path is not None:
+                        read_any = True
+                        log_status_bar(f"sd_keepalive touch={status_path}")
+                if (
+                    not read_any
+                    and self.keep_awake.last_status_error != self.last_status_read_error
+                ):
+                    self.last_status_read_error = self.keep_awake.last_status_error
+                    if self.last_status_read_error:
+                        log_status_bar(
+                            f"sd_keepalive error: {self.last_status_read_error}"
+                        )
+            finally:
+                self._keepalive_poke_in_flight = False
+
+        threading.Thread(target=_poke, daemon=True).start()
 
     def sync_closed_lid_awake(self) -> None:
         was_active = self.closed_lid_awake.active()
