@@ -4,9 +4,9 @@ import json
 import os
 import re
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Callable
 from typing import Any
 
 from .models import HookEvent, parse_datetime
@@ -695,7 +695,7 @@ def is_sidepulse_devin_command(command: str) -> bool:
         return False
 
     has_devin_provider = any(
-        part == "--provider" and index + 1 < len(parts) and parts[index + 1] == "devin"
+        (part == "--provider" and index + 1 < len(parts) and parts[index + 1] == "devin")
         or part == "--provider=devin"
         for index, part in enumerate(parts)
     )

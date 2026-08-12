@@ -23,7 +23,6 @@ from Quartz import CGContextFillRect, CGContextSetRGBFillColor
 from .led_status import LedDisplayState, normalize_brightness, program_for_display_state
 from .led_wasm import LedWasmUnavailableError, SdLedWasmController
 
-
 VIRTUAL_DEVICE_ID = "virtual:status-bar"
 VIRTUAL_DEVICE_NAME = "Screen Bar"
 LED_COUNT = 8
@@ -336,7 +335,7 @@ def notch_bar_path(rect):
 def virtual_led_colors(
     state: LedDisplayState,
     elapsed: float,
-    brightness: int | float = 255,
+    brightness: float = 255,
 ) -> list[tuple[float, float, float, float]]:
     """Return the eight LED colors for the same status animations as the device."""
     scale = normalize_brightness(brightness) / 255.0
@@ -587,7 +586,7 @@ class VirtualLedView(NSView):
                 rgb = (1.0, 0.55, 0.0)
             else:
                 rgb = (0.0, 1.0, 0.4)
-            colors.append(tuple(channel * scale * amount for channel in rgb) + (amount,))
+            colors.append((*(channel * scale * amount for channel in rgb), amount))
         self.fixed_colors = colors
         self.setNeedsDisplay_(True)
 
@@ -1058,14 +1057,14 @@ class VirtualStatusDevice(NSObject):
     def set_state(
         self,
         state: LedDisplayState,
-        brightness: int | float,
+        brightness: float,
         *,
         started_at: float | None = None,
     ):
         self.show()
         self.view.setState_brightness_startedAt_(state, brightness, started_at)
 
-    def set_battery(self, percent: int, brightness: int | float):
+    def set_battery(self, percent: int, brightness: float):
         self.show()
         self.view.setBatteryPercent_brightness_(percent, brightness)
 

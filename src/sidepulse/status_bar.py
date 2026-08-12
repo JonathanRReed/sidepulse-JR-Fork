@@ -7,7 +7,8 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass, replace as dataclass_replace
+from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path
 
@@ -18,8 +19,8 @@ try:
         NSApplication,
         NSApplicationActivationPolicyAccessory,
         NSBackingStoreBuffered,
-        NSBezierPath,
         NSBezelStyleRounded,
+        NSBezierPath,
         NSButton,
         NSButtonTypeSwitch,
         NSClickGestureRecognizer,
@@ -40,32 +41,32 @@ try:
         NSOnState,
         NSPopover,
         NSPopoverBehaviorTransient,
-        NSScrollView,
         NSSavePanel,
         NSScreen,
+        NSScrollView,
         NSSlider,
-        NSSwitch,
         NSSplitView,
         NSSplitViewDividerStyleThin,
         NSStatusBar,
+        NSSwitch,
         NSTextField,
         NSTextView,
+        NSVariableStatusItemLength,
         NSView,
         NSViewController,
-        NSWorkspace,
         NSWindow,
         NSWindowStyleMaskClosable,
         NSWindowStyleMaskMiniaturizable,
         NSWindowStyleMaskTitled,
-        NSVariableStatusItemLength,
+        NSWorkspace,
     )
     from Foundation import (
+        NSURL,
         NSIndexSet,
         NSMutableAttributedString,
         NSObject,
         NSString,
         NSTimer,
-        NSURL,
     )
 except ImportError as exc:  # pragma: no cover - only exercised on non-macOS setups.
     raise SystemExit(
@@ -73,27 +74,30 @@ except ImportError as exc:  # pragma: no cover - only exercised on non-macOS set
         "  python3 -m pip install pyobjc-framework-Cocoa"
     ) from exc
 
+from . import (
+    calendar_watch,
+    display_brightness,
+    focus_sync,
+    native_ui,
+    notification_watch,
+    reminders_watch,
+    weather_watch,
+)
+from . import colors as colors_module
+from . import signals as signals_module
 from .app_bundle import default_app_bundle_path, running_inside_bundle
+from .audit import (
+    default_status_audit_log_path,
+    export_status_audit_csv,
+    export_status_audit_html,
+    trim_oversized_logs,
+)
 from .battery import (
     BatteryLedController,
     BatterySnapshot,
     format_watts,
     program_for_battery,
     read_battery_snapshot,
-)
-from . import calendar_watch
-from . import reminders_watch
-from . import signals as signals_module
-from . import weather_watch
-from . import display_brightness
-from . import focus_sync
-from . import native_ui
-from . import notification_watch
-from .audit import (
-    default_status_audit_log_path,
-    export_status_audit_csv,
-    export_status_audit_html,
-    trim_oversized_logs,
 )
 from .collector import (
     CLAUDE_TRANSCRIPT_PROVIDER,
@@ -104,42 +108,6 @@ from .collector import (
     default_sources,
     read_recent_lines,
 )
-from .device_writer import (
-    DEFAULT_FILE_NAME,
-    MOUNT_ROOT,
-    DeviceCandidate,
-    DeviceWriteError,
-    discover_devices,
-    normalize_led_text,
-    path_exists,
-    target_from_device_path,
-    validate_led_text,
-    write_led_program,
-)
-from .keep_awake import KEEPALIVE_FILE_NAME, KeepAwakeController
-from .ipc import HookEventServer, default_event_socket_path, default_latest_state_path
-from .install import (
-    install_provider_hooks,
-    uninstall_provider_hooks,
-)
-from .led_status import (
-    ANIMATION_STYLE_CHOICES,
-    MAX_CHANNEL_GAIN,
-    MIN_CHANNEL_GAIN,
-    AgentLedController,
-    LedDisplayState,
-    apply_brightness,
-    apply_channel_gain_to_program,
-    brightness_percent,
-    led_count_for_target,
-    normalize_brightness,
-    program_for_display_state,
-    normalized_device_name,
-    style_to_program,
-    timer_fill_program,
-    write_mode_to_leds,
-)
-from . import colors as colors_module
 from .colors import (
     ANIMATION_MODE_KEYS,
     BLEND_MODE_CHOICES,
@@ -159,15 +127,40 @@ from .colors import (
     matching_preset,
     program_for_snapshot,
 )
-from .virtual_device import (
-    LED_COUNT,
-    VIRTUAL_DEVICE_ID,
-    VIRTUAL_DEVICE_NAME,
-    WINDOW_HEIGHT as SCREEN_BAR_PREVIEW_HEIGHT,
-    VirtualLedView,
-    VirtualStatusDevice,
-    monotonic_ms,
-    slot_width_for_screen,
+from .device_writer import (
+    DEFAULT_FILE_NAME,
+    MOUNT_ROOT,
+    DeviceCandidate,
+    DeviceWriteError,
+    discover_devices,
+    normalize_led_text,
+    path_exists,
+    target_from_device_path,
+    validate_led_text,
+    write_led_program,
+)
+from .install import (
+    install_provider_hooks,
+    uninstall_provider_hooks,
+)
+from .ipc import HookEventServer, default_event_socket_path, default_latest_state_path
+from .keep_awake import KEEPALIVE_FILE_NAME, KeepAwakeController
+from .led_status import (
+    ANIMATION_STYLE_CHOICES,
+    MAX_CHANNEL_GAIN,
+    MIN_CHANNEL_GAIN,
+    AgentLedController,
+    LedDisplayState,
+    apply_brightness,
+    apply_channel_gain_to_program,
+    brightness_percent,
+    led_count_for_target,
+    normalize_brightness,
+    normalized_device_name,
+    program_for_display_state,
+    style_to_program,
+    timer_fill_program,
+    write_mode_to_leds,
 )
 from .led_wasm import LedWasmUnavailableError, SdLedWasmController
 from .lid_sleep import (
@@ -177,13 +170,13 @@ from .lid_sleep import (
     sleep_helper_install_command,
     sleep_helper_installed,
 )
-from .models import AgentMode, AgentStatus, MODE_LABELS
+from .models import MODE_LABELS, AgentMode, AgentStatus
 from .providers import (
     HOOK_PROVIDERS,
     PROVIDER_SPECS,
     ProviderConfig,
-    detect_log_path,
     default_state_dir,
+    detect_log_path,
     parse_log_line,
     provider_spec,
 )
@@ -204,24 +197,24 @@ from .session_actions import (
     session_open_target,
 )
 from .settings import (
+    CALIBRATION_PROFILE_SLOTS,
     CLOSED_LID_AWAKE_AGENTS,
     CLOSED_LID_AWAKE_ALWAYS,
     CLOSED_LID_AWAKE_CHOICES,
     CLOSED_LID_AWAKE_NEVER,
-    CALIBRATION_PROFILE_SLOTS,
     DEFAULT_NOTIFICATION_APP_COLORS,
     LED_DISPLAY_AGENT,
     LED_DISPLAY_BATTERY,
     LED_DISPLAY_CHOICES,
     LED_DISPLAY_TIMER,
+    LID_ANIMATION_CLOSED,
+    LID_ANIMATION_OPEN,
     NOTIFICATION_APP_IMESSAGE,
     NOTIFICATION_APP_TELEGRAM,
     NOTIFICATION_APP_WHATSAPP,
-    LID_ANIMATION_CLOSED,
-    LID_ANIMATION_OPEN,
     LedAnimationSetting,
-    default_settings_path,
     default_lid_animation,
+    default_settings_path,
     load_settings,
     normalize_animation_duration,
     save_settings,
@@ -230,6 +223,18 @@ from .status_bar_launch import (
     LAUNCH_AGENT_LABEL,
     install_launch_agent,
     launch_agent_installed,
+)
+from .virtual_device import (
+    LED_COUNT,
+    VIRTUAL_DEVICE_ID,
+    VIRTUAL_DEVICE_NAME,
+    VirtualLedView,
+    VirtualStatusDevice,
+    monotonic_ms,
+    slot_width_for_screen,
+)
+from .virtual_device import (
+    WINDOW_HEIGHT as SCREEN_BAR_PREVIEW_HEIGHT,
 )
 
 
@@ -741,6 +746,11 @@ class StatusBarController(NSObject):
                 payload = {"ok": True, "alerts": alerts}
             except weather_watch.WeatherUnavailableError as exc:
                 payload = {"ok": False, "error": str(exc)}
+            except Exception as exc:
+                # A surprise here must still post a payload -- otherwise
+                # weather_fetch_in_flight stays True forever and weather
+                # alerts silently stop until the next app restart.
+                payload = {"ok": False, "error": f"unexpected: {exc!r}"}
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "weatherChecked:", payload, False
             )
@@ -814,7 +824,7 @@ class StatusBarController(NSObject):
     def refresh_(self, _sender):
         try:
             self.ingest_transcript_fallback()
-            snapshot = self.monitor.snapshot(include_stale=False)
+            snapshot = self.monitor.snapshot()
         except Exception as exc:
             log_status_bar(f"refresh error: {exc}")
             # No confirmable agent state: clear any escalation episode
@@ -1271,7 +1281,7 @@ class StatusBarController(NSObject):
                 "Privacy & Security → Reminders."
             )
 
-    def test_signal_program(self, brightness: int | float, led_count: int = 8) -> str:
+    def test_signal_program(self, brightness: float, led_count: int = 8) -> str:
         key = getattr(self, "test_signal_key", None) or signals_module.SIGNAL_LOW_BATTERY
         if key == "__studio__":
             program = getattr(self, "studio_preview_program", "") or "#00E5FF"
@@ -1836,6 +1846,24 @@ class StatusBarController(NSObject):
             NSApp.terminate_(self)
 
     def applicationWillTerminate_(self, _notification):
+        # Repeating NSTimers retain their target; left running they keep
+        # the controller alive and firing through launchd teardown.
+        for name in (
+            "timer",
+            "lid_timer",
+            "device_timer",
+            "brightness_watch_timer",
+            "notification_watch_timer",
+            "calendar_watch_timer",
+            "reminders_watch_timer",
+            "weather_watch_timer",
+            "color_preview_timer",
+            "signal_preview_timer",
+            "setup_demo_timer",
+        ):
+            active_timer = getattr(self, name, None)
+            if active_timer is not None:
+                active_timer.invalidate()
         self.stop_event_server()
         self.closed_lid_awake.release()
         self.keep_awake.release()
@@ -2043,7 +2071,7 @@ class StatusBarController(NSObject):
             button.setTitle_("")
             button.setImage_(image_for_symbol(self.current_state.symbol, self.current_state.label))
 
-    def escalation_takeover_program(self, brightness: int | float, led_count: int = 8) -> str:
+    def escalation_takeover_program(self, brightness: float, led_count: int = 8) -> str:
         """Fast full-bar strobe in the ask color -- the opt-in "don't
         let me miss this" finale."""
         ask_color = self.settings.colors.mode_colors.get("ask", "#FF3A00")
@@ -3364,7 +3392,7 @@ class StatusBarController(NSObject):
         self.refresh_settings_window()
         self.refresh_(None)
 
-    def set_device_brightness(self, device_id: str | None, brightness: int | float) -> None:
+    def set_device_brightness(self, device_id: str | None, brightness: float) -> None:
         if not device_id:
             return
         device = next(
@@ -4077,7 +4105,21 @@ class StatusBarController(NSObject):
             try:
                 if active():
                     return key
-            except Exception:
+            except Exception as exc:
+                # A buggy claim must not silently disable its signal
+                # forever -- log the first failure per display kind so it
+                # shows up in status-bar.err.log instead of vanishing.
+                logged = getattr(self, "display_claim_errors_logged", None)
+                if logged is None:
+                    logged = set()
+                    self.display_claim_errors_logged = logged
+                if key not in logged:
+                    logged.add(key)
+                    print(
+                        f"sidepulse: display claim {key!r} raised {exc!r}; "
+                        "treating as inactive",
+                        file=sys.stderr,
+                    )
                 continue
         return LED_DISPLAY_AGENT
 
@@ -6640,7 +6682,7 @@ def _build_agent_or_mode_color_row(
     return native_ui.make_row(row_label, container)
 
 
-def _build_color_studio_pane(target: StatusBarController) -> "NSView":
+def _build_color_studio_pane(target: StatusBarController) -> NSView:
     """The Color Studio: the old standalone Colors window merged into
     Settings as its own pane -- the pinned Live Preview on top, the
     color/blend/fade/animation cards scrolling beneath, footer pinned.
@@ -7022,7 +7064,7 @@ def set_swatch_selected(button, selected: bool) -> None:
         pass
 
 
-def nscolor_from_hex(hex_value: str) -> "NSColor":
+def nscolor_from_hex(hex_value: str) -> NSColor:
     red, green, blue = colors_module.hex_to_rgb(colors_module.normalize_hex(hex_value, "#000000"))
     return NSColor.colorWithCalibratedRed_green_blue_alpha_(red / 255.0, green / 255.0, blue / 255.0, 1.0)
 
@@ -7475,7 +7517,7 @@ def validate_lid_animation(animation: LedAnimationSetting) -> None:
 def program_for_lid_animation(
     animation: LedAnimationSetting,
     *,
-    brightness: int | float = 255,
+    brightness: float = 255,
 ) -> str:
     validate_lid_animation(animation)
     return apply_brightness(normalize_led_text(animation.program), brightness)

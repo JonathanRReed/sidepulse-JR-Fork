@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 import socket
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from .providers import default_state_dir
-
 
 MAX_EVENT_BYTES = 1024 * 1024
 HOOK_EVENT_SEND_TIMEOUT_SECONDS = 0.2
@@ -102,7 +101,7 @@ class HookEventServer:
                 return
             try:
                 connection, _ = server.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 return

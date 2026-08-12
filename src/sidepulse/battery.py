@@ -6,10 +6,11 @@ import plistlib
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .device_writer import (
     DEFAULT_FILE_NAME,
@@ -17,14 +18,13 @@ from .device_writer import (
     resolve_target_path,
     write_led_program,
 )
-from .led_status import led_count_for_target
 from .led_status import (
     NEUTRAL_CHANNEL_GAINS,
     apply_brightness,
     apply_channel_gain_to_program,
+    led_count_for_target,
     normalize_brightness,
 )
-
 
 BATTERY_LOW_RED = "#FF2600"
 BATTERY_MID_AMBER = "#FFB000"
@@ -291,7 +291,7 @@ def program_for_battery(
     led_count: int = 8,
     full_charge_watts: float | None = None,
     transition_ms: int = 360,
-    brightness: int | float = 255,
+    brightness: float = 255,
 ) -> str:
     count = max(1, min(8, int(led_count)))
     percent = max(0, min(100, int(snapshot.percent)))
@@ -390,7 +390,7 @@ def write_battery_to_leds(
     file_name: str = DEFAULT_FILE_NAME,
     dry_run: bool = False,
     full_charge_watts: float | None = None,
-    brightness: int | float = 255,
+    brightness: float = 255,
 ) -> BatteryLedWrite:
     target = resolve_target_path(device_path=device_path, file_name=file_name)
     program = program_for_battery(
@@ -420,7 +420,7 @@ class BatteryLedController:
         file_name: str = DEFAULT_FILE_NAME,
         dry_run: bool = False,
         error_retry_seconds: float = 10.0,
-        brightness: int | float = 255,
+        brightness: float = 255,
         channel_gains: tuple[float, float, float] = NEUTRAL_CHANNEL_GAINS,
     ) -> None:
         self.device_path = device_path
@@ -574,7 +574,7 @@ def should_rewrite_battery_program(snapshot: BatterySnapshot, elapsed_seconds: f
     return elapsed_seconds >= charging_update_interval_seconds(snapshot.charge_speed_ratio())
 
 
-def parse_full_watts(value: str | float | int | None) -> float | None:
+def parse_full_watts(value: str | float | None) -> float | None:
     if value is None:
         return None
     if isinstance(value, (int, float)):

@@ -4,10 +4,11 @@ import json
 import re
 import threading
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from .models import (
     MODE_PRIORITY,
@@ -21,7 +22,6 @@ from .models import (
 from .origin import origin_label_from_payload
 from .providers import HOOK_PROVIDERS, detect_log_path, parse_log_line
 from .settings import AgentMonitorSettings, load_settings
-
 
 CODEX_TRANSCRIPT_PROVIDER = "codex-transcripts"
 CLAUDE_TRANSCRIPT_PROVIDER = "claude-transcripts"
@@ -133,7 +133,7 @@ class AgentMonitor:
         idle_visible_seconds: float = IDLE_VISIBLE_SECONDS,
         post_tool_working_visible_seconds: float = POST_TOOL_WORKING_VISIBLE_SECONDS,
         max_lines_per_source: int = 5000,
-    ) -> "AgentMonitor":
+    ) -> AgentMonitor:
         return cls(
             stale_after_seconds=stale_after_seconds,
             tool_running_timeout_seconds=tool_running_timeout_seconds,
@@ -143,7 +143,7 @@ class AgentMonitor:
             max_lines_per_source=max_lines_per_source,
         )
 
-    def snapshot(self, include_stale: bool = False) -> MonitorSnapshot:
+    def snapshot(self) -> MonitorSnapshot:
         now = datetime.now(timezone.utc)
         statuses_by_key = self._latest_statuses()
 
@@ -171,7 +171,10 @@ class AgentMonitor:
         stale.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
 
         visible = tuple(fresh)
-        stale_visible = tuple(stale if include_stale else stale)
+        # The snapshot ALWAYS carries stale statuses; consumers decide
+        # visibility (the dropdown falls back to them when idle, the CLI
+        # gates them behind --all at render time).
+        stale_visible = tuple(stale)
         aggregate = aggregate_status(visible, stale_visible)
 
         return MonitorSnapshot(
@@ -428,7 +431,7 @@ class LiveAgentMonitor:
             self.statuses_by_key[status.agent_id] = status
             self.write_latest_state()
 
-    def snapshot(self, include_stale: bool = False) -> MonitorSnapshot:
+    def snapshot(self) -> MonitorSnapshot:
         now = datetime.now(timezone.utc)
         with self.lock:
             statuses = tuple(self.statuses_by_key.values())
@@ -441,7 +444,6 @@ class LiveAgentMonitor:
             completed_visible_seconds=self.completed_visible_seconds,
             idle_visible_seconds=self.idle_visible_seconds,
             post_tool_working_visible_seconds=self.post_tool_working_visible_seconds,
-            include_stale=include_stale,
         )
 
     def load_latest_state(self) -> None:
@@ -1203,7 +1205,6 @@ def snapshot_from_statuses(
     completed_visible_seconds: float,
     idle_visible_seconds: float,
     post_tool_working_visible_seconds: float = POST_TOOL_WORKING_VISIBLE_SECONDS,
-    include_stale: bool = False,
 ) -> MonitorSnapshot:
     fresh: list[AgentStatus] = []
     stale: list[AgentStatus] = []
@@ -1236,7 +1237,7 @@ def snapshot_from_statuses(
     stale.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
 
     visible = tuple(fresh)
-    stale_visible = tuple(stale if include_stale else stale)
+    stale_visible = tuple(stale)
     return MonitorSnapshot(
         aggregate=aggregate_status(visible, stale_visible),
         statuses=visible,

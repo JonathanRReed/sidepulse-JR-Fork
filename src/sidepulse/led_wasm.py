@@ -5,7 +5,6 @@ import json
 from dataclasses import dataclass
 from importlib import resources
 
-
 LED_WASM_RESOURCE = "sdled.wasm"
 ERROR_NAMES = (
     "ok",

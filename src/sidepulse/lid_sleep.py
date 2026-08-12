@@ -6,16 +6,15 @@ import re
 import shlex
 import shutil
 import subprocess
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
 
 from .settings import (
     CLOSED_LID_AWAKE_AGENTS,
     CLOSED_LID_AWAKE_ALWAYS,
     CLOSED_LID_AWAKE_NEVER,
 )
-
 
 CAFFEINATE_CLOSED_LID_COMMAND = ("/usr/bin/caffeinate", "-dimsu")
 IOREG_CLAMSHELL_COMMAND = ("/usr/sbin/ioreg", "-r", "-k", "AppleClamshellState", "-d", "4")
@@ -313,10 +312,7 @@ class ClosedLidAwakeController:
             self.system_disable_attempted = True
             try:
                 already_disabled = self.sleep_disabled_reader()
-                if already_disabled is False:
-                    self.sleep_disabled_setter(True)
-                    self.changed_system_disable = True
-                elif already_disabled is None:
+                if already_disabled is False or already_disabled is None:
                     self.sleep_disabled_setter(True)
                     self.changed_system_disable = True
             except Exception as exc:

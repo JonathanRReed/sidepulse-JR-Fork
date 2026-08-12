@@ -79,7 +79,7 @@ class SignalStyle:
     speed_seconds: float
     intensity: float
 
-    def normalized(self) -> "SignalStyle":
+    def normalized(self) -> SignalStyle:
         return replace(
             self,
             color=_normalize_color(self.color, "#FFFFFF"),
@@ -97,7 +97,7 @@ class SignalStyle:
         }
 
     @classmethod
-    def from_dict(cls, raw: object, fallback: "SignalStyle") -> "SignalStyle":
+    def from_dict(cls, raw: object, fallback: SignalStyle) -> SignalStyle:
         if not isinstance(raw, dict):
             return fallback
         try:

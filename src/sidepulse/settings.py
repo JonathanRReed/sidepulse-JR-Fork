@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,6 @@ from .battery import DEFAULT_POWER_CHANGE_PREVIEW_SECONDS
 from .colors import ColorSettings
 from .led_status import DEFAULT_CHANNEL_GAIN, normalize_channel_gain
 from .session_actions import SESSION_OPEN_CHOICES
-
 
 LED_DISPLAY_AGENT = "agent"
 LED_DISPLAY_BATTERY = "battery"
@@ -281,14 +281,14 @@ class AgentMonitorSettings:
             return self.claude_transcripts_enabled
         return False
 
-    def with_transcript_provider(self, provider: str, enabled: bool) -> "AgentMonitorSettings":
+    def with_transcript_provider(self, provider: str, enabled: bool) -> AgentMonitorSettings:
         if provider == "codex":
             return replace(self, codex_transcripts_enabled=enabled)
         if provider == "claude":
             return replace(self, claude_transcripts_enabled=enabled)
         raise ValueError(f"Unknown transcript provider: {provider}")
 
-    def with_led_display(self, display: str) -> "AgentMonitorSettings":
+    def with_led_display(self, display: str) -> AgentMonitorSettings:
         if display not in LED_DISPLAY_CHOICES:
             raise ValueError(f"Unknown LED display: {display}")
         return replace(self, led_display=display)
@@ -312,7 +312,7 @@ class AgentMonitorSettings:
         *,
         name: str | None = None,
         path: str | None = None,
-    ) -> "AgentMonitorSettings":
+    ) -> AgentMonitorSettings:
         if display not in LED_DISPLAY_CHOICES:
             raise ValueError(f"Unknown LED display: {display}")
 
@@ -350,11 +350,11 @@ class AgentMonitorSettings:
     def with_device_brightness(
         self,
         device_id: str,
-        brightness: int | float,
+        brightness: float,
         *,
         name: str | None = None,
         path: str | None = None,
-    ) -> "AgentMonitorSettings":
+    ) -> AgentMonitorSettings:
         value = normalize_brightness(brightness)
         devices: list[DeviceDisplaySetting] = []
         updated = False
@@ -396,7 +396,7 @@ class AgentMonitorSettings:
         *,
         name: str | None = None,
         path: str | None = None,
-    ) -> "AgentMonitorSettings":
+    ) -> AgentMonitorSettings:
         devices: list[DeviceDisplaySetting] = []
         updated = False
         for device in self.devices:
@@ -439,7 +439,7 @@ class AgentMonitorSettings:
         *,
         name: str | None = None,
         path: str | None = None,
-    ) -> "AgentMonitorSettings":
+    ) -> AgentMonitorSettings:
         """Sets one of "red"/"green"/"blue" gain for a device, leaving the
         other two untouched. Three separate calls (one per slider) rather
         than one method taking all three, since each slider in the menu
@@ -477,7 +477,7 @@ class AgentMonitorSettings:
             )
         return replace(self, devices=tuple(devices))
 
-    def with_device_channel_gains_reset(self, device_id: str) -> "AgentMonitorSettings":
+    def with_device_channel_gains_reset(self, device_id: str) -> AgentMonitorSettings:
         """Back to (1.0, 1.0, 1.0) -- a no-op correction, i.e. write the
         true hex unmodified."""
         devices = tuple(
@@ -494,7 +494,7 @@ class AgentMonitorSettings:
         device_id: str,
         name: str,
         path: str,
-    ) -> "AgentMonitorSettings":
+    ) -> AgentMonitorSettings:
         return self.with_device_display(
             device_id,
             self.display_for_device(device_id),
@@ -502,7 +502,7 @@ class AgentMonitorSettings:
             path=path,
         )
 
-    def without_device(self, device_id: str) -> "AgentMonitorSettings":
+    def without_device(self, device_id: str) -> AgentMonitorSettings:
         devices = tuple(device for device in self.devices if device.device_id != device_id)
         if devices == self.devices:
             return self
@@ -531,7 +531,7 @@ class AgentMonitorSettings:
         provider: str,
         action: str,
         origin: str | None = None,
-    ) -> "AgentMonitorSettings":
+    ) -> AgentMonitorSettings:
         if action not in SESSION_OPEN_CHOICES:
             raise ValueError(f"Unknown session open action: {action}")
         key = session_open_preference_key(provider, origin)
@@ -541,7 +541,7 @@ class AgentMonitorSettings:
 
     def with_provider_session_open_action(
         self, provider: str, action: str
-    ) -> "AgentMonitorSettings":
+    ) -> AgentMonitorSettings:
         """Set the provider-wide opener and discard older per-origin overrides."""
         if action not in SESSION_OPEN_CHOICES:
             raise ValueError(f"Unknown session open action: {action}")
@@ -555,7 +555,7 @@ class AgentMonitorSettings:
         preferences[provider_key] = action
         return replace(self, session_open_preferences=preferences)
 
-    def with_battery_full_charge_watts(self, watts: float | None) -> "AgentMonitorSettings":
+    def with_battery_full_charge_watts(self, watts: float | None) -> AgentMonitorSettings:
         if watts is not None and watts <= 0:
             watts = None
         return replace(self, battery_full_charge_watts=watts)
@@ -565,7 +565,7 @@ class AgentMonitorSettings:
         *,
         enabled: bool | None = None,
         seconds: float | None = None,
-    ) -> "AgentMonitorSettings":
+    ) -> AgentMonitorSettings:
         preview_seconds = self.battery_power_change_preview_seconds
         if seconds is not None:
             preview_seconds = max(0.0, float(seconds))
@@ -584,15 +584,15 @@ class AgentMonitorSettings:
             return self.lid_open_animation
         raise ValueError(f"Unknown lid animation: {kind}")
 
-    def with_closed_lid_awake_policy(self, policy: str) -> "AgentMonitorSettings":
+    def with_closed_lid_awake_policy(self, policy: str) -> AgentMonitorSettings:
         if policy not in CLOSED_LID_AWAKE_CHOICES:
             raise ValueError(f"Unknown closed-lid awake policy: {policy}")
         return replace(self, closed_lid_awake_policy=policy)
 
-    def with_closed_lid_system_override(self, enabled: bool) -> "AgentMonitorSettings":
+    def with_closed_lid_system_override(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, closed_lid_system_override_enabled=bool(enabled))
 
-    def with_closed_lid_grace_minutes(self, minutes: float) -> "AgentMonitorSettings":
+    def with_closed_lid_grace_minutes(self, minutes: float) -> AgentMonitorSettings:
         return replace(self, closed_lid_grace_minutes=normalize_closed_lid_grace_minutes(minutes))
 
     def with_lid_animation(
@@ -601,7 +601,7 @@ class AgentMonitorSettings:
         *,
         program: str,
         duration_seconds: float,
-    ) -> "AgentMonitorSettings":
+    ) -> AgentMonitorSettings:
         animation = LedAnimationSetting(
             program=program,
             duration_seconds=normalize_animation_duration(duration_seconds),
@@ -612,46 +612,46 @@ class AgentMonitorSettings:
             return replace(self, lid_open_animation=animation)
         raise ValueError(f"Unknown lid animation: {kind}")
 
-    def with_setup_screen_completed(self, completed: bool = True) -> "AgentMonitorSettings":
+    def with_setup_screen_completed(self, completed: bool = True) -> AgentMonitorSettings:
         return replace(self, setup_screen_completed=bool(completed))
 
-    def with_virtual_status_device(self, enabled: bool) -> "AgentMonitorSettings":
+    def with_virtual_status_device(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, virtual_status_device_enabled=bool(enabled))
 
-    def with_virtual_status_device_wraps_menu_bar(self, enabled: bool) -> "AgentMonitorSettings":
+    def with_virtual_status_device_wraps_menu_bar(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, virtual_status_device_wraps_menu_bar=bool(enabled))
 
-    def with_colors(self, colors: ColorSettings) -> "AgentMonitorSettings":
+    def with_colors(self, colors: ColorSettings) -> AgentMonitorSettings:
         return replace(self, colors=colors)
 
-    def with_alcove_compatibility_mode(self, mode: str) -> "AgentMonitorSettings":
+    def with_alcove_compatibility_mode(self, mode: str) -> AgentMonitorSettings:
         if mode not in ALCOVE_COMPAT_CHOICES:
             raise ValueError(f"Unknown Alcove compatibility mode: {mode}")
         return replace(self, alcove_compatibility_mode=mode)
 
-    def with_idle_dim_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+    def with_idle_dim_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, idle_dim_enabled=bool(enabled))
 
-    def with_idle_dim_after_minutes(self, minutes: float) -> "AgentMonitorSettings":
+    def with_idle_dim_after_minutes(self, minutes: float) -> AgentMonitorSettings:
         return replace(self, idle_dim_after_minutes=normalize_idle_dim_after_minutes(minutes))
 
-    def with_idle_dim_fraction(self, fraction: float) -> "AgentMonitorSettings":
+    def with_idle_dim_fraction(self, fraction: float) -> AgentMonitorSettings:
         return replace(self, idle_dim_fraction=normalize_idle_dim_fraction(fraction))
 
-    def with_focus_sync_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+    def with_focus_sync_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, focus_sync_enabled=bool(enabled))
 
-    def with_screen_bar_gap_width(self, width: float | None) -> "AgentMonitorSettings":
+    def with_screen_bar_gap_width(self, width: float | None) -> AgentMonitorSettings:
         if width is not None:
             width = max(120.0, min(1200.0, float(width)))
         return replace(self, screen_bar_gap_width=width)
 
-    def with_screen_bar_wing_length(self, length: float | None) -> "AgentMonitorSettings":
+    def with_screen_bar_wing_length(self, length: float | None) -> AgentMonitorSettings:
         if length is not None:
             length = max(0.0, min(400.0, float(length)))
         return replace(self, screen_bar_wing_length=length)
 
-    def with_screen_bar_bracket_style(self, style: str) -> "AgentMonitorSettings":
+    def with_screen_bar_bracket_style(self, style: str) -> AgentMonitorSettings:
         if style not in BRACKET_STYLE_CHOICES:
             raise ValueError(f"Unknown bracket style: {style}")
         return replace(self, screen_bar_bracket_style=style)
@@ -662,7 +662,7 @@ class AgentMonitorSettings:
                 return device.blend_mode
         return None
 
-    def with_device_blend_mode(self, device_id: str, mode: str | None) -> "AgentMonitorSettings":
+    def with_device_blend_mode(self, device_id: str, mode: str | None) -> AgentMonitorSettings:
         """mode=None restores the global Colors-window blend choice."""
         devices = tuple(
             replace(device, blend_mode=mode) if device.device_id == device_id else device
@@ -670,7 +670,7 @@ class AgentMonitorSettings:
         )
         return replace(self, devices=devices)
 
-    def with_saved_calibration_profile(self, slot: str) -> "AgentMonitorSettings":
+    def with_saved_calibration_profile(self, slot: str) -> AgentMonitorSettings:
         """Snapshots every known device's brightness + channel gains
         into a named profile slot."""
         payload = {
@@ -686,7 +686,7 @@ class AgentMonitorSettings:
         profiles[slot] = payload
         return replace(self, calibration_profiles=profiles)
 
-    def with_applied_calibration_profile(self, slot: str) -> "AgentMonitorSettings":
+    def with_applied_calibration_profile(self, slot: str) -> AgentMonitorSettings:
         """Applies a saved profile onto matching devices; unknown ids in
         the profile are ignored, devices missing from it are untouched."""
         profile = self.calibration_profiles.get(slot)
@@ -706,31 +706,31 @@ class AgentMonitorSettings:
             devices.append(device)
         return replace(self, devices=tuple(devices))
 
-    def with_low_battery_alert_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+    def with_low_battery_alert_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, low_battery_alert_enabled=bool(enabled))
 
-    def with_low_battery_threshold_percent(self, percent: float) -> "AgentMonitorSettings":
+    def with_low_battery_threshold_percent(self, percent: float) -> AgentMonitorSettings:
         return replace(self, low_battery_threshold_percent=max(1.0, min(50.0, float(percent))))
 
-    def with_notification_blinks_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+    def with_notification_blinks_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, notification_blinks_enabled=bool(enabled))
 
-    def with_completion_sweep_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+    def with_completion_sweep_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, completion_sweep_enabled=bool(enabled))
 
-    def with_calendar_alerts_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+    def with_calendar_alerts_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, calendar_alerts_enabled=bool(enabled))
 
-    def with_reminder_alerts_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+    def with_reminder_alerts_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, reminder_alerts_enabled=bool(enabled))
 
-    def with_weather_alerts_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+    def with_weather_alerts_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, weather_alerts_enabled=bool(enabled))
 
-    def with_studio_program(self, program: str) -> "AgentMonitorSettings":
+    def with_studio_program(self, program: str) -> AgentMonitorSettings:
         return replace(self, studio_program=str(program))
 
-    def with_focus_profile_rule(self, focus_identifier: str, slot: str | None) -> "AgentMonitorSettings":
+    def with_focus_profile_rule(self, focus_identifier: str, slot: str | None) -> AgentMonitorSettings:
         """slot=None removes the rule."""
         if slot is not None and slot not in CALIBRATION_PROFILE_SLOTS:
             raise ValueError(f"Unknown profile slot: {slot}")
@@ -741,12 +741,12 @@ class AgentMonitorSettings:
             rules[focus_identifier] = slot
         return replace(self, focus_profile_rules=rules)
 
-    def with_timer_expected_minutes(self, minutes: float) -> "AgentMonitorSettings":
+    def with_timer_expected_minutes(self, minutes: float) -> AgentMonitorSettings:
         return replace(self, timer_expected_minutes=max(1.0, min(480.0, float(minutes))))
 
     def with_weather_location(
         self, latitude: float | None, longitude: float | None
-    ) -> "AgentMonitorSettings":
+    ) -> AgentMonitorSettings:
         """Both None = automatic IP geolocation."""
         if latitude is not None:
             latitude = max(-90.0, min(90.0, float(latitude)))
@@ -754,10 +754,10 @@ class AgentMonitorSettings:
             longitude = max(-180.0, min(180.0, float(longitude)))
         return replace(self, weather_latitude=latitude, weather_longitude=longitude)
 
-    def with_calendar_lead_minutes(self, minutes: float) -> "AgentMonitorSettings":
+    def with_calendar_lead_minutes(self, minutes: float) -> AgentMonitorSettings:
         return replace(self, calendar_lead_minutes=max(1.0, min(60.0, float(minutes))))
 
-    def with_escalation_tier(self, tier: str) -> "AgentMonitorSettings":
+    def with_escalation_tier(self, tier: str) -> AgentMonitorSettings:
         from .signals import ESCALATION_TIERS
 
         if tier not in ESCALATION_TIERS:
@@ -769,7 +769,7 @@ class AgentMonitorSettings:
         ramp_seconds: float | None = None,
         menu_bar_seconds: float | None = None,
         final_seconds: float | None = None,
-    ) -> "AgentMonitorSettings":
+    ) -> AgentMonitorSettings:
         def clamp(value, low, high):
             return max(low, min(high, float(value)))
 
@@ -792,6 +792,8 @@ class AgentMonitorSettings:
         merged over the built-in default. Continuous signals never get
         a one-shot pattern -- it would flash once and leave the bar
         dark for the rest of a multi-hour condition."""
+        from dataclasses import replace as _replace
+
         from .signals import (
             CONTINUOUS_SIGNALS,
             DEFAULT_SIGNAL_STYLES,
@@ -799,7 +801,6 @@ class AgentMonitorSettings:
             PATTERN_BREATHE,
             SignalStyle,
         )
-        from dataclasses import replace as _replace
 
         fallback = DEFAULT_SIGNAL_STYLES[key]
         style = SignalStyle.from_dict(self.signal_styles.get(key), fallback)
@@ -807,7 +808,7 @@ class AgentMonitorSettings:
             style = _replace(style, pattern=PATTERN_BREATHE)
         return style
 
-    def with_signal_style(self, key: str, style) -> "AgentMonitorSettings":
+    def with_signal_style(self, key: str, style) -> AgentMonitorSettings:
         from .signals import DEFAULT_SIGNAL_STYLES
 
         if key not in DEFAULT_SIGNAL_STYLES:
@@ -816,7 +817,7 @@ class AgentMonitorSettings:
         styles[key] = style.normalized().to_dict()
         return replace(self, signal_styles=styles)
 
-    def with_notification_app_color(self, bundle_id: str, color: str | None) -> "AgentMonitorSettings":
+    def with_notification_app_color(self, bundle_id: str, color: str | None) -> AgentMonitorSettings:
         """color=None removes the app from the blink list entirely."""
         apps = dict(self.notification_app_colors)
         if color is None:
@@ -836,7 +837,7 @@ class AgentMonitorSettings:
             return self.idle_dim_fraction
         return max(0.0, min(1.0, float(rule)))
 
-    def with_focus_dim_rule(self, mode_identifier: str, fraction: float | None) -> "AgentMonitorSettings":
+    def with_focus_dim_rule(self, mode_identifier: str, fraction: float | None) -> AgentMonitorSettings:
         """fraction=None removes the rule (back to the shared default)."""
         rules = dict(self.focus_dim_rules)
         if fraction is None:
@@ -1136,7 +1137,13 @@ def save_settings(
     # thread via remember_connected_devices, so in-place truncation had
     # a real interleaving window, not just a power-loss one.)
     payload = json.dumps(settings.to_dict(), indent=2, sort_keys=True) + "\n"
-    scratch = target.with_name(target.name + ".tmp")
+    # Scratch name is unique per writer: the LED worker thread and
+    # main-thread UI actions both save concurrently, and a SHARED
+    # scratch let one thread os.replace() a file the other was still
+    # writing -- a truncated settings.json.
+    scratch = target.with_name(
+        f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
     scratch.write_text(payload)
     os.replace(scratch, target)
     return target

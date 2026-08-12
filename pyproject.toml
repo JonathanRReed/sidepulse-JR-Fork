@@ -65,3 +65,18 @@ include = ["sidepulse*"]
 
 [tool.setuptools.package-data]
 "sidepulse.resources" = ["sd_eject_guard.c", "sdled.wasm"]
+
+[tool.ruff]
+# Pin the lint surface: ruff 0.16's expanded defaults flag this app's
+# deliberate quiet-failure excepts (BLE001/S110 -- watchers and TCC
+# probes are DESIGNED to swallow errors and back off quietly).
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "RUF"]
+# En dash / minus sign appear deliberately in user-facing copy.
+allowed-confusables = ["\u2013", "\u2212"]
+ignore = [
+    "RUF046",  # int(len(...)) casts kept for PyObjC bridge clarity
+    "RUF059",  # unpacked-but-unused tuple parts document payload shape
+]

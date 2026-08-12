@@ -10,7 +10,6 @@ from typing import Any
 from .models import AgentStatus, HookEvent
 from .providers import default_state_dir
 
-
 STATUS_AUDIT_LOG_NAME = "event-status.jsonl"
 RAW_PREVIEW_LIMIT = 2000
 MESSAGE_PREVIEW_LIMIT = 240

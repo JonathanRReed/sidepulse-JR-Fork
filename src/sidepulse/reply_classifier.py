@@ -6,8 +6,8 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 DEFAULT_MODEL = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 LABELS = ("REPLY_REQUIRED", "NO_REPLY_REQUIRED", "UNCERTAIN")

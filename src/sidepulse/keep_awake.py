@@ -4,12 +4,11 @@ import os
 import subprocess
 import threading
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Sequence
 
 from .device_writer import KNOWN_LED_FILE_NAMES
 from .models import AgentMode
-
 
 AWAKE_GRACE_SECONDS = 300.0
 SD_STATUS_READ_SECONDS = 60.0

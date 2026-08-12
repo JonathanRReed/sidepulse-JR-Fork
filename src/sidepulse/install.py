@@ -4,8 +4,8 @@ import json
 import os
 import queue
 import re
-import shutil
 import shlex
+import shutil
 import subprocess
 import sys
 import threading

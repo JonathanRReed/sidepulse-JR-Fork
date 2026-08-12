@@ -33,8 +33,8 @@ from .lid_sleep import (
 from .models import AgentStatus
 from .providers import (
     HOOK_PROVIDERS,
-    detect_provider_configs,
     default_log_path,
+    detect_provider_configs,
     provider_spec,
 )
 from .settings import (
@@ -433,7 +433,11 @@ def cmd_sidepulse_sdejectguard_start(args: argparse.Namespace) -> int:
 
 
 def cmd_sidepulse_sdejectguard_stop(args: argparse.Namespace) -> int:
-    from .sd_eject_guard_launch import SD_EJECT_GUARD_DISPLAY_NAME, SdEjectGuardInstallError, stop_sd_eject_guard
+    from .sd_eject_guard_launch import (
+        SD_EJECT_GUARD_DISPLAY_NAME,
+        SdEjectGuardInstallError,
+        stop_sd_eject_guard,
+    )
 
     try:
         results = stop_sd_eject_guard(scope=args.scope, dry_run=args.dry_run)
@@ -454,7 +458,11 @@ def cmd_sidepulse_sdejectguard_stop(args: argparse.Namespace) -> int:
 
 
 def cmd_sidepulse_sdejectguard_uninstall(args: argparse.Namespace) -> int:
-    from .sd_eject_guard_launch import SD_EJECT_GUARD_DISPLAY_NAME, SdEjectGuardInstallError, uninstall_sd_eject_guard
+    from .sd_eject_guard_launch import (
+        SD_EJECT_GUARD_DISPLAY_NAME,
+        SdEjectGuardInstallError,
+        uninstall_sd_eject_guard,
+    )
 
     try:
         results = uninstall_sd_eject_guard(scope=args.scope, dry_run=args.dry_run)
@@ -513,7 +521,11 @@ def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
     results = install_hook_results(args)
     print_install_results(results, dry_run=args.dry_run)
 
-    from .sd_eject_guard_launch import SD_EJECT_GUARD_DISPLAY_NAME, SdEjectGuardInstallError, install_sd_eject_guard
+    from .sd_eject_guard_launch import (
+        SD_EJECT_GUARD_DISPLAY_NAME,
+        SdEjectGuardInstallError,
+        install_sd_eject_guard,
+    )
 
     try:
         guard_result = install_sd_eject_guard(
@@ -698,7 +710,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     monitor = monitor_from_args(args)
-    snapshot = monitor.snapshot(include_stale=args.all)
+    snapshot = monitor.snapshot()
     if args.json:
         print(json.dumps(snapshot.to_dict(), indent=2))
     else:
@@ -713,7 +725,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         if sys.stdout.isatty():
             print("\033[?25l", end="")
         while True:
-            snapshot = monitor.snapshot(include_stale=args.all)
+            snapshot = monitor.snapshot()
             print("\033[2J\033[H", end="")
             print(
                 render_watch_dashboard(
@@ -743,7 +755,7 @@ def cmd_leds(args: argparse.Namespace) -> int:
 
     try:
         while True:
-            snapshot = monitor.snapshot(include_stale=args.all)
+            snapshot = monitor.snapshot()
             result = leds.sync_mode(snapshot.aggregate.mode)
             if result.changed or result.error or args.once:
                 print(render_led_sync_result(result, snapshot, dry_run=args.dry_run))

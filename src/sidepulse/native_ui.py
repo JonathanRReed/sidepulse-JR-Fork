@@ -54,8 +54,8 @@ try:
         NSLayoutConstraintOrientationVertical,
         NSLayoutPriorityDefaultHigh,
         NSPopUpButton,
-        NSScrollView,
         NSScrollerStyleOverlay,
+        NSScrollView,
         NSSlider,
         NSStackView,
         NSStackViewDistributionFill,
@@ -248,7 +248,7 @@ class _FillWidthStackView(NSStackView):
         constraint.setActive_(True)
 
 
-def make_fill_stack(*, spacing: float = SPACE_M, fill_priority: int = 999) -> "NSStackView":
+def make_fill_stack(*, spacing: float = SPACE_M, fill_priority: int = 999) -> NSStackView:
     """A vertical _FillWidthStackView with the shared stack defaults.
 
     Two tiers of fill_priority, and the difference matters:
@@ -273,7 +273,7 @@ def make_fill_stack(*, spacing: float = SPACE_M, fill_priority: int = 999) -> "N
     return stack
 
 
-def make_stack(*, orientation: str = "vertical", spacing: float = 8.0, alignment=None) -> "NSStackView":
+def make_stack(*, orientation: str = "vertical", spacing: float = 8.0, alignment=None) -> NSStackView:
     stack = NSStackView.alloc().init()
     stack.setOrientation_(
         NSUserInterfaceLayoutOrientationVertical
@@ -299,7 +299,7 @@ def make_stack(*, orientation: str = "vertical", spacing: float = 8.0, alignment
     return stack
 
 
-def make_label(text: str, *, secondary: bool = False, size: float = 13.0, bold: bool = False) -> "NSTextField":
+def make_label(text: str, *, secondary: bool = False, size: float = 13.0, bold: bool = False) -> NSTextField:
     label = NSTextField.labelWithString_(text)
     label.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
     label.setTextColor_(NSColor.secondaryLabelColor() if secondary else NSColor.labelColor())
@@ -308,7 +308,7 @@ def make_label(text: str, *, secondary: bool = False, size: float = 13.0, bold: 
 
 def make_wrapping_label(
     text: str, *, secondary: bool = False, size: float = 13.0, max_width: float = 520.0
-) -> "NSTextField":
+) -> NSTextField:
     """A label that word-wraps instead of clipping at its container's
     edge -- for explanatory sentences (a plain make_label is single-line
     and truncates)."""
@@ -319,7 +319,7 @@ def make_wrapping_label(
     return label
 
 
-def make_section_title(text: str) -> "NSTextField":
+def make_section_title(text: str) -> NSTextField:
     """A group header in System Settings' own register: small, semibold,
     left-aligned -- the sidebar selection already names the pane, so
     in-content titles are quiet organizers, not display headlines."""
@@ -329,7 +329,7 @@ def make_section_title(text: str) -> "NSTextField":
     return label
 
 
-def make_row(label_text: str, control, *, help_text: str | None = None, fill_control: bool = False) -> "NSStackView":
+def make_row(label_text: str, control, *, help_text: str | None = None, fill_control: bool = False) -> NSStackView:
     """A full-width "label ......... control" row in System Settings' own
     geometry: label at the leading edge (primary color -- it's the row's
     subject, not a caption), control at the trailing edge, the gap
@@ -363,7 +363,7 @@ def make_row(label_text: str, control, *, help_text: str | None = None, fill_con
     return row
 
 
-def make_checkbox(title: str, target, selector: str, *, help_text: str | None = None) -> "NSButton":
+def make_checkbox(title: str, target, selector: str, *, help_text: str | None = None) -> NSButton:
     checkbox = NSButton.alloc().init()
     checkbox.setButtonType_(NSButtonTypeSwitch)
     checkbox.setTitle_(title)
@@ -377,7 +377,7 @@ def make_checkbox(title: str, target, selector: str, *, help_text: str | None = 
 
 def make_switch_row(
     title: str, target, selector: str, *, help_text: str | None = None
-) -> tuple["NSStackView", "NSSwitch"]:
+) -> tuple[NSStackView, NSSwitch]:
     """A "Title ......... [switch]" row -- the System Settings register
     for a boolean, replacing the box-on-the-left checkbox (which reads
     as a dialog control, not a settings row). Returns (row, switch);
@@ -395,7 +395,7 @@ def make_switch_row(
     return row, switch
 
 
-def make_hspacer() -> "NSView":
+def make_hspacer() -> NSView:
     """A no-intrinsic-size view that soaks up leftover width. Append to a
     horizontal cluster that sits directly in a fill-width stack, so the
     stretch lands here instead of arbitrarily distorting the
@@ -405,7 +405,7 @@ def make_hspacer() -> "NSView":
     return spacer
 
 
-def make_card(title: str | None = None) -> tuple["NSView", "NSStackView"]:
+def make_card(title: str | None = None) -> tuple[NSView, NSStackView]:
     """A translucent, rounded, padded card -- the grouped-box unit both
     windows are built from. Returns (outer_view_to_add_to_parent_stack,
     inner_content_stack) -- callers append rows to the inner stack.
@@ -431,7 +431,7 @@ def make_card(title: str | None = None) -> tuple["NSView", "NSStackView"]:
     return outer, content
 
 
-def add_separator(stack: "NSStackView") -> None:
+def add_separator(stack: NSStackView) -> None:
     line = NSView.alloc().init()
     line.setWantsLayer_(True)
     line.layer().setBackgroundColor_(NSColor.separatorColor().CGColor())
@@ -486,7 +486,7 @@ def build_sidebar_table(width: float = 200.0):
 # width, so callers should wrap it in constrain_width().
 
 
-def make_button(title: str, target, selector: str) -> "NSButton":
+def make_button(title: str, target, selector: str) -> NSButton:
     button = NSButton.alloc().init()
     button.setTitle_(title)
     button.setBezelStyle_(NSBezelStyleRounded)
@@ -495,14 +495,14 @@ def make_button(title: str, target, selector: str) -> "NSButton":
     return button
 
 
-def make_popup_button(target, selector: str) -> "NSPopUpButton":
+def make_popup_button(target, selector: str) -> NSPopUpButton:
     popup = NSPopUpButton.alloc().init()
     popup.setTarget_(target)
     popup.setAction_(selector)
     return popup
 
 
-def make_field(text: str = "", *, target=None, action: str | None = None) -> "NSTextField":
+def make_field(text: str = "", *, target=None, action: str | None = None) -> NSTextField:
     """An editable text field. Passing target/action wires the field to
     commit on Return AND on end-of-editing (tabbing/clicking away) --
     the instant-apply contract every field in this app follows: a Mac
@@ -580,7 +580,7 @@ class _FlippedClipView(NSClipView):
         return True
 
 
-def wrap_in_scroll_pane(stack: "NSStackView", *, padding: float = 20.0) -> "NSScrollView":
+def wrap_in_scroll_pane(stack: NSStackView, *, padding: float = 20.0) -> NSScrollView:
     """Wraps a vertical content stack (typically a column of make_card()
     results) in its own independently-scrolling NSScrollView, pinned to
     the scroll view's content width so rows/cards fill it, with height
@@ -651,7 +651,7 @@ def wrap_in_scroll_pane(stack: "NSStackView", *, padding: float = 20.0) -> "NSSc
     return scroll
 
 
-def stretch_to_stack_width(stack: "NSStackView", view) -> None:
+def stretch_to_stack_width(stack: NSStackView, view) -> None:
     """Forces `view` (already added via stack.addArrangedSubview_(view))
     to fill the vertical stack's own width exactly, instead of relying on
     NSStackView's own cross-axis sizing. That default is normally fine
@@ -670,7 +670,7 @@ def stretch_to_stack_width(stack: "NSStackView", view) -> None:
     )
 
 
-def make_fixed_area(width: float, height: float) -> "NSView":
+def make_fixed_area(width: float, height: float) -> NSView:
     """A plain NSView sized by Auto Layout constraints (not an intrinsic
     content size) so it can sit as one arranged subview in a stack --
     while anything added inside it via addSubview_ with an explicit frame
@@ -685,7 +685,7 @@ def make_fixed_area(width: float, height: float) -> "NSView":
     return view
 
 
-def sidebar_cell_view(label_text: str) -> "NSView":
+def sidebar_cell_view(label_text: str) -> NSView:
     """One row's content view for the sidebar table -- plain label, no
     disclosure/icon complexity needed for a flat single-level list."""
     label = NSTextField.labelWithString_(label_text)

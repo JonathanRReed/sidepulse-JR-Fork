@@ -40,9 +40,8 @@ from .led_status import (
     scale_hex_brightness,
     settle_duration_ms,
 )
-from .models import AgentMode, AgentStatus, MODE_PRIORITY
+from .models import MODE_PRIORITY, AgentMode, AgentStatus
 from .providers import PROVIDER_SPECS
-
 
 # --- Mode color keys -------------------------------------------------------
 
@@ -257,8 +256,7 @@ def normalize_hex(value: object, fallback: str) -> str:
     if not isinstance(value, str):
         return fallback
     text = value.strip()
-    if text.startswith("#"):
-        text = text[1:]
+    text = text.removeprefix("#")
     if len(text) != 6:
         return fallback
     try:
@@ -378,7 +376,7 @@ IDENTITY_PALETTE: tuple[str, ...] = (
 )
 
 
-def identity_colors_for_agents(agent_ids: "list[str]") -> dict[str, str]:
+def identity_colors_for_agents(agent_ids: list[str]) -> dict[str, str]:
     """Deterministic palette assignment: each id hashes to a preferred
     slot and probes forward past slots already taken this round, so the
     same set of sessions always maps to the same colors, and two
@@ -460,7 +458,7 @@ class ColorSettings:
     done_celebration_enabled: bool = DEFAULT_DONE_CELEBRATION_ENABLED
 
     @classmethod
-    def defaults(cls) -> "ColorSettings":
+    def defaults(cls) -> ColorSettings:
         return cls(
             mode_colors=_default_mode_colors(),
             agent_colors=_default_agent_colors(),
@@ -492,7 +490,7 @@ class ColorSettings:
             return None
         return normalize_hex(raw, IDENTITY_PALETTE[0])
 
-    def with_session_color(self, agent_id: str, hex_value: str | None) -> "ColorSettings":
+    def with_session_color(self, agent_id: str, hex_value: str | None) -> ColorSettings:
         """hex_value=None removes the override (back to auto)."""
         session_colors = dict(self.session_colors)
         if hex_value is None:
@@ -524,7 +522,7 @@ class ColorSettings:
             return DEFAULT_MODE_ANIMATION[key]
         return style
 
-    def with_mode_color(self, key: str, hex_value: str) -> "ColorSettings":
+    def with_mode_color(self, key: str, hex_value: str) -> ColorSettings:
         if key not in MODE_COLOR_KEYS:
             raise ValueError(f"Unknown mode color key: {key}")
         fallback = _default_mode_colors()[key]
@@ -532,32 +530,32 @@ class ColorSettings:
         colors[key] = normalize_hex(hex_value, fallback)
         return replace(self, mode_colors=colors)
 
-    def with_agent_color(self, provider: str, hex_value: str) -> "ColorSettings":
+    def with_agent_color(self, provider: str, hex_value: str) -> ColorSettings:
         fallback = default_agent_color(provider)
         colors = dict(self.agent_colors)
         colors[provider] = normalize_hex(hex_value, fallback)
         return replace(self, agent_colors=colors)
 
-    def with_blend_mode(self, mode: str) -> "ColorSettings":
+    def with_blend_mode(self, mode: str) -> ColorSettings:
         if mode not in BLEND_MODE_CHOICES:
             raise ValueError(f"Unknown blend mode: {mode}")
         return replace(self, blend_mode=mode)
 
-    def with_fade_floor(self, key: str, value: float) -> "ColorSettings":
+    def with_fade_floor(self, key: str, value: float) -> ColorSettings:
         if key not in FADE_MODE_KEYS:
             raise ValueError(f"Unknown fade mode key: {key}")
         floors = dict(self.fade_floor)
         floors[key] = normalize_fade_fraction(value, DEFAULT_FADE_FLOOR)
         return replace(self, fade_floor=floors)
 
-    def with_fade_ceiling(self, key: str, value: float) -> "ColorSettings":
+    def with_fade_ceiling(self, key: str, value: float) -> ColorSettings:
         if key not in FADE_MODE_KEYS:
             raise ValueError(f"Unknown fade mode key: {key}")
         ceilings = dict(self.fade_ceiling)
         ceilings[key] = normalize_fade_fraction(value, DEFAULT_FADE_CEILING)
         return replace(self, fade_ceiling=ceilings)
 
-    def with_mode_animation(self, key: str, style: str) -> "ColorSettings":
+    def with_mode_animation(self, key: str, style: str) -> ColorSettings:
         if key not in ANIMATION_MODE_KEYS:
             raise ValueError(f"Unknown animation mode key: {key}")
         if style not in ANIMATION_STYLE_CHOICES:
@@ -566,7 +564,7 @@ class ColorSettings:
         animations[key] = style
         return replace(self, mode_animation=animations)
 
-    def with_cycle_speed(self, seconds: float) -> "ColorSettings":
+    def with_cycle_speed(self, seconds: float) -> ColorSettings:
         """Sets the global speed. Does not affect any mode that has its own
         override via with_speed_override()."""
         return replace(self, cycle_speed_seconds=normalize_cycle_speed(seconds))
@@ -581,14 +579,14 @@ class ColorSettings:
     def uses_global_speed(self, blend_mode: str) -> bool:
         return blend_mode not in self.speed_overrides
 
-    def with_speed_override(self, blend_mode: str, seconds: float) -> "ColorSettings":
+    def with_speed_override(self, blend_mode: str, seconds: float) -> ColorSettings:
         if blend_mode not in SPEED_OVERRIDE_MODES:
             raise ValueError(f"Unknown speed-override mode: {blend_mode}")
         overrides = dict(self.speed_overrides)
         overrides[blend_mode] = normalize_cycle_speed(seconds)
         return replace(self, speed_overrides=overrides)
 
-    def with_global_speed_for_mode(self, blend_mode: str) -> "ColorSettings":
+    def with_global_speed_for_mode(self, blend_mode: str) -> ColorSettings:
         """Reverts `blend_mode` back to following the global speed."""
         if blend_mode not in SPEED_OVERRIDE_MODES:
             raise ValueError(f"Unknown speed-override mode: {blend_mode}")
@@ -598,10 +596,10 @@ class ColorSettings:
         del overrides[blend_mode]
         return replace(self, speed_overrides=overrides)
 
-    def with_round_robin_urgency_alert(self, enabled: bool) -> "ColorSettings":
+    def with_round_robin_urgency_alert(self, enabled: bool) -> ColorSettings:
         return replace(self, round_robin_urgency_alert=bool(enabled))
 
-    def with_done_celebration_enabled(self, enabled: bool) -> "ColorSettings":
+    def with_done_celebration_enabled(self, enabled: bool) -> ColorSettings:
         return replace(self, done_celebration_enabled=bool(enabled))
 
     def to_dict(self) -> dict[str, Any]:
@@ -620,7 +618,7 @@ class ColorSettings:
         }
 
     @classmethod
-    def from_dict(cls, data: object) -> "ColorSettings":
+    def from_dict(cls, data: object) -> ColorSettings:
         defaults = cls.defaults()
         if not isinstance(data, dict):
             return defaults
@@ -733,7 +731,7 @@ PRESET_DESCRIPTIONS: dict[str, str] = {
 }
 
 
-def apply_preset(colors: "ColorSettings", preset: str) -> "ColorSettings":
+def apply_preset(colors: ColorSettings, preset: str) -> ColorSettings:
     """One-click personalities for the whole display engine -- each sets
     blend mode, animation styles, speed, fade range, and event toggles as
     a coherent package. Agent identity colors are deliberately untouched:
@@ -769,7 +767,7 @@ def apply_preset(colors: "ColorSettings", preset: str) -> "ColorSettings":
     raise ValueError(f"Unknown preset: {preset}")
 
 
-def matching_preset(colors: "ColorSettings") -> str:
+def matching_preset(colors: ColorSettings) -> str:
     """Which preset the current settings exactly correspond to, or
     PRESET_CUSTOM -- so the preset picker can honestly show "Custom" the
     moment any manual tweak diverges from a package."""
@@ -830,7 +828,7 @@ def _single_agent_program(
     state: LedDisplayState,
     *,
     led_count: int,
-    brightness: int | float,
+    brightness: float,
     settings: ColorSettings,
 ) -> str:
     return program_for_display_state(
@@ -904,7 +902,7 @@ def _color_blend_program(
     agents: list[_ActiveAgent],
     *,
     led_count: int,
-    brightness: int | float,
+    brightness: float,
     settings: ColorSettings,
 ) -> str:
     blended = weighted_blend([(agent.color, float(agent.weight)) for agent in agents])
@@ -931,7 +929,7 @@ def _cycle_program(
     agents: list[_ActiveAgent],
     *,
     led_count: int,
-    brightness: int | float,
+    brightness: float,
     settings: ColorSettings,
 ) -> str:
     # Show each active agent's own color in turn across the whole strip --
@@ -967,7 +965,7 @@ def _round_robin_program(
     agents: list[_ActiveAgent],
     *,
     led_count: int,
-    brightness: int | float,
+    brightness: float,
     settings: ColorSettings,
 ) -> str:
     """Repeats the active-agent sequence across every LED (3 agents on 8
@@ -1013,7 +1011,7 @@ def _relay_program(
     agents: list[_ActiveAgent],
     *,
     led_count: int,
-    brightness: int | float,
+    brightness: float,
     settings: ColorSettings,
 ) -> str:
     """A baton pass: exactly one LED flares to its agent's peak color at a
@@ -1096,7 +1094,7 @@ def _spatial_split_program(
     agents: list[_ActiveAgent],
     *,
     led_count: int,
-    brightness: int | float,
+    brightness: float,
     settings: ColorSettings,
 ) -> str:
     if len(agents) > led_count:
@@ -1124,7 +1122,11 @@ def _spatial_split_program(
         # A slow, purely cosmetic background rotation so a busy strip keeps
         # some motion even between reshuffles. Inserted before "repeat" so
         # it loops with everything else.
-        program_lines = program_lines[:-1] + [f"roll {IDLE_ROLL_SECONDS:g}s linear"] + program_lines[-1:]
+        program_lines = [
+            *program_lines[:-1],
+            f"roll {IDLE_ROLL_SECONDS:g}s linear",
+            *program_lines[-1:],
+        ]
 
     return apply_brightness("\n".join(program_lines), brightness)
 
@@ -1186,7 +1188,7 @@ def program_for_snapshot(
     *,
     led_count: int = 8,
     colors: ColorSettings | None = None,
-    brightness: int | float = 255,
+    brightness: float = 255,
     fallback_mode: AgentMode = AgentMode.IDLE_READY,
 ) -> tuple[LedDisplayState, str]:
     """Render an LED program for the full set of active agent statuses.
@@ -1261,10 +1263,10 @@ def program_for_snapshot(
 
 def _with_attention_takeover(
     program: str,
-    agents: "list[_ActiveAgent]",
+    agents: list[_ActiveAgent],
     *,
     settings: ColorSettings,
-    brightness: int | float,
+    brightness: float,
 ) -> str:
     """Prepends the full-bar double-flash preamble (see ATTENTION_FLASH_MS)
     when the urgency alert is on and any agent is Waiting/Blocked. Applied
@@ -1291,14 +1293,14 @@ def _with_attention_takeover(
     return program
 
 
-def _peak_color_for_agent(agent: "_ActiveAgent", settings: ColorSettings) -> str:
+def _peak_color_for_agent(agent: _ActiveAgent, settings: ColorSettings) -> str:
     if agent.state == LedDisplayState.DONE:
         return agent.color
     _floor, ceiling = settings.fade_range(_STATE_TO_MODE_KEY[agent.state])
     return agent.color if ceiling >= 1.0 else scale_hex_brightness(agent.color, ceiling)
 
 
-def _peak_color_for_agent_with_alert(agent: "_ActiveAgent", settings: ColorSettings) -> str:
+def _peak_color_for_agent_with_alert(agent: _ActiveAgent, settings: ColorSettings) -> str:
     """Like _peak_color_for_agent, but applies the Round-Robin/Cycle urgency
     alert color swap first -- used by preview_led_colors() for those two
     modes so the static preview matches what program_for_snapshot() would

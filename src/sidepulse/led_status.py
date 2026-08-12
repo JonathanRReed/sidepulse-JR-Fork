@@ -103,7 +103,7 @@ NEUTRAL_CHANNEL_GAINS = (DEFAULT_CHANNEL_GAIN, DEFAULT_CHANNEL_GAIN, DEFAULT_CHA
 _HEX_COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}")
 
 
-def normalize_channel_gain(value: float | int | None) -> float:
+def normalize_channel_gain(value: float | None) -> float:
     if value is None:
         return DEFAULT_CHANNEL_GAIN
     try:
@@ -301,7 +301,7 @@ def program_for_display_state(
     state: LedDisplayState,
     *,
     led_count: int = 8,
-    brightness: int | float = 255,
+    brightness: float = 255,
     idle_color: str = IDLE_DIM,
     ask_color: str = ASK_AMBER,
     done_color: str = DONE_GREEN,
@@ -402,7 +402,7 @@ def write_mode_to_leds(
     device_path: Path | None = None,
     file_name: str = DEFAULT_FILE_NAME,
     dry_run: bool = False,
-    brightness: int | float = 255,
+    brightness: float = 255,
     channel_gains: tuple[float, float, float] = NEUTRAL_CHANNEL_GAINS,
 ) -> LedStatusWrite:
     target = resolve_target_path(device_path=device_path, file_name=file_name)
@@ -439,17 +439,17 @@ def normalized_device_name(name: str) -> str:
     return "".join(char for char in name.lower() if char.isalnum())
 
 
-def normalize_brightness(value: int | float | None) -> int:
+def normalize_brightness(value: float | None) -> int:
     if value is None:
         return 255
     return max(0, min(255, int(round(float(value)))))
 
 
-def brightness_percent(value: int | float | None) -> int:
+def brightness_percent(value: float | None) -> int:
     return round(normalize_brightness(value) / 255 * 100)
 
 
-def low_battery_program(brightness: int | float = 255) -> str:
+def low_battery_program(brightness: float = 255) -> str:
     """The low-battery signal's DEFAULT style through the one renderer
     (see LOW_BATTERY_RED's comment for why it's deliberately slow)."""
     from .signals import DEFAULT_SIGNAL_STYLES, SIGNAL_LOW_BATTERY
@@ -461,7 +461,7 @@ def timer_fill_program(
     fraction: float,
     *,
     led_count: int = 8,
-    brightness: int | float = 255,
+    brightness: float = 255,
     color: str = "#00E5FF",
 ) -> str:
     """LED fill from the left as elapsed working time crosses the
@@ -512,7 +512,7 @@ def timer_fill_program(
 
 def style_to_program(
     style,
-    brightness: int | float = 255,
+    brightness: float = 255,
     *,
     color: str | None = None,
     led_count: int = 8,
@@ -588,7 +588,7 @@ def style_to_program(
     return apply_brightness(body, effective)
 
 
-def calendar_glow_program(brightness: int | float = 255) -> str:
+def calendar_glow_program(brightness: float = 255) -> str:
     """The calendar signal's DEFAULT style through the one renderer --
     kept as a named helper for call sites and tests."""
     from .signals import DEFAULT_SIGNAL_STYLES, SIGNAL_CALENDAR
@@ -599,7 +599,7 @@ def calendar_glow_program(brightness: int | float = 255) -> str:
 NOTIFICATION_BLINK_SECONDS = 3 * 0.3 + 0.4  # default blink style's hold
 
 
-def notification_blink_program(color: str, brightness: int | float = 255) -> str:
+def notification_blink_program(color: str, brightness: float = 255) -> str:
     """The notification signal's DEFAULT style (app color override)
     through the one renderer."""
     from .signals import DEFAULT_SIGNAL_STYLES, SIGNAL_NOTIFICATION
@@ -609,7 +609,7 @@ def notification_blink_program(color: str, brightness: int | float = 255) -> str
     )
 
 
-def apply_brightness(program: str, brightness: int | float = 255) -> str:
+def apply_brightness(program: str, brightness: float = 255) -> str:
     value = normalize_brightness(brightness)
     if value >= 255:
         return program
@@ -624,7 +624,7 @@ class AgentLedController:
         file_name: str = DEFAULT_FILE_NAME,
         dry_run: bool = False,
         error_retry_seconds: float = 10.0,
-        brightness: int | float = 255,
+        brightness: float = 255,
         channel_gains: tuple[float, float, float] = NEUTRAL_CHANNEL_GAINS,
     ) -> None:
         self.device_path = device_path

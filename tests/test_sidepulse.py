@@ -14,6 +14,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from sidepulse import cli as cli_module
+from sidepulse import collector as collector_module
+from sidepulse import colors as colors_module
 from sidepulse.audit import (
     append_status_audit_record,
     export_status_audit_csv,
@@ -27,9 +30,14 @@ from sidepulse.battery import (
     parse_ioreg_battery_plist,
     program_for_battery,
 )
-from sidepulse import collector as collector_module
-from sidepulse import cli as cli_module
-from sidepulse import colors as colors_module
+from sidepulse.cli import build_parser, visible_watch_statuses
+from sidepulse.collector import (
+    AgentMonitor,
+    LiveAgentMonitor,
+    MonitorSnapshot,
+    SourceSpec,
+    default_sources,
+)
 from sidepulse.colors import (
     BLEND_MODE_CHOICES,
     BLEND_MODE_CLASSIC,
@@ -49,14 +57,6 @@ from sidepulse.colors import (
     program_for_snapshot,
     urgency_weight,
 )
-from sidepulse.collector import (
-    AgentMonitor,
-    LiveAgentMonitor,
-    MonitorSnapshot,
-    SourceSpec,
-    default_sources,
-)
-from sidepulse.cli import build_parser, visible_watch_statuses
 from sidepulse.device_writer import (
     DeviceWriteError,
     discover_devices,
@@ -65,7 +65,6 @@ from sidepulse.device_writer import (
     write_led_program,
 )
 from sidepulse.hook import format_hook_payload, routed_hook_payload, write_hook_payload
-from sidepulse.ipc import HookEventServer, send_hook_event
 from sidepulse.install import (
     hook_command,
     install_claude_hooks,
@@ -84,6 +83,7 @@ from sidepulse.install import (
     uninstall_openclaw_hooks,
     update_codex_trusted_hashes,
 )
+from sidepulse.ipc import HookEventServer, send_hook_event
 from sidepulse.keep_awake import KeepAwakeController, status_file_for_target
 from sidepulse.led_status import (
     ANIMATION_STYLE_BLINK,
@@ -113,11 +113,11 @@ from sidepulse.providers import (
     HOOK_PROVIDERS,
     PROVIDER_REGISTRY,
     PROVIDER_SPECS,
-    detect_devin_config,
-    detect_log_path,
-    detect_grok_config,
     default_log_path,
     default_state_dir,
+    detect_devin_config,
+    detect_grok_config,
+    detect_log_path,
     parse_log_line,
     provider_spec,
 )
@@ -150,9 +150,9 @@ from sidepulse.settings import (
     CLOSED_LID_AWAKE_AGENTS,
     CLOSED_LID_AWAKE_ALWAYS,
     CLOSED_LID_AWAKE_NEVER,
+    LED_DISPLAY_BATTERY,
     LID_ANIMATION_CLOSED,
     LID_ANIMATION_OPEN,
-    LED_DISPLAY_BATTERY,
     AgentMonitorSettings,
     DeviceDisplaySetting,
     default_config_dir,
@@ -1721,7 +1721,7 @@ class AgentMonitorTests(unittest.TestCase):
                 closed_lid_awake_policy=CLOSED_LID_AWAKE_AGENTS,
             ),
             closed_lid_awake=SimpleNamespace(last_error=None),
-            status_bar_devices=lambda: [],
+            status_bar_devices=list,
         )
 
         menu = status_bar.build_menu(snapshot, status_bar.STATE_IDLE, target)
@@ -1771,7 +1771,7 @@ class AgentMonitorTests(unittest.TestCase):
         target = SimpleNamespace(
             settings=AgentMonitorSettings(),
             closed_lid_awake=SimpleNamespace(last_error=None),
-            status_bar_devices=lambda: [],
+            status_bar_devices=list,
         )
 
         menu = status_bar.build_menu(snapshot, status_bar.STATE_IDLE, target)
@@ -6477,7 +6477,11 @@ class AnimationSmoothnessTests(unittest.TestCase):
     in-progress pulse."""
 
     def test_settle_duration_ms_is_bounded_and_proportional(self) -> None:
-        from sidepulse.led_status import SETTLE_MAX_MS, SETTLE_MIN_MS, settle_duration_ms
+        from sidepulse.led_status import (
+            SETTLE_MAX_MS,
+            SETTLE_MIN_MS,
+            settle_duration_ms,
+        )
 
         self.assertEqual(settle_duration_ms(0), SETTLE_MIN_MS)
         self.assertEqual(settle_duration_ms(100_000), SETTLE_MAX_MS)
@@ -6965,7 +6969,10 @@ class ChannelGainCalibrationTests(unittest.TestCase):
         self.assertEqual(apply_channel_gain_to_hex("off", (0.5, 0.5, 0.5)), "off")
 
     def test_apply_channel_gain_to_program_is_a_no_op_at_neutral_gains(self) -> None:
-        from sidepulse.led_status import NEUTRAL_CHANNEL_GAINS, apply_channel_gain_to_program
+        from sidepulse.led_status import (
+            NEUTRAL_CHANNEL_GAINS,
+            apply_channel_gain_to_program,
+        )
 
         program = "off 160ms cosine\n#2B8FFF 1600ms pulse\nrepeat"
         self.assertEqual(apply_channel_gain_to_program(program, NEUTRAL_CHANNEL_GAINS), program)
@@ -7216,14 +7223,49 @@ class FocusSyncTests(unittest.TestCase):
             self.assertTrue(focus_sync.is_focus_active())
 
 
+def isolate_controller(case, *, build_controller=True):
+    """Shared harness for every test class that builds a StatusBarController.
+
+    Everything the controller touches on disk is faked BEFORE it exists:
+    settings paths (both modules), the collector's latest-state snapshot,
+    and device discovery. Real-world incident this guards against: an
+    un-isolated refresh_() discovered the REAL mounted SidePulse volume
+    and wrote an LED program to it mid-test-run -- and the LED worker's
+    remember_connected_devices could then flush temp-test state into the
+    user's real settings.json.
+    """
+    tmp = tempfile.TemporaryDirectory()
+    case.addCleanup(tmp.cleanup)
+    case._tmp = tmp
+    case._settings_path = Path(tmp.name) / "settings.json"
+    for target in (
+        "sidepulse.settings.default_settings_path",
+        "sidepulse.status_bar.default_settings_path",
+    ):
+        patcher = patch(target, return_value=case._settings_path)
+        patcher.start()
+        case.addCleanup(patcher.stop)
+    latest = patch(
+        "sidepulse.status_bar.default_latest_state_path",
+        return_value=Path(tmp.name) / "latest.json",
+    )
+    latest.start()
+    case.addCleanup(latest.stop)
+    discovery = patch("sidepulse.status_bar.discover_devices", return_value=[])
+    discovery.start()
+    case.addCleanup(discovery.stop)
+    try:
+        from sidepulse import status_bar
+    except SystemExit as exc:
+        case.skipTest(str(exc))
+    case.status_bar = status_bar
+    if build_controller:
+        case.controller = status_bar.StatusBarController.alloc().init()
+
+
 class LowPowerModeTests(unittest.TestCase):
     def setUp(self) -> None:
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-        self.status_bar = status_bar
-        self.controller = status_bar.StatusBarController.alloc().init()
+        isolate_controller(self)
 
     def _snapshot(self, percent: int, *, plugged: bool = False):
         from sidepulse.battery import BatterySnapshot
@@ -7369,12 +7411,7 @@ class FocusModeParsingTests(unittest.TestCase):
 
 class FocusSyncScaleFactorTests(unittest.TestCase):
     def setUp(self) -> None:
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-        self.status_bar = status_bar
-        self.controller = status_bar.StatusBarController.alloc().init()
+        isolate_controller(self)
 
     def test_neutral_when_disabled(self) -> None:
         self.controller.settings = self.controller.settings.with_focus_sync_enabled(False)
@@ -7507,9 +7544,8 @@ class DisplayBrightnessTests(unittest.TestCase):
             display_brightness,
             "current_screen_brightness_fraction",
             side_effect=display_brightness.DisplayBrightnessUnavailableError("nope"),
-        ):
-            with self.assertRaises(display_brightness.DisplayBrightnessUnavailableError):
-                display_brightness.auto_led_brightness()
+        ), self.assertRaises(display_brightness.DisplayBrightnessUnavailableError):
+            display_brightness.auto_led_brightness()
 
 
 class DeviceAutoBrightnessSettingsTests(unittest.TestCase):
@@ -7578,21 +7614,7 @@ class RememberConnectedDevicesRaceTests(unittest.TestCase):
         # save_settings() -- MUST be isolated from the real settings file
         # (patched before construction, per the established rule) or it
         # writes real device entries and flips real flags on disk.
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        settings_path = Path(self._tmp.name) / "settings.json"
-        patcher_settings = patch("sidepulse.settings.default_settings_path", return_value=settings_path)
-        patcher_status_bar = patch("sidepulse.status_bar.default_settings_path", return_value=settings_path)
-        patcher_settings.start()
-        patcher_status_bar.start()
-        self.addCleanup(patcher_settings.stop)
-        self.addCleanup(patcher_status_bar.stop)
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-        self.status_bar = status_bar
-        self.controller = status_bar.StatusBarController.alloc().init()
+        isolate_controller(self)
 
     def _device(self, device_id="SidePulseDot"):
         return self.status_bar.StatusBarDevice(
@@ -7651,11 +7673,7 @@ class RememberConnectedDevicesRaceTests(unittest.TestCase):
 
 class EffectiveDeviceBrightnessTests(unittest.TestCase):
     def setUp(self) -> None:
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-        self.status_bar = status_bar
+        isolate_controller(self, build_controller=False)
 
     def _device(self, **overrides):
         defaults = dict(
@@ -7699,12 +7717,7 @@ class IdleTimeoutDimmingTests(unittest.TestCase):
     shouldn't keep a bright light going on the desk."""
 
     def setUp(self) -> None:
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-        self.status_bar = status_bar
-        self.controller = status_bar.StatusBarController.alloc().init()
+        isolate_controller(self)
 
     def _device(self, **overrides):
         defaults = dict(
@@ -7810,7 +7823,10 @@ class IdleTimeoutDimmingTests(unittest.TestCase):
         self.assertEqual(reloaded.idle_dim_fraction, 0.3)
 
     def test_idle_dim_after_minutes_is_clamped(self) -> None:
-        from sidepulse.settings import MAX_IDLE_DIM_AFTER_MINUTES, MIN_IDLE_DIM_AFTER_MINUTES
+        from sidepulse.settings import (
+            MAX_IDLE_DIM_AFTER_MINUTES,
+            MIN_IDLE_DIM_AFTER_MINUTES,
+        )
 
         settings = AgentMonitorSettings().with_idle_dim_after_minutes(0.0)
         self.assertEqual(settings.idle_dim_after_minutes, MIN_IDLE_DIM_AFTER_MINUTES)
@@ -7846,7 +7862,10 @@ class ClosedLidGracePeriodTests(unittest.TestCase):
         self.assertEqual(reloaded.closed_lid_grace_minutes, 15.0)
 
     def test_closed_lid_grace_minutes_is_clamped(self) -> None:
-        from sidepulse.settings import MAX_CLOSED_LID_GRACE_MINUTES, MIN_CLOSED_LID_GRACE_MINUTES
+        from sidepulse.settings import (
+            MAX_CLOSED_LID_GRACE_MINUTES,
+            MIN_CLOSED_LID_GRACE_MINUTES,
+        )
 
         settings = AgentMonitorSettings().with_closed_lid_grace_minutes(-5.0)
         self.assertEqual(settings.closed_lid_grace_minutes, MIN_CLOSED_LID_GRACE_MINUTES)
@@ -7887,21 +7906,19 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
     Auto-Brightness in Settings and couldn't find it there at all."""
 
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        settings_path = Path(self._tmp.name) / "settings.json"
-        patcher_settings = patch("sidepulse.settings.default_settings_path", return_value=settings_path)
-        patcher_status_bar = patch("sidepulse.status_bar.default_settings_path", return_value=settings_path)
-        patcher_settings.start()
-        patcher_status_bar.start()
-        self.addCleanup(patcher_settings.stop)
-        self.addCleanup(patcher_status_bar.stop)
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-        self.status_bar = status_bar
-        self.controller = status_bar.StatusBarController.alloc().init()
+        isolate_controller(self)
+        # These tests exercise the Devices section, so discovery must
+        # find exactly one (fake) device -- previously they leaned on
+        # discovering the REAL mounted SidePulse volume.
+        volume_root = Path(self._tmp.name) / "volumes"
+        (volume_root / "SidePulseDot").mkdir(parents=True)
+        devices = discover_devices(mount_root=volume_root)
+        assert len(devices) == 1
+        fake_discovery = patch(
+            "sidepulse.status_bar.discover_devices", return_value=devices
+        )
+        fake_discovery.start()
+        self.addCleanup(fake_discovery.stop)
 
     def test_calibration_test_lights_device_and_follows_gain_changes(self) -> None:
         # The guided flow's contract: clicking a patch lights the device
@@ -8233,25 +8250,7 @@ class ScreenBarSettingsTakeEffectImmediatelyTests(unittest.TestCase):
     though it saved correctly."""
 
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self._settings_path = Path(self._tmp.name) / "settings.json"
-        patcher_settings = patch(
-            "sidepulse.settings.default_settings_path", return_value=self._settings_path
-        )
-        patcher_status_bar = patch(
-            "sidepulse.status_bar.default_settings_path", return_value=self._settings_path
-        )
-        patcher_settings.start()
-        patcher_status_bar.start()
-        self.addCleanup(patcher_settings.stop)
-        self.addCleanup(patcher_status_bar.stop)
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-        self.status_bar = status_bar
-        self.controller = status_bar.StatusBarController.alloc().init()
+        isolate_controller(self)
         # The bug only manifests once the Screen Bar window already exists
         # (reposition() is a no-op before that) -- matches the real
         # scenario: the user already has it visible and flips a setting.
@@ -8301,27 +8300,9 @@ class ScreenBarSettingsTakeEffectImmediatelyTests(unittest.TestCase):
         self.assertTrue(loaded.setup_screen_completed)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TranscriptFallbackTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        settings_path = Path(self._tmp.name) / "settings.json"
-        patcher_settings = patch("sidepulse.settings.default_settings_path", return_value=settings_path)
-        patcher_status_bar = patch("sidepulse.status_bar.default_settings_path", return_value=settings_path)
-        patcher_settings.start()
-        patcher_status_bar.start()
-        self.addCleanup(patcher_settings.stop)
-        self.addCleanup(patcher_status_bar.stop)
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-        self.status_bar = status_bar
-        self.controller = status_bar.StatusBarController.alloc().init()
+        isolate_controller(self)
 
     def test_transcript_monitor_follows_the_switches(self) -> None:
         # The "Watch ... transcripts" switches used to save a setting
@@ -8462,21 +8443,7 @@ class SignalEngineTests(unittest.TestCase):
 
 class SignalStyleCardTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        settings_path = Path(self._tmp.name) / "settings.json"
-        patcher_settings = patch("sidepulse.settings.default_settings_path", return_value=settings_path)
-        patcher_status_bar = patch("sidepulse.status_bar.default_settings_path", return_value=settings_path)
-        patcher_settings.start()
-        patcher_status_bar.start()
-        self.addCleanup(patcher_settings.stop)
-        self.addCleanup(patcher_status_bar.stop)
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-        self.status_bar = status_bar
-        self.controller = status_bar.StatusBarController.alloc().init()
+        isolate_controller(self)
         self.controller.show_settings_window()
 
     def tearDown(self) -> None:
@@ -8628,21 +8595,7 @@ class EscalationTests(unittest.TestCase):
 
 class EscalationControllerTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        settings_path = Path(self._tmp.name) / "settings.json"
-        patcher_settings = patch("sidepulse.settings.default_settings_path", return_value=settings_path)
-        patcher_status_bar = patch("sidepulse.status_bar.default_settings_path", return_value=settings_path)
-        patcher_settings.start()
-        patcher_status_bar.start()
-        self.addCleanup(patcher_settings.stop)
-        self.addCleanup(patcher_status_bar.stop)
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-        self.status_bar = status_bar
-        self.controller = status_bar.StatusBarController.alloc().init()
+        isolate_controller(self)
 
     def test_blocked_episode_tracking_and_flash_timer_lifecycle(self) -> None:
         asking = (_status("codex", AgentMode.WAITING_FOR_INPUT),)
@@ -8748,25 +8701,12 @@ class HardeningTests(unittest.TestCase):
 
 class AskInboxAndActionsTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        settings_path = Path(self._tmp.name) / "settings.json"
-        patcher_settings = patch("sidepulse.settings.default_settings_path", return_value=settings_path)
-        patcher_status_bar = patch("sidepulse.status_bar.default_settings_path", return_value=settings_path)
-        patcher_settings.start()
-        patcher_status_bar.start()
-        self.addCleanup(patcher_settings.stop)
-        self.addCleanup(patcher_status_bar.stop)
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-        self.status_bar = status_bar
-        self.controller = status_bar.StatusBarController.alloc().init()
+        isolate_controller(self)
 
     def test_ask_statuses_filters_to_sessions_needing_the_user(self) -> None:
-        from sidepulse.collector import snapshot_from_statuses
         from datetime import datetime, timezone
+
+        from sidepulse.collector import snapshot_from_statuses
 
         statuses = (
             _status("codex", AgentMode.WORKING),
@@ -9028,21 +8968,7 @@ class WeatherAlertTests(unittest.TestCase):
 
 class CalendarAlertTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        settings_path = Path(self._tmp.name) / "settings.json"
-        patcher_settings = patch("sidepulse.settings.default_settings_path", return_value=settings_path)
-        patcher_status_bar = patch("sidepulse.status_bar.default_settings_path", return_value=settings_path)
-        patcher_settings.start()
-        patcher_status_bar.start()
-        self.addCleanup(patcher_settings.stop)
-        self.addCleanup(patcher_status_bar.stop)
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-        self.status_bar = status_bar
-        self.controller = status_bar.StatusBarController.alloc().init()
+        isolate_controller(self)
 
     def _device(self):
         return self.status_bar.StatusBarDevice(
@@ -9289,3 +9215,7 @@ class AppBundleTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("SidePulse.app/Contents/MacOS/SidePulse", result.stdout)
             self.assertIn("site-packages", result.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
