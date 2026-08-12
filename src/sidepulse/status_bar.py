@@ -2011,7 +2011,12 @@ class StatusBarController(NSObject):
         are live."""
         previous_modes = getattr(self, "last_agent_modes", {})
         current_modes = {
-            status.agent_id: status.mode for status in (statuses or ()) if status.agent_id
+            status.agent_id: status.mode
+            for status in (statuses or ())
+            # Sweep on MAIN agents finishing; a Claude session can burn
+            # through a dozen Task workers and the green sweep would
+            # never stop firing.
+            if status.agent_id and not status.is_subagent
         }
         self.last_agent_modes = current_modes
         if not self.settings.completion_sweep_enabled:
@@ -5099,6 +5104,7 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
             identity = colors_module.identity_colors_for_agents(
                 [status.agent_id for status in statuses]
             )
+        subagent_groups = active_subagents_by_parent(snapshot)
         for status in statuses:
             dot_color = None
             if getattr(target, "settings", None) is not None:
@@ -5109,6 +5115,32 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
                     status, snapshot.collected_at, target, identity_color=dot_color
                 )
             )
+            # Its running sub-agents, indented underneath in the SAME
+            # identity color -- one visual family per main session.
+            children = subagent_groups.pop(status.agent_id, [])
+            for child in children[:3]:
+                menu.addItem_(
+                    build_session_menu_item(
+                        child,
+                        snapshot.collected_at,
+                        target,
+                        identity_color=dot_color,
+                        indent=True,
+                    )
+                )
+            if len(children) > 3:
+                more = disabled_menu_item(f"{len(children) - 3} more sub-agents working")
+                more.setIndentationLevel_(1)
+                menu.addItem_(more)
+        # Sub-agents whose parent session isn't visible (rare: parent
+        # aged out while workers run on) still deserve a row.
+        for children in subagent_groups.values():
+            for child in children[:3]:
+                menu.addItem_(
+                    build_session_menu_item(
+                        child, snapshot.collected_at, target, indent=True
+                    )
+                )
 
     menu.addItem_(NSMenuItem.separatorItem())
     menu.addItem_(disabled_menu_item("Devices"))
@@ -7936,23 +7968,29 @@ def build_session_menu_item(
     *,
     width: float | None = None,
     identity_color: str | None = None,
+    indent: bool = False,
 ) -> NSMenuItem:
+    # Sub-agent rows carry an explicit elbow -- indentationLevel alone
+    # disappears next to the state-spinner and app-icon stack.
+    prefix = "\u21b3 " if indent else ""
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        native_session_menu_title(status),
+        f"{prefix}{native_session_menu_title(status)}",
         "openSessionPrimary:",
         "",
     )
     item.setTarget_(target)
     item.setRepresentedObject_(status)
+    if indent:
+        item.setIndentationLevel_(1)
     if identity_color is not None:
         # A colored bullet leading the title -- the session's identity
         # hue, matching what the LEDs show for it.
-        title = f"● {native_session_menu_title(status)}"
+        title = f"{prefix}\u25cf {native_session_menu_title(status)}"
         attributed = NSMutableAttributedString.alloc().initWithString_(title)
         attributed.addAttribute_value_range_(
             NSForegroundColorAttributeName,
             nscolor_from_hex(identity_color),
-            (0, 1),
+            (len(prefix), 1),
         )
         item.setAttributedTitle_(attributed)
     image = session_row_icon_for_status(status)
@@ -8295,19 +8333,42 @@ def build_error_menu(exc: Exception) -> NSMenu:
 
 
 def recent_statuses(snapshot) -> list[AgentStatus]:
-    statuses = list(snapshot.statuses)
+    """Main sessions only -- sub-agents render indented under their
+    parent (active_subagents_by_parent), not as top-level rows."""
+    statuses = [status for status in snapshot.statuses if not status.is_subagent]
     if not statuses:
-        statuses = list(snapshot.stale_statuses)
+        statuses = [
+            status for status in snapshot.stale_statuses if not status.is_subagent
+        ]
     statuses.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
     return statuses[:12]
 
 
+def active_subagents_by_parent(snapshot) -> dict[str, list[AgentStatus]]:
+    """Fresh, still-running sub-agents grouped by their parent session.
+    Finished sub-agents are noise and drop out immediately."""
+    groups: dict[str, list[AgentStatus]] = {}
+    for status in snapshot.statuses:
+        if not status.is_subagent or status.mode == AgentMode.COMPLETED:
+            continue
+        parent = status.parent_agent_id
+        if parent is None:
+            continue
+        groups.setdefault(parent, []).append(status)
+    for children in groups.values():
+        children.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
+    return groups
+
+
 def ask_statuses(snapshot) -> list[AgentStatus]:
-    """The sessions currently waiting on the user -- the Ask Inbox."""
+    """The sessions currently waiting on the user -- the Ask Inbox.
+    Main sessions only: a sub-agent's ask is its parent's problem, and
+    counting them made "Needs You" claim asks nobody could answer."""
     return [
         status
         for status in snapshot.statuses
-        if status.mode in (AgentMode.WAITING_FOR_INPUT, AgentMode.BLOCKED_ERROR)
+        if not status.is_subagent
+        and status.mode in (AgentMode.WAITING_FOR_INPUT, AgentMode.BLOCKED_ERROR)
     ]
 
 

@@ -1126,7 +1126,12 @@ def mode_for_event(record: HookEvent) -> AgentMode | None:
         return AgentMode.WORKING
     if event in {"UserPromptSubmit", "PreCompact", "PostCompact", "SubagentStart"}:
         return AgentMode.WORKING
-    if event in {"Stop", "SubagentStop"}:
+    if event == "SubagentStop":
+        # A finished sub-agent can't be answered -- their reports often
+        # END with question-shaped text, but there is nobody to ask, so
+        # mapping them to an ask left a phantom "Needs You" glowing.
+        return AgentMode.COMPLETED
+    if event == "Stop":
         if _assistant_message_asks_question(raw.get("last_assistant_message")):
             return AgentMode.WAITING_FOR_INPUT
         return AgentMode.COMPLETED
@@ -1714,7 +1719,10 @@ def _assistant_message_asks_question(message: object) -> bool:
     if not lines:
         return False
 
-    for line in reversed(lines[-8:]):
+    # Only the CLOSING lines: a question aimed at the user sits at the
+    # end of the turn. Scanning eight lines deep flagged summaries whose
+    # bullets merely started with "how"/"what" -- the phantom ask.
+    for line in reversed(lines[-3:]):
         if _assistant_status_line(line):
             continue
         if _assistant_line_asks_question(line):

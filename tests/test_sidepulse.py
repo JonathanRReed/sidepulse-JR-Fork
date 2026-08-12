@@ -8969,6 +8969,136 @@ class WeatherAlertTests(unittest.TestCase):
             self.assertIn("repeat", program)
 
 
+class SubagentAndPhantomAskTests(unittest.TestCase):
+    """Two real-world complaints: 'it keeps saying ask when nobody is
+    asking' (question-shaped text in finished turns / finished
+    sub-agents), and sub-agent swarms drowning the dropdown (77 of 111
+    live statuses were sub-agents on a real install)."""
+
+    def _status(self, agent_id, mode, *, session_id=None, provider="claude"):
+        return AgentStatus(
+            provider=provider,
+            agent_id=agent_id,
+            display_name=agent_id,
+            mode=mode,
+            updated_at=datetime.now(timezone.utc),
+            event_name="PostToolUse",
+            session_id=session_id,
+        )
+
+    def test_subagent_identity_from_agent_id(self) -> None:
+        sub = self._status("claude:agent:abc123", AgentMode.WORKING, session_id="s1")
+        main = self._status("claude:session:s1", AgentMode.WORKING, session_id="s1")
+        self.assertTrue(sub.is_subagent)
+        self.assertEqual(sub.parent_agent_id, "claude:session:s1")
+        self.assertFalse(main.is_subagent)
+        self.assertIsNone(main.parent_agent_id)
+
+    def test_finished_subagent_is_never_an_ask(self) -> None:
+        from sidepulse.collector import mode_for_event
+        from sidepulse.models import HookEvent
+
+        record = HookEvent(
+            provider="claude",
+            event_name="SubagentStop",
+            logged_at=datetime.now(timezone.utc),
+            raw={"last_assistant_message": "Should I proceed with the merge?"},
+        )
+        self.assertEqual(mode_for_event(record), AgentMode.COMPLETED)
+
+    def test_stop_with_trailing_question_is_an_ask(self) -> None:
+        from sidepulse.collector import mode_for_event
+        from sidepulse.models import HookEvent
+
+        record = HookEvent(
+            provider="claude",
+            event_name="Stop",
+            logged_at=datetime.now(timezone.utc),
+            raw={"last_assistant_message": "All done.\nShould I proceed with the merge?"},
+        )
+        self.assertEqual(mode_for_event(record), AgentMode.WAITING_FOR_INPUT)
+
+    def test_question_buried_in_a_summary_is_not_an_ask(self) -> None:
+        from sidepulse.collector import mode_for_event
+        from sidepulse.models import HookEvent
+
+        message = (
+            "Should we ship this? I decided yes.\n"
+            "Here is what changed:\n"
+            "- Fixed the footer\n"
+            "- Added the tips row\n"
+            "- Updated the docs\n"
+            "Everything is committed and pushed."
+        )
+        record = HookEvent(
+            provider="claude",
+            event_name="Stop",
+            logged_at=datetime.now(timezone.utc),
+            raw={"last_assistant_message": message},
+        )
+        self.assertEqual(mode_for_event(record), AgentMode.COMPLETED)
+
+    def test_ask_inbox_ignores_subagents(self) -> None:
+        from sidepulse import status_bar
+
+        snapshot = SimpleNamespace(
+            statuses=[
+                self._status(
+                    "claude:agent:worker1",
+                    AgentMode.WAITING_FOR_INPUT,
+                    session_id="s1",
+                ),
+                self._status(
+                    "claude:session:s1", AgentMode.WORKING, session_id="s1"
+                ),
+            ],
+            stale_statuses=[],
+            collected_at=datetime.now(timezone.utc),
+        )
+        self.assertEqual(status_bar.ask_statuses(snapshot), [])
+
+    def test_menu_groups_running_subagents_under_their_parent(self) -> None:
+        from sidepulse import status_bar
+        from sidepulse.settings import AgentMonitorSettings
+
+        main = self._status("claude:session:s1", AgentMode.WORKING, session_id="s1")
+        workers = [
+            self._status(
+                f"claude:agent:w{index}", AgentMode.TOOL_RUNNING, session_id="s1"
+            )
+            for index in range(5)
+        ]
+        finished = self._status(
+            "claude:agent:done1", AgentMode.COMPLETED, session_id="s1"
+        )
+        snapshot = SimpleNamespace(
+            statuses=[main, finished, *workers],
+            stale_statuses=[],
+            collected_at=datetime.now(timezone.utc),
+        )
+        target = SimpleNamespace(
+            settings=AgentMonitorSettings(),
+            closed_lid_awake=SimpleNamespace(last_error=None),
+            status_bar_devices=list,
+        )
+        menu = status_bar.build_menu(snapshot, status_bar.STATE_WORKING, target)
+        rows = [
+            (menu.itemAtIndex_(index).title(), menu.itemAtIndex_(index).indentationLevel())
+            for index in range(menu.numberOfItems())
+        ]
+        indented = [title for title, level in rows if level == 1]
+        # Three visible workers + the "2 more" summary; the finished one
+        # is gone entirely.
+        self.assertEqual(len(indented), 4)
+        self.assertTrue(any("2 more sub-agents" in title for title in indented))
+        self.assertFalse(any("done1" in title for title, _level in rows))
+        # No sub-agent appears as a TOP-LEVEL row.
+        top_level_subs = [
+            title for title, level in rows if level == 0 and "claude:agent:" in title
+        ]
+        self.assertEqual(top_level_subs, [])
+
+
 class MenuTeachingTests(unittest.TestCase):
     """The dropdown teaches: empty state says what happens next, and a
     daily tip advertises a feature (clicking it opens the right pane)."""

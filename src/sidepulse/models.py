@@ -80,6 +80,21 @@ class AgentStatus:
     stale: bool = False
 
     @property
+    def is_subagent(self) -> bool:
+        """Sub-agents (Claude Task workers, Codex/Devin spawned agents)
+        carry provider:agent:<id> keys; main sessions are
+        provider:session:<id>. A real install had 77 of 111 statuses be
+        sub-agents -- they need grouping, not top billing."""
+        return ":agent:" in self.agent_id
+
+    @property
+    def parent_agent_id(self) -> str | None:
+        """The main session this sub-agent belongs to, when known."""
+        if not self.is_subagent or not self.session_id:
+            return None
+        return f"{self.provider}:session:{self.session_id}"
+
+    @property
     def priority(self) -> int:
         return MODE_PRIORITY.get(self.mode, MODE_PRIORITY[AgentMode.UNKNOWN])
 

@@ -80,7 +80,7 @@ in `signal_display_entries()` plus one claim in
   (fakes settings paths, `latest.json`, and device discovery BEFORE
   construction). An un-isolated `refresh_()` once wrote an LED program
   to the developer's real mounted device mid-test-run.
-- Gate: `python -m pytest tests/ -q` (exit code checked directly — a
+- Gate: REINSTALL FIRST (`pip install --force-reinstall --no-deps .`) — the venv's pytest imports the INSTALLED package, not `src/`; a green run without reinstalling tests yesterday's code. Then `python -m pytest tests/ -q` (exit code checked directly — a
   `| tail` pipe once swallowed a red run), then `ruff check src tests`
   (config pinned in `pyproject.toml`).
 - Verify UI work rendered, not just built: window-ID `screencapture`
