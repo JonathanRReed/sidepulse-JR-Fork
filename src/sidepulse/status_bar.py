@@ -2061,10 +2061,11 @@ class StatusBarController(NSObject):
         rendering the colors from when the window opened -- edits
         used to leak to the device within one sync tick anyway."""
         colors = self.settings.colors
-        colors_window = getattr(self, "colors_window", None)
+        settings_window = getattr(self, "settings_window", None)
         if (
-            colors_window is not None
-            and colors_window.isVisible()
+            settings_window is not None
+            and settings_window.isVisible()
+            and getattr(self, "current_settings_pane", "") == "color_studio"
             and not getattr(self, "color_preview_enabled", True)
         ):
             if getattr(self, "colors_preview_baseline", None) is None:
@@ -2261,22 +2262,35 @@ class StatusBarController(NSObject):
         if row < 0 or row >= len(SETTINGS_SIDEBAR_ITEMS):
             return
         selected_key = SETTINGS_SIDEBAR_ITEMS[row][0]
+        self.current_settings_pane = selected_key
         for key, pane in self.settings_panes.items():
             pane.setHidden_(key != selected_key)
+        if selected_key == "color_studio":
+            self.refresh_colors_window()
 
     @objc.IBAction
     def openColorsWindow_(self, _sender):
         self.show_colors_window()
 
     def show_colors_window(self) -> None:
-        if self.colors_window is None:
-            self.colors_window = build_colors_window(self)
+        """Opens Settings at the Color Studio pane -- the standalone
+        Colors window is retired; one app, one window."""
+        self.show_settings_window()
+        self.select_settings_pane("color_studio")
         self.refresh_colors_window()
-        self.colors_window.makeKeyAndOrderFront_(None)
-        NSApp.activateIgnoringOtherApps_(True)
+
+    def select_settings_pane(self, pane_key: str) -> None:
+        if self.settings_sidebar_table is None:
+            return
+        for index, (key, _label) in enumerate(SETTINGS_SIDEBAR_ITEMS):
+            if key == pane_key:
+                self.settings_sidebar_table.selectRowIndexes_byExtendingSelection_(
+                    NSIndexSet.indexSetWithIndex_(index), False
+                )
+                return
 
     def refresh_colors_window(self) -> None:
-        if self.colors_window is None:
+        if getattr(self, "color_fields", None) is None:
             return
         scenario_popup = self.color_fields.get("preview_scenario_popup")
         if scenario_popup is not None:
@@ -2420,7 +2434,7 @@ class StatusBarController(NSObject):
         )
 
     def animate_colors_preview_once(self) -> None:
-        if self.colors_window is None or not self.colors_window.isVisible():
+        if self.settings_window is None or not self.settings_window.isVisible():
             self.stop_colors_preview_animation()
             return
         now_ms = monotonic_ms()
@@ -2682,9 +2696,8 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def closeColorsWindow_(self, _sender):
+        # Retired with the standalone window; kept for selector compat.
         self.stop_colors_preview_animation()
-        if self.colors_window is not None:
-            self.colors_window.performClose_(None)
 
     @objc.IBAction
     def setScreenBarGapWidth_(self, sender):
@@ -5314,7 +5327,8 @@ def format_byte_count(size: int) -> str:
 # otherwise empty window.
 SETTINGS_SIDEBAR_ITEMS: tuple[tuple[str, str], ...] = (
     ("devices", "Devices"),
-    ("colors_screen_bar", "Colors & Screen Bar"),
+    ("color_studio", "Color Studio"),
+    ("colors_screen_bar", "Screen Bar"),
     ("agents", "Agents"),
     ("led_behavior", "Signals"),
     ("power", "Power"),
@@ -6447,7 +6461,7 @@ def _build_debug_pane(target: StatusBarController):
 
 
 def build_settings_window(target: StatusBarController) -> NSWindow:
-    width, height = 820, 560
+    width, height = 900, 640
     # Fixed-size, like a Mac settings window should be (System Settings
     # itself is fixed-width): the panes are designed at this size, and a
     # user-resizable frame combined with a pure-Auto-Layout content
@@ -6536,6 +6550,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
 
     panes = {
         "devices": devices_pane,
+        "color_studio": _build_color_studio_pane(target),
         "colors_screen_bar": colors_pane,
         "agents": agents_pane,
         "led_behavior": led_behavior_pane,
@@ -6625,34 +6640,13 @@ def _build_agent_or_mode_color_row(
     return native_ui.make_row(row_label, container)
 
 
-def build_colors_window(target: StatusBarController) -> NSWindow:
-    width, height = 640, 700
-    # Fixed-size for the same reasons build_settings_window documents --
-    # its required height constraint below never coexisted sanely with a
-    # user-resizable frame anyway.
-    style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
-    window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-        ((0, 0), (width, height)), style, NSBackingStoreBuffered, False,
-    )
-    window.setTitle_("SidePulse Colors")
-    window.setReleasedWhenClosed_(False)
-    window.center()
-
+def _build_color_studio_pane(target: StatusBarController) -> "NSView":
+    """The Color Studio: the old standalone Colors window merged into
+    Settings as its own pane -- the pinned Live Preview on top, the
+    color/blend/fade/animation cards scrolling beneath, footer pinned.
+    One app, one window, one visual language."""
     root = NSView.alloc().init()
-    window.setContentView_(root)
-    # A window whose entire content view hierarchy is pure Auto Layout
-    # (true here, unlike the Settings window's NSSplitView, which imposes
-    # a real frame on its children outside the constraint solver) fits
-    # its own size to that content's computed fitting size -- and for a
-    # scroll view with nothing else bounding it, that "fit" is its full,
-    # unscrolled document size: a several-thousand-point-tall window
-    # instead of one that scrolls. Giving root an explicit, required size
-    # here breaks that pull; anything below still just scrolls normally.
-    # Equality on both axes -- see build_settings_window: a >= floor lets
-    # width-preferring content inflate past the fixed frame and clip.
     root.setTranslatesAutoresizingMaskIntoConstraints_(False)
-    root.widthAnchor().constraintEqualToConstant_(width).setActive_(True)
-    root.heightAnchor().constraintEqualToConstant_(height).setActive_(True)
 
     # Live Preview stays pinned at the top, outside the scroll area -- it's
     # a continuous creative-feedback tool you check while adjusting colors
@@ -6879,16 +6873,16 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
     footer_left.addArrangedSubview_(native_ui.make_button("Reset to Defaults", target, "resetColorsToDefaults:"))
     live_toggle = native_ui.make_checkbox("Preview live on device", target, "toggleColorPreviewLive:")
     footer_left.addArrangedSubview_(live_toggle)
-    done_button = native_ui.make_button("Done", target, "closeColorsWindow:")
     footer.addSubview_(footer_left)
-    footer.addSubview_(done_button)
     NSLayoutConstraint.activateConstraints_(
         [
             footer_left.leadingAnchor().constraintEqualToAnchor_(footer.leadingAnchor()),
             footer_left.centerYAnchor().constraintEqualToAnchor_(footer.centerYAnchor()),
-            done_button.trailingAnchor().constraintEqualToAnchor_(footer.trailingAnchor()),
-            done_button.centerYAnchor().constraintEqualToAnchor_(footer.centerYAnchor()),
-            footer.heightAnchor().constraintGreaterThanOrEqualToConstant_(28.0),
+            # EQUALITY, not a floor: with only >=28 and no internal
+            # bottom pin, the solver dumped the pane's vertical slack
+            # into the footer and squeezed the scroll view to zero
+            # height (an empty-looking Color Studio).
+            footer.heightAnchor().constraintEqualToConstant_(28.0),
         ]
     )
     root.addSubview_(footer)
@@ -6940,7 +6934,7 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
     }
     target.color_preview_rows = preview_rows
     refresh_blend_and_speed_fields(target)
-    return window
+    return root
 
 
 def refresh_blend_and_speed_fields(target: StatusBarController) -> None:

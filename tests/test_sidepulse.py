@@ -7986,6 +7986,10 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
             return ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1
 
         for key, pane in self.controller.settings_panes.items():
+            if key == "color_studio":
+                # Custom container (pinned preview + own scroll), not a
+                # wrap_in_scroll_pane -- covered by its own tests.
+                continue
             pane.layoutSubtreeIfNeeded()
             # documentView is a plain container (padding lives inside it,
             # where NSClipView's scroll-to-document-origin can't eat it);
@@ -8013,6 +8017,8 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         self.controller.show_settings_window()
         self.controller.settings_window.contentView().layoutSubtreeIfNeeded()
         for key, pane in self.controller.settings_panes.items():
+            if key == "color_studio":
+                continue
             pane.layoutSubtreeIfNeeded()
             self.assertGreater(
                 pane.documentView().frame().size.height, 0, f"{key!r} pane has no content height"
@@ -8029,6 +8035,8 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         self.controller.show_settings_window()
         self.controller.settings_window.contentView().layoutSubtreeIfNeeded()
         for key, pane in self.controller.settings_panes.items():
+            if key == "color_studio":
+                continue
             pane.layoutSubtreeIfNeeded()
             clip = pane.contentView()
             origin = clip.constrainBoundsRect_(clip.bounds()).origin
