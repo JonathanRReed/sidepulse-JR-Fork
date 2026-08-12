@@ -25,7 +25,8 @@ Studio programs.
 | Device I/O | `device_writer.py` | Discovery (`/Volumes` scan), size validation, atomic program writes |
 | Firmware grammar | `led_wasm.py` (+ packaged `sdled.wasm`) | The REAL parser; Screen Bar animation stepping; Studio program validation |
 | Screen Bar | `virtual_device.py` | Pixel-measured notch geometry, bracket/wings drawing, ~90ms temporal smoothing, change-gated 60fps redraw |
-| Orchestration + UI | `status_bar.py` (the monolith) | The controller: timers, watchers, precedence arbiter, menu, Settings window |
+| Orchestration + UI | `status_bar.py` | The controller: timers, watchers, precedence arbiter, menu; ~9k lines |
+| Settings window | `settings_window.py` | Every pane builder + window assembly, extracted from status_bar; runs against status_bar's namespace (see its docstring) |
 | Persistence | `settings.py` | `AgentMonitorSettings`, frozen-dataclass `with_*` mutators, atomic unique-scratch saves |
 | Packaging | `app_bundle.py`, `status_bar_launch.py` | The sealed `SidePulse.app` + launchd agent |
 
@@ -89,12 +90,13 @@ in `signal_display_entries()` plus one claim in
 
 ## Known debt (deliberate)
 
-- `status_bar.py` is ~8k lines. The extraction plan (menu builder,
-  settings panes, widget helpers, formatters — all already
-  `target`-parameterized module functions) is mechanical but touches
-  test monkeypatching semantics; do it as its own dedicated wave, one
-  module per commit.
+- `status_bar.py` is ~9k lines after the settings-window extraction
+  (settings_window.py, 2026-08-12). Remaining cuts if wanted: the menu
+  builders and the widget/control factories — same mechanical shape,
+  one module per commit.
 - Open Signal API (external processes claiming a signal slot) is the
-  approved next feature.
+  approved next feature. Its outbound half exists: post_webhook and
+  the per-event webhook bridge (escalation, completion, quota,
+  weather, timebox).
 - Per-agent mode-animation overrides and session stats are explicitly
   deferred (see `docs/FORK-ROADMAP.md`).

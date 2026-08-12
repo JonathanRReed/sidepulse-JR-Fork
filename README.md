@@ -1,126 +1,124 @@
-# sidepulse — JR fork
+# SidePulse (JR fork)
 
-A quality-first divergence of [inteliwear/sidepulse](https://github.com/inteliwear/sidepulse)
-that turns SidePulse into a **universal status indicator** for the Mac:
-agent status at the core, computer signals layered on top, deeply
-customizable behind good defaults — and, since the fusion waves, one
-place to watch **every agent harness and every provider's usage**.
+A macOS menu-bar app that turns AI-agent activity into ambient light —
+on SidePulse LED hardware (the Pro in a MacBook's SD slot, the Dot on
+USB-C) and on an on-screen light bar that hugs the notch.
 
-## What this fork adds over upstream
+When Claude Code or Codex is working, the lights breathe in that
+session's color. When a task finishes, they sweep green. When an agent
+is blocked waiting on *you*, they turn amber and escalate — light,
+menu-bar flash, chime, and optionally a webhook that can reach your
+phone — until you answer. You stop tabbing over to check on agents;
+you glance at the light.
 
-**Monitoring that tells the truth**
+This is a fork of
+[inteliwear/sidepulse](https://github.com/inteliwear/sidepulse) that
+grows the original device companion into a universal status indicator
+for the Mac. It diverges deliberately (hardware stays first-class, new
+signal surfaces, deep customization behind good defaults) but keeps
+the Python core merge-friendly with upstream.
 
-- **Hard vs soft asks** — only *tracked* requests (permission prompts,
-  errors, actionable notifications) ring the Ask signal or escalate; a
-  finished turn that merely ended with a question never does. Sub-agent
-  asks can't blink the lights at all by default (a worker's question is
-  its parent's problem — Signals has the override).
-- **Sub-agents ride under their parent** — the dropdown shows main
-  sessions with running workers nested beneath (`↳`, parent's identity
-  color, "· 2 workers · 4m"); finished workers vanish instantly.
-- **Unseen-done, modeled** — completions newer than your last look put
-  a ✓ on the icon and a "new" tag on the row; opening the menu clears
-  them. Completions only *celebrate* while under 2 minutes fresh, so
-  restarts and replays repaint silently.
-- **Ask escalation** — an ignored "needs you" ramps, flashes the
-  menu-bar icon, chimes, and can take over every surface; the **Ask
-  Inbox** pins "Needs You (N)" atop the dropdown; the ramp carries an
-  absolute brightness floor so no dimming stack can hide it.
-- **Quiet for an Hour, Clear Finished,** a daily **Tip** submenu that
-  jumps to (and flashes) the exact control it teased, and a teaching
-  empty state everywhere.
+## What it does
 
-**Usage & cost, everywhere (CodexBar-grade)**
+- **Watches agent sessions** through provider hooks — Claude Code,
+  Codex, Gemini, Devin, Cursor, Grok, and friends. It knows the
+  difference between a main session and its sub-agent workers, between
+  "finished and you've seen it" and "finished while you were away",
+  and between a real blocked-on-you request (permission prompt, error)
+  and a turn that merely ended with a question — only the real ones
+  escalate.
+- **Renders status everywhere you look**: the physical LEDs, the
+  Screen Bar around the notch, and the menu-bar icon with a dropdown
+  of live sessions (click one to jump to its terminal — or click the
+  Screen Bar itself while an ask is live).
+- **Layers Mac signals on top**: calendar and reminder glows,
+  severe-weather warnings, battery, notification blinks, and quota
+  alerts share one precedence ladder. A blocked agent always outranks
+  the rest; per-Focus and per-device policies decide what else gets
+  through (a Dot can be pinned to one provider, or to asks only).
+- **Tracks usage and cost**: today's tokens with approximate cost and
+  cache savings per provider, weekly limit percentages (including
+  Anthropic's own usage endpoint, opt-in), and daily/hourly graphs
+  from a week up to a year.
+- **Leaves the desk when needed**: a webhook bridge POSTs JSON moments
+  — agent blocked for minutes, task completed, quota crossed, severe
+  weather — to ntfy, Home Assistant, or anything with a URL.
 
-- **Profile pane** — today's Claude spend with **cache savings** (the
-  stat you actually want), Codex sessions/tokens with the **weekly
-  limit percent read straight from the newest rollout** (no API, no
-  auth), an official opt-in **Claude plan limits** line (Anthropic's
-  own OAuth usage endpoint), and a **7-day/30/90/Year graph** with an
-  hourly sparkline — powered by a persisted per-file parse cache
-  (cold scan seconds, warm scan milliseconds) with first-seen dedupe
-  so resumed sessions never double-count.
-- **Quota signals** — opt-in threshold blinks in the provider's color
-  ("75, 90" — yours to edit), a **Quota Sunrise** sweep the moment a
-  window resets, and **Quota Runway** as a per-device Display: the
-  strip renders remaining headroom as ambient brand-colored light.
+## Quick start
 
-**The Screen Bar (notch bar)**
+```sh
+python3 -m pip install -e .
+sidepulse setup
+```
 
-- Pixel-measures the hardware notch, coexists with Alcove as a rounded
-  bracket mirroring the physical LEDs, phase-locked to real device
-  writes. **Click it while an ask is live** to jump straight to the
-  asking session; **dwell on it** for a 4-second Claude/Codex runway
-  peek. A **Dim floor** dial runs it from soft outline to true pitch
-  black (only the moving signal shows); the **Exhale** — one slow warm
-  breath — marks the moment your last agent finishes with nothing left
-  needing you. Opt-in **wing-tip gauges** give standing state its own
-  pixels: a quota ember on the left tip that deepens as your worst
-  window fills, unseen-done green on the right that goes out the
-  moment you open the menu — surviving whatever animation owns the
-  center of the bar.
+`sidepulse setup` walks through hook installation per provider,
+optional launch-at-login, and the app-bundle install (a sealed
+"SidePulse.app" so macOS permission grants attach to a real app name).
+The menu-bar app's own Setup window covers the same ground with
+buttons. Everything works with zero granted permissions; individual
+features ask for what they need when you turn them on:
 
-**Hardware first-class**
+| Permission | Unlocks | Asked when |
+| --- | --- | --- |
+| Full Disk Access | Focus-mode reactions (dim/off/profile per Focus) | You enable Focus features |
+| Calendar / Reminders | Event and reminder glows | You enable those signals |
+| Screen Recording | The Screen Bar matching Alcove's live capsule width | Automatic if granted; quietly skipped otherwise |
+| Notifications DB (via FDA) | Per-app notification blinks | You enable notification blinks |
 
-- Per-device **Resting glow** (a faint calibration-corrected ember so
-  unlit dots read as physical), white-point **calibration** with
-  Day/Night/Travel profiles (auto-applied per Focus), per-device
-  Display (Agent / Battery / Timer / Studio / Quota runway), blend
-  modes, and **provider pinning** — "the Dot is Codex's": a pinned
-  device shows one provider's sessions and rests dark when none are
-  live, while asks still light every surface. **"Set as Power-Up
-  Look"** burns your Studio program into the device's INIT.LED so the
-  hardware boots wearing your light, and **Night warmth** eases green
-  and blue down from 7 PM to 7 AM, composed over each device's own
-  calibration.
-- **Context-aware lid animations**: closing the lid on live agents
-  plays "Still Cooking"; reopening to them plays "Back On It" — four
-  editable slots, every preset parse-verified against the real
-  firmware grammar.
+## The Screen Bar
 
-**Looks**
+A light bar that wraps the MacBook notch and mirrors the LEDs —
+useful when the hardware is out of sight or you have none. It measures
+the real notch from screen pixels, coexists with
+[Alcove](https://henrikruscon.com/alcove) by drawing a bracket around
+it (matching Alcove's visible capsule width automatically), can run
+pitch-black with only the moving signal visible, and answers clicks
+and hovers: click during an ask to jump to the session, dwell for a
+quota peek. Optional wing-tip gauges keep a quota ember and an
+unseen-done dot in your peripheral vision.
 
-- **Color Studio** — brand swatches (Claude/OpenAI/Codex/Gemini) with
-  named tooltips, curated + provider **palettes** on a gamut-safe
-  OKLCH engine, per-mode animation thumbnails, fade presets, a pinned
-  live preview, and **Color by project** — sessions in one repo share
-  a hue family, providers told apart by lightness within it.
-- **Signal Engine** — every light-claiming signal (low battery,
-  notifications, reminders, calendar, NWS severe weather, completions,
-  quota) is one model with one renderer, an explicit precedence
-  ladder, and a per-signal style card with a Test button.
-- **Studio** — write any LED program in the device DSL, preview it on
-  everything, run it persistently, or make it the power-up look —
-  plus **Capture What's Playing** and a named shelf of saved looks.
+## Hardware
 
-**System signals** — per-Focus rules by *name* (School → off, Work →
-dim 50%) with per-Focus **signal policies** (All / Asks only /
-Silent), calendar/reminders glow, notification blinks, weather
-heartbeat, and a dropdown **Timer** whose presets can run paired
-Shortcuts at start and end (the **Focus handshake**), turn a
-deepening overtime ember past zero, and — via a one-shot **stage-3
-webhook** — let a blocked agent find you in the kitchen.
+The devices mount as disk drives; everything renders by writing a
+small LED program to `LEDS.LED` (the DSL is in
+[`LEDS_FORMAT.md`](LEDS_FORMAT.md), and writes are atomic — an eject
+mid-write can't leave the firmware a torn program). Per-device:
+display choice (agent / battery / timer / studio / quota runway),
+brightness with auto-brightness, white-point calibration with
+day/night/travel profiles, resting glow, provider pinning, and signal
+muting. The Studio pane lets you write programs by hand, keep a shelf
+of saved looks, and burn one into `INIT.LED` so the hardware boots
+wearing your colors.
 
-**Engineering**
+## Odds and ends worth knowing
 
-- A sealed **app bundle** so macOS privacy grants attach to
-  "SidePulse" by name; grouped, icon-led settings with fading toasts,
-  crossfading panes, and hover-lit sidebar rows; **no SD-card I/O,
-  subprocess forks, or sqlite ever on the main thread**; 30fps
-  change-gated Screen Bar with 15Hz WASM sampling; 550+ tests run by
-  CI on macOS; the design ledgers live in `docs/`.
-- **More providers** — Cursor, Hermes Agent, and OpenClaw hooks
-  alongside upstream's set.
+- **Timer**: dropdown presets drain the bar as a countdown, can run a
+  Shortcut at start and end (Focus on with the drain, off when it
+  finishes), and turn a deepening ember when you run over.
+- **Night warmth**: eases green and blue down from 7 PM to 7 AM,
+  composed over each device's calibration.
+- **Color by project**: sessions in the same repo share a hue family,
+  providers told apart by lightness.
+- **Quiet hour, per-Focus signal policies** (all / asks only /
+  silent), and a **quota sunrise** sweep the moment a limit window
+  resets.
+- Engineering: no SD-card I/O, subprocess forks, or sqlite on the main
+  thread; a 30fps change-gated Screen Bar with 15Hz WASM sampling;
+  570+ tests on macOS CI; corrupt settings are preserved for recovery,
+  never silently reset. Architecture notes live in
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), the build ledger in
+  [`docs/FORK-ROADMAP.md`](docs/FORK-ROADMAP.md).
 
-**Credits** — many of the monitoring semantics and usage-tracking
-techniques were adopted (with citations) from studying
+## Credits
+
+Many monitoring semantics and usage-tracking techniques were adopted,
+with citations in the code, from studying
 [T3 Code](https://github.com/pingdotgg/t3code) and
-[CodexBar](https://github.com/steipete/CodexBar) — see
-[`docs/T3CODE-FINDINGS.md`](docs/T3CODE-FINDINGS.md) and
-[`docs/CODEXBAR-FINDINGS.md`](docs/CODEXBAR-FINDINGS.md) for exactly
-what came from where.
+[CodexBar](https://github.com/steipete/CodexBar).
 
-The full build ledger lives in [`docs/FORK-ROADMAP.md`](docs/FORK-ROADMAP.md).
+Everything below is the upstream project's reference documentation:
+the CLI, the LED format, and the battery tools, all of which this fork
+keeps working.
 
 ---
 
