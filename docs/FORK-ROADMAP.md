@@ -1,5 +1,17 @@
 # SidePulse fork — master plan
 
+> **QUALITY MODE (2026-08-12).** Feature freeze by Jonathan's call:
+> enhance, clean, fix. Landed: **completion sweep** (a finishing
+> agent claims the bar in its identity color — the aggregate hid
+> completions whenever another agent was working; diagnosed from the
+> live ledger after "I finished and saw no sign of it") + dead-handler
+> sweep (8 orphaned IBActions removed, verified unreferenced).
+> **Approved next feature when the freeze lifts: the open Signal API**
+> (CLI + Shortcuts so anything can claim the light). Remaining debt,
+> each its own tranche: Devices-pane hotplug rebuild · Codex
+> hook-install off main thread · per-agent mode-animation overrides ·
+> a flaky worker-thread teardown warning in one escalation test.
+
 > **FOURTH WAVE — the "finished product" round (2026-08-11,
 > 7e37748..2d35923).** From the closing brainstorm, all approved and
 > shipped: **Ask Inbox** ("Needs You (N)" pinned atop the dropdown

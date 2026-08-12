@@ -854,23 +854,6 @@ class StatusBarController(NSObject):
         self.refresh_(None)
 
     @objc.IBAction
-    def openDeepLink_(self, sender):
-        url = sender.representedObject()
-        if not url:
-            return
-        open_url(str(url))
-
-    @objc.IBAction
-    def resumeSession_(self, sender):
-        command = sender.representedObject()
-        if command:
-            open_terminal_command(str(command))
-
-    @objc.IBAction
-    def openSession_(self, sender):
-        self.open_session(sender.representedObject(), None, remember=False)
-
-    @objc.IBAction
     def openSessionPrimary_(self, sender):
         self.open_session(
             sender.representedObject(),
@@ -878,21 +861,6 @@ class StatusBarController(NSObject):
             remember=False,
         )
         self.close_status_menu()
-
-    @objc.IBAction
-    def openSessionOptions_(self, sender):
-        status = sender.representedObject()
-        if not isinstance(status, AgentStatus):
-            return
-        menu = build_session_options_menu(status, datetime.now().astimezone(), self)
-        try:
-            height = sender.bounds().size.height
-        except Exception:
-            try:
-                height = sender.bounds()[1][1]
-            except Exception:
-                height = 0
-        menu.popUpMenuPositioningItem_atLocation_inView_(None, (0, height), sender)
 
     @objc.IBAction
     def openSessionWithAction_(self, sender):
@@ -923,20 +891,6 @@ class StatusBarController(NSObject):
         self.set_settings_message(
             f"{provider.title()} sessions: {provider_open_action_label(provider, action)}."
         )
-
-    @objc.IBAction
-    def toggleDeviceConnection_(self, _sender):
-        if self.device_connected():
-            self.disconnect_device()
-        else:
-            self.connect_device()
-        self.refresh_(None)
-
-    @objc.IBAction
-    def toggleKeepAwake_(self, _sender):
-        self.keep_awake.set_enabled(not self.keep_awake.enabled)
-        log_status_bar(f"keep_awake={'on' if self.keep_awake.enabled else 'off'}")
-        self.refresh_(None)
 
     @objc.IBAction
     def setClosedLidAwakePolicy_(self, sender):
@@ -1550,16 +1504,8 @@ class StatusBarController(NSObject):
         self.set_transcript_monitoring("claude", sender.state() == NSOnState)
 
     @objc.IBAction
-    def toggleBatteryLedDisplay_(self, _sender):
-        self.set_battery_led_display(self.settings.led_display != LED_DISPLAY_BATTERY)
-
-    @objc.IBAction
     def setBatteryLedDisplayFromCheckbox_(self, sender):
         self.set_battery_led_display(sender.state() == NSOnState)
-
-    @objc.IBAction
-    def toggleBatteryPowerPreview_(self, _sender):
-        self.set_battery_power_preview(not self.settings.battery_show_on_power_change)
 
     @objc.IBAction
     def setBatteryPowerPreviewFromCheckbox_(self, sender):
