@@ -7293,6 +7293,17 @@ def isolate_controller(case, *, build_controller=True):
     )
     latest.start()
     case.addCleanup(latest.stop)
+    # The live Alcove on the dev machine must never steer test geometry:
+    # the capsule tracker reads "no capsule" unless a test injects one.
+    try:
+        alcove = patch(
+            "sidepulse.virtual_device.measured_alcove_capsule_width",
+            return_value=None,
+        )
+        alcove.start()
+        case.addCleanup(alcove.stop)
+    except (ImportError, SystemExit):
+        pass
     discovery = patch("sidepulse.status_bar.discover_devices", return_value=[])
     discovery.start()
     case.addCleanup(discovery.stop)
@@ -8373,13 +8384,14 @@ class TranscriptFallbackTests(unittest.TestCase):
         )
 
     def test_transcript_records_reach_the_live_monitor_exactly_once(self) -> None:
-        from datetime import datetime, timezone
-
         from sidepulse.models import HookEvent
 
+        # Relative, not a wall-clock date: a hardcoded timestamp aged
+        # past the collector's staleness window overnight and the test
+        # started failing on the calendar, not on a regression.
         record = HookEvent(
             provider="codex",
-            logged_at=datetime(2026, 8, 11, 12, 0, 0, tzinfo=timezone.utc),
+            logged_at=datetime.now(timezone.utc) - timedelta(minutes=1),
             event_name="SessionStart",
             raw={},
             session_id="transcript-session",
@@ -9514,6 +9526,143 @@ class ContextLidAnimationTests(unittest.TestCase):
         self.assertEqual(
             loaded.lid_open_active_animation.program, "#12E3B0 500ms pulse"
         )
+
+
+class AlcoveFollowTests(unittest.TestCase):
+    """The bracket follows Alcove's alpha-measured capsule width --
+    widen instantly, narrow patiently, never balloon."""
+
+    @staticmethod
+    def _screen():
+        return SimpleNamespace(
+            frame=lambda: SimpleNamespace(
+                origin=SimpleNamespace(x=0.0, y=0.0),
+                size=SimpleNamespace(width=1512.0, height=982.0),
+            ),
+            safeAreaInsets=lambda: SimpleNamespace(top=32.0),
+            auxiliaryTopLeftArea=lambda: SimpleNamespace(
+                origin=SimpleNamespace(x=0.0, y=0.0),
+                size=SimpleNamespace(width=640.0, height=24.0),
+            ),
+            auxiliaryTopRightArea=lambda: SimpleNamespace(
+                origin=SimpleNamespace(x=872.0, y=0.0),
+                size=SimpleNamespace(width=640.0, height=24.0),
+            ),
+        )
+
+    def test_alcove_width_is_matched_exactly_both_directions(self) -> None:
+        from sidepulse import virtual_device
+
+        screen = self._screen()
+        base = virtual_device.virtual_window_frame_for_screen(
+            screen, wrap_menu_bar=True
+        )
+        wider = virtual_device.virtual_window_frame_for_screen(
+            screen, wrap_menu_bar=True, alcove_total_width=300.0
+        )
+        self.assertEqual(wider[1][0], 300.0)
+        # Still centered on the notch.
+        self.assertAlmostEqual(wider[0][0] + wider[1][0] / 2.0, 756.0)
+        # "Match" means match: a capsule NARROWER than the current bar
+        # narrows the bar too (this is what supersedes a stale manual
+        # gap the moment a real reading exists) -- down to a sane floor.
+        narrower = virtual_device.virtual_window_frame_for_screen(
+            screen, wrap_menu_bar=True, alcove_total_width=170.0
+        )
+        self.assertEqual(narrower[1][0], 170.0)
+        self.assertAlmostEqual(narrower[0][0] + narrower[1][0] / 2.0, 756.0)
+        self.assertEqual(
+            virtual_device.virtual_window_frame_for_screen(
+                screen, wrap_menu_bar=True, alcove_total_width=60.0
+            )[1][0],
+            140.0,
+        )
+        # None means classic geometry, byte-identical.
+        self.assertEqual(
+            virtual_device.virtual_window_frame_for_screen(
+                screen, wrap_menu_bar=True, alcove_total_width=None
+            ),
+            base,
+        )
+        # Without wrap the parameter is inert.
+        self.assertEqual(
+            virtual_device.virtual_window_frame_for_screen(
+                screen, wrap_menu_bar=False, alcove_total_width=900.0
+            ),
+            virtual_device.virtual_window_frame_for_screen(screen),
+        )
+
+    def test_alcove_width_still_caps_at_the_screen(self) -> None:
+        from sidepulse import virtual_device
+
+        screen = self._screen()
+        huge = virtual_device.virtual_window_frame_for_screen(
+            screen, wrap_menu_bar=True, alcove_total_width=5000.0
+        )
+        self.assertLessEqual(huge[1][0], 1512.0)
+
+    def test_tracker_widen_instant_narrow_patient(self) -> None:
+        from sidepulse import virtual_device
+
+        readings = []
+        clock = [0.0]
+        tracker = virtual_device.AlcoveCapsuleTracker(
+            measure=lambda _band: readings.pop(0), clock=lambda: clock[0]
+        )
+        margin = 2.0 * virtual_device.ALCOVE_CAPSULE_MARGIN
+        # First reading adopts immediately.
+        readings.append(272.0)
+        self.assertEqual(tracker.desired_total_width(37.0), 272.0 + margin)
+        # A wider capsule adopts immediately too.
+        clock[0] = 2.0
+        readings.append(330.0)
+        self.assertEqual(tracker.desired_total_width(37.0), 330.0 + margin)
+        # A narrower capsule must HOLD before it is adopted.
+        clock[0] = 4.0
+        readings.append(200.0)
+        self.assertEqual(tracker.desired_total_width(37.0), 330.0 + margin)
+        clock[0] = 5.0
+        readings.append(200.0)
+        self.assertEqual(tracker.desired_total_width(37.0), 330.0 + margin)
+        clock[0] = 4.0 + virtual_device.ALCOVE_NARROW_AFTER_SECONDS + 0.1
+        readings.append(200.0)
+        self.assertEqual(tracker.desired_total_width(37.0), 200.0 + margin)
+
+    def test_tracker_holds_through_gaps_then_falls_back(self) -> None:
+        from sidepulse import virtual_device
+
+        values = {"reading": 272.0}
+        clock = [0.0]
+        tracker = virtual_device.AlcoveCapsuleTracker(
+            measure=lambda _band: values["reading"], clock=lambda: clock[0]
+        )
+        margin = 2.0 * virtual_device.ALCOVE_CAPSULE_MARGIN
+        self.assertEqual(tracker.desired_total_width(37.0), 272.0 + margin)
+        # Reading gap (hover panel open / capsule mid-transition).
+        values["reading"] = None
+        clock[0] = 2.0
+        self.assertEqual(tracker.desired_total_width(37.0), 272.0 + margin)
+        # Past the hold window: hardware geometry.
+        clock[0] = 2.0 + virtual_device.ALCOVE_HOLD_SECONDS + 1.0
+        self.assertIsNone(tracker.desired_total_width(37.0))
+
+    def test_tracker_caps_the_balloon(self) -> None:
+        from sidepulse import virtual_device
+
+        tracker = virtual_device.AlcoveCapsuleTracker(
+            measure=lambda _band: 5000.0, clock=lambda: 0.0
+        )
+        self.assertEqual(
+            tracker.desired_total_width(37.0), virtual_device.ALCOVE_FOLLOW_MAX_WIDTH
+        )
+
+    def test_follow_setting_round_trips_default_on(self) -> None:
+        self.assertTrue(AgentMonitorSettings().screen_bar_follow_alcove)
+        configured = AgentMonitorSettings().with_screen_bar_follow_alcove(False)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            self.assertFalse(load_settings(path).screen_bar_follow_alcove)
 
 
 class TimeboxHandshakeTests(unittest.TestCase):

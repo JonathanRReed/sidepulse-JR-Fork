@@ -4031,6 +4031,14 @@ class StatusBarController(NSObject):
         self.set_settings_message("Bar size back to Automatic.")
 
     @objc.IBAction
+    def toggleScreenBarFollowAlcove_(self, sender):
+        self.settings = self.settings.with_screen_bar_follow_alcove(
+            checkbox_is_on(sender)
+        )
+        save_settings(self.settings)
+        self.refresh_(None)
+
+    @objc.IBAction
     def toggleScreenBarGauges_(self, sender):
         self.settings = self.settings.with_screen_bar_gauges_enabled(
             checkbox_is_on(sender)
@@ -4303,6 +4311,10 @@ class StatusBarController(NSObject):
         set_checkbox_state(
             self.settings_buttons.get("screen_bar_gauges"),
             self.settings.screen_bar_gauges_enabled,
+        )
+        set_checkbox_state(
+            self.settings_buttons.get("screen_bar_follow_alcove"),
+            self.settings.screen_bar_follow_alcove,
         )
         self.refresh_screen_bar_preview()
         closed_lid_policy_popup = self.settings_fields.get("closed_lid_awake_policy_popup")
@@ -5699,6 +5711,9 @@ class StatusBarController(NSObject):
         )
         self.virtual_status_device.set_bracket_style(self.settings.screen_bar_bracket_style)
         self.virtual_status_device.set_min_glow(self.settings.screen_bar_min_glow)
+        self.virtual_status_device.set_follow_alcove(
+            self.settings.screen_bar_follow_alcove
+        )
         # Story #14: the wing tips as standing micro-gauges -- the left
         # tip's quota ember tracks the worst window (fades in past 50%),
         # the right tip holds unseen-done green until the menu opens.
@@ -8183,6 +8198,21 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         "Extend glow along the menu bar", target, "toggleScreenBarWrapsMenuBar:"
     )
     inner.addArrangedSubview_(wraps_row)
+    follow_row, follow_switch = native_ui.make_switch_row(
+        "Match Alcove's width automatically",
+        target,
+        "toggleScreenBarFollowAlcove:",
+        help_text=(
+            "The bracket tracks Alcove's visible capsule -- widening "
+            "for a timer or now-playing pill and easing back when it "
+            "collapses, hugging it within a couple of points. While a "
+            "capsule is visible this supersedes the Bar Size gap, so "
+            "Automatic stays automatic; a manual wing length still "
+            "wins. Needs Screen Recording permission; without it the "
+            "bar quietly keeps its classic size."
+        ),
+    )
+    inner.addArrangedSubview_(follow_row)
     native_ui.add_separator(inner)
     # Bracket coloring: Auto keeps the on-screen bracket in lockstep
     # with the physical LEDs' ripple whenever a crowd is lit.
@@ -8253,6 +8283,7 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
     buttons = {
         "screen_bar_wraps_menu_bar": wraps_switch,
         "screen_bar_gauges": gauges_switch,
+        "screen_bar_follow_alcove": follow_switch,
     }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 

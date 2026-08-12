@@ -312,6 +312,10 @@ class AgentMonitorSettings:
     # Story #14: wing tips as standing micro-gauges (quota ember left,
     # unseen-done green right). Screen-Bar-only luxury; off by default.
     screen_bar_gauges_enabled: bool = False
+    # Follow Alcove's visible capsule width (alpha-measured) so an
+    # expanded live activity never outgrows the bracket. On by default;
+    # manual wing lengths always win over it.
+    screen_bar_follow_alcove: bool = True
     # Opt-in: reading the Claude Code keychain item triggers a one-time
     # macOS prompt, so this must never default on.
     claude_plan_limits_enabled: bool = False
@@ -809,6 +813,9 @@ class AgentMonitorSettings:
     def with_screen_bar_gauges_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, screen_bar_gauges_enabled=bool(enabled))
 
+    def with_screen_bar_follow_alcove(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, screen_bar_follow_alcove=bool(enabled))
+
     def with_screen_bar_min_glow(self, fraction: float) -> AgentMonitorSettings:
         return replace(
             self, screen_bar_min_glow=max(0.0, min(1.0, float(fraction)))
@@ -1127,6 +1134,7 @@ class AgentMonitorSettings:
             "menu_bar_label_enabled": self.menu_bar_label_enabled,
             "screen_bar_min_glow": self.screen_bar_min_glow,
             "screen_bar_gauges_enabled": self.screen_bar_gauges_enabled,
+            "screen_bar_follow_alcove": self.screen_bar_follow_alcove,
             "claude_plan_limits_enabled": self.claude_plan_limits_enabled,
             "quota_alerts_enabled": self.quota_alerts_enabled,
             "usage_graph_days": self.usage_graph_days,
@@ -1379,6 +1387,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         menu_bar_label_enabled=_bool_setting(data.get("menu_bar_label_enabled"), False),
         screen_bar_min_glow=_fraction_setting(data.get("screen_bar_min_glow"), 0.25),
         screen_bar_gauges_enabled=_bool_setting(data.get("screen_bar_gauges_enabled"), False),
+        screen_bar_follow_alcove=_bool_setting(data.get("screen_bar_follow_alcove"), True),
         claude_plan_limits_enabled=_bool_setting(
             data.get("claude_plan_limits_enabled"), False
         ),

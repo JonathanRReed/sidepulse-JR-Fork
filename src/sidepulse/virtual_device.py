@@ -73,6 +73,27 @@ WING_MAX_WIDTH = 110.0
 # ~40pt), and with 6pt wings a wide measurement hid the ENTIRE bar
 # behind the physical notch -- "I don't see the screen bar anymore".
 WING_AUTO_LENGTH = 14.0
+
+# --- Alcove capsule following -------------------------------------------
+# The visible capsule is measured from Alcove's OWN window image (alpha
+# channel), so the bracket can widen to embrace an expanded live
+# activity. See measured_alcove_capsule_width for why this succeeds
+# where two window-bounds attempts failed.
+ALCOVE_CAPSULE_ALPHA_THRESHOLD = 0.08
+# A lit region taller than this many menu-band heights is Alcove's
+# hover panel, not the capsule -- never size to it (the ballooning
+# failure both reverted attempts hit).
+ALCOVE_CAPSULE_MAX_BAND_FACTOR = 1.8
+# Breathing room past the capsule's edge on each side.
+ALCOVE_CAPSULE_MARGIN = 2.0
+# Hard ceiling on the followed width, whatever the measurement says.
+ALCOVE_FOLLOW_MAX_WIDTH = 520.0
+# Widen instantly; adopt a NARROWER capsule only after it has held for
+# this long (media pills flicker during track changes).
+ALCOVE_NARROW_AFTER_SECONDS = 3.0
+# Keep the last good width through brief no-reading gaps (capsule
+# mid-transition, hover panel open) before falling back to hardware.
+ALCOVE_HOLD_SECONDS = 8.0
 # The bracket is clipped to a rounded rect: the underline's ends curve
 # up into the risers and the riser tops are capped instead of ending
 # in hard right angles -- "more rounded on the corners so they feel
@@ -268,6 +289,7 @@ def virtual_window_frame_for_screen(
     wrap_menu_bar: bool = False,
     gap_width: float | None = None,
     wing_length: float | None = None,
+    alcove_total_width: float | None = None,
 ):
     """The Screen Bar window's full frame. With ``wrap_menu_bar`` on, the
     window widens symmetrically to include room for the wing glow on each
@@ -287,6 +309,20 @@ def virtual_window_frame_for_screen(
             wing = wing_width_for_screen(screen, notch_width)
     else:
         wing = 0.0
+    # Alcove following (wings-only mode): the bar tracks the measured
+    # capsule EXACTLY -- growing past the hardware notch for an
+    # expanded live activity and narrowing back below even a manual
+    # gap once it collapses ("match Alcove" means match, not "at
+    # least"). A manual wing length still wins upstream (the tracker
+    # never runs); with no reading this stays None and classic
+    # geometry holds. The screen caps below still apply.
+    if wrap_menu_bar and alcove_total_width is not None:
+        target = max(140.0, float(alcove_total_width))
+        if target >= notch_width:
+            wing = (target - notch_width) / 2.0
+        else:
+            notch_width = target
+            wing = 0.0
     # Never wider than the screen itself, whatever the user typed.
     notch_width = min(notch_width, frame.size.width - 8.0)
     wing = min(wing, max(0.0, (frame.size.width - notch_width) / 2.0 - 4.0))
@@ -307,12 +343,172 @@ def is_alcove_running() -> bool:
         return False
 
 
-# NOTE on sizing to Alcove: tried twice, reverted twice. Alcove's
-# window bounds say nothing about the visible capsule (it keeps a wide,
-# often invisible window; notification HUDs widen it further), and its
-# capsule can't be told apart from a near-black menu bar in pixels.
-# Automatic geometry is hardware-notch; the Bar Size sliders are the
-# manual override for anything else.
+# NOTE on sizing to Alcove, third attempt -- the first two were
+# reverted: window BOUNDS say nothing about the visible capsule (a
+# static, mostly transparent 624pt canvas, verified again 2026-08-12
+# with a 90s bounds sampler that never moved), and SCREEN pixels can't
+# tell the capsule from a near-black menu bar. What works is capturing
+# Alcove's own window ALONE and reading the ALPHA channel: the capsule
+# sits on a transparent canvas, so its lit bounding box IS the visible
+# pill (measured live: a 272pt timer pill inside the 624pt canvas,
+# 32pt tall). Both old failure modes die at once -- the invisible
+# canvas is transparent (ignored), and no menu-bar pixels are in the
+# image at all. The lit box's HEIGHT separates the capsule from the
+# hover panel. Falls back to hardware-notch geometry the moment a
+# reading is unavailable (Screen Recording not granted, Alcove gone,
+# panel open past the hold window).
+
+
+def measured_alcove_capsule_width(menu_band_height: float) -> float | None:
+    """Width in points of Alcove's VISIBLE capsule, or None when there
+    is no trustworthy reading (no Alcove window, capture unavailable,
+    or the lit region is the hover panel rather than the capsule)."""
+    try:
+        import Quartz
+        from AppKit import NSBitmapImageRep
+
+        band = max(24.0, float(menu_band_height))
+        info = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID
+        )
+        best_width = None
+        for entry in info or []:
+            if str(entry.get("kCGWindowOwnerName", "")) != "Alcove":
+                continue
+            bounds = entry.get("kCGWindowBounds") or {}
+            window_x = float(bounds.get("X", 0.0))
+            window_y = float(bounds.get("Y", 0.0))
+            window_w = float(bounds.get("Width", 0.0))
+            if window_w <= 0.0:
+                continue
+            # Capture only the window's top band (plus enough extra rows
+            # to recognize the hover panel) -- a ~624x60 nominal image,
+            # not the whole 320pt canvas.
+            probe_height = band * (ALCOVE_CAPSULE_MAX_BAND_FACTOR + 0.2)
+            rect = Quartz.CGRectMake(window_x, window_y, window_w, probe_height)
+            image = Quartz.CGWindowListCreateImage(
+                rect,
+                Quartz.kCGWindowListOptionIncludingWindow,
+                int(entry.get("kCGWindowNumber", 0)),
+                Quartz.kCGWindowImageNominalResolution,
+            )
+            if image is None:
+                continue
+            rep = NSBitmapImageRep.alloc().initWithCGImage_(image)
+            if rep is None:
+                continue
+            width_px = int(rep.pixelsWide())
+            height_px = int(rep.pixelsHigh())
+            if width_px <= 0 or height_px <= 0:
+                continue
+            scale = width_px / window_w
+            # Two probe rows inside the capsule band find its extent; one
+            # row below the band exposes the hover panel.
+            capsule_rows = [
+                min(height_px - 1, max(0, int(band * 0.35 * scale))),
+                min(height_px - 1, max(0, int(band * 0.7 * scale))),
+            ]
+            panel_row = min(
+                height_px - 1, max(0, int(band * ALCOVE_CAPSULE_MAX_BAND_FACTOR * scale))
+            )
+            min_x = None
+            max_x = None
+            for row in capsule_rows:
+                for x in range(0, width_px, 2):
+                    color = rep.colorAtX_y_(x, row)
+                    if (
+                        color is not None
+                        and color.alphaComponent() > ALCOVE_CAPSULE_ALPHA_THRESHOLD
+                    ):
+                        if min_x is None or x < min_x:
+                            min_x = x
+                        if max_x is None or x > max_x:
+                            max_x = x
+            if min_x is None or max_x is None or max_x <= min_x:
+                continue
+            panel_lit = 0
+            for x in range(0, width_px, 4):
+                color = rep.colorAtX_y_(x, panel_row)
+                if (
+                    color is not None
+                    and color.alphaComponent() > ALCOVE_CAPSULE_ALPHA_THRESHOLD
+                ):
+                    panel_lit += 1
+                    if panel_lit >= 3:
+                        break
+            if panel_lit >= 3:
+                # Hover panel open: nothing here describes the capsule.
+                continue
+            width_pt = (max_x - min_x + 2) / scale
+            if width_pt < 40.0:
+                continue
+            if best_width is None or width_pt > best_width:
+                best_width = width_pt
+        return best_width
+    except Exception:
+        return None
+
+
+class AlcoveCapsuleTracker:
+    """Hysteresis around the raw measurement: widen instantly (a live
+    activity just appeared -- embrace it now), narrow only after the
+    smaller reading holds for ALCOVE_NARROW_AFTER_SECONDS, and ride out
+    reading gaps for ALCOVE_HOLD_SECONDS before surrendering to
+    hardware geometry. Injectable measure/clock for tests."""
+
+    def __init__(self, measure=None, clock=time.monotonic):
+        # measure=None resolves to the module function AT CALL TIME so
+        # tests can patch sidepulse.virtual_device.
+        # measured_alcove_capsule_width and every tracker sees it.
+        self._measure = measure
+        self._clock = clock
+        self._adopted: float | None = None
+        self._narrow_candidate: float | None = None
+        self._narrow_since: float | None = None
+        self._last_good: float | None = None
+
+    def desired_total_width(self, menu_band_height: float) -> float | None:
+        """The bar's minimum total width in points, or None for
+        hardware geometry."""
+        now = self._clock()
+        measure = (
+            self._measure if self._measure is not None else measured_alcove_capsule_width
+        )
+        reading = measure(menu_band_height)
+        if reading is not None:
+            reading = min(reading + 2.0 * ALCOVE_CAPSULE_MARGIN, ALCOVE_FOLLOW_MAX_WIDTH)
+            self._last_good = now
+            if self._adopted is None or reading > self._adopted + 0.5:
+                self._adopted = reading
+                self._narrow_since = None
+                self._narrow_candidate = None
+            elif reading < self._adopted - 4.0:
+                if (
+                    self._narrow_since is None
+                    or self._narrow_candidate is None
+                    or reading > self._narrow_candidate + 4.0
+                ):
+                    self._narrow_since = now
+                    self._narrow_candidate = reading
+                elif now - self._narrow_since >= ALCOVE_NARROW_AFTER_SECONDS:
+                    self._adopted = self._narrow_candidate
+                    self._narrow_since = None
+                    self._narrow_candidate = None
+            else:
+                self._narrow_since = None
+                self._narrow_candidate = None
+            return self._adopted
+        if (
+            self._adopted is not None
+            and self._last_good is not None
+            and now - self._last_good <= ALCOVE_HOLD_SECONDS
+        ):
+            return self._adopted
+        self._adopted = None
+        self._narrow_since = None
+        self._narrow_candidate = None
+        return None
+
 
 
 
@@ -1186,6 +1382,9 @@ class VirtualStatusDevice(NSObject):
         if self.view is not None:
             self.view.set_standing_gauges(left_level, right_on)
 
+    def set_follow_alcove(self, enabled: bool) -> None:
+        self.follow_alcove_width = bool(enabled)
+
     def set_bracket_style(self, style: str) -> None:
         if self.view is not None:
             self.view.setBracketStyle_(style)
@@ -1290,11 +1489,39 @@ class VirtualStatusDevice(NSObject):
                 cache = self._notch_measure_cache
             if cache[1] is not None:
                 effective_gap = cache[1][1]
+        # Follow Alcove's visible capsule (alpha-measured) so an
+        # expanded live activity never outgrows the bracket. Manual
+        # wing lengths win; the tracker only runs in wings-only mode.
+        follow_width = None
+        if (
+            wings_only
+            and wing_override is None
+            and getattr(self, "follow_alcove_width", True)
+        ):
+            tracker = getattr(self, "_alcove_tracker", None)
+            if tracker is None:
+                tracker = AlcoveCapsuleTracker()
+                self._alcove_tracker = tracker
+            band = max(24.0, window_height_for_notch_depth(notch_depth_for_screen(screen)))
+            follow_width = tracker.desired_total_width(band)
+            if follow_width != getattr(self, "_last_follow_width", None):
+                self._last_follow_width = follow_width
+                try:
+                    from .status_bar import log_status_bar
+
+                    log_status_bar(
+                        f"alcove follow: {follow_width:.0f}pt"
+                        if follow_width is not None
+                        else "alcove follow: hardware geometry"
+                    )
+                except Exception:
+                    pass
         window_frame = virtual_window_frame_for_screen(
             screen,
             wrap_menu_bar=self.wraps_menu_bar,
             gap_width=effective_gap,
             wing_length=wing_override,
+            alcove_total_width=follow_width,
         )
         current = self.window.frame()
         frame_changed = (
