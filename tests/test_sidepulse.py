@@ -9247,6 +9247,44 @@ class UsageGraphRangeTests(unittest.TestCase):
         self.assertEqual(len(buckets), 365)
 
 
+class ClickToAnswerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def _ask(self, agent_id):
+        return AgentStatus(
+            provider="claude",
+            agent_id=agent_id,
+            display_name=agent_id,
+            mode=AgentMode.WAITING_FOR_INPUT,
+            updated_at=datetime.now(timezone.utc),
+            event_name="PermissionRequest",
+            session_id="s1",
+        )
+
+    def test_click_targets_oldest_ask_and_disarms_when_clear(self) -> None:
+        from types import SimpleNamespace as NS
+
+        self.assertIsNone(self.controller.screen_bar_click_status())
+        newer, older = self._ask("claude:session:new"), self._ask("claude:session:old")
+        self.controller.last_snapshot = NS(statuses=[newer, older])
+        self.controller.ask_blocked_by_agent = {
+            "claude:session:old": 10.0,
+            "claude:session:new": 99.0,
+        }
+        target = self.controller.screen_bar_click_status()
+        self.assertEqual(target.agent_id, "claude:session:old")
+        self.controller.last_snapshot = NS(statuses=[])
+        self.assertIsNone(self.controller.screen_bar_click_status())
+
+    def test_subagent_asks_never_arm_the_bar(self) -> None:
+        from types import SimpleNamespace as NS
+
+        worker = self._ask("claude:agent:w1")
+        self.controller.last_snapshot = NS(statuses=[worker])
+        self.assertIsNone(self.controller.screen_bar_click_status())
+
+
 class QuotaRunwayTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_controller(self)

@@ -8,6 +8,7 @@ from AppKit import (
     NSBackingStoreBuffered,
     NSBezierPath,
     NSColor,
+    NSCursor,
     NSGraphicsContext,
     NSScreen,
     NSView,
@@ -520,6 +521,15 @@ def current_cg_context():
 
 
 class VirtualLedView(NSView):
+    def mouseDown_(self, _event):
+        handler = getattr(self, "click_handler", None)
+        if handler is not None:
+            handler()
+
+    def resetCursorRects(self):
+        if getattr(self, "click_handler", None) is not None:
+            self.addCursorRect_cursor_(self.bounds(), NSCursor.pointingHandCursor())
+
     def initWithFrame_(self, frame):
         self = objc.super(VirtualLedView, self).initWithFrame_(frame)
         if self is not None:
@@ -1087,6 +1097,16 @@ class VirtualStatusDevice(NSObject):
 
     def set_wraps_menu_bar(self, enabled: bool) -> None:
         self.wraps_menu_bar = bool(enabled)
+
+    def set_click_handler(self, handler) -> None:
+        """Arms the bar as a click target (an ask is active: clicking
+        jumps to the asking session). None restores the fully
+        click-through window -- the default, and the safe state."""
+        if self.view is not None:
+            self.view.click_handler = handler
+            self.view.window() and self.view.window().invalidateCursorRectsForView_(self.view)
+        if self.window is not None:
+            self.window.setIgnoresMouseEvents_(handler is None)
 
     def set_min_glow(self, fraction: float) -> None:
         if self.view is not None:

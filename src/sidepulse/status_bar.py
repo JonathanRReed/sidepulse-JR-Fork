@@ -5075,6 +5075,20 @@ class StatusBarController(NSObject):
         )
         self.virtual_status_device.set_bracket_style(self.settings.screen_bar_bracket_style)
         self.virtual_status_device.set_min_glow(self.settings.screen_bar_min_glow)
+        # Click-to-answer: while an ask is live, the glowing bar itself
+        # is the fastest route to the asking session -- click it and the
+        # oldest unanswered ask's terminal comes forward. With no ask,
+        # the window stays fully click-through (mouse events ignored),
+        # exactly as before.
+        click_target = self.screen_bar_click_status()
+        if click_target is not None:
+            self.virtual_status_device.set_click_handler(
+                lambda status=click_target: self.open_session(
+                    status, None, remember=False
+                )
+            )
+        else:
+            self.virtual_status_device.set_click_handler(None)
         device = next(
             (
                 item for item in self.status_bar_devices(remember=False)
@@ -5274,6 +5288,22 @@ class StatusBarController(NSObject):
         if result.ok:
             return None
         return f"{result.error_name} at line {result.line}, column {result.column}"
+
+    def screen_bar_click_status(self):
+        """The session a Screen Bar click should open: the OLDEST
+        unanswered hard ask (the same episode ordering escalation
+        follows), or None when nothing needs you."""
+        snapshot = getattr(self, "last_snapshot", None)
+        if snapshot is None:
+            return None
+        asks = ask_statuses(snapshot)
+        if not asks:
+            return None
+        episodes = getattr(self, "ask_blocked_by_agent", {})
+        return min(
+            asks,
+            key=lambda status: episodes.get(status.agent_id, float("inf")),
+        )
 
     def quota_runway_state(self) -> tuple[float, str] | None:
         """(fraction_left, brand color) for the WORST tracked quota
