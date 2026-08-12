@@ -25,7 +25,6 @@ try:
         NSClickGestureRecognizer,
         NSColor,
         NSColorPanel,
-        NSColorWell,
         NSCompositingOperationSourceOver,
         NSEventTypeLeftMouseDragged,
         NSFont,
@@ -130,6 +129,7 @@ from .led_status import (
     AgentLedController,
     LedDisplayState,
     apply_brightness,
+    apply_channel_gain_to_program,
     brightness_percent,
     led_count_for_target,
     normalize_brightness,
@@ -1059,23 +1059,50 @@ class StatusBarController(NSObject):
         preview = self.settings_fields.get(f"signal_preview:{key}")
         if preview is not None:
             preview.setProgram_(style_to_program(style, 255, color=preview_color))
-        well = self.settings_fields.get(f"signal_color:{key}")
-        if well is not None:
-            well.setColor_(nscolor_from_hex(style.color))
+        swatch = self.settings_fields.get(f"signal_color:{key}")
+        if swatch is not None:
+            swatch.setProgram_(style.color)
 
-    @objc.IBAction
-    def setSignalColor_(self, sender):
-        key = str(sender.identifier() or "")
+    def _set_signal_color(self, key: str, new_color: str) -> None:
         if key not in signals_module.DEFAULT_SIGNAL_STYLES:
             return
         style = self._current_signal_style(key)
-        new_color = hex_from_nscolor(sender.color())
         self._save_signal_style(
             key,
             signals_module.SignalStyle(
                 new_color, style.pattern, style.speed_seconds, style.intensity
             ),
         )
+
+    @objc.IBAction
+    def pickSignalSwatch_(self, sender):
+        identifier = str(sender.identifier() or "")
+        if "|" not in identifier:
+            return
+        key, hex_color = identifier.split("|", 1)
+        self._set_signal_color(key, hex_color)
+
+    @objc.IBAction
+    def openSignalColorPanel_(self, sender):
+        key = str(sender.identifier() or "")
+        if key not in signals_module.DEFAULT_SIGNAL_STYLES:
+            return
+        self.color_panel_signal_key = key
+        self.active_color_target = None
+        panel = NSColorPanel.sharedColorPanel()
+        panel.setTarget_(self)
+        panel.setAction_("signalPanelColorChanged:")
+        panel.setColor_(nscolor_from_hex(self._current_signal_style(key).color))
+        panel.orderFront_(None)
+
+    @objc.IBAction
+    def signalPanelColorChanged_(self, sender):
+        key = getattr(self, "color_panel_signal_key", None)
+        if not key:
+            return
+        if self._slider_event_is_drag():
+            return
+        self._set_signal_color(key, hex_from_nscolor(sender.color()))
 
     @objc.IBAction
     def selectSignalPattern_(self, recognizer):
@@ -1675,6 +1702,10 @@ class StatusBarController(NSObject):
         self._device_calibration_popover = popover
         self.device_settings_controls.setdefault(device_id, {}).update(controls)
         self.refresh_device_settings_controls(device_id, controls)
+        # White-first: light every LED true white immediately so the
+        # user starts matching without hunting for a patch to click.
+        self.calibration_test = (device_id, "#FFFFFF")
+        self._send_calibration_test()
 
     @objc.IBAction
     def toggleVirtualStatusDevice_(self, _sender):
@@ -2367,6 +2398,8 @@ class StatusBarController(NSObject):
 
     def open_custom_color_panel(self, target_key: tuple[str, str], current_hex: str) -> None:
         self.active_color_target = target_key
+        # Route exclusively to the Colors window (not a signal card).
+        self.color_panel_signal_key = None
         panel = NSColorPanel.sharedColorPanel()
         panel.setColor_(nscolor_from_hex(current_hex))
         panel.setTarget_(self)
@@ -3018,6 +3051,10 @@ class StatusBarController(NSObject):
             self.refresh_screen_bar_preview()
         set_checkbox_state(
             controls.get("auto_brightness_checkbox"),
+            self.settings.auto_brightness_enabled_for_device(device_id),
+        )
+        set_checkbox_state(
+            controls.get("auto_brightness_row_checkbox"),
             self.settings.auto_brightness_enabled_for_device(device_id),
         )
         red, green, blue = self.settings.channel_gains_for_device(device_id)
@@ -4027,78 +4064,76 @@ class StatusBarController(NSObject):
         # any of them.
         brightness = self.effective_brightness_for_device(device)
         display = self.active_led_display_kind_for_device(device, battery_snapshot)
+
+        def _set_virtual(program: str) -> None:
+            # The Screen Bar honors ITS calibration exactly like a
+            # physical device -- gains applied at the write boundary
+            # (the Colors-window previews stay uncorrected "true" hex).
+            self.virtual_status_device.set_program(
+                apply_channel_gain_to_program(program, device.channel_gains),
+                started_at=started_at,
+            )
+
         if display == LED_DISPLAY_TEST:
-            self.virtual_status_device.set_program(
-                self.test_signal_program(brightness), started_at=started_at
-            )
+            _set_virtual(self.test_signal_program(brightness))
         elif display == LED_DISPLAY_ESCALATION:
-            self.virtual_status_device.set_program(
-                self.escalation_takeover_program(brightness), started_at=started_at
-            )
+            _set_virtual(self.escalation_takeover_program(brightness))
         elif display == LED_DISPLAY_NOTIFICATION and self.notification_blink_color:
-            self.virtual_status_device.set_program(
+            _set_virtual(
                 style_to_program(
                     self.settings.signal_style(signals_module.SIGNAL_NOTIFICATION),
                     brightness,
                     color=self.notification_blink_color,
-                ),
-                started_at=started_at,
+                )
             )
         elif display == LED_DISPLAY_COMPLETION:
-            self.virtual_status_device.set_program(
+            _set_virtual(
                 style_to_program(
                     self.settings.signal_style(signals_module.SIGNAL_COMPLETION),
                     brightness,
                     color=getattr(self, "completion_sweep_color", None),
-                ),
-                started_at=started_at,
+                )
             )
         elif display == LED_DISPLAY_WEATHER:
-            self.virtual_status_device.set_program(
+            _set_virtual(
                 style_to_program(
                     self.settings.signal_style(signals_module.SIGNAL_WEATHER), brightness
-                ),
-                started_at=started_at,
+                )
             )
         elif display == LED_DISPLAY_REMINDERS:
-            self.virtual_status_device.set_program(
+            _set_virtual(
                 style_to_program(
                     self.settings.signal_style(signals_module.SIGNAL_REMINDERS), brightness
-                ),
-                started_at=started_at,
+                )
             )
         elif display == LED_DISPLAY_CALENDAR:
-            self.virtual_status_device.set_program(
+            _set_virtual(
                 style_to_program(
                     self.settings.signal_style(signals_module.SIGNAL_CALENDAR), brightness
-                ),
-                started_at=started_at,
+                )
             )
         elif display == LED_DISPLAY_LOW_BATTERY:
-            self.virtual_status_device.set_program(
+            _set_virtual(
                 style_to_program(
                     self.settings.signal_style(signals_module.SIGNAL_LOW_BATTERY), brightness
-                ),
-                started_at=started_at,
+                )
             )
         elif display == LED_DISPLAY_BATTERY and battery_snapshot is not None:
-            self.virtual_status_device.set_program(
+            _set_virtual(
                 program_for_battery(
                     battery_snapshot,
                     led_count=8,
                     brightness=brightness,
-                ),
-                started_at=started_at,
+                )
             )
         elif display == LED_DISPLAY_TIMER:
-            self.virtual_status_device.set_program(
+            _set_virtual(
                 timer_fill_program(
                     self.timer_fill_fraction(),
                     led_count=8,
                     brightness=brightness,
                     color=self.settings.colors.mode_colors.get("working", "#00E5FF"),
-                ),
-                started_at=started_at,
+                )
             )
         else:
             colors_for_render = self.agent_render_colors()
@@ -4112,7 +4147,7 @@ class StatusBarController(NSObject):
                 brightness=brightness,
                 fallback_mode=mode,
             )
-            self.virtual_status_device.set_program(program, started_at=started_at)
+            _set_virtual(program)
 
     def schedule_screen_bar_sync(
         self,
@@ -4728,7 +4763,7 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     profiles_item.setSubmenu_(profiles_menu)
     menu.addItem_(profiles_item)
     # Timebox: the bar as an ambient countdown.
-    timebox_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Timebox", None, "")
+    timebox_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Timer", None, "")
     timebox_menu = NSMenu.alloc().init()
     timebox_menu.setAutoenablesItems_(False)
     for minutes in (15, 25, 45, 60):
@@ -5286,6 +5321,14 @@ def _build_devices_pane(target: StatusBarController):
             )
         )
 
+        auto_checkbox_row = native_ui.make_checkbox(
+            "Match screen brightness", target, "toggleDeviceAutoBrightness:"
+        )
+        auto_checkbox_row.setRepresentedObject_(device.device_id)
+        auto_checkbox_row.setState_(1 if device.auto_brightness_enabled else 0)
+        inner.addArrangedSubview_(native_ui.make_row("Auto-Brightness", auto_checkbox_row))
+        native_ui.add_separator(inner)
+
         calibrate_button = native_ui.make_button("Calibrate…", target, "openDeviceCalibrationPopover:")
         calibrate_button.setRepresentedObject_(device.device_id)
         red, green, blue = device.channel_gains
@@ -5350,6 +5393,7 @@ def _build_devices_pane(target: StatusBarController):
             "brightness_dots": brightness_dots,
             "calibrate_button": calibrate_button,
             "calibration_label": calibration_label,
+            "auto_brightness_row_checkbox": auto_checkbox_row,
             "display_popup": display_popup,
             "blend_popup": blend_popup,
         }
@@ -5388,9 +5432,10 @@ def build_calibration_popover_content(device: StatusBarDevice, target: StatusBar
 
     stack.addArrangedSubview_(
         native_ui.make_label(
-            "Hold the device beside these patches.\n"
-            "Click one to light the device with it, then\n"
-            "adjust until the light matches the patch.",
+            "Every LED is now TRUE WHITE, and the patch below\n"
+            "shows true white on screen. Adjust Red, Green, and\n"
+            "Blue until the light looks white to you -- then check\n"
+            "the other patches if you want to fine-tune.",
             secondary=True,
             size=11.0,
         )
@@ -5672,6 +5717,20 @@ SIGNAL_STYLE_CARDS: tuple[tuple[str, str, bool], ...] = (
     ("completion", "Completion Sweep Style", True),
 )
 SIGNAL_THUMB_SIZE = (52.0, 20.0)
+# Quick-pick swatches for signal colors: recognizable brand hues first
+# (pick "Claude" and mean it), then the identity palette. The swatch
+# row + the classic NSColorPanel replaced NSColorWell entirely: the
+# modern well is SwiftUI-backed and SEGFAULTed inside Swift
+# Concurrency's executor checks in this Python-hosted process the
+# moment its "add a color" picker was touched (crash report
+# SidePulse-2026-08-11-202021.ips).
+BRAND_SWATCHES: tuple[tuple[str, str], ...] = (
+    ("Claude", "#D97757"),
+    ("OpenAI", "#10A37F"),
+    ("Codex", "#FF3A00"),
+    ("Gemini", "#4796E3"),
+)
+SWATCH_BUTTON_SIZE = 22.0
 SIGNAL_PREVIEW_SIZE = (220.0, 22.0)
 ESCALATION_TIER_LABELS: tuple[tuple[str, str], ...] = (
     ("Light ramp only", "light"),
@@ -5717,22 +5776,61 @@ def _apply_thumb_selection(thumbs: dict, selected_pattern: str) -> None:
             layer.setBorderWidth_(0.0)
 
 
+def _solid_swatch_image(hex_color: str, size: float = SWATCH_BUTTON_SIZE):
+    image = NSImage.alloc().initWithSize_((size, size))
+    image.lockFocus()
+    nscolor_from_hex(hex_color).setFill()
+    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+        ((1.0, 1.0), (size - 2.0, size - 2.0)), 6.0, 6.0
+    ).fill()
+    NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.25).setStroke()
+    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+        ((1.0, 1.0), (size - 2.0, size - 2.0)), 6.0, 6.0
+    ).stroke()
+    image.unlockFocus()
+    return image
+
+
+def make_signal_color_row(target: StatusBarController, key: str, current_color: str):
+    """Brand + palette swatches and a Custom… button (classic
+    NSColorPanel). No NSColorWell anywhere -- see BRAND_SWATCHES."""
+    row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
+    swatches = list(BRAND_SWATCHES) + [
+        (f"Palette {index + 1}", hex_color)
+        for index, hex_color in enumerate(colors_module.IDENTITY_PALETTE[:4])
+    ]
+    for label, hex_color in swatches:
+        button = NSButton.alloc().init()
+        button.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        button.setBordered_(False)
+        button.setImage_(_solid_swatch_image(hex_color))
+        button.setToolTip_(f"{label} — {hex_color}")
+        button.setTarget_(target)
+        button.setAction_("pickSignalSwatch:")
+        button.setIdentifier_(f"{key}|{hex_color}")
+        native_ui.constrain_width(button, SWATCH_BUTTON_SIZE)
+        native_ui.constrain_height(button, SWATCH_BUTTON_SIZE)
+        row.addArrangedSubview_(button)
+    custom = native_ui.make_button("Custom…", target, "openSignalColorPanel:")
+    custom.setIdentifier_(key)
+    row.addArrangedSubview_(custom)
+    return row
+
+
 def make_signal_style_card(target: StatusBarController, key: str, title: str, *, show_color: bool, fields: dict):
     outer, inner = native_ui.make_card(title)
     style = target.settings.signal_style(key)
 
     if show_color:
-        well = NSColorWell.alloc().init()
-        well.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        well.setColor_(nscolor_from_hex(style.color))
-        well.setTarget_(target)
-        well.setAction_("setSignalColor:")
-        well.setIdentifier_(key)
-        native_ui.constrain_width(well, 44.0)
-        native_ui.constrain_height(well, 24.0)
-        inner.addArrangedSubview_(native_ui.make_row("Color", well))
+        color_row = make_signal_color_row(target, key, style.color)
+        current_swatch = _mini_led_view(SWATCH_BUTTON_SIZE * 1.6, SWATCH_BUTTON_SIZE)
+        current_swatch.setProgram_(style.color)
+        color_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+        color_cluster.addArrangedSubview_(current_swatch)
+        color_cluster.addArrangedSubview_(color_row)
+        inner.addArrangedSubview_(native_ui.make_row("Color", color_cluster))
         native_ui.add_separator(inner)
-        fields[f"signal_color:{key}"] = well
+        fields[f"signal_color:{key}"] = current_swatch
 
     preview_color = _signal_preview_color(target, key)
     thumbs: dict[str, object] = {}

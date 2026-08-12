@@ -474,6 +474,7 @@ def timer_fill_program(
     stripped = color.lstrip("#")
     red, green, blue = (int(stripped[i : i + 2], 16) for i in (0, 2, 4))
     segments = []
+    frontier = min(led_count - 1, int(filled)) if filled > 0 else 0
     for index in range(led_count):
         amount = max(0.0, min(1.0, filled - index))
         if amount <= 0.0:
@@ -486,7 +487,12 @@ def timer_fill_program(
                 f"{round(channel * amount):02X}" for channel in (red, green, blue)
             )
             segments.append(f"{index}:{scaled}")
-    return apply_brightness("; ".join(segments), brightness)
+    body = "; ".join(segments)
+    if 0.0 < fraction < 1.0:
+        # The plink: the frontier LED breathes, so a slow timer reads
+        # as alive grains landing rather than a frozen bar.
+        body += f"\n{frontier}:{color} 1200ms pulse\nrepeat"
+    return apply_brightness(body, brightness)
 
 
 def style_to_program(
