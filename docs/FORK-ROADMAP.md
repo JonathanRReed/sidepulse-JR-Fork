@@ -155,6 +155,24 @@ Decisions locked 2026-08-11 (grilling session with Jonathan):
 - **Jonathan's Focus modes** (for per-Focus rules): Do Not Disturb, Work,
   Sleep, School (custom), Personal (custom).
 
+## FINAL PASS (2026-08-12) -- promise ledger cleared
+
+- Main thread is now I/O-silent: SD-card keepalive pokes and /Volumes
+  discovery moved to workers (the "5 seconds to register a scroll"
+  freeze), joining the lid ioreg fork and Notification Center sqlite
+  from the adversarial audit. Focus reads 1s-cached.
+- STORIES-V2 shipped: all top five (click-to-answer, Quota Runway,
+  Exhale, hover peek, INIT.LED power-up) + Quota Sunrise. Remaining
+  stories 6-10/12-16 stay ranked in docs/STORIES-V2.md.
+- ULTRA-PLAN polish shipped: fading toast confirmations, pane
+  crossfade, sidebar hover, teaching empty states (Devices pane CTA +
+  dropdown), escalation visibility floor.
+- Full preview-engine release on settings close (was 28 of ~98
+  engines); PERF-AUDIT.md holds the ranked tail (glow run-coalescing,
+  shared JSContext, transcript-union sort).
+- README rewritten for new users; .gitignore covers .superpowers/ and
+  uv.lock; T3 Code and CodexBar credited with citation docs.
+
 ## DEPTH WAVE (2026-08-11, late night) -- T3 round 2 + depth over breadth
 
 - Focus pane (per-mode rules found + promoted, live "Right Now" card,

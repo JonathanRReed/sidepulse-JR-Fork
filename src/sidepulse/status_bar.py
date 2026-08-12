@@ -1145,9 +1145,10 @@ class StatusBarController(NSObject):
         )
 
     def release_preview_engines(self) -> None:
-        """Drop the thumbnail views' WASM engines when settings closes
-        -- dozens of live JavaScriptCore contexts are pure RSS while the
-        window is gone; they rebuild lazily on next open."""
+        """Drop EVERY preview surface's WASM engine when settings goes
+        away -- the first version swept 28 of ~98 engines (mode + lid
+        thumbs only) and left the signal cards' contexts resident.
+        Everything rebuilds lazily on next open."""
         groups = list(getattr(self, "colors_animation_thumbs", {}).values())
         singles = getattr(self, "lid_animation_thumbs", {})
         for thumbs in groups:
@@ -1155,6 +1156,24 @@ class StatusBarController(NSObject):
                 thumb.wasm_controller = None
         for thumb in singles.values():
             thumb.wasm_controller = None
+        for field_key, view in (getattr(self, "settings_fields", None) or {}).items():
+            if field_key.startswith(("signal_preview:", "signal_color:")):
+                view.wasm_controller = None
+            elif field_key.startswith("signal_thumbs:"):
+                for thumb in view.values():
+                    thumb.wasm_controller = None
+        # BOTH color-preview dicts together: clearing only the engines
+        # leaves the program-match early-return handing back stale None
+        # and silently killing the preview.
+        self.color_preview_wasm = {}
+        self.color_preview_programs = {}
+        # Rendered-style memo too, so reopened cards re-render fresh.
+        self._signal_card_rendered = {}
+
+    def windowWillClose_(self, notification):
+        if notification.object() is getattr(self, "settings_window", None):
+            self.stop_colors_preview_animation()
+            self.release_preview_engines()
 
     def menuWillOpen_(self, _menu):
         self.status_menu_open = True
@@ -6493,7 +6512,10 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         for device in devices:
             menu.addItem_(build_device_menu_item(device, target))
     else:
-        menu.addItem_(disabled_menu_item("No devices"))
+        menu.addItem_(disabled_menu_item("No devices yet"))
+        menu.addItem_(
+            disabled_menu_item("Plug in a SidePulse, or add the Screen Bar below")
+        )
     if SCREEN_BAR_FEATURE_ENABLED:
         virtual_toggle = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             (
@@ -7263,7 +7285,23 @@ def _build_devices_pane(target: StatusBarController):
     device_controls: dict[str, dict[str, object]] = {}
     if not devices:
         outer, inner = native_ui.make_card("Devices")
-        inner.addArrangedSubview_(native_ui.make_label("No devices connected yet.", secondary=True))
+        inner.addArrangedSubview_(
+            native_ui.make_wrapping_label(
+                "No devices yet. Plug a SidePulse into any USB port and it "
+                "appears here by itself -- or start with the on-screen bar:",
+                secondary=True,
+                size=12.0,
+                max_width=560.0,
+            )
+        )
+        empty_cta = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+        empty_cta.addArrangedSubview_(
+            native_ui.make_button(
+                "Add the Screen Bar", target, "toggleVirtualStatusDevice:"
+            )
+        )
+        empty_cta.addArrangedSubview_(native_ui.make_hspacer())
+        inner.addArrangedSubview_(empty_cta)
         stack.addArrangedSubview_(outer)
     if devices:
         # One global timer length for the Working-timer display.
@@ -8703,6 +8741,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         ((0, 0), (width, height)), style, NSBackingStoreBuffered, False,
     )
     window.setTitle_("SidePulse Agent Monitor Settings")
+    window.setDelegate_(target)
     window.setReleasedWhenClosed_(False)
     window.center()
 

@@ -7,3 +7,5 @@ __pycache__/
 .ruff_cache/
 build/
 dist/
+.superpowers/
+uv.lock

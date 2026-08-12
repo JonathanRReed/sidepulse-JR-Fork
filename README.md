@@ -3,35 +3,107 @@
 A quality-first divergence of [inteliwear/sidepulse](https://github.com/inteliwear/sidepulse)
 that turns SidePulse into a **universal status indicator** for the Mac:
 agent status at the core, computer signals layered on top, deeply
-customizable behind good defaults.
+customizable behind good defaults — and, since the fusion waves, one
+place to watch **every agent harness and every provider's usage**.
 
-What this fork adds over upstream:
+## What this fork adds over upstream
 
+**Monitoring that tells the truth**
+
+- **Hard vs soft asks** — only *tracked* requests (permission prompts,
+  errors, actionable notifications) ring the Ask signal or escalate; a
+  finished turn that merely ended with a question never does. Sub-agent
+  asks can't blink the lights at all by default (a worker's question is
+  its parent's problem — Signals has the override).
+- **Sub-agents ride under their parent** — the dropdown shows main
+  sessions with running workers nested beneath (`↳`, parent's identity
+  color, "· 2 workers · 4m"); finished workers vanish instantly.
+- **Unseen-done, modeled** — completions newer than your last look put
+  a ✓ on the icon and a "new" tag on the row; opening the menu clears
+  them. Completions only *celebrate* while under 2 minutes fresh, so
+  restarts and replays repaint silently.
+- **Ask escalation** — an ignored "needs you" ramps, flashes the
+  menu-bar icon, chimes, and can take over every surface; the **Ask
+  Inbox** pins "Needs You (N)" atop the dropdown; the ramp carries an
+  absolute brightness floor so no dimming stack can hide it.
+- **Quiet for an Hour, Clear Finished,** a daily **Tip** submenu that
+  jumps to (and flashes) the exact control it teased, and a teaching
+  empty state everywhere.
+
+**Usage & cost, everywhere (CodexBar-grade)**
+
+- **Profile pane** — today's Claude spend with **cache savings** (the
+  stat you actually want), Codex sessions/tokens with the **weekly
+  limit percent read straight from the newest rollout** (no API, no
+  auth), an official opt-in **Claude plan limits** line (Anthropic's
+  own OAuth usage endpoint), and a **7-day/30/90/Year graph** with an
+  hourly sparkline — powered by a persisted per-file parse cache
+  (cold scan seconds, warm scan milliseconds) with first-seen dedupe
+  so resumed sessions never double-count.
+- **Quota signals** — opt-in threshold blinks in the provider's color
+  ("75, 90" — yours to edit), a **Quota Sunrise** sweep the moment a
+  window resets, and **Quota Runway** as a per-device Display: the
+  strip renders remaining headroom as ambient brand-colored light.
+
+**The Screen Bar (notch bar)**
+
+- Pixel-measures the hardware notch, coexists with Alcove as a rounded
+  bracket mirroring the physical LEDs, phase-locked to real device
+  writes. **Click it while an ask is live** to jump straight to the
+  asking session; **dwell on it** for a 4-second Claude/Codex runway
+  peek. A **Dim floor** dial runs it from soft outline to true pitch
+  black (only the moving signal shows); the **Exhale** — one slow warm
+  breath — marks the moment your last agent finishes with nothing left
+  needing you.
+
+**Hardware first-class**
+
+- Per-device **Resting glow** (a faint calibration-corrected ember so
+  unlit dots read as physical), white-point **calibration** with
+  Day/Night/Travel profiles (auto-applied per Focus), per-device
+  Display (Agent / Battery / Timer / Studio / Quota runway) and blend
+  modes, and **"Set as Power-Up Look"** — burn your Studio program
+  into the device's INIT.LED so the hardware boots wearing your light.
+- **Context-aware lid animations**: closing the lid on live agents
+  plays "Still Cooking"; reopening to them plays "Back On It" — four
+  editable slots, every preset parse-verified against the real
+  firmware grammar.
+
+**Looks**
+
+- **Color Studio** — brand swatches (Claude/OpenAI/Codex/Gemini) with
+  named tooltips, curated + provider **palettes** on a gamut-safe
+  OKLCH engine, per-mode animation thumbnails, fade presets, and a
+  pinned live preview.
 - **Signal Engine** — every light-claiming signal (low battery,
-  notifications, reminders, calendar, weather, completions) is one
-  model with one renderer, an explicit precedence order, and a
-  per-signal **style card**: color, animating pattern thumbnails
-  (breathe / blink / sweep / ripple / comet / sparkle / heartbeat),
-  speed, intensity, live preview, and a Test button.
-- **Ask escalation** — an ignored "agent needs you" ramps, flashes the
-  menu-bar icon, and can optionally chime or take over every surface;
-  an **Ask Inbox** pins "Needs You (N)" atop the dropdown.
-- **Color = agent** — with several sessions live, each gets a stable
-  identity hue across the LEDs, the Screen Bar, and the dropdown;
-  a **completion sweep** in that hue fires when any agent finishes.
-- **Screen Bar** — pixel-measures the hardware notch (no model
-  tables), coexists with Alcove as a rounded bracket that mirrors the
-  physical LEDs' animation, with manual size sliders.
-- **System signals** — per-Focus dimming and profiles (Day/Night/
-  Travel, auto-applied when a Focus activates), calendar lead glow,
-  reminders-due glow, notification blinks (iMessage/WhatsApp/
-  Telegram), NWS severe-weather heartbeat, working-timer fill, and a
-  dropdown **Timebox**.
-- **A real app bundle** — `~/Applications/SidePulse.app` with a valid
-  sealed signature, so macOS privacy grants (Full Disk Access,
-  Calendars, Reminders) attach to "SidePulse" by name.
+  notifications, reminders, calendar, NWS severe weather, completions,
+  quota) is one model with one renderer, an explicit precedence
+  ladder, and a per-signal style card with a Test button.
+- **Studio** — write any LED program in the device DSL, preview it on
+  everything, run it persistently, or make it the power-up look.
+
+**System signals** — per-Focus rules by *name* (School → off, Work →
+dim 50%), calendar/reminders glow, notification blinks, weather
+heartbeat, working-timer fill with a dropdown **Timer**.
+
+**Engineering**
+
+- A sealed **app bundle** so macOS privacy grants attach to
+  "SidePulse" by name; grouped, icon-led settings with fading toasts,
+  crossfading panes, and hover-lit sidebar rows; **no SD-card I/O,
+  subprocess forks, or sqlite ever on the main thread**; 30fps
+  change-gated Screen Bar with 15Hz WASM sampling; 530+ tests run by
+  CI on macOS; the design ledgers live in `docs/`.
 - **More providers** — Cursor, Hermes Agent, and OpenClaw hooks
   alongside upstream's set.
+
+**Credits** — many of the monitoring semantics and usage-tracking
+techniques were adopted (with citations) from studying
+[T3 Code](https://github.com/pingdotgg/t3code) and
+[CodexBar](https://github.com/steipete/CodexBar) — see
+[`docs/T3CODE-FINDINGS.md`](docs/T3CODE-FINDINGS.md) and
+[`docs/CODEXBAR-FINDINGS.md`](docs/CODEXBAR-FINDINGS.md) for exactly
+what came from where.
 
 The full build ledger lives in [`docs/FORK-ROADMAP.md`](docs/FORK-ROADMAP.md).
 

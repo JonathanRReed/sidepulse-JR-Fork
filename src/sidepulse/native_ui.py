@@ -67,6 +67,9 @@ try:
         NSTableViewSelectionHighlightStyleSourceList,
         NSTableViewStylePlain,
         NSTextField,
+        NSTrackingActiveInKeyWindow,
+        NSTrackingArea,
+        NSTrackingMouseEnteredAndExited,
         NSUserInterfaceLayoutOrientationHorizontal,
         NSUserInterfaceLayoutOrientationVertical,
         NSView,
@@ -687,6 +690,38 @@ def make_fixed_area(width: float, height: float) -> NSView:
     return view
 
 
+class _HoverRowView(NSView):
+    """Raycast's defining micro-interaction: rows acknowledge the
+    pointer. ActiveInKeyWindow (not ActiveAlways) so hover clears for
+    free whenever the window loses key."""
+
+    def updateTrackingAreas(self):
+        for area in list(self.trackingAreas()):
+            self.removeTrackingArea_(area)
+        self.addTrackingArea_(
+            NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                self.bounds(),
+                NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow,
+                self,
+                None,
+            )
+        )
+
+    def mouseEntered_(self, _event):
+        self.setWantsLayer_(True)
+        layer = self.layer()
+        if layer is not None:
+            layer.setCornerRadius_(6.0)
+            layer.setBackgroundColor_(
+                NSColor.controlColor().colorWithAlphaComponent_(0.35).CGColor()
+            )
+
+    def mouseExited_(self, _event):
+        layer = self.layer()
+        if layer is not None:
+            layer.setBackgroundColor_(None)
+
+
 def sidebar_cell_view(label_text: str, symbol: str | None = None) -> NSView:
     """One row's content view for the sidebar table. With a symbol name
     the row leads with a template SF Symbol at secondary weight -- the
@@ -694,7 +729,7 @@ def sidebar_cell_view(label_text: str, symbol: str | None = None) -> NSView:
     shape before you read a single word."""
     label = NSTextField.labelWithString_(label_text)
     label.setFont_(NSFont.systemFontOfSize_(13.0))
-    container = NSView.alloc().init()
+    container = _HoverRowView.alloc().init()
     container.addSubview_(label)
     label.setTranslatesAutoresizingMaskIntoConstraints_(False)
     text_leading = 8.0
