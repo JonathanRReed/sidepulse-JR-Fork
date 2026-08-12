@@ -9354,6 +9354,44 @@ class PowerUpLookTests(unittest.TestCase):
         self.assertFalse((volume_root / "SidePulseDot" / "INIT.LED").exists())
 
 
+class StudioLibraryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_save_load_delete_round_trip(self) -> None:
+        from sidepulse.settings import load_settings, save_settings
+
+        settings = self.controller.settings.with_studio_saved_look(
+            "Aurora", "#00E5FF 500ms pulse\nrepeat"
+        )
+        settings = settings.with_studio_saved_look("Ember", "#FF9F0A 400ms pulse\nrepeat")
+        # Re-saving a name replaces, never duplicates.
+        settings = settings.with_studio_saved_look("Aurora", "#12E3B0 300ms pulse\nrepeat")
+        self.assertEqual(len(settings.studio_library), 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(settings, path)
+            loaded = load_settings(path)
+        self.assertEqual(
+            dict(loaded.studio_library)["Aurora"], "#12E3B0 300ms pulse\nrepeat"
+        )
+        self.assertEqual(len(loaded.without_studio_look("Ember").studio_library), 1)
+        with self.assertRaises(ValueError):
+            settings.with_studio_saved_look("  ", "x")
+
+    def test_capture_strips_brightness_prefix(self) -> None:
+        self.controller.show_settings_window()
+        view = self.controller.virtual_status_device.view
+        if view is None:
+            self.controller.virtual_status_device._build_window()
+            view = self.controller.virtual_status_device.view
+        view.current_program = "brightness 120\n#00E5FF 500ms pulse\nrepeat"
+        self.controller.captureStudioProgram_(None)
+        captured = str(self.controller.studio_editor.string())
+        self.assertNotIn("brightness", captured)
+        self.assertIn("#00E5FF", captured)
+
+
 class OvertimePatinaWebhookTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_controller(self)

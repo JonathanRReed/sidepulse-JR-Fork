@@ -1648,6 +1648,97 @@ class StatusBarController(NSObject):
             led_count=led_count,
         )
 
+    def _refresh_studio_library_popup(self) -> None:
+        popup = getattr(self, "studio_library_popup", None)
+        if popup is None:
+            return
+        popup.removeAllItems()
+        popup.addItemWithTitle_("Saved looks\u2026")
+        popup.lastItem().setRepresentedObject_("")
+        for look_name, _program in self.settings.studio_library:
+            popup.addItemWithTitle_(look_name)
+            popup.lastItem().setRepresentedObject_(look_name)
+
+    @objc.IBAction
+    def captureStudioProgram_(self, _sender):
+        """Snapshot the EXACT program rendering on the Screen Bar into
+        the editor -- any live moment you love becomes an editable
+        artifact. The baked `brightness` prefix is stripped so the look
+        re-renders correctly under your live brightness."""
+        view = getattr(self.virtual_status_device, "view", None)
+        program = getattr(view, "current_program", None) if view is not None else None
+        if not program:
+            self.set_settings_message("Nothing is playing on the Screen Bar.")
+            return
+        lines = [
+            line
+            for line in str(program).splitlines()
+            if not line.strip().lower().startswith("brightness")
+        ]
+        editor = getattr(self, "studio_editor", None)
+        if editor is None:
+            return
+        editor.setString_("\n".join(lines).strip())
+        self.set_settings_message("Captured. It's yours now -- edit away.")
+
+    @objc.IBAction
+    def saveStudioLook_(self, _sender):
+        editor = getattr(self, "studio_editor", None)
+        field = getattr(self, "studio_save_name_field", None)
+        if editor is None or field is None:
+            return
+        name = str(field.stringValue()).strip()
+        program = str(editor.string()).strip()
+        if not name:
+            self.set_settings_message("Name the look first.")
+            return
+        if not program:
+            self.set_settings_message("Write a program first.")
+            return
+        try:
+            normalized = normalize_led_text(program)
+            validate_led_text(normalized)
+        except Exception as exc:
+            self.set_settings_message(f"Can't save: {exc}")
+            return
+        dsl_error = self.validate_studio_program(normalized)
+        if dsl_error:
+            self.set_settings_message(f"Can't save: {dsl_error}.")
+            return
+        self.settings = self.settings.with_studio_saved_look(name, program)
+        save_settings(self.settings)
+        self._refresh_studio_library_popup()
+        self.set_settings_message(f"Saved \u201c{name}\u201d to your looks.")
+
+    @objc.IBAction
+    def loadStudioLook_(self, sender):
+        item = sender.selectedItem()
+        name = str(item.representedObject() or "") if item is not None else ""
+        if not name:
+            return
+        for look_name, program in self.settings.studio_library:
+            if look_name == name:
+                editor = getattr(self, "studio_editor", None)
+                if editor is not None:
+                    editor.setString_(program)
+                self.set_settings_message(f"Loaded \u201c{name}\u201d.")
+                return
+
+    @objc.IBAction
+    def deleteStudioLook_(self, _sender):
+        popup = getattr(self, "studio_library_popup", None)
+        if popup is None:
+            return
+        item = popup.selectedItem()
+        name = str(item.representedObject() or "") if item is not None else ""
+        if not name:
+            self.set_settings_message("Pick a saved look to delete.")
+            return
+        self.settings = self.settings.without_studio_look(name)
+        save_settings(self.settings)
+        self._refresh_studio_library_popup()
+        self.set_settings_message(f"Deleted \u201c{name}\u201d.")
+
     @objc.IBAction
     def applyStudioAsPowerUp_(self, _sender):
         """Burns the Studio program into every connected device's
@@ -8791,8 +8882,32 @@ def _add_studio_card(target: StatusBarController, stack) -> None:
     studio_buttons.addArrangedSubview_(
         native_ui.make_button("Set as Power-Up Look", target, "applyStudioAsPowerUp:")
     )
+    studio_buttons.addArrangedSubview_(
+        native_ui.make_button("Capture What's Playing", target, "captureStudioProgram:")
+    )
     studio_buttons.addArrangedSubview_(native_ui.make_hspacer())
     studio_inner.addArrangedSubview_(studio_buttons)
+    library_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    save_name = native_ui.make_field("", target=target, action="saveStudioLook:")
+    native_ui.constrain_width(save_name, 140.0)
+    library_row.addArrangedSubview_(save_name)
+    library_row.addArrangedSubview_(
+        native_ui.make_button("Save Look", target, "saveStudioLook:")
+    )
+    library_popup = native_ui.make_popup_button(target, "loadStudioLook:")
+    library_popup.addItemWithTitle_("Saved looks\u2026")
+    library_popup.lastItem().setRepresentedObject_("")
+    for look_name, _program in target.settings.studio_library:
+        library_popup.addItemWithTitle_(look_name)
+        library_popup.lastItem().setRepresentedObject_(look_name)
+    library_row.addArrangedSubview_(library_popup)
+    library_row.addArrangedSubview_(
+        native_ui.make_button("Delete", target, "deleteStudioLook:")
+    )
+    library_row.addArrangedSubview_(native_ui.make_hspacer())
+    studio_inner.addArrangedSubview_(library_row)
+    target.studio_save_name_field = save_name
+    target.studio_library_popup = library_popup
     stack.addArrangedSubview_(studio_outer)
     target.studio_editor = studio_editor
 

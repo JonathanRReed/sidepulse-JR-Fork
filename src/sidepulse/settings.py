@@ -314,6 +314,8 @@ class AgentMonitorSettings:
     usage_display_mode: str = "tokens"
     codex_percent_enabled: bool = True
     escalation_webhook_url: str = ""
+    # Named Studio programs -- a shelf of looks.
+    studio_library: tuple[tuple[str, str], ...] = ()
     # Sub-agent asks can't be answered (their parent handles them), so
     # by default only MAIN sessions may ring the Ask signal.
     subagent_asks_alert: bool = False
@@ -703,6 +705,27 @@ class AgentMonitorSettings:
     def with_subagent_asks_alert(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, subagent_asks_alert=bool(enabled))
 
+    def with_studio_saved_look(self, name: str, program: str) -> AgentMonitorSettings:
+        cleaned = str(name).strip()
+        if not cleaned:
+            raise ValueError("a saved look needs a name")
+        library = tuple(
+            (existing, existing_program)
+            for existing, existing_program in self.studio_library
+            if existing != cleaned
+        )
+        return replace(self, studio_library=(*library, (cleaned, str(program))))
+
+    def without_studio_look(self, name: str) -> AgentMonitorSettings:
+        return replace(
+            self,
+            studio_library=tuple(
+                (existing, program)
+                for existing, program in self.studio_library
+                if existing != name
+            ),
+        )
+
     def with_escalation_webhook_url(self, url: str) -> AgentMonitorSettings:
         return replace(self, escalation_webhook_url=str(url).strip())
 
@@ -1040,6 +1063,7 @@ class AgentMonitorSettings:
             "usage_display_mode": self.usage_display_mode,
             "codex_percent_enabled": self.codex_percent_enabled,
             "escalation_webhook_url": self.escalation_webhook_url,
+            "studio_library": [list(item) for item in self.studio_library],
             "subagent_asks_alert": self.subagent_asks_alert,
             "quota_alert_thresholds": list(self.quota_alert_thresholds),
             "dismissed_tips": list(self.dismissed_tips),
@@ -1291,6 +1315,13 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         codex_percent_enabled=_bool_setting(data.get("codex_percent_enabled"), True),
         escalation_webhook_url=str(data.get("escalation_webhook_url") or "").strip(),
+        studio_library=tuple(
+            (str(item[0]), str(item[1]))
+            for item in (data.get("studio_library") or [])
+            if isinstance(item, (list, tuple))
+            and len(item) == 2
+            and str(item[0]).strip()
+        ),
         usage_graph_days=(
             int(data.get("usage_graph_days"))
             if data.get("usage_graph_days") in (7, 30, 90, 365)
