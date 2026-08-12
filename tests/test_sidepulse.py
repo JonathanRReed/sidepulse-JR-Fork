@@ -145,8 +145,6 @@ from sidepulse.session_actions import (
     session_vscode_link,
 )
 from sidepulse.settings import (
-    ALCOVE_COMPAT_ALWAYS,
-    ALCOVE_COMPAT_AUTO,
     CLOSED_LID_AWAKE_AGENTS,
     CLOSED_LID_AWAKE_ALWAYS,
     CLOSED_LID_AWAKE_NEVER,
@@ -8275,10 +8273,10 @@ class ScreenBarSettingsTakeEffectImmediatelyTests(unittest.TestCase):
         self.assertTrue(self.controller.virtual_status_device.wraps_menu_bar)
         self.assertGreaterEqual(after, before)
 
-    def test_settings_round_trip_persists_colors_and_alcove_mode(self) -> None:
+    def test_settings_round_trip_persists_colors(self) -> None:
         settings = AgentMonitorSettings().with_colors(
             ColorSettings.defaults().with_agent_color("codex", "#123456")
-        ).with_alcove_compatibility_mode(ALCOVE_COMPAT_ALWAYS)
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
@@ -8286,7 +8284,6 @@ class ScreenBarSettingsTakeEffectImmediatelyTests(unittest.TestCase):
             loaded = load_settings(path)
 
         self.assertEqual(loaded.colors.agent_color("codex"), "#123456")
-        self.assertEqual(loaded.alcove_compatibility_mode, ALCOVE_COMPAT_ALWAYS)
 
     def test_corrupt_colors_block_falls_back_without_breaking_other_settings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8297,13 +8294,12 @@ class ScreenBarSettingsTakeEffectImmediatelyTests(unittest.TestCase):
             )
             data = json.loads(path.read_text())
             data["colors"] = "not-a-dict"
-            data["alcove_compatibility_mode"] = "bogus"
+            data["closed_lid_animation"] = 12345
             path.write_text(json.dumps(data))
 
             loaded = load_settings(path)
 
         self.assertEqual(loaded.colors.to_dict(), ColorSettings.defaults().to_dict())
-        self.assertEqual(loaded.alcove_compatibility_mode, ALCOVE_COMPAT_AUTO)
         self.assertTrue(loaded.setup_screen_completed)
 
 

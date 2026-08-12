@@ -35,10 +35,6 @@ DEFAULT_NOTIFICATION_APP_COLORS: dict[str, str] = {
     NOTIFICATION_APP_WHATSAPP: "#25D366",
     NOTIFICATION_APP_TELEGRAM: "#2AABEE",
 }
-ALCOVE_COMPAT_AUTO = "auto"
-ALCOVE_COMPAT_ALWAYS = "always"
-ALCOVE_COMPAT_NEVER = "never"
-ALCOVE_COMPAT_CHOICES = (ALCOVE_COMPAT_AUTO, ALCOVE_COMPAT_ALWAYS, ALCOVE_COMPAT_NEVER)
 CLOSED_LID_AWAKE_NEVER = "never"
 CLOSED_LID_AWAKE_AGENTS = "agents"
 CLOSED_LID_AWAKE_ALWAYS = "always"
@@ -237,7 +233,6 @@ class AgentMonitorSettings:
     session_open_preferences: dict[str, str] = field(default_factory=dict)
     setup_screen_completed: bool = False
     colors: ColorSettings = field(default_factory=ColorSettings.defaults)
-    alcove_compatibility_mode: str = ALCOVE_COMPAT_AUTO
     # Extends the Screen Bar's glow beyond the notch's own width, reaching
     # toward the menu bar's edges on both sides -- an opt-in look (default
     # off) since how much room is actually safe to use depends on how
@@ -630,11 +625,6 @@ class AgentMonitorSettings:
     def with_colors(self, colors: ColorSettings) -> AgentMonitorSettings:
         return replace(self, colors=colors)
 
-    def with_alcove_compatibility_mode(self, mode: str) -> AgentMonitorSettings:
-        if mode not in ALCOVE_COMPAT_CHOICES:
-            raise ValueError(f"Unknown Alcove compatibility mode: {mode}")
-        return replace(self, alcove_compatibility_mode=mode)
-
     def with_idle_dim_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, idle_dim_enabled=bool(enabled))
 
@@ -898,7 +888,6 @@ class AgentMonitorSettings:
             "session_open_preferences": dict(sorted(self.session_open_preferences.items())),
             "setup_screen_completed": self.setup_screen_completed,
             "colors": self.colors.to_dict(),
-            "alcove_compatibility_mode": self.alcove_compatibility_mode,
             "idle_dim_enabled": self.idle_dim_enabled,
             "idle_dim_after_minutes": self.idle_dim_after_minutes,
             "idle_dim_fraction": self.idle_dim_fraction,
@@ -1116,9 +1105,6 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         session_open_preferences=_session_open_preferences(data.get("session_open_preferences")),
         setup_screen_completed=_bool_setting(data.get("setup_screen_completed"), False),
         colors=ColorSettings.from_dict(data.get("colors")),
-        alcove_compatibility_mode=_alcove_compatibility_mode_setting(
-            data.get("alcove_compatibility_mode")
-        ),
         idle_dim_enabled=_bool_setting(data.get("idle_dim_enabled"), True),
         idle_dim_after_minutes=normalize_idle_dim_after_minutes(
             data.get("idle_dim_after_minutes"), default=DEFAULT_IDLE_DIM_AFTER_MINUTES
@@ -1193,12 +1179,6 @@ def _closed_lid_awake_policy(value: object) -> str:
     if isinstance(value, str) and value in CLOSED_LID_AWAKE_CHOICES:
         return value
     return CLOSED_LID_AWAKE_NEVER
-
-
-def _alcove_compatibility_mode_setting(value: object) -> str:
-    if isinstance(value, str) and value in ALCOVE_COMPAT_CHOICES:
-        return value
-    return ALCOVE_COMPAT_AUTO
 
 
 def _device_display_settings(value: object, default_display: str) -> tuple[DeviceDisplaySetting, ...]:

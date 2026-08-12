@@ -3491,7 +3491,12 @@ class StatusBarController(NSObject):
             return
 
         self.reset_led_controllers_for_device(str(device_id))
-        label = "Battery Level" if display == LED_DISPLAY_BATTERY else "Agent Status"
+        label = {
+            LED_DISPLAY_AGENT: "Agent Status",
+            LED_DISPLAY_BATTERY: "Battery Level",
+            LED_DISPLAY_TIMER: "Working Timer",
+            LED_DISPLAY_STUDIO: "Studio Program",
+        }.get(display, display)
         self.set_settings_message(f"{device.name if device else device_id}: {label}.")
         self.refresh_settings_window()
         self.refresh_(None)
@@ -7335,20 +7340,23 @@ def make_color_preset_popup(target):
     return popup
 
 
-def select_color_preset(popup, preset: str) -> None:
+def select_popup_item(popup, key: str, value) -> None:
+    """Select the popup row whose representedObject dict carries
+    payload[key] == value -- the one sync idiom behind every
+    settings-window popup refresh."""
     for index in range(popup.numberOfItems()):
         payload = popup.itemAtIndex_(index).representedObject()
-        if isinstance(payload, dict) and payload.get("preset") == preset:
+        if isinstance(payload, dict) and payload.get(key) == value:
             popup.selectItemAtIndex_(index)
             return
+
+
+def select_color_preset(popup, preset: str) -> None:
+    select_popup_item(popup, "preset", preset)
 
 
 def select_blend_mode(popup, blend_mode: str) -> None:
-    for index in range(popup.numberOfItems()):
-        payload = popup.itemAtIndex_(index).representedObject()
-        if isinstance(payload, dict) and payload.get("blend_mode") == blend_mode:
-            popup.selectItemAtIndex_(index)
-            return
+    select_popup_item(popup, "blend_mode", blend_mode)
 
 
 def make_preview_scenario_popup(target):
@@ -7360,11 +7368,7 @@ def make_preview_scenario_popup(target):
 
 
 def select_preview_scenario(popup, scenario: str) -> None:
-    for index in range(popup.numberOfItems()):
-        payload = popup.itemAtIndex_(index).representedObject()
-        if isinstance(payload, dict) and payload.get("scenario") == scenario:
-            popup.selectItemAtIndex_(index)
-            return
+    select_popup_item(popup, "scenario", scenario)
 
 
 ANIMATION_STYLE_DISPLAY_LABELS: dict[str, str] = {
@@ -7384,11 +7388,7 @@ def make_animation_style_popup(target, mode_key: str):
 
 
 def select_animation_style(popup, style: str) -> None:
-    for index in range(popup.numberOfItems()):
-        payload = popup.itemAtIndex_(index).representedObject()
-        if isinstance(payload, dict) and payload.get("style") == style:
-            popup.selectItemAtIndex_(index)
-            return
+    select_popup_item(popup, "style", style)
 
 
 def make_closed_lid_awake_policy_popup(target):
@@ -7406,11 +7406,7 @@ def make_closed_lid_awake_policy_popup(target):
 
 
 def select_closed_lid_awake_policy(popup, policy: str) -> None:
-    for index in range(popup.numberOfItems()):
-        payload = popup.itemAtIndex_(index).representedObject()
-        if isinstance(payload, dict) and payload.get("policy") == policy:
-            popup.selectItemAtIndex_(index)
-            return
+    select_popup_item(popup, "policy", policy)
 
 
 def add_preview_dot(parent, x: int, y: int):
@@ -7561,11 +7557,7 @@ def provider_open_action_label(provider: str, action: str) -> str:
 
 
 def select_popup_action(popup, action: str) -> None:
-    for index in range(popup.numberOfItems()):
-        payload = popup.itemAtIndex_(index).representedObject()
-        if isinstance(payload, dict) and payload.get("action") == action:
-            popup.selectItemAtIndex_(index)
-            return
+    select_popup_item(popup, "action", action)
 
 
 def add_slider(
