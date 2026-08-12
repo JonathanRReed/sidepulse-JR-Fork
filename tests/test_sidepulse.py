@@ -9480,6 +9480,28 @@ class QuotaAlertTests(unittest.TestCase):
         self.controller.track_quota_thresholds({"Codex weekly": 95.0})
         self.assertEqual(self.controller.quota_blink_until, 0.0)
 
+    def test_quota_sunrise_fires_on_reset_only(self) -> None:
+        from sidepulse.signals import quota_resets
+
+        # First sight: silent. High->low: sunrise. Drift down: silent.
+        self.assertEqual(quota_resets({}, {"Codex weekly": 2.0}), [])
+        self.assertEqual(
+            quota_resets({"Codex weekly": 83.0}, {"Codex weekly": 1.0}),
+            ["Codex weekly"],
+        )
+        self.assertEqual(
+            quota_resets({"Codex weekly": 40.0}, {"Codex weekly": 5.0}), []
+        )
+
+    def test_sunrise_sets_brand_sweep(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_quota_alerts_enabled(True)
+        )
+        self.controller.track_quota_thresholds({"Codex weekly": 83.0})
+        self.controller.track_quota_thresholds({"Codex weekly": 1.0})
+        self.assertEqual(self.controller.completion_sweep_color, "#10A37F")
+        self.assertGreater(self.controller.completion_sweep_until, 0.0)
+
     def test_threshold_settings_round_trip_and_validation(self) -> None:
         from sidepulse.settings import AgentMonitorSettings, load_settings, save_settings
 

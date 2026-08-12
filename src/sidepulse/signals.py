@@ -202,6 +202,23 @@ def quota_crossings(
     return fired
 
 
+def quota_resets(
+    previous: dict[str, float],
+    current: dict[str, float],
+) -> list[str]:
+    """Window keys whose usage just RESET: a large downward transition
+    (>=50% before, near zero now). The mirror image of quota_crossings,
+    same first-observation silence -- restarts never celebrate."""
+    reset = []
+    for key, percent in current.items():
+        prior = previous.get(key)
+        if prior is None:
+            continue
+        if prior >= 50.0 and percent <= 10.0:
+            reset.append(key)
+    return reset
+
+
 def signal_hold_seconds(style: SignalStyle) -> float:
     """How long a MOMENT signal (notification/reminders) claims the bar
     for one firing: the pattern's full play time plus a settle beat."""

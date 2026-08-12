@@ -1063,6 +1063,29 @@ class StatusBarController(NSObject):
         self.quota_last_percents = percents
         if not self.settings.quota_alerts_enabled or not percents:
             return
+        # Quota sunrise: the moment a window RESETS, one upward sweep in
+        # the provider's color -- "you're rich again" announces itself.
+        resets = signals_module.quota_resets(previous, percents)
+        if resets and not self.quiet_active():
+            window_key = resets[-1]
+            brand = {"Claude": "#D97757", "Codex": "#10A37F"}
+            self.completion_sweep_color = next(
+                (
+                    hex_value
+                    for name, hex_value in brand.items()
+                    if window_key.startswith(name)
+                ),
+                "#00FF66",
+            )
+            hold = signals_module.signal_hold_seconds(
+                self.settings.signal_style(signals_module.SIGNAL_COMPLETION)
+            )
+            self.completion_sweep_until = time.monotonic() + hold
+            log_status_bar(f"quota sunrise: {window_key} reset")
+            self.refresh_(None)
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                hold + 0.1, self, "refresh:", None, False
+            )
         fired = signals_module.quota_crossings(
             previous, percents, self.settings.quota_alert_thresholds
         )
