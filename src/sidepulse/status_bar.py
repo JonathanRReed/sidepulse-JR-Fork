@@ -286,6 +286,7 @@ LED_DISPLAY_REMINDERS = "reminders"
 REMINDERS_WATCH_SECONDS = 60.0
 REMINDERS_WATCH_RETRY_SECONDS = 300.0
 LED_DISPLAY_WEATHER = "weather"
+LED_DISPLAY_QUOTA = "quota_alert"
 WEATHER_WATCH_SECONDS = 600.0
 WEATHER_WATCH_RETRY_SECONDS = 1800.0
 CALENDAR_WATCH_SECONDS = 30.0
@@ -433,6 +434,10 @@ class StatusBarController(NSObject):
         # FDA grant costs one failed query a minute, not one per tick.
         self.notification_record_cursor: int | None = None
         self.notification_blink_until = 0.0
+        self.quota_blink_until = 0.0
+        self.quota_blink_color = None
+        self.quota_blink_label = None
+        self.quota_last_percents: dict[str, float] = {}
         self.notification_blink_color: str | None = None
         self.notification_watch_retry_at = 0.0
         # Calendar glow: monotonic deadline of the next event's start
@@ -941,11 +946,13 @@ class StatusBarController(NSObject):
                 limits = usage_stats.codex_rate_limits(
                     Path.home() / ".codex" / "sessions"
                 )
+                percents = {}
                 primary = (limits or {}).get("primary") or {}
                 if primary.get("used_percent") is not None:
                     codex_parts.append(
                         f"weekly limit {primary['used_percent']:.0f}% used"
                     )
+                    percents["Codex weekly"] = float(primary["used_percent"])
                 codex_line = " \u00b7 ".join(codex_parts) if codex_parts else None
                 buckets = usage_stats.daily_buckets(totals.records)
                 day_bars = [
@@ -960,9 +967,12 @@ class StatusBarController(NSObject):
                 plan_line = None
                 if self.settings.claude_plan_limits_enabled:
                     try:
-                        plan_line = claude_quota.summary_line(
-                            claude_quota.fetch_windows()
-                        )
+                        plan_windows = claude_quota.fetch_windows()
+                        plan_line = claude_quota.summary_line(plan_windows)
+                        for window in plan_windows:
+                            percents[f"Claude {window['label']}"] = float(
+                                window["utilization"]
+                            )
                     except claude_quota.ClaudeQuotaUnavailableError as exc:
                         log_status_bar(f"claude quota unavailable: {exc}")
                         plan_line = "Claude plan: unavailable right now."
@@ -981,9 +991,10 @@ class StatusBarController(NSObject):
                 day_bars = []
                 hourly = []
                 plan_line = None
+                percents = {}
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "applyUsageSummary:",
-                (line, detail, codex_line, day_bars, hourly, plan_line),
+                (line, detail, codex_line, day_bars, hourly, plan_line, percents),
                 False,
             )
 
@@ -996,8 +1007,15 @@ class StatusBarController(NSObject):
         line = payload[0] if payload else None
         detail = payload[1] if payload and len(payload) > 1 else None
         self.usage_detail_text = detail
+        self.usage_summary_text = line
         self.codex_summary_text = payload[2] if payload and len(payload) > 2 else None
         fields = getattr(self, "settings_fields", None) or {}
+        usage_label = fields.get("profile_usage_label")
+        if usage_label is not None:
+            usage_label.setStringValue_(line or "No Claude activity yet today.")
+        detail_label = fields.get("profile_usage_detail")
+        if detail_label is not None:
+            detail_label.setStringValue_(detail or "")
         codex_label = fields.get("profile_codex_label")
         if codex_label is not None:
             codex_label.setStringValue_(self.codex_summary_text or "")
@@ -1010,15 +1028,38 @@ class StatusBarController(NSObject):
         plan_label = fields.get("profile_plan_label")
         if plan_label is not None:
             plan_label.setStringValue_(self.claude_plan_text or "")
-        if line != getattr(self, "usage_summary_text", None):
-            self.usage_summary_text = line
-            self._menu_signature = None
-        usage_label = self.settings_fields.get("profile_usage_label") if getattr(self, "settings_fields", None) else None
-        if usage_label is not None:
-            usage_label.setStringValue_(line or "No Claude activity yet today.")
-        detail_label = self.settings_fields.get("profile_usage_detail") if getattr(self, "settings_fields", None) else None
-        if detail_label is not None:
-            detail_label.setStringValue_(detail or "")
+        percents = payload[6] if payload and len(payload) > 6 else {}
+        self.track_quota_thresholds(dict(percents or {}))
+
+    def track_quota_thresholds(self, percents: dict) -> None:
+        """Edge-triggered: a blink fires only when a window CROSSES a
+        configured threshold upward -- first observations, restarts and
+        repaints stay silent (the T3 transition rule)."""
+        previous = self.quota_last_percents
+        self.quota_last_percents = percents
+        if not self.settings.quota_alerts_enabled or not percents:
+            return
+        fired = signals_module.quota_crossings(
+            previous, percents, self.settings.quota_alert_thresholds
+        )
+        if not fired or self.quiet_active():
+            return
+        window_key, threshold = fired[-1]
+        brand = {"Claude": "#D97757", "Codex": "#10A37F"}
+        self.quota_blink_color = next(
+            (hex_value for name, hex_value in brand.items() if window_key.startswith(name)),
+            None,
+        )
+        self.quota_blink_label = f"{window_key} at {threshold:.0f}%"
+        hold = signals_module.signal_hold_seconds(
+            self.settings.signal_style(signals_module.SIGNAL_QUOTA)
+        )
+        self.quota_blink_until = time.monotonic() + hold
+        log_status_bar(f"quota alert: {self.quota_blink_label}")
+        self.refresh_(None)
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            hold + 0.1, self, "refresh:", None, False
+        )
 
     def release_preview_engines(self) -> None:
         """Drop the thumbnail views' WASM engines when settings closes
@@ -1880,6 +1921,28 @@ class StatusBarController(NSObject):
         self.set_settings_message(
             "Resting glow off." if fraction <= 0.004 else f"Resting glow: {round(fraction * 100)}%."
         )
+        self.refresh_(None)
+
+    @objc.IBAction
+    def toggleQuotaAlerts_(self, sender):
+        self.settings = self.settings.with_quota_alerts_enabled(checkbox_is_on(sender))
+        save_settings(self.settings)
+        self.refresh_(None)
+
+    @objc.IBAction
+    def applyQuotaThresholds_(self, sender):
+        raw = str(sender.stringValue())
+        try:
+            values = [float(part) for part in raw.replace(";", ",").split(",") if part.strip()]
+            self.settings = self.settings.with_quota_alert_thresholds(values)
+        except ValueError:
+            self.set_settings_message(
+                "Thresholds are percentages, like 50, 75, 90."
+            )
+            return
+        save_settings(self.settings)
+        pretty = ", ".join(f"{value:g}%" for value in self.settings.quota_alert_thresholds)
+        self.set_settings_message(f"Quota blinks at {pretty}.")
         self.refresh_(None)
 
     @objc.IBAction
@@ -3685,6 +3748,10 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("weather_alerts_enabled"),
             self.settings.weather_alerts_enabled,
         )
+        set_checkbox_state(
+            self.settings_buttons.get("quota_alerts_enabled"),
+            self.settings.quota_alerts_enabled,
+        )
         # Signals cards: re-render each from saved state, and sync the
         # escalation controls -- like every other control here, they must
         # reflect changes made outside their own handlers.
@@ -4718,6 +4785,14 @@ class StatusBarController(NSObject):
                 ),
             ),
             (
+                LED_DISPLAY_QUOTA,
+                lambda: (
+                    self.settings.quota_alerts_enabled
+                    and not self.quiet_active()
+                    and now < self.quota_blink_until
+                ),
+            ),
+            (
                 LED_DISPLAY_REMINDERS,
                 lambda: (
                     self.settings.reminder_alerts_enabled
@@ -4904,6 +4979,14 @@ class StatusBarController(NSObject):
             _set_virtual(
                 style_to_program(
                     self.settings.signal_style(signals_module.SIGNAL_WEATHER), brightness
+                )
+            )
+        elif display == LED_DISPLAY_QUOTA:
+            _set_virtual(
+                style_to_program(
+                    self.settings.signal_style(signals_module.SIGNAL_QUOTA),
+                    brightness,
+                    color=self.quota_blink_color,
                 )
             )
         elif display == LED_DISPLAY_REMINDERS:
@@ -5108,6 +5191,16 @@ class StatusBarController(NSObject):
                 LedDisplayState.ASK,
                 lambda device, _snapshot: (
                     f"{device.name} Weather {self.weather_alert_event or 'alert'}"
+                ),
+            ),
+            LED_DISPLAY_QUOTA: (
+                lambda brightness, led_count: styled(
+                    signals_module.SIGNAL_QUOTA,
+                    color=self.quota_blink_color,
+                )(brightness, led_count),
+                LedDisplayState.ASK,
+                lambda device, _snapshot: (
+                    f"{device.name} Quota {self.quota_blink_label or ''}"
                 ),
             ),
             LED_DISPLAY_REMINDERS: (
@@ -7029,6 +7122,7 @@ SIGNAL_STYLE_CARDS: tuple[tuple[str, str, bool], ...] = (
     ("calendar", "Calendar Style", True),
     ("weather", "Weather Alert Style", True),
     ("completion", "Completion Sweep Style", True),
+    ("quota", "Quota Alert Style", True),
 )
 SIGNAL_THUMB_SIZE = (52.0, 20.0)
 # Quick-pick swatches for signal colors: recognizable brand hues first
@@ -7505,6 +7599,29 @@ def _build_led_behavior_pane(target: StatusBarController):
         ),
     )
     cal_inner.addArrangedSubview_(weather_row)
+    native_ui.add_separator(cal_inner)
+    quota_row, quota_switch = native_ui.make_switch_row(
+        "Blink when a quota threshold is crossed",
+        target,
+        "toggleQuotaAlerts:",
+        help_text=(
+            "A double-tap in the provider's color the moment Codex's "
+            "weekly limit (or a Claude plan window, when plan limits "
+            "are on) crosses a threshold below. Quiet hour holds it."
+        ),
+    )
+    cal_inner.addArrangedSubview_(quota_row)
+    quota_field = native_ui.make_field(
+        ", ".join(f"{value:g}" for value in target.settings.quota_alert_thresholds),
+        target=target,
+        action="applyQuotaThresholds:",
+    )
+    native_ui.constrain_width(quota_field, 110.0)
+    quota_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
+    quota_controls.addArrangedSubview_(quota_field)
+    quota_controls.addArrangedSubview_(native_ui.make_label("% used", secondary=True))
+    cal_inner.addArrangedSubview_(native_ui.make_row("Thresholds", quota_controls))
+    fields["quota_thresholds_field"] = quota_field
     lat_field = native_ui.make_field(
         ""
         if target.settings.weather_latitude is None
@@ -7587,6 +7704,7 @@ def _build_led_behavior_pane(target: StatusBarController):
         "calendar_alerts_enabled": cal_switch,
         "reminder_alerts_enabled": rem_switch,
         "weather_alerts_enabled": weather_switch,
+        "quota_alerts_enabled": quota_switch,
     }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 

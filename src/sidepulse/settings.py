@@ -280,6 +280,8 @@ class AgentMonitorSettings:
     # Opt-in: reading the Claude Code keychain item triggers a one-time
     # macOS prompt, so this must never default on.
     claude_plan_limits_enabled: bool = False
+    quota_alerts_enabled: bool = False
+    quota_alert_thresholds: tuple[float, ...] = (75.0, 90.0)
     dismissed_tips: tuple[str, ...] = ()
     # Per-Focus dim rules, keyed by the Focus mode identifier (e.g.
     # "com.apple.donotdisturb.mode.default"): 1.0 = don't dim, 0.0 = LEDs
@@ -647,6 +649,21 @@ class AgentMonitorSettings:
     def with_idle_dim_fraction(self, fraction: float) -> AgentMonitorSettings:
         return replace(self, idle_dim_fraction=normalize_idle_dim_fraction(fraction))
 
+    def with_quota_alerts_enabled(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, quota_alerts_enabled=bool(enabled))
+
+    def with_quota_alert_thresholds(self, thresholds) -> AgentMonitorSettings:
+        cleaned = sorted(
+            {
+                max(1.0, min(100.0, float(value)))
+                for value in thresholds
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            }
+        )
+        if not cleaned:
+            raise ValueError("at least one threshold between 1 and 100")
+        return replace(self, quota_alert_thresholds=tuple(cleaned))
+
     def with_claude_plan_limits_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, claude_plan_limits_enabled=bool(enabled))
 
@@ -946,6 +963,8 @@ class AgentMonitorSettings:
             "menu_bar_label_enabled": self.menu_bar_label_enabled,
             "screen_bar_min_glow": self.screen_bar_min_glow,
             "claude_plan_limits_enabled": self.claude_plan_limits_enabled,
+            "quota_alerts_enabled": self.quota_alerts_enabled,
+            "quota_alert_thresholds": list(self.quota_alert_thresholds),
             "dismissed_tips": list(self.dismissed_tips),
             "focus_dim_rules": dict(sorted(self.focus_dim_rules.items())),
         }
@@ -1174,6 +1193,10 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         claude_plan_limits_enabled=_bool_setting(
             data.get("claude_plan_limits_enabled"), False
         ),
+        quota_alerts_enabled=_bool_setting(data.get("quota_alerts_enabled"), False),
+        quota_alert_thresholds=_quota_thresholds_setting(
+            data.get("quota_alert_thresholds")
+        ),
         dismissed_tips=tuple(
             str(item)
             for item in (data.get("dismissed_tips") or [])
@@ -1205,6 +1228,20 @@ def save_settings(
     scratch.write_text(payload)
     os.replace(scratch, target)
     return target
+
+
+def _quota_thresholds_setting(value: object) -> tuple[float, ...]:
+    if isinstance(value, list):
+        cleaned = sorted(
+            {
+                max(1.0, min(100.0, float(item)))
+                for item in value
+                if isinstance(item, (int, float)) and not isinstance(item, bool)
+            }
+        )
+        if cleaned:
+            return tuple(cleaned)
+    return (75.0, 90.0)
 
 
 def _fraction_setting(value: object, default: float) -> float:

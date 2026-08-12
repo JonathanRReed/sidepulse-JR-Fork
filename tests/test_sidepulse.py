@@ -9150,6 +9150,89 @@ class SubagentAndPhantomAskTests(unittest.TestCase):
         self.assertEqual(top_level_subs, [])
 
 
+class ClaudeQuotaTests(unittest.TestCase):
+    def test_windows_from_payload_tolerates_schema_growth(self) -> None:
+        from sidepulse.claude_quota import summary_line, windows_from_payload
+
+        payload = {
+            "five_hour": {"utilization": 42.5, "resets_at": "2026-08-12T04:00:00Z"},
+            "seven_day": {"utilization": 61},
+            "limits": [
+                {"utilization": 12, "scope": {"model": {"display_name": "Opus"}}},
+                "garbage",
+            ],
+        }
+        windows = windows_from_payload(payload)
+        self.assertEqual(len(windows), 3)
+        self.assertEqual(windows[0]["label"], "5-hour")
+        self.assertEqual(windows[0]["utilization"], 42.5)
+        self.assertIn("weekly 61%", summary_line(windows))
+        self.assertIsNone(summary_line([]))
+        self.assertEqual(windows_from_payload("nope"), [])
+
+
+class QuotaAlertTests(unittest.TestCase):
+    """Quota threshold blinks: edge-triggered, opt-in, quiet-aware."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_crossings_fire_upward_only_and_never_on_first_sight(self) -> None:
+        from sidepulse.signals import quota_crossings
+
+        thresholds = (75.0, 90.0)
+        self.assertEqual(quota_crossings({}, {"Codex weekly": 92.0}, thresholds), [])
+        self.assertEqual(
+            quota_crossings({"Codex weekly": 70.0}, {"Codex weekly": 80.0}, thresholds),
+            [("Codex weekly", 75.0)],
+        )
+        self.assertEqual(
+            quota_crossings({"Codex weekly": 80.0}, {"Codex weekly": 85.0}, thresholds),
+            [],
+        )
+        self.assertEqual(
+            quota_crossings({"Codex weekly": 60.0}, {"Codex weekly": 95.0}, thresholds),
+            [("Codex weekly", 75.0), ("Codex weekly", 90.0)],
+        )
+
+    def test_track_quota_thresholds_fires_blink_when_enabled(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_quota_alerts_enabled(True)
+        )
+        self.controller.track_quota_thresholds({"Codex weekly": 70.0})
+        self.assertEqual(self.controller.quota_blink_until, 0.0)
+        self.controller.track_quota_thresholds({"Codex weekly": 91.0})
+        self.assertGreater(self.controller.quota_blink_until, 0.0)
+        self.assertIn("Codex weekly at", self.controller.quota_blink_label)
+        self.assertEqual(self.controller.quota_blink_color, "#10A37F")
+
+    def test_disabled_or_quiet_never_blinks(self) -> None:
+        self.controller.track_quota_thresholds({"Codex weekly": 70.0})
+        self.controller.track_quota_thresholds({"Codex weekly": 95.0})
+        self.assertEqual(self.controller.quota_blink_until, 0.0)
+        self.controller.settings = (
+            self.controller.settings.with_quota_alerts_enabled(True)
+        )
+        self.controller.quiet_until_monotonic = time.monotonic() + 3600.0
+        self.controller.track_quota_thresholds({"Codex weekly": 60.0})
+        self.controller.track_quota_thresholds({"Codex weekly": 95.0})
+        self.assertEqual(self.controller.quota_blink_until, 0.0)
+
+    def test_threshold_settings_round_trip_and_validation(self) -> None:
+        from sidepulse.settings import AgentMonitorSettings, load_settings, save_settings
+
+        configured = AgentMonitorSettings().with_quota_alert_thresholds([90, 50.5, 90])
+        self.assertEqual(configured.quota_alert_thresholds, (50.5, 90.0))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured.with_quota_alerts_enabled(True), path)
+            loaded = load_settings(path)
+        self.assertTrue(loaded.quota_alerts_enabled)
+        self.assertEqual(loaded.quota_alert_thresholds, (50.5, 90.0))
+        with self.assertRaises(ValueError):
+            AgentMonitorSettings().with_quota_alert_thresholds([])
+
+
 class GlowDialTests(unittest.TestCase):
     """The dimming dials: pitch-black Screen Bar, physical resting glow."""
 

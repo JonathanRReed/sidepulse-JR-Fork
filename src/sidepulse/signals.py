@@ -61,6 +61,7 @@ SIGNAL_NOTIFICATION = "notification"
 SIGNAL_REMINDERS = "reminders"
 SIGNAL_CALENDAR = "calendar"
 SIGNAL_WEATHER = "weather"
+SIGNAL_QUOTA = "quota"
 SIGNAL_COMPLETION = "completion"
 
 _HEX_RE = re.compile(r"#?[0-9a-fA-F]{6}")
@@ -131,6 +132,9 @@ DEFAULT_SIGNAL_STYLES: dict[str, SignalStyle] = {
     # this, a completion was invisible whenever another agent's
     # WORKING state outranked it in the aggregate.
     SIGNAL_COMPLETION: SignalStyle("#00FF66", PATTERN_SWEEP, 0.8, 1.0),
+    # Quota threshold crossed: a double-tap in caution amber (or the
+    # provider's own color at fire time) -- a nudge, not an alarm.
+    SIGNAL_QUOTA: SignalStyle("#FFB020", PATTERN_DOUBLE_BLINK, 0.9, 1.0),
 }
 
 
@@ -177,6 +181,25 @@ def escalation_stage(
     if blocked_elapsed_seconds >= final_seconds:
         stage = 3
     return min(stage, _TIER_CEILING.get(tier, 2))
+
+
+def quota_crossings(
+    previous: dict[str, float],
+    current: dict[str, float],
+    thresholds: tuple[float, ...],
+) -> list[tuple[str, float]]:
+    """(window key, threshold) pairs newly crossed UPWARD since the last
+    observation. A key seen for the first time never fires -- the T3
+    rule: transitions alert, repaints and restarts never do."""
+    fired: list[tuple[str, float]] = []
+    for key, percent in current.items():
+        prior = previous.get(key)
+        if prior is None:
+            continue
+        for threshold in thresholds:
+            if prior < threshold <= percent:
+                fired.append((key, float(threshold)))
+    return fired
 
 
 def signal_hold_seconds(style: SignalStyle) -> float:
