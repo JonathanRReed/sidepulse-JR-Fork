@@ -1,5 +1,23 @@
 # SidePulse fork — master plan
 
+> **FOURTH WAVE — the "finished product" round (2026-08-11,
+> 7e37748..2d35923).** From the closing brainstorm, all approved and
+> shipped: **Ask Inbox** ("Needs You (N)" pinned atop the dropdown
+> with identity dots + one-click jumps; menu-bar "(N)" badge at 2+
+> asks) · **Test buttons** on every signal style card (5s
+> top-precedence play on all surfaces) · **Focus → Profile
+> automation** (per-Focus Apply Day/Night/Travel, edge-triggered once
+> per activation) · **Timebox** (15/25/45/60-min draining fill from
+> the dropdown, chime at zero) · **hardening** (charging pulse loops,
+> preview-off no longer leaks to hardware, color-panel commits on
+> release, 5MB log rotation at launch).
+>
+> Open items (each its own future tranche, deliberately not done
+> shallow): Devices-pane live rebuild on hotplug · Codex hook-install
+> off the main thread · dead-IBAction sweep · per-agent
+> mode-animation overrides · bigger bets from the brainstorm (open
+> signal API/Shortcuts, remote agents over Tailscale, session stats).
+
 > **ROADMAP COMPLETE (2026-08-11, third wave: f523130..08b8020).**
 > Every deferred item is shipped and the closing adversarial review's
 > 7 findings are fixed:
