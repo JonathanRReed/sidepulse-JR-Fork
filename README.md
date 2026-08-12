@@ -54,16 +54,25 @@ place to watch **every agent harness and every provider's usage**.
   peek. A **Dim floor** dial runs it from soft outline to true pitch
   black (only the moving signal shows); the **Exhale** — one slow warm
   breath — marks the moment your last agent finishes with nothing left
-  needing you.
+  needing you. Opt-in **wing-tip gauges** give standing state its own
+  pixels: a quota ember on the left tip that deepens as your worst
+  window fills, unseen-done green on the right that goes out the
+  moment you open the menu — surviving whatever animation owns the
+  center of the bar.
 
 **Hardware first-class**
 
 - Per-device **Resting glow** (a faint calibration-corrected ember so
   unlit dots read as physical), white-point **calibration** with
   Day/Night/Travel profiles (auto-applied per Focus), per-device
-  Display (Agent / Battery / Timer / Studio / Quota runway) and blend
-  modes, and **"Set as Power-Up Look"** — burn your Studio program
-  into the device's INIT.LED so the hardware boots wearing your light.
+  Display (Agent / Battery / Timer / Studio / Quota runway), blend
+  modes, and **provider pinning** — "the Dot is Codex's": a pinned
+  device shows one provider's sessions and rests dark when none are
+  live, while asks still light every surface. **"Set as Power-Up
+  Look"** burns your Studio program into the device's INIT.LED so the
+  hardware boots wearing your light, and **Night warmth** eases green
+  and blue down from 7 PM to 7 AM, composed over each device's own
+  calibration.
 - **Context-aware lid animations**: closing the lid on live agents
   plays "Still Cooking"; reopening to them plays "Back On It" — four
   editable slots, every preset parse-verified against the real
@@ -73,18 +82,24 @@ place to watch **every agent harness and every provider's usage**.
 
 - **Color Studio** — brand swatches (Claude/OpenAI/Codex/Gemini) with
   named tooltips, curated + provider **palettes** on a gamut-safe
-  OKLCH engine, per-mode animation thumbnails, fade presets, and a
-  pinned live preview.
+  OKLCH engine, per-mode animation thumbnails, fade presets, a pinned
+  live preview, and **Color by project** — sessions in one repo share
+  a hue family, providers told apart by lightness within it.
 - **Signal Engine** — every light-claiming signal (low battery,
   notifications, reminders, calendar, NWS severe weather, completions,
   quota) is one model with one renderer, an explicit precedence
   ladder, and a per-signal style card with a Test button.
 - **Studio** — write any LED program in the device DSL, preview it on
-  everything, run it persistently, or make it the power-up look.
+  everything, run it persistently, or make it the power-up look —
+  plus **Capture What's Playing** and a named shelf of saved looks.
 
 **System signals** — per-Focus rules by *name* (School → off, Work →
-dim 50%), calendar/reminders glow, notification blinks, weather
-heartbeat, working-timer fill with a dropdown **Timer**.
+dim 50%) with per-Focus **signal policies** (All / Asks only /
+Silent), calendar/reminders glow, notification blinks, weather
+heartbeat, and a dropdown **Timer** whose presets can run paired
+Shortcuts at start and end (the **Focus handshake**), turn a
+deepening overtime ember past zero, and — via a one-shot **stage-3
+webhook** — let a blocked agent find you in the kitchen.
 
 **Engineering**
 
@@ -92,7 +107,7 @@ heartbeat, working-timer fill with a dropdown **Timer**.
   "SidePulse" by name; grouped, icon-led settings with fading toasts,
   crossfading panes, and hover-lit sidebar rows; **no SD-card I/O,
   subprocess forks, or sqlite ever on the main thread**; 30fps
-  change-gated Screen Bar with 15Hz WASM sampling; 530+ tests run by
+  change-gated Screen Bar with 15Hz WASM sampling; 550+ tests run by
   CI on macOS; the design ledgers live in `docs/`.
 - **More providers** — Cursor, Hermes Agent, and OpenClaw hooks
   alongside upstream's set.

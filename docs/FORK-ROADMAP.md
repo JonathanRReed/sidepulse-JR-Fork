@@ -161,9 +161,13 @@ Decisions locked 2026-08-11 (grilling session with Jonathan):
   discovery moved to workers (the "5 seconds to register a scroll"
   freeze), joining the lid ioreg fork and Notification Center sqlite
   from the adversarial audit. Focus reads 1s-cached.
-- STORIES-V2 shipped: all top five (click-to-answer, Quota Runway,
-  Exhale, hover peek, INIT.LED power-up) + Quota Sunrise. Remaining
-  stories 6-10/12-16 stay ranked in docs/STORIES-V2.md.
+- STORIES-V2 shipped: all sixteen. Top five (click-to-answer, Quota
+  Runway, Exhale, hover peek, INIT.LED power-up), then overtime ember,
+  Studio library + capture, night warmth, deep-work patina, timebox
+  Focus handshake, Quota Sunrise, per-Focus signal policies, project
+  hue families, wing-tip gauges, stage-3 webhook, and per-device
+  provider pinning. The stories file itself is retired -- everything
+  in it lives in the app now.
 - ULTRA-PLAN polish shipped: fading toast confirmations, pane
   crossfade, sidebar hover, teaching empty states (Devices pane CTA +
   dropdown), escalation visibility floor.
