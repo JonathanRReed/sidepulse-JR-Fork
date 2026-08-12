@@ -1281,10 +1281,18 @@ class VirtualLedView(NSView):
         NSGraphicsContext.restoreGraphicsState()
 
     def _fill_glow_row(self, cg_context, colors, led_width, notch_width, glow_height, _height, *, x_start, x_end, wing_offset, wing_taper_floor=0.0):
-        """Draws the 4-layer LED glow (bloom / soft falloff / core / hotline)
-        across [x_start, x_end) -- see glow_color_for_column for how a
-        wing's glow is colored versus the notch body's own inter-LED
-        blend."""
+        """Draws the 4-layer LED glow (bloom / soft falloff / core /
+        hotline) across [x_start, x_end) -- see glow_color_for_column
+        for how a wing's glow is colored versus the notch body's own
+        inter-LED blend.
+
+        Audit #4 stage A: columns are sampled at BLEND_COLUMN_WIDTH,
+        quantized to the same 1/1024 precision the redraw change-gate
+        uses, and ADJACENT COLUMNS WITH IDENTICAL QUANTIZED COLOR
+        coalesce into one rect per layer -- a solid or gently-blended
+        bar collapses from ~440 bridged fills per frame at 30fps to a
+        handful, and the loop-invariant layer geometry is hoisted."""
+        runs: list = []  # [x, width, (r, g, b, a)] -- None marks a dark gap
         column_x = x_start
         while column_x < x_end:
             column_width = min(BLEND_COLUMN_WIDTH, x_end - column_x)
@@ -1292,44 +1300,64 @@ class VirtualLedView(NSView):
             red, green, blue, alpha = glow_color_for_column(
                 colors, led_width, notch_width, wing_offset, center_x, taper_floor=wing_taper_floor
             )
+            column_end = column_x + column_width
             if max(red, green, blue, alpha) <= 0.001:
-                column_x += column_width
+                if runs and runs[-1] is not None:
+                    runs.append(None)
+                column_x = column_end
                 continue
+            quantized = (
+                round(red * 1024.0) / 1024.0,
+                round(green * 1024.0) / 1024.0,
+                round(blue * 1024.0) / 1024.0,
+                round(alpha * 1024.0) / 1024.0,
+            )
+            last = runs[-1] if runs else None
+            if last is not None and last[2] == quantized:
+                last[1] += column_width
+            else:
+                runs.append([column_x, column_width, quantized])
+            column_x = column_end
 
-            # The light source is centered on its target LED and fades through
-            # the neighboring LED width on both sides, for a three-LED footprint.
+        # The light source is centered on its target LED and fades
+        # through the neighboring LED width on both sides, for a
+        # three-LED footprint. Geometry identical for every run.
+        bloom_y = LED_BAND_HEIGHT
+        bloom_height = glow_height * 0.45
+        soft_y = LED_BAND_HEIGHT + bloom_height
+        soft_height = glow_height * 0.55
+        for run in runs:
+            if run is None:
+                continue
+            run_x, run_width, (red, green, blue, alpha) = run
             fill_rect_with_cg(
                 cg_context,
-                ((column_x, LED_BAND_HEIGHT), (column_width, glow_height * 0.45)),
+                ((run_x, bloom_y), (run_width, bloom_height)),
                 tone_mapped_led_color(
                     red, green, blue, alpha, boost=0.82, alpha_scale=0.18
                 ),
             )
             fill_rect_with_cg(
                 cg_context,
-                (
-                    (column_x, LED_BAND_HEIGHT + glow_height * 0.45),
-                    (column_width, glow_height * 0.55),
-                ),
+                ((run_x, soft_y), (run_width, soft_height)),
                 tone_mapped_led_color(
                     red, green, blue, alpha, boost=0.64, alpha_scale=0.07
                 ),
             )
             fill_rect_with_cg(
                 cg_context,
-                ((column_x, 0.0), (column_width, LED_BAND_HEIGHT)),
+                ((run_x, 0.0), (run_width, LED_BAND_HEIGHT)),
                 tone_mapped_led_color(
                     red, green, blue, alpha, boost=LED_CORE_BOOST, alpha_scale=0.92
                 ),
             )
             fill_rect_with_cg(
                 cg_context,
-                ((column_x, 0.0), (column_width, 1.15)),
+                ((run_x, 0.0), (run_width, 1.15)),
                 tone_mapped_led_color(
                     red, green, blue, alpha, boost=LED_HOTLINE_BOOST, alpha_scale=0.72
                 ),
             )
-            column_x += column_width
 
     def _draw_wing_riser(
         self, cg_context, edge_color, x_start, x_end, height, *, outer_on_left: bool = True

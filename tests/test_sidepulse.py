@@ -1870,6 +1870,9 @@ class AgentMonitorTests(unittest.TestCase):
             ):
                 target = status_bar.StatusBarController.alloc().init()
                 window = status_bar.build_settings_window(target)
+                # Panes build lazily in production (audit #5); tests
+                # assert across the full control map.
+                target.ensure_all_settings_panes()
 
         self.assertEqual(window.title(), "SidePulse Agent Monitor Settings")
         self.assertIn("debug_log_status", target.settings_fields)
@@ -8046,6 +8049,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         # rather than trusting a hand-written height formula the way the
         # old single-column window had to.
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         self.controller.settings_window.contentView().layoutSubtreeIfNeeded()
 
         def overlaps(a, b):
@@ -8085,6 +8089,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         # guards that each pane actually produced non-degenerate content
         # rather than an empty/zero-height document view.
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         self.controller.settings_window.contentView().layoutSubtreeIfNeeded()
         for key, pane in self.controller.settings_panes.items():
             if key == "color_studio" or key.startswith("header:"):
@@ -8103,6 +8108,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         # while frame-based tests kept passing. Forcing the constrain
         # pass here reproduces what the real display does.
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         self.controller.settings_window.contentView().layoutSubtreeIfNeeded()
         for key, pane in self.controller.settings_panes.items():
             if key == "color_studio" or key.startswith("header:"):
@@ -8124,6 +8130,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
 
     def test_devices_section_exists_for_each_connected_device(self) -> None:
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         devices = self.controller.status_bar_devices(remember=False)
         self.assertEqual(set(self.controller.device_settings_controls.keys()), {d.device_id for d in devices})
 
@@ -8135,6 +8142,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         # about. Brightness itself stays inline, since it's something
         # you'd actually adjust often.
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         for controls in self.controller.device_settings_controls.values():
             for key in ("brightness_slider", "brightness_label", "brightness_dots", "calibrate_button", "calibration_label"):
                 self.assertIn(key, controls)
@@ -8144,6 +8152,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         # -- one dot per real LED shows how bright the device will
         # actually be.
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         for device_id, controls in self.controller.device_settings_controls.items():
             device = next(
                 d for d in self.controller.status_bar_devices(remember=False) if d.device_id == device_id
@@ -8161,6 +8170,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         # hardware sync + a full settings-window refresh) would make the
         # slider feel sluggish and thrash the disk.
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         device_id = next(iter(self.controller.device_settings_controls))
         controls = self.controller.device_settings_controls[device_id]
         slider = controls["brightness_slider"]
@@ -8191,6 +8201,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         # centered the preview around a width of 0, pushing it into
         # negative x and clipping the entire left wing off-screen.
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         preview = self.controller.settings_fields["screen_bar_preview_view"]
         expected_total = (
             self.status_bar.SCREEN_BAR_PREVIEW_NOTCH_WIDTH
@@ -8207,6 +8218,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
 
     def test_calibrate_button_opens_a_popover_with_the_full_controls(self) -> None:
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         device_id = next(iter(self.controller.device_settings_controls))
         button = self.controller.device_settings_controls[device_id]["calibrate_button"]
 
@@ -8224,6 +8236,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
 
     def test_menu_bar_change_is_reflected_in_the_open_settings_window(self) -> None:
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         device_id = next(iter(self.controller.device_settings_controls))
         controls = self.controller.device_settings_controls[device_id]
 
@@ -8235,6 +8248,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
 
     def test_settings_window_change_is_reflected_in_a_freshly_built_menu(self) -> None:
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         device_id = next(iter(self.controller.device_settings_controls))
         controls = self.controller.device_settings_controls[device_id]
 
@@ -8248,6 +8262,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
 
     def test_calibration_change_via_settings_window_persists(self) -> None:
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         device_id = next(iter(self.controller.device_settings_controls))
         button = self.controller.device_settings_controls[device_id]["calibrate_button"]
         self.controller.openDeviceCalibrationPopover_(button)
@@ -8265,6 +8280,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
             CLOSED_LID_AWAKE_ALWAYS
         )
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         popup = self.controller.settings_fields["closed_lid_awake_policy_popup"]
         self.assertEqual(popup.titleOfSelectedItem(), "Always")
 
@@ -8272,6 +8288,8 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         from sidepulse.settings import CLOSED_LID_AWAKE_ALWAYS
 
         self.controller.show_settings_window()
+
+        self.controller.ensure_all_settings_panes()
         popup = self.controller.settings_fields["closed_lid_awake_policy_popup"]
         for index in range(popup.numberOfItems()):
             if popup.itemAtIndex_(index).representedObject().get("policy") == CLOSED_LID_AWAKE_ALWAYS:
@@ -8503,6 +8521,7 @@ class SignalStyleCardTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_controller(self)
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
 
     def tearDown(self) -> None:
         timer = getattr(self.controller, "signal_preview_timer", None)
@@ -9346,6 +9365,7 @@ class PowerUpLookTests(unittest.TestCase):
         (volume_root / "SidePulseDot").mkdir(parents=True)
         devices = discover_devices(mount_root=volume_root)
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         self.controller.studio_editor.setString_("#00E5FF 500ms pulse\nrepeat")
         with patch("sidepulse.status_bar.discover_devices", return_value=devices):
             self.controller.applyStudioAsPowerUp_(None)
@@ -9360,6 +9380,7 @@ class PowerUpLookTests(unittest.TestCase):
         (volume_root / "SidePulseDot").mkdir(parents=True)
         devices = discover_devices(mount_root=volume_root)
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         self.controller.studio_editor.setString_("")
         with patch("sidepulse.status_bar.discover_devices", return_value=devices):
             self.controller.applyStudioAsPowerUp_(None)
@@ -9393,6 +9414,7 @@ class StudioLibraryTests(unittest.TestCase):
 
     def test_capture_strips_brightness_prefix(self) -> None:
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         view = self.controller.virtual_status_device.view
         if view is None:
             self.controller.virtual_status_device._build_window()
@@ -10675,6 +10697,7 @@ class StudioDisplayAndTrancheCTests(unittest.TestCase):
         devices = discover_devices(mount_root=volume_root)
         with patch("sidepulse.status_bar.discover_devices", return_value=devices):
             self.controller.show_settings_window()
+            self.controller.ensure_all_settings_panes()
         controls = next(iter(self.controller.device_settings_controls.values()))
         popup = controls["display_popup"]
         keys = {
@@ -10685,6 +10708,7 @@ class StudioDisplayAndTrancheCTests(unittest.TestCase):
 
     def test_apply_weather_location_round_trip(self) -> None:
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         lat = self.controller.settings_fields["weather_latitude_field"]
         lon = self.controller.settings_fields["weather_longitude_field"]
         lat.setStringValue_("41.88")
@@ -10700,6 +10724,7 @@ class StudioDisplayAndTrancheCTests(unittest.TestCase):
 
     def test_half_filled_weather_location_is_rejected(self) -> None:
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         lat = self.controller.settings_fields["weather_latitude_field"]
         lat.setStringValue_("41.88")
         self.controller.applyWeatherLocation_(None)
@@ -10707,6 +10732,7 @@ class StudioDisplayAndTrancheCTests(unittest.TestCase):
 
     def test_devices_pane_rebuilds_on_hotplug_while_visible(self) -> None:
         self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
         self.assertEqual(len(self.controller.device_settings_controls), 0)
         # Prime the connection signature, then "plug in" a device.
         self.controller.observe_connected_devices()

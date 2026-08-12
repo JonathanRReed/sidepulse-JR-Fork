@@ -3506,6 +3506,41 @@ class StatusBarController(NSObject):
         if replayed:
             log_status_bar(f"startup_replay events={replayed}")
 
+    def ensure_settings_pane(self, key: str) -> None:
+        """Build one settings pane on first visit (audit #5's lazy
+        half). Installed hidden; the sidebar switcher unhides it."""
+        panes = getattr(self, "settings_panes", None)
+        container = getattr(self, "_settings_pane_container", None)
+        if panes is None or container is None or key in panes:
+            return
+        try:
+            pane, fields, buttons = _build_settings_pane(self, key)
+        except KeyError:
+            return
+        container.addSubview_(pane)
+        NSLayoutConstraint.activateConstraints_(
+            [
+                pane.topAnchor().constraintEqualToAnchor_(container.topAnchor()),
+                pane.leadingAnchor().constraintEqualToAnchor_(container.leadingAnchor()),
+                pane.trailingAnchor().constraintEqualToAnchor_(container.trailingAnchor()),
+                pane.bottomAnchor().constraintEqualToAnchor_(container.bottomAnchor()),
+            ]
+        )
+        pane.setHidden_(True)
+        panes[key] = pane
+        self.settings_fields.update(fields)
+        self.settings_buttons.update(buttons)
+
+    def ensure_all_settings_panes(self) -> None:
+        """Every pane, built now -- for tests and any caller that needs
+        the full control map rather than the lazy first-visit build."""
+        for key, _label in SETTINGS_SIDEBAR_ITEMS:
+            if not key.startswith("header:"):
+                self.ensure_settings_pane(key)
+        # Freshly built panes snapshot settings at construction; one
+        # refresh pass brings every control to CURRENT state.
+        self.refresh_settings_window()
+
     def show_settings_window(self) -> None:
         if self.settings_window is None:
             self.settings_window = build_settings_window(self)
@@ -3579,6 +3614,7 @@ class StatusBarController(NSObject):
         selected_key = SETTINGS_SIDEBAR_ITEMS[row][0]
         if selected_key.startswith("header:"):
             return
+        self.ensure_settings_pane(selected_key)
         outgoing_key = getattr(self, "current_settings_pane", None)
         self.current_settings_pane = selected_key
         # Crossfade instead of a hard swap -- and a generation counter so
@@ -9766,63 +9802,54 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         ]
     )
 
-    profile_pane, profile_fields = _build_profile_pane(target)
-    devices_pane, device_controls = _build_devices_pane(target)
-    colors_pane, colors_fields, colors_buttons = _build_colors_screen_bar_pane(target)
-    agents_pane, agents_fields, agents_buttons = _build_agents_pane(target)
-    led_behavior_pane, led_behavior_fields, led_behavior_buttons = _build_led_behavior_pane(target)
-    focus_pane, focus_fields, focus_buttons = _build_focus_pane(target)
-    power_pane, power_fields, power_buttons = _build_power_pane(target)
-    lid_animations_pane, lid_animations_fields = _build_lid_animations_pane(target)
-    debug_pane, debug_fields = _build_debug_pane(target)
-
-    panes = {
-        "profile": profile_pane,
-        "devices": devices_pane,
-        "color_studio": _build_color_studio_pane(target),
-        "colors_screen_bar": colors_pane,
-        "agents": agents_pane,
-        "led_behavior": led_behavior_pane,
-        "focus": focus_pane,
-        "power": power_pane,
-        "animations": lid_animations_pane,
-        "debug": debug_pane,
-    }
-    for key, pane in panes.items():
-        content_container.addSubview_(pane)
-        NSLayoutConstraint.activateConstraints_(
-            [
-                pane.topAnchor().constraintEqualToAnchor_(content_container.topAnchor()),
-                pane.leadingAnchor().constraintEqualToAnchor_(content_container.leadingAnchor()),
-                pane.trailingAnchor().constraintEqualToAnchor_(content_container.trailingAnchor()),
-                pane.bottomAnchor().constraintEqualToAnchor_(content_container.bottomAnchor()),
-            ]
-        )
-        pane.setHidden_(key != DEFAULT_SETTINGS_PANE)
-
+    # Audit #5: panes build LAZILY, on first visit -- the gear click
+    # used to construct all ten panes (and ~98 WASM preview engines,
+    # one JSContext each) before the window could even appear. Only the
+    # default pane exists now; ensure_settings_pane() installs the rest
+    # as the sidebar reaches them, merging their fields/buttons in.
     target.settings_sidebar_table = sidebar_table
-    target.settings_panes = panes
-
-    target.settings_fields = {
-        **agents_fields,
-        **lid_animations_fields,
-        **debug_fields,
-        **colors_fields,
-        **power_fields,
-        **led_behavior_fields,
-        **focus_fields,
-        **profile_fields,
-        "message": message,
-    }
-    target.settings_buttons = {
-        **agents_buttons,
-        **power_buttons,
-        **colors_buttons,
-        **led_behavior_buttons,
-        **focus_buttons,
-    }
-    target.device_settings_controls = device_controls
+    target._settings_pane_container = content_container
+    target.settings_panes = {}
+    target.settings_fields = {"message": message}
+    target.settings_buttons = {}
+    target.device_settings_controls = {}
+    target.ensure_settings_pane(DEFAULT_SETTINGS_PANE)
+    default_pane = target.settings_panes.get(DEFAULT_SETTINGS_PANE)
+    if default_pane is not None:
+        default_pane.setHidden_(False)
     return window
+
+
+def _build_settings_pane(target: StatusBarController, key: str):
+    """(pane, fields, buttons) for one sidebar key -- fields and
+    buttons may be empty. The Devices builder also installs its own
+    control map (it owns per-device rows)."""
+    if key == "profile":
+        pane, fields = _build_profile_pane(target)
+        return pane, fields, {}
+    if key == "devices":
+        pane, device_controls = _build_devices_pane(target)
+        target.device_settings_controls = device_controls
+        return pane, {}, {}
+    if key == "color_studio":
+        return _build_color_studio_pane(target), {}, {}
+    if key == "colors_screen_bar":
+        return _build_colors_screen_bar_pane(target)
+    if key == "agents":
+        return _build_agents_pane(target)
+    if key == "led_behavior":
+        return _build_led_behavior_pane(target)
+    if key == "focus":
+        return _build_focus_pane(target)
+    if key == "power":
+        return _build_power_pane(target)
+    if key == "animations":
+        pane, fields = _build_lid_animations_pane(target)
+        return pane, fields, {}
+    if key == "debug":
+        pane, fields = _build_debug_pane(target)
+        return pane, fields, {}
+    raise KeyError(key)
 
 
 MODE_COLOR_DISPLAY_LABELS: dict[str, str] = {
