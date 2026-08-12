@@ -206,6 +206,7 @@ from .settings import (
     LED_DISPLAY_AGENT,
     LED_DISPLAY_BATTERY,
     LED_DISPLAY_CHOICES,
+    LED_DISPLAY_STUDIO,
     LED_DISPLAY_TIMER,
     LID_ANIMATION_CLOSED,
     LID_ANIMATION_OPEN,
@@ -1307,9 +1308,14 @@ class StatusBarController(NSObject):
         if not program:
             return
         try:
-            validate_led_text(normalize_led_text(program))
+            normalized = normalize_led_text(program)
+            validate_led_text(normalized)
         except Exception as exc:
             self.set_settings_message(f"Studio program error: {exc}")
+            return
+        dsl_error = self.validate_studio_program(normalized)
+        if dsl_error:
+            self.set_settings_message(f"Studio program error: {dsl_error}.")
             return
         self.settings = self.settings.with_studio_program(program)
         save_settings(self.settings)
@@ -1421,11 +1427,29 @@ class StatusBarController(NSObject):
         slot = str(sender.representedObject() or "")
         if slot not in CALIBRATION_PROFILE_SLOTS:
             return
+        profile = self.settings.calibration_profiles.get(slot)
+        known_ids = {device.device_id for device in self.settings.devices}
+        matched = (
+            sum(1 for device_id in profile if device_id in known_ids)
+            if isinstance(profile, dict)
+            else 0
+        )
         self.settings = self.settings.with_applied_calibration_profile(slot)
         save_settings(self.settings)
         self.refresh_settings_window()
         self.refresh_(None)
-        self.set_settings_message(f"Applied the {slot} profile.")
+        if matched:
+            plural = "device" if matched == 1 else "devices"
+            self.set_settings_message(
+                f"Applied the {slot} profile to {matched} {plural}."
+            )
+        else:
+            # "Applied" with zero matches was a silent no-op that still
+            # claimed success -- say what actually happened.
+            self.set_settings_message(
+                f"The {slot} profile has no devices matching this Mac's -- "
+                "nothing changed."
+            )
 
     @objc.IBAction
     def toggleWeatherAlerts_(self, sender):
@@ -1440,6 +1464,47 @@ class StatusBarController(NSObject):
             self.weather_alert_active = False
             self.set_settings_message("Weather warnings off.")
             self.refresh_(None)
+
+    @objc.IBAction
+    def applyWeatherLocation_(self, _sender):
+        lat_field = self.settings_fields.get("weather_latitude_field")
+        lon_field = self.settings_fields.get("weather_longitude_field")
+        if lat_field is None or lon_field is None:
+            return
+
+        def parsed(field):
+            text = str(field.stringValue()).strip()
+            if not text:
+                return None, True
+            try:
+                return float(text), True
+            except ValueError:
+                return None, False
+
+        latitude, lat_ok = parsed(lat_field)
+        longitude, lon_ok = parsed(lon_field)
+        if not (lat_ok and lon_ok):
+            self.set_settings_message(
+                "Weather location must be decimal degrees, like 41.88 and -87.63."
+            )
+            return
+        if (latitude is None) != (longitude is None):
+            self.set_settings_message(
+                "Enter BOTH latitude and longitude, or leave both blank "
+                "for automatic."
+            )
+            return
+        self.settings = self.settings.with_weather_location(latitude, longitude)
+        save_settings(self.settings)
+        # Re-check alerts for the new location right away.
+        self.weather_watch_retry_at = 0.0
+        if latitude is None:
+            self.set_settings_message("Weather location: automatic (network address).")
+        else:
+            self.set_settings_message(
+                f"Weather location set to {latitude:g}, {longitude:g}."
+            )
+        self.refresh_(None)
 
     @objc.IBAction
     def reminderAccessResolved_(self, granted):
@@ -2049,7 +2114,14 @@ class StatusBarController(NSObject):
 
         if (
             stage >= 3
-            and self.settings.escalation_tier == signals_module.ESCALATION_TIER_CHIME
+            # Takeover INCLUDES the chime: picking the louder tier used
+            # to silently lose the sound (the tiers are a ceiling, and
+            # the chime only fired on exact equality).
+            and self.settings.escalation_tier
+            in (
+                signals_module.ESCALATION_TIER_CHIME,
+                signals_module.ESCALATION_TIER_TAKEOVER,
+            )
             and not self.escalation_chimed
         ):
             self.escalation_chimed = True
@@ -3150,6 +3222,18 @@ class StatusBarController(NSObject):
             self.settings_fields.get("calendar_lead_field"),
             f"{self.settings.calendar_lead_minutes:g}",
         )
+        set_field_value(
+            self.settings_fields.get("weather_latitude_field"),
+            ""
+            if self.settings.weather_latitude is None
+            else f"{self.settings.weather_latitude:g}",
+        )
+        set_field_value(
+            self.settings_fields.get("weather_longitude_field"),
+            ""
+            if self.settings.weather_longitude is None
+            else f"{self.settings.weather_longitude:g}",
+        )
         for identifier, fraction in self.settings.focus_dim_rules.items():
             popup = self.settings_fields.get(f"focus_rule_popup:{identifier}")
             if popup is not None:
@@ -4146,6 +4230,10 @@ class StatusBarController(NSObject):
                 LED_DISPLAY_TIMER,
                 lambda: device.display == LED_DISPLAY_TIMER or self.timebox_active(),
             ),
+            (
+                LED_DISPLAY_STUDIO,
+                lambda: device.display == LED_DISPLAY_STUDIO,
+            ),
         )
         for key, active in claims:
             try:
@@ -4321,6 +4409,10 @@ class StatusBarController(NSObject):
                     color=self.settings.colors.mode_colors.get("working", "#00E5FF"),
                 )
             )
+        elif display == LED_DISPLAY_STUDIO and (
+            studio_program := self.studio_display_program(brightness)
+        ):
+            _set_virtual(studio_program)
         else:
             colors_for_render = self.agent_render_colors()
             override = self.settings.device_blend_mode(VIRTUAL_DEVICE_ID)
@@ -4388,6 +4480,143 @@ class StatusBarController(NSObject):
                     "refresh:", None, False
                 )
 
+    def validate_studio_program(self, program: str) -> str | None:
+        """Real firmware-grammar validation via the same sdled.wasm the
+        Screen Bar runs -- validate_led_text only checks size limits,
+        and a program the FIRMWARE can't parse makes the device strobe
+        red. Returns an error message, or None when the program parses
+        (or when the parser is unavailable; size checks still apply)."""
+        try:
+            from .led_wasm import SdLedWasmController
+
+            result = SdLedWasmController(led_count=8).parse(program, 0)
+        except Exception:
+            return None
+        if result.ok:
+            return None
+        return f"{result.error_name} at line {result.line}, column {result.column}"
+
+    def studio_display_program(self, brightness: float) -> str | None:
+        """The persistent Studio render: the saved program, validated and
+        brightness-scaled. None (fall back to Agent) when empty or
+        invalid, so a typo can never strobe the firmware. Validation is
+        cached by program text -- this runs on every LED sync."""
+        program = (self.settings.studio_program or "").strip()
+        if not program:
+            return None
+        cached = getattr(self, "_studio_validation_cache", None)
+        if cached is None or cached[0] != program:
+            try:
+                normalized = normalize_led_text(program)
+                validate_led_text(normalized)
+                error = self.validate_studio_program(normalized)
+            except Exception as exc:
+                normalized, error = program, str(exc)
+            cached = (program, error, normalized)
+            self._studio_validation_cache = cached
+        if cached[1] is not None:
+            return None
+        return apply_brightness(cached[2], brightness)
+
+    def signal_display_entries(self):
+        """display kind -> (program factory(brightness, led_count), LED
+        state, label factory(device, battery_snapshot)). Adding a
+        persistent signal is one row here plus a precedence claim in
+        active_led_display_kind_for_device. A factory returning None
+        means "not renderable right now" and falls back to Agent."""
+
+        def styled(signal_key, *, color=None):
+            def factory(brightness, led_count):
+                return style_to_program(
+                    self.settings.signal_style(signal_key),
+                    brightness,
+                    color=color() if callable(color) else color,
+                    led_count=led_count,
+                )
+
+            return factory
+
+        return {
+            LED_DISPLAY_TEST: (
+                lambda brightness, led_count: self.test_signal_program(
+                    brightness, led_count=led_count
+                ),
+                LedDisplayState.ASK,
+                lambda device, _snapshot: f"{device.name} Signal test",
+            ),
+            LED_DISPLAY_ESCALATION: (
+                lambda brightness, led_count: self.escalation_takeover_program(
+                    brightness, led_count=led_count
+                ),
+                LedDisplayState.ASK,
+                lambda device, _snapshot: f"{device.name} Needs you (takeover)",
+            ),
+            LED_DISPLAY_NOTIFICATION: (
+                lambda brightness, led_count: (
+                    styled(
+                        signals_module.SIGNAL_NOTIFICATION,
+                        color=self.notification_blink_color,
+                    )(brightness, led_count)
+                    if self.notification_blink_color
+                    else None
+                ),
+                LedDisplayState.ASK,
+                lambda device, _snapshot: f"{device.name} Notification blink",
+            ),
+            LED_DISPLAY_COMPLETION: (
+                lambda brightness, led_count: styled(
+                    signals_module.SIGNAL_COMPLETION,
+                    color=getattr(self, "completion_sweep_color", None),
+                )(brightness, led_count),
+                LedDisplayState.DONE,
+                lambda device, _snapshot: f"{device.name} Completion sweep",
+            ),
+            LED_DISPLAY_WEATHER: (
+                styled(signals_module.SIGNAL_WEATHER),
+                LedDisplayState.ASK,
+                lambda device, _snapshot: (
+                    f"{device.name} Weather {self.weather_alert_event or 'alert'}"
+                ),
+            ),
+            LED_DISPLAY_REMINDERS: (
+                styled(signals_module.SIGNAL_REMINDERS),
+                LedDisplayState.ASK,
+                lambda device, _snapshot: f"{device.name} Reminder due",
+            ),
+            LED_DISPLAY_CALENDAR: (
+                styled(signals_module.SIGNAL_CALENDAR),
+                LedDisplayState.ASK,
+                lambda device, _snapshot: (
+                    f"{device.name} Calendar {self.calendar_event_title or 'event'}"
+                ),
+            ),
+            LED_DISPLAY_LOW_BATTERY: (
+                styled(signals_module.SIGNAL_LOW_BATTERY),
+                LedDisplayState.ASK,
+                lambda device, snapshot: (
+                    f"{device.name} Low battery "
+                    f"{snapshot.percent if snapshot else '?'}%"
+                ),
+            ),
+            LED_DISPLAY_TIMER: (
+                lambda brightness, led_count: timer_fill_program(
+                    self.timer_fill_fraction(),
+                    led_count=led_count,
+                    brightness=brightness,
+                    color=self.settings.colors.mode_colors.get("working", "#00E5FF"),
+                ),
+                LedDisplayState.WORKING,
+                lambda device, _snapshot: (
+                    f"{device.name} Timer {round(self.timer_fill_fraction() * 100)}%"
+                ),
+            ),
+            LED_DISPLAY_STUDIO: (
+                lambda brightness, led_count: self.studio_display_program(brightness),
+                LedDisplayState.WORKING,
+                lambda device, _snapshot: f"{device.name} Studio program",
+            ),
+        }
+
     def sync_leds_now(
         self,
         mode: AgentMode,
@@ -4423,118 +4652,16 @@ class StatusBarController(NSObject):
                 self.last_led_display_kind_by_device[device.device_id] = device_display_kind
 
             device_led_count = led_count_for_target(device.target)
-            if device_display_kind == LED_DISPLAY_TEST:
+            entry = self.signal_display_entries().get(device_display_kind)
+            program = None
+            label = ""
+            if entry is not None:
+                factory, led_state, label_factory = entry
                 controller = self.agent_controller_for_device(device)
-                result = controller.sync_program(
-                    self.test_signal_program(controller.brightness, led_count=device_led_count),
-                    LedDisplayState.ASK,
-                )
-                label = f"{device.name} Signal test"
-                if result.error:
-                    agent_write_failed = True
-                elif result.changed:
-                    agent_write_changed = True
-            elif device_display_kind == LED_DISPLAY_ESCALATION:
-                controller = self.agent_controller_for_device(device)
-                result = controller.sync_program(
-                    self.escalation_takeover_program(
-                        controller.brightness, led_count=device_led_count
-                    ),
-                    LedDisplayState.ASK,
-                )
-                label = f"{device.name} Needs you (takeover)"
-                if result.error:
-                    agent_write_failed = True
-                elif result.changed:
-                    agent_write_changed = True
-            elif device_display_kind == LED_DISPLAY_NOTIFICATION and self.notification_blink_color:
-                controller = self.agent_controller_for_device(device)
-                result = controller.sync_program(
-                    style_to_program(
-                        self.settings.signal_style(signals_module.SIGNAL_NOTIFICATION),
-                        controller.brightness,
-                        color=self.notification_blink_color,
-                        led_count=device_led_count,
-                    ),
-                    LedDisplayState.ASK,
-                )
-                label = f"{device.name} Notification blink"
-                if result.error:
-                    agent_write_failed = True
-                elif result.changed:
-                    agent_write_changed = True
-            elif device_display_kind == LED_DISPLAY_COMPLETION:
-                controller = self.agent_controller_for_device(device)
-                result = controller.sync_program(
-                    style_to_program(
-                        self.settings.signal_style(signals_module.SIGNAL_COMPLETION),
-                        controller.brightness,
-                        color=getattr(self, "completion_sweep_color", None),
-                        led_count=device_led_count,
-                    ),
-                    LedDisplayState.DONE,
-                )
-                label = f"{device.name} Completion sweep"
-                if result.error:
-                    agent_write_failed = True
-                elif result.changed:
-                    agent_write_changed = True
-            elif device_display_kind == LED_DISPLAY_WEATHER:
-                controller = self.agent_controller_for_device(device)
-                result = controller.sync_program(
-                    style_to_program(
-                        self.settings.signal_style(signals_module.SIGNAL_WEATHER),
-                        controller.brightness,
-                        led_count=device_led_count,
-                    ),
-                    LedDisplayState.ASK,
-                )
-                label = f"{device.name} Weather {self.weather_alert_event or 'alert'}"
-                if result.error:
-                    agent_write_failed = True
-                elif result.changed:
-                    agent_write_changed = True
-            elif device_display_kind == LED_DISPLAY_REMINDERS:
-                controller = self.agent_controller_for_device(device)
-                result = controller.sync_program(
-                    style_to_program(
-                        self.settings.signal_style(signals_module.SIGNAL_REMINDERS),
-                        controller.brightness,
-                        led_count=device_led_count,
-                    ),
-                    LedDisplayState.ASK,
-                )
-                label = f"{device.name} Reminder due"
-                if result.error:
-                    agent_write_failed = True
-                elif result.changed:
-                    agent_write_changed = True
-            elif device_display_kind == LED_DISPLAY_CALENDAR:
-                controller = self.agent_controller_for_device(device)
-                result = controller.sync_program(
-                    style_to_program(
-                        self.settings.signal_style(signals_module.SIGNAL_CALENDAR),
-                        controller.brightness,
-                        led_count=device_led_count,
-                    ),
-                    LedDisplayState.ASK,
-                )
-                label = f"{device.name} Calendar {self.calendar_event_title or 'event'}"
-                if result.error:
-                    agent_write_failed = True
-                elif result.changed:
-                    agent_write_changed = True
-            elif device_display_kind == LED_DISPLAY_LOW_BATTERY:
-                controller = self.agent_controller_for_device(device)
-                result = controller.sync_program(
-                    style_to_program(
-                        self.settings.signal_style(signals_module.SIGNAL_LOW_BATTERY),
-                        controller.brightness,
-                        led_count=device_led_count,
-                    ),
-                    LedDisplayState.ASK,
-                )
-                label = f"{device.name} Low battery {battery_snapshot.percent if battery_snapshot else '?'}%"
+                program = factory(controller.brightness, device_led_count)
+                label = label_factory(device, battery_snapshot)
+            if program is not None:
+                result = controller.sync_program(program, led_state)
                 if result.error:
                     agent_write_failed = True
                 elif result.changed:
@@ -4545,22 +4672,6 @@ class StatusBarController(NSObject):
                     f"{device.name} Battery {battery_snapshot.percent}% "
                     f"{format_watts(battery_snapshot.adapter_power)}"
                 )
-            elif device_display_kind == LED_DISPLAY_TIMER:
-                controller = self.agent_controller_for_device(device)
-                result = controller.sync_program(
-                    timer_fill_program(
-                        self.timer_fill_fraction(),
-                        led_count=device_led_count,
-                        brightness=controller.brightness,
-                        color=self.settings.colors.mode_colors.get("working", "#00E5FF"),
-                    ),
-                    LedDisplayState.WORKING,
-                )
-                label = f"{device.name} Timer {round(self.timer_fill_fraction() * 100)}%"
-                if result.error:
-                    agent_write_failed = True
-                elif result.changed:
-                    agent_write_changed = True
             else:
                 colors_for_render = self.agent_render_colors()
                 override = self.settings.device_blend_mode(device.device_id)
@@ -4574,7 +4685,6 @@ class StatusBarController(NSObject):
                     agent_write_failed = True
                 elif result.changed:
                     agent_write_changed = True
-
             if result.error:
                 active_errors[device.device_id] = result.error
                 previous_error = self.device_errors.get(device.device_id)
@@ -4795,8 +4905,45 @@ class StatusBarController(NSObject):
     def poll_devices_once(self) -> None:
         if not self.observe_connected_devices():
             return
+        self.rebuild_devices_pane()
         if self.last_snapshot is not None:
             self.refresh_(None)
+
+    def rebuild_devices_pane(self) -> None:
+        """A device plugged in while Settings is open used to appear in
+        the menu-bar submenu but never in the Devices pane until app
+        restart -- the pane snapshots devices when the window is built."""
+        window = getattr(self, "settings_window", None)
+        panes = getattr(self, "settings_panes", None)
+        if window is None or panes is None:
+            return
+        old_pane = panes.get("devices")
+        if old_pane is None:
+            return
+        container = old_pane.superview()
+        if container is None:
+            return
+        was_hidden = old_pane.isHidden()
+        new_pane, device_controls = _build_devices_pane(self)
+        new_pane.setHidden_(was_hidden)
+        container.addSubview_(new_pane)
+        NSLayoutConstraint.activateConstraints_(
+            [
+                new_pane.topAnchor().constraintEqualToAnchor_(container.topAnchor()),
+                new_pane.leadingAnchor().constraintEqualToAnchor_(
+                    container.leadingAnchor()
+                ),
+                new_pane.trailingAnchor().constraintEqualToAnchor_(
+                    container.trailingAnchor()
+                ),
+                new_pane.bottomAnchor().constraintEqualToAnchor_(
+                    container.bottomAnchor()
+                ),
+            ]
+        )
+        old_pane.removeFromSuperview()
+        panes["devices"] = new_pane
+        self.device_settings_controls = device_controls
 
     def sync_keep_awake(self, mode: AgentMode) -> None:
         was_running = self.keep_awake.process_running()
@@ -5538,6 +5685,7 @@ def _build_devices_pane(target: StatusBarController):
             ("Agent status", LED_DISPLAY_AGENT),
             ("Battery fill", LED_DISPLAY_BATTERY),
             ("Working timer fill", LED_DISPLAY_TIMER),
+            ("Studio program", LED_DISPLAY_STUDIO),
         ):
             display_popup.addItemWithTitle_(label)
             item = display_popup.lastItem()
@@ -5551,7 +5699,8 @@ def _build_devices_pane(target: StatusBarController):
                 help_text=(
                     "Working timer fill lights the strip as elapsed working "
                     "time crosses your expected length -- a timer, not a "
-                    "claim about task progress."
+                    "claim about task progress. Studio program plays the "
+                    "animation you wrote in the Studio, all the time."
                 ),
             )
         )
@@ -6315,6 +6464,42 @@ def _build_led_behavior_pane(target: StatusBarController):
         ),
     )
     cal_inner.addArrangedSubview_(weather_row)
+    lat_field = native_ui.make_field(
+        ""
+        if target.settings.weather_latitude is None
+        else f"{target.settings.weather_latitude:g}",
+        target=target,
+        action="applyWeatherLocation:",
+    )
+    lon_field = native_ui.make_field(
+        ""
+        if target.settings.weather_longitude is None
+        else f"{target.settings.weather_longitude:g}",
+        target=target,
+        action="applyWeatherLocation:",
+    )
+    native_ui.constrain_width(lat_field, 72.0)
+    native_ui.constrain_width(lon_field, 72.0)
+    location_controls = native_ui.make_stack(
+        orientation="horizontal", spacing=native_ui.SPACE_XS
+    )
+    location_controls.addArrangedSubview_(lat_field)
+    location_controls.addArrangedSubview_(native_ui.make_label("lat", secondary=True))
+    location_controls.addArrangedSubview_(lon_field)
+    location_controls.addArrangedSubview_(native_ui.make_label("lon", secondary=True))
+    cal_inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Location override",
+            location_controls,
+            help_text=(
+                "Leave both blank to locate automatically from your "
+                "network address. NWS alerts cover the United States "
+                "and its territories."
+            ),
+        )
+    )
+    fields["weather_latitude_field"] = lat_field
+    fields["weather_longitude_field"] = lon_field
     stack.addArrangedSubview_(cal_outer)
     fields["calendar_lead_field"] = lead_field
 

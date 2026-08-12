@@ -16,7 +16,13 @@ from .session_actions import SESSION_OPEN_CHOICES
 LED_DISPLAY_AGENT = "agent"
 LED_DISPLAY_BATTERY = "battery"
 LED_DISPLAY_TIMER = "timer"
-LED_DISPLAY_CHOICES = (LED_DISPLAY_AGENT, LED_DISPLAY_BATTERY, LED_DISPLAY_TIMER)
+LED_DISPLAY_STUDIO = "studio"
+LED_DISPLAY_CHOICES = (
+    LED_DISPLAY_AGENT,
+    LED_DISPLAY_BATTERY,
+    LED_DISPLAY_TIMER,
+    LED_DISPLAY_STUDIO,
+)
 CALIBRATION_PROFILE_SLOTS = ("Day", "Night", "Travel")
 # Notification blink defaults: each app's own brand color, so the blink
 # says WHICH app without reading anything.

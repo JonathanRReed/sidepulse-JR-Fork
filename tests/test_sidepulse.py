@@ -1699,6 +1699,7 @@ class AgentMonitorTests(unittest.TestCase):
             observe_connected_devices=lambda: True,
             last_snapshot=object(),
             refresh_=lambda sender: calls.append(sender),
+            rebuild_devices_pane=lambda: None,
         )
 
         status_bar.StatusBarController.poll_devices_once(target)
@@ -8970,6 +8971,111 @@ class WeatherAlertTests(unittest.TestCase):
             self.assertLessEqual(len(program.encode()), MAX_LED_BYTES)
             self.assertLessEqual(len(program.splitlines()), MAX_LED_LINES)
             self.assertIn("repeat", program)
+
+
+class StudioDisplayAndTrancheCTests(unittest.TestCase):
+    """The review's not-fully-real list: Studio as a persistent display
+    choice, weather location override UI, hotplug pane rebuild."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def _device(self, display):
+        return self.status_bar.StatusBarDevice(
+            device_id="SidePulsePro",
+            name="SidePulse Pro",
+            root=Path("/Volumes/SidePulsePro"),
+            target=Path("/Volumes/SidePulsePro/LEDS.LED"),
+            connected=True,
+            display=display,
+        )
+
+    def test_studio_is_a_valid_display_choice(self) -> None:
+        from sidepulse.settings import LED_DISPLAY_CHOICES, LED_DISPLAY_STUDIO
+
+        self.assertIn(LED_DISPLAY_STUDIO, LED_DISPLAY_CHOICES)
+
+    def test_studio_display_claims_the_device(self) -> None:
+        from sidepulse.settings import LED_DISPLAY_STUDIO
+
+        kind = self.controller.active_led_display_kind_for_device(
+            self._device(LED_DISPLAY_STUDIO), None
+        )
+        self.assertEqual(kind, LED_DISPLAY_STUDIO)
+
+    def test_studio_display_program_validates_and_scales(self) -> None:
+        self.controller.settings = self.controller.settings.with_studio_program(
+            "#FF0000 500ms pulse\nrepeat"
+        )
+        program = self.controller.studio_display_program(255)
+        self.assertIsNotNone(program)
+        self.assertIn("pulse", program)
+
+    def test_broken_studio_program_never_reaches_the_device(self) -> None:
+        self.controller.settings = self.controller.settings.with_studio_program(
+            "this is not a program !!!"
+        )
+        self.assertIsNone(self.controller.studio_display_program(255))
+
+    def test_empty_studio_program_falls_back(self) -> None:
+        self.assertIsNone(self.controller.studio_display_program(255))
+
+    def test_studio_option_is_in_the_display_popup(self) -> None:
+        from sidepulse.settings import LED_DISPLAY_STUDIO
+
+        volume_root = Path(self._tmp.name) / "volumes"
+        (volume_root / "SidePulseDot").mkdir(parents=True)
+        devices = discover_devices(mount_root=volume_root)
+        with patch("sidepulse.status_bar.discover_devices", return_value=devices):
+            self.controller.show_settings_window()
+        controls = next(iter(self.controller.device_settings_controls.values()))
+        popup = controls["display_popup"]
+        keys = {
+            popup.itemAtIndex_(index).representedObject()
+            for index in range(popup.numberOfItems())
+        }
+        self.assertIn(LED_DISPLAY_STUDIO, keys)
+
+    def test_apply_weather_location_round_trip(self) -> None:
+        self.controller.show_settings_window()
+        lat = self.controller.settings_fields["weather_latitude_field"]
+        lon = self.controller.settings_fields["weather_longitude_field"]
+        lat.setStringValue_("41.88")
+        lon.setStringValue_("-87.63")
+        self.controller.applyWeatherLocation_(None)
+        self.assertEqual(self.controller.settings.weather_latitude, 41.88)
+        self.assertEqual(self.controller.settings.weather_longitude, -87.63)
+        lat.setStringValue_("")
+        lon.setStringValue_("")
+        self.controller.applyWeatherLocation_(None)
+        self.assertIsNone(self.controller.settings.weather_latitude)
+        self.assertIsNone(self.controller.settings.weather_longitude)
+
+    def test_half_filled_weather_location_is_rejected(self) -> None:
+        self.controller.show_settings_window()
+        lat = self.controller.settings_fields["weather_latitude_field"]
+        lat.setStringValue_("41.88")
+        self.controller.applyWeatherLocation_(None)
+        self.assertIsNone(self.controller.settings.weather_latitude)
+
+    def test_devices_pane_rebuilds_on_hotplug_while_visible(self) -> None:
+        self.controller.show_settings_window()
+        self.assertEqual(len(self.controller.device_settings_controls), 0)
+        # Prime the connection signature, then "plug in" a device.
+        self.controller.observe_connected_devices()
+        volume_root = Path(self._tmp.name) / "hotplug"
+        (volume_root / "SidePulsePro").mkdir(parents=True)
+        devices = discover_devices(mount_root=volume_root)
+        with patch("sidepulse.status_bar.discover_devices", return_value=devices):
+            self.controller.poll_devices_once()
+        # Device ids for non-/Volumes roots carry the full path.
+        self.assertTrue(
+            any(
+                "SidePulsePro" in device_id
+                for device_id in self.controller.device_settings_controls
+            ),
+            self.controller.device_settings_controls,
+        )
 
 
 class CalendarAlertTests(unittest.TestCase):
