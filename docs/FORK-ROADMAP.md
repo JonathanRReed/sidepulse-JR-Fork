@@ -1,5 +1,28 @@
 # SidePulse fork — master plan
 
+> **ROADMAP COMPLETE (2026-08-11, third wave: f523130..08b8020).**
+> Every deferred item is shipped and the closing adversarial review's
+> 7 findings are fixed:
+> - Bracket/LED sync: the Alcove bracket mirrors the physical relay
+>   ripple per-column ("auto"/"spatial"/"identity" popup in Colors &
+>   Screen Bar; auto falls back to identity for a lone agent).
+> - Four new patterns everywhere: ripple, comet, sparkle, heartbeat.
+>   Continuous signals never offer one-shot patterns.
+> - Weather: Severe/Extreme NWS warnings play the weather style at
+>   top routine precedence; IP-geo or manual lat/lon (deliberately no
+>   CoreLocation — a Location prompt costs a re-sign + FDA re-grant);
+>   worker-thread fetches, launch-time poll, quiet backoff.
+> - Calibration profiles: Day/Night/Travel slots in the dropdown's
+>   Profiles submenu (manual enablement — autoenablesItems off).
+> - Per-device blend override (validated on load) + per-device
+>   Display popup (Agent / Battery / Working timer fill).
+> - Working timer fill: honest elapsed-time fill ("#000000" segments,
+>   never "N:off" — the firmware parser rejects it as solid-red
+>   error), Working Timer card sets the expected minutes.
+> Still open (deliberate): per-agent mode-animation overrides — the
+> mode-animation engine threads styles per-state through kwargs;
+> doing per-agent there is its own tranche.
+
 > **SIGNAL ENGINE WAVE — SHIPPED (2026-08-11, second build day).**
 > Spec: docs/superpowers/specs/2026-08-11-signal-engine-design.md.
 > All five phases landed and a closing adversarial review's 12
