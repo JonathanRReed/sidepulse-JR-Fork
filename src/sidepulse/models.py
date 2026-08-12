@@ -80,6 +80,28 @@ class AgentStatus:
     stale: bool = False
 
     @property
+    def is_hard_ask(self) -> bool:
+        """A TRACKED blocked-on-you request (permission prompt, error,
+        actionable notification) versus a SOFT ask inferred from a
+        finished turn's closing question. Only hard asks escalate --
+        the T3 lesson: escalation belongs to request lifecycles, not
+        text heuristics."""
+        if self.mode == AgentMode.BLOCKED_ERROR:
+            return True
+        if self.mode != AgentMode.WAITING_FOR_INPUT:
+            return False
+        return self.event_name in ("PermissionRequest", "Notification")
+
+    @property
+    def is_plan_ready(self) -> bool:
+        """A plan-approval prompt: the agent finished planning and is
+        waiting for a go/no-go, quieter than a permission ask."""
+        return (
+            self.mode == AgentMode.WAITING_FOR_INPUT
+            and self.tool_name == "ExitPlanMode"
+        )
+
+    @property
     def is_subagent(self) -> bool:
         """Sub-agents (Claude Task workers, Codex/Devin spawned agents)
         carry provider:agent:<id> keys; main sessions are
@@ -104,7 +126,11 @@ class AgentStatus:
 
     def age_seconds(self, now: datetime | None = None) -> float:
         current = now or datetime.now(timezone.utc)
-        return max(0.0, (current - self.updated_at).total_seconds())
+        # abs, not max(0,...): a timestamp from a device clock AHEAD of
+        # ours pinned the age at 0 forever, so the status could never go
+        # stale (T3 bounds its grace windows on both sides for the same
+        # reason).
+        return abs((current - self.updated_at).total_seconds())
 
     def to_dict(self, now: datetime | None = None) -> dict[str, Any]:
         return {

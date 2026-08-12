@@ -5763,14 +5763,25 @@ team id YOUR_TEAM_ID, push key '/path/to/AuthKey_YOUR_KEY_ID.p8'
         self.assertEqual(provider_session_opener_providers(), HOOK_PROVIDERS)
 
 
-def _status(provider: str, mode: AgentMode, *, when: datetime | None = None) -> AgentStatus:
+def _status(
+    provider: str,
+    mode: AgentMode,
+    *,
+    when: datetime | None = None,
+    event_name: str | None = None,
+) -> AgentStatus:
+    # Ask-mode fixtures default to a TRACKED request event: escalation
+    # deliberately ignores soft (question-heuristic) asks.
+    if event_name is None:
+        ask_modes = (AgentMode.WAITING_FOR_INPUT, AgentMode.BLOCKED_ERROR)
+        event_name = "PermissionRequest" if mode in ask_modes else "Test"
     return AgentStatus(
         provider=provider,
         agent_id=provider,
         display_name=provider.title(),
         mode=mode,
         updated_at=when or datetime.now(timezone.utc),
-        event_name="Test",
+        event_name=event_name,
     )
 
 
@@ -8617,6 +8628,14 @@ class EscalationControllerTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_controller(self)
 
+    def test_soft_asks_never_escalate(self) -> None:
+        # A finished turn that merely ENDED with a question must not ramp
+        # toward a chime -- only tracked requests (PermissionRequest,
+        # actionable notifications, errors) escalate.
+        soft = (_status("codex", AgentMode.WAITING_FOR_INPUT, event_name="Stop"),)
+        self.controller.track_ask_blocked(soft)
+        self.assertIsNone(self.controller.ask_blocked_since)
+
     def test_blocked_episode_tracking_and_flash_timer_lifecycle(self) -> None:
         asking = (_status("codex", AgentMode.WAITING_FOR_INPUT),)
         self.controller.track_ask_blocked(asking)
@@ -9114,6 +9133,95 @@ class SubagentAndPhantomAskTests(unittest.TestCase):
             title for title, level in rows if level == 0 and "claude:agent:" in title
         ]
         self.assertEqual(top_level_subs, [])
+
+
+class T3AdoptionTests(unittest.TestCase):
+    """The T3 Code learnings: unseen-done via visit tracking, quiet hour
+    with break-through rules, clear-finished, row suffixes."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def _status(self, agent_id, mode, *, event="PostToolUse", tool=None):
+        return AgentStatus(
+            provider="claude",
+            agent_id=agent_id,
+            display_name=agent_id,
+            mode=mode,
+            updated_at=datetime.now(timezone.utc),
+            event_name=event,
+            tool_name=tool,
+        )
+
+    def test_hard_vs_soft_ask(self) -> None:
+        hard = self._status("claude:session:a", AgentMode.WAITING_FOR_INPUT, event="PermissionRequest")
+        soft = self._status("claude:session:b", AgentMode.WAITING_FOR_INPUT, event="Stop")
+        error = self._status("claude:session:c", AgentMode.BLOCKED_ERROR, event="PostToolUseFailure")
+        self.assertTrue(hard.is_hard_ask)
+        self.assertFalse(soft.is_hard_ask)
+        self.assertTrue(error.is_hard_ask)
+
+    def test_plan_ready_detection(self) -> None:
+        plan = self._status(
+            "claude:session:a",
+            AgentMode.WAITING_FOR_INPUT,
+            event="PermissionRequest",
+            tool="ExitPlanMode",
+        )
+        self.assertTrue(plan.is_plan_ready)
+        self.assertIn("Plan ready", self.status_bar.session_row_suffix(plan))
+
+    def test_unseen_completions_cleared_by_menu_open(self) -> None:
+        from types import SimpleNamespace as NS
+
+        done = self._status("claude:session:a", AgentMode.COMPLETED, event="Stop")
+        snapshot = NS(statuses=[done], stale_statuses=[], collected_at=datetime.now(timezone.utc))
+        # Never opened the menu: the completion is unseen.
+        self.assertEqual(len(self.status_bar.unseen_completions(snapshot, self.controller)), 1)
+        # Opening the menu is the visit that clears it.
+        self.controller.menuWillOpen_(None)
+        self.assertEqual(self.status_bar.unseen_completions(snapshot, self.controller), [])
+
+    def test_quiet_hour_gates_courtesy_signals_not_asks(self) -> None:
+        self.controller.quiet_until_monotonic = time.monotonic() + 3600.0
+        self.assertTrue(self.controller.quiet_active())
+        device = self.status_bar.StatusBarDevice(
+            device_id="SidePulsePro",
+            name="SidePulse Pro",
+            root=Path("/Volumes/SidePulsePro"),
+            target=Path("/Volumes/SidePulsePro/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        # A live completion sweep would normally claim the display...
+        self.controller.completion_sweep_until = time.monotonic() + 30.0
+        kind = self.controller.active_led_display_kind_for_device(device, None)
+        self.assertNotEqual(kind, self.status_bar.LED_DISPLAY_COMPLETION)
+        # ...and does again the moment quiet ends.
+        self.controller.quiet_until_monotonic = 0.0
+        kind = self.controller.active_led_display_kind_for_device(device, None)
+        self.assertEqual(kind, self.status_bar.LED_DISPLAY_COMPLETION)
+
+    def test_clear_finished_hides_rows_until_reactivation(self) -> None:
+        from types import SimpleNamespace as NS
+
+        done = self._status("claude:session:a", AgentMode.COMPLETED, event="Stop")
+        self.controller.last_snapshot = NS(
+            statuses=[done], stale_statuses=[], collected_at=datetime.now(timezone.utc)
+        )
+        self.controller.clearFinished_(None)
+        self.assertIn("claude:session:a", self.controller.cleared_session_ids)
+        snapshot = self.controller.last_snapshot
+        self.assertEqual(self.status_bar.unseen_completions(snapshot, self.controller), [])
+
+    def test_working_suffix_formats_minutes(self) -> None:
+        working = self._status("claude:session:a", AgentMode.WORKING)
+        suffix = self.status_bar.session_row_suffix(
+            working, working_since=time.monotonic() - 250.0
+        )
+        self.assertIn("4m", suffix)
+        with_workers = self.status_bar.session_row_suffix(working, worker_count=3)
+        self.assertIn("3 workers", with_workers)
 
 
 class MenuTeachingTests(unittest.TestCase):

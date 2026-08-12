@@ -152,6 +152,19 @@ is open; let dots/badges carry state changes.
 - **Why-comments carrying incident context** — their comments read
   like our paid-for-in-blood ledger, at every decision point.
 
+## Adoption status (2026-08-11, same night)
+
+Shipped: #1 hard/soft ask split (only tracked requests escalate),
+#2 worker counts on parent rows + grouped sub-agents, #4 the ladder via
+hard-ask-first precedence, #5 unseen-done badge cleared by opening the
+menu + per-row "new" tag, #6 as a global Quiet-for-an-Hour (courtesy
+signals suppressed; hard asks and weather break through), #7 as
+Clear Finished (cleared stays cleared until the session reactivates),
+#8 abs() age windows, #9 Plan-ready tag on ExitPlanMode approvals,
+#10 elapsed working time on rows, #11 static menu ordering while open.
+Remaining: per-session snooze presets (#6 full), settle shelves (#7
+full), #3's color audit as a design pass.
+
 ## Suggested adoption order
 
 1. **Unseen-done via last-opened tracking** (#5) — smallest change,

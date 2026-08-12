@@ -857,7 +857,23 @@ class StatusBarController(NSObject):
         self.track_ask_blocked(snapshot.statuses)
         self.track_working(snapshot.statuses)
         self.track_completions(snapshot.statuses)
-        self.set_status(state, ask_count=len(ask_statuses(snapshot)))
+        # A cleared session stays cleared until it comes back to LIFE --
+        # removing only reactivated ids (rather than intersecting with
+        # the currently-completed set) keeps a clear stable across the
+        # stale flicker when a finished row ages out of the snapshot.
+        cleared = getattr(self, "cleared_session_ids", set())
+        if cleared:
+            active_again = {
+                status.agent_id
+                for status in snapshot.statuses
+                if status.mode != AgentMode.COMPLETED
+            }
+            self.cleared_session_ids = cleared - active_again
+        self.set_status(
+            state,
+            ask_count=len(ask_statuses(snapshot)),
+            done_badge=bool(unseen_completions(snapshot, self)),
+        )
         self.sync_keep_awake(snapshot.aggregate.mode)
         self.sync_leds(
             snapshot.aggregate.mode,
@@ -1995,11 +2011,12 @@ class StatusBarController(NSObject):
         answered agent's long episode. Pass an empty tuple to clear
         (e.g. the refresh error path, where no state can be confirmed)."""
         now = time.monotonic()
-        ask_modes = (AgentMode.WAITING_FOR_INPUT, AgentMode.BLOCKED_ERROR)
         current = {
             status.agent_id
             for status in (statuses or ())
-            if status.mode in ask_modes and status.agent_id
+            # HARD asks from MAIN sessions only: soft question-heuristic
+            # asks and sub-agent noise must never ramp toward a chime.
+            if status.agent_id and status.is_hard_ask and not status.is_subagent
         }
         tracked = getattr(self, "ask_blocked_by_agent", {})
         updated = {agent_id: tracked.get(agent_id, now) for agent_id in current}
@@ -2090,6 +2107,36 @@ class StatusBarController(NSObject):
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             hold + 0.1, self, "refresh:", None, False
         )
+
+    def quiet_active(self) -> bool:
+        """User-requested quiet: celebration, notification, calendar and
+        reminder glows hold their tongue. Hard asks and weather always
+        break through (T3: blocked-on-you outranks snooze)."""
+        return time.monotonic() < getattr(self, "quiet_until_monotonic", 0.0)
+
+    @objc.IBAction
+    def toggleQuietHour_(self, _sender):
+        if self.quiet_active():
+            self.quiet_until_monotonic = 0.0
+        else:
+            self.quiet_until_monotonic = time.monotonic() + 3600.0
+        self._menu_signature = None
+        self.refresh_(None)
+
+    @objc.IBAction
+    def clearFinished_(self, _sender):
+        """Settle the finished rows out of the dropdown -- they return
+        automatically if the session comes back to life."""
+        snapshot = self.last_snapshot
+        if snapshot is None:
+            return
+        cleared = set(getattr(self, "cleared_session_ids", set()))
+        for status in snapshot.statuses:
+            if not status.is_subagent and status.mode == AgentMode.COMPLETED:
+                cleared.add(status.agent_id)
+        self.cleared_session_ids = cleared
+        self._menu_signature = None
+        self.refresh_(None)
 
     def timebox_active(self) -> bool:
         ends_at = getattr(self, "timebox_ends_at", None)
@@ -2244,10 +2291,13 @@ class StatusBarController(NSObject):
             and self.current_escalation_stage() >= 3
         )
 
-    def set_status(self, state: StatusBarState, *, ask_count: int = 0) -> None:
+    def set_status(
+        self, state: StatusBarState, *, ask_count: int = 0, done_badge: bool = False
+    ) -> None:
         previous = self.current_state
         self.current_state = state
         self.current_ask_count = ask_count
+        self.unseen_done_badge = done_badge
         if state == STATE_IDLE:
             if previous != STATE_IDLE or self.idle_since_monotonic is None:
                 self.idle_since_monotonic = time.monotonic()
@@ -2261,6 +2311,10 @@ class StatusBarController(NSObject):
         # The badge: with several sessions waiting at once, the count is
         # the difference between "check sometime" and "two are stuck".
         title = f" {state.label} ({ask_count})" if ask_count >= 2 else f" {state.label}"
+        if done_badge and ask_count == 0:
+            # "Something finished since you last looked" -- cleared the
+            # moment the menu opens (the T3 lastVisitedAt read model).
+            title = f"{title} \u2713"
         button.setTitle_(title)
         button.setImage_(image_for_symbol(state.symbol, state.label))
         button.setToolTip_(f"SidePulse Agent Monitor: {state.label}")
@@ -4275,6 +4329,7 @@ class StatusBarController(NSObject):
                 LED_DISPLAY_NOTIFICATION,
                 lambda: (
                     self.settings.notification_blinks_enabled
+                    and not self.quiet_active()
                     and self.notification_blink_color is not None
                     and now < self.notification_blink_until
                 ),
@@ -4282,20 +4337,25 @@ class StatusBarController(NSObject):
             (
                 LED_DISPLAY_REMINDERS,
                 lambda: (
-                    self.settings.reminder_alerts_enabled and now < self.reminders_glow_until
+                    self.settings.reminder_alerts_enabled
+                    and not self.quiet_active()
+                    and now < self.reminders_glow_until
                 ),
             ),
             (
                 LED_DISPLAY_COMPLETION,
                 lambda: (
                     self.settings.completion_sweep_enabled
+                    and not self.quiet_active()
                     and now < getattr(self, "completion_sweep_until", 0.0)
                 ),
             ),
             (
                 LED_DISPLAY_CALENDAR,
                 lambda: (
-                    self.settings.calendar_alerts_enabled and now < self.calendar_glow_until
+                    self.settings.calendar_alerts_enabled
+                    and not self.quiet_active()
+                    and now < self.calendar_glow_until
                 ),
             ),
             (
@@ -5118,6 +5178,44 @@ def daily_tip() -> tuple[str, str | None]:
     return DAILY_TIPS[day % len(DAILY_TIPS)]
 
 
+def target_quiet_active(target) -> bool:
+    quiet = getattr(target, "quiet_active", None)
+    return bool(quiet()) if callable(quiet) else False
+
+
+def session_row_suffix(
+    status: AgentStatus,
+    *,
+    worker_count: int = 0,
+    working_since: float | None = None,
+    unseen_done: bool = False,
+) -> str:
+    """The row's trailing facts: plan-ready tag, live worker count,
+    elapsed working time, and the unseen-done marker."""
+    parts = []
+    if status.is_plan_ready:
+        parts.append("Plan ready")
+    if worker_count == 1:
+        parts.append("1 worker")
+    elif worker_count > 1:
+        parts.append(f"{worker_count} workers")
+    if working_since is not None and status.mode in (
+        AgentMode.WORKING,
+        AgentMode.TOOL_RUNNING,
+        AgentMode.LONG_TASK_PROGRESS,
+    ):
+        minutes = int(max(0.0, time.monotonic() - working_since) // 60)
+        if minutes >= 60:
+            parts.append(f"{minutes // 60}h {minutes % 60}m")
+        elif minutes >= 1:
+            parts.append(f"{minutes}m")
+    if unseen_done and status.mode == AgentMode.COMPLETED:
+        parts.append("new")
+    if not parts:
+        return ""
+    return " \u00b7 " + " \u00b7 ".join(parts)
+
+
 def menu_content_signature(snapshot, state, target) -> tuple:
     """Everything the dropdown renders, hashed coarsely. Ages bucket to
     the minute (rows show "4m"), and a 30s monotonic bucket is a safety
@@ -5152,6 +5250,9 @@ def menu_content_signature(snapshot, state, target) -> tuple:
         round(target.timer_fill_fraction(), 2) if target.timebox_active() else None,
         target.settings.closed_lid_awake_policy,
         target.closed_lid_awake.last_error,
+        target_quiet_active(target),
+        tuple(sorted(getattr(target, "cleared_session_ids", set()))),
+        tuple(sorted(u.agent_id for u in unseen_completions(snapshot, target))),
         int(time.monotonic() // 30),
     )
 
@@ -5207,19 +5308,35 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
                 [status.agent_id for status in statuses]
             )
         subagent_groups = active_subagents_by_parent(snapshot)
+        cleared_ids = getattr(target, "cleared_session_ids", set())
+        unseen_ids = {
+            unseen.agent_id for unseen in unseen_completions(snapshot, target)
+        }
+        working_since = getattr(target, "working_since_by_agent", {})
         for status in statuses:
+            if status.mode == AgentMode.COMPLETED and status.agent_id in cleared_ids:
+                continue
             dot_color = None
             if getattr(target, "settings", None) is not None:
                 dot_color = target.settings.colors.session_color(status.agent_id)
             dot_color = dot_color or identity.get(status.agent_id)
+            children = subagent_groups.pop(status.agent_id, [])
             menu.addItem_(
                 build_session_menu_item(
-                    status, snapshot.collected_at, target, identity_color=dot_color
+                    status,
+                    snapshot.collected_at,
+                    target,
+                    identity_color=dot_color,
+                    title_suffix=session_row_suffix(
+                        status,
+                        worker_count=len(children),
+                        working_since=working_since.get(status.agent_id),
+                        unseen_done=status.agent_id in unseen_ids,
+                    ),
                 )
             )
             # Its running sub-agents, indented underneath in the SAME
             # identity color -- one visual family per main session.
-            children = subagent_groups.pop(status.agent_id, [])
             for child in children[:3]:
                 menu.addItem_(
                     build_session_menu_item(
@@ -5352,6 +5469,32 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     )
     settings.setTarget_(target)
     menu.addItem_(settings)
+
+    quiet_title = (
+        "End Quiet Hour" if target_quiet_active(target) else "Quiet for an Hour"
+    )
+    quiet_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        quiet_title,
+        "toggleQuietHour:",
+        "",
+    )
+    quiet_item.setTarget_(target)
+    quiet_item.setState_(1 if target_quiet_active(target) else 0)
+    menu.addItem_(quiet_item)
+    completed_rows = [
+        status
+        for status in statuses
+        if status.mode == AgentMode.COMPLETED
+        and status.agent_id not in getattr(target, "cleared_session_ids", set())
+    ]
+    if completed_rows:
+        clear_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"Clear Finished ({len(completed_rows)})",
+            "clearFinished:",
+            "",
+        )
+        clear_item.setTarget_(target)
+        menu.addItem_(clear_item)
 
     menu.addItem_(NSMenuItem.separatorItem())
     tip_text, tip_pane = daily_tip()
@@ -8071,12 +8214,14 @@ def build_session_menu_item(
     width: float | None = None,
     identity_color: str | None = None,
     indent: bool = False,
+    title_suffix: str = "",
 ) -> NSMenuItem:
     # Sub-agent rows carry an explicit elbow -- indentationLevel alone
     # disappears next to the state-spinner and app-icon stack.
     prefix = "\u21b3 " if indent else ""
+    base_title = f"{native_session_menu_title(status)}{title_suffix}"
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        f"{prefix}{native_session_menu_title(status)}",
+        f"{prefix}{base_title}",
         "openSessionPrimary:",
         "",
     )
@@ -8087,7 +8232,7 @@ def build_session_menu_item(
     if identity_color is not None:
         # A colored bullet leading the title -- the session's identity
         # hue, matching what the LEDs show for it.
-        title = f"{prefix}\u25cf {native_session_menu_title(status)}"
+        title = f"{prefix}\u25cf {base_title}"
         attributed = NSMutableAttributedString.alloc().initWithString_(title)
         attributed.addAttribute_value_range_(
             NSForegroundColorAttributeName,
@@ -8432,6 +8577,24 @@ def build_error_menu(exc: Exception) -> NSMenu:
     item.setEnabled_(False)
     menu.addItem_(item)
     return menu
+
+
+def unseen_completions(snapshot, target) -> list[AgentStatus]:
+    """Main-session completions the user has NOT seen: newer than the
+    last time the dropdown was opened. Opening the menu is the visit
+    that clears them -- modeled, not guessed (T3's lastVisitedAt)."""
+    opened_at = getattr(target, "menu_last_opened_at", None)
+    cleared = getattr(target, "cleared_session_ids", set())
+    unseen = []
+    for status in snapshot.statuses:
+        if status.is_subagent or status.mode != AgentMode.COMPLETED:
+            continue
+        if status.agent_id in cleared:
+            continue
+        if opened_at is not None and status.updated_at <= opened_at:
+            continue
+        unseen.append(status)
+    return unseen
 
 
 def recent_statuses(snapshot) -> list[AgentStatus]:
