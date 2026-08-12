@@ -1278,6 +1278,18 @@ def _build_led_behavior_pane(target: StatusBarController):
         ),
     )
     notif_inner.addArrangedSubview_(completion_row)
+    native_ui.add_separator(notif_inner)
+    completion_banner_row, completion_banner_switch = native_ui.make_switch_row(
+        "Post a macOS notification when a session finishes",
+        target,
+        "toggleCompletionNotification:",
+        help_text=(
+            "A banner with the session's name, for eyes on another "
+            "screen when the lights swept. Main sessions only; Quiet "
+            "Hour and Focus policies hold it."
+        ),
+    )
+    notif_inner.addArrangedSubview_(completion_banner_row)
     for bundle_id, app_label in (
         (NOTIFICATION_APP_IMESSAGE, "iMessage"),
         (NOTIFICATION_APP_WHATSAPP, "WhatsApp"),
@@ -1515,6 +1527,7 @@ def _build_led_behavior_pane(target: StatusBarController):
         "idle_dim_enabled": idle_switch,
         "notification_blinks_enabled": notif_switch,
         "completion_sweep_enabled": completion_switch,
+        "completion_notification": completion_banner_switch,
         "calendar_alerts_enabled": cal_switch,
         "reminder_alerts_enabled": rem_switch,
         "weather_alerts_enabled": weather_switch,

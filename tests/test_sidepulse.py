@@ -9169,11 +9169,17 @@ class SubagentAndPhantomAskTests(unittest.TestCase):
             for index in range(menu.numberOfItems())
         ]
         indented = [title for title, level in rows if level == 1]
-        # Three visible workers + the "2 more" summary; the finished one
-        # is gone entirely.
-        self.assertEqual(len(indented), 4)
-        self.assertTrue(any("2 more sub-agents" in title for title in indented))
+        # ONE rollup row carries all five running workers in a submenu;
+        # the finished one is gone entirely.
+        self.assertEqual(len(indented), 1, rows)
+        self.assertIn("5 workers", indented[0])
         self.assertFalse(any("done1" in title for title, _level in rows))
+        rollup_item = next(
+            menu.itemAtIndex_(index)
+            for index in range(menu.numberOfItems())
+            if menu.itemAtIndex_(index).indentationLevel() == 1
+        )
+        self.assertEqual(rollup_item.submenu().numberOfItems(), 5)
         # No sub-agent appears as a TOP-LEVEL row.
         top_level_subs = [
             title for title, level in rows if level == 0 and "claude:agent:" in title
@@ -9711,6 +9717,115 @@ class BacklogBehaviorTests(unittest.TestCase):
             self.controller.settings.display_for_device("Dot"),
             self.status_bar.LED_DISPLAY_AGENT,
         )
+
+
+class MenuQualityOfLifeTests(unittest.TestCase):
+    """Worker rollup, device-health rows, completion banners."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def _snapshot(self, statuses):
+        return SimpleNamespace(
+            statuses=list(statuses),
+            stale_statuses=[],
+            collected_at=datetime.now(timezone.utc),
+        )
+
+    def _worker(self, parent_session: str, worker_id: str):
+        return AgentStatus(
+            provider="claude",
+            agent_id=f"claude:agent:{worker_id}",
+            display_name=f"worker {worker_id}",
+            mode=AgentMode.WORKING,
+            updated_at=datetime.now(timezone.utc),
+            event_name="PreToolUse",
+            session_id=parent_session,
+        )
+
+    def test_workers_roll_up_into_one_submenu_row(self) -> None:
+        parent = AgentStatus(
+            provider="claude",
+            agent_id="claude:session:main-1",
+            display_name="Main session",
+            mode=AgentMode.WORKING,
+            updated_at=datetime.now(timezone.utc),
+            event_name="PreToolUse",
+            session_id="main-1",
+        )
+        workers = [self._worker("main-1", f"w{i}") for i in range(5)]
+        menu = self.status_bar.build_menu(
+            self._snapshot([parent, *workers]),
+            self.status_bar.STATE_WORKING,
+            self.controller,
+        )
+        titles = [
+            menu.itemAtIndex_(index).title() for index in range(menu.numberOfItems())
+        ]
+        rollups = [title for title in titles if "worker" in title and "\u21b3" in title]
+        self.assertEqual(len(rollups), 1, titles)
+        self.assertIn("5 workers", rollups[0])
+        # No worker appears inline at the top level...
+        self.assertFalse(any("worker w" in title for title in titles))
+        # ...but every one is in the rollup's submenu, clickable.
+        rollup_item = next(
+            menu.itemAtIndex_(index)
+            for index in range(menu.numberOfItems())
+            if "\u21b3" in menu.itemAtIndex_(index).title()
+        )
+        submenu = rollup_item.submenu()
+        self.assertEqual(submenu.numberOfItems(), 5)
+
+    def test_device_errors_surface_in_the_menu(self) -> None:
+        self.controller.device_errors = {"Dot": "[Errno 28] No space left on device"}
+        menu = self.status_bar.build_menu(
+            self._snapshot([]), self.status_bar.STATE_IDLE, self.controller
+        )
+        titles = [
+            menu.itemAtIndex_(index).title() for index in range(menu.numberOfItems())
+        ]
+        self.assertTrue(
+            any("not updating" in title and "Dot" in title for title in titles),
+            titles,
+        )
+
+    def test_completion_banner_fires_on_fresh_main_transition_only(self) -> None:
+        posted: list = []
+        self.controller.post_completion_notification = posted.append
+        self.controller.settings = (
+            self.controller.settings.with_completion_notification_enabled(True)
+        )
+        working = _status("codex", AgentMode.WORKING)
+        done = _status("codex", AgentMode.COMPLETED)
+        self.controller.track_completions((working,))
+        self.assertEqual(posted, [])
+        self.controller.track_completions((done,))
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(posted[0].agent_id, done.agent_id)
+
+    def test_completion_banner_respects_toggle_and_quiet(self) -> None:
+        delivered: list = []
+        status = _status("claude", AgentMode.COMPLETED)
+        # Disabled: short-circuits before AppKit is ever imported.
+        self.controller.post_completion_notification(status)
+        self.controller.settings = (
+            self.controller.settings.with_completion_notification_enabled(True)
+        )
+        self.controller.quiet_until_monotonic = time.monotonic() + 60.0
+        with patch(
+            "sidepulse.status_bar.deliver_macos_notification",
+            side_effect=lambda title, body: delivered.append((title, body)),
+        ):
+            self.controller.post_completion_notification(status)
+        self.assertEqual(delivered, [])
+        self.controller.quiet_until_monotonic = 0.0
+        with patch(
+            "sidepulse.status_bar.deliver_macos_notification",
+            side_effect=lambda title, body: delivered.append((title, body)),
+        ):
+            self.controller.post_completion_notification(status)
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(delivered[0][0], "Claude finished")
 
 
 class LazyPaneBuildTests(unittest.TestCase):

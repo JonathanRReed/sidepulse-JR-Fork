@@ -344,6 +344,10 @@ class AgentMonitorSettings:
     studio_library: tuple[tuple[str, str], ...] = ()
     night_warmth_enabled: bool = False
     focus_signal_policy: dict[str, str] = field(default_factory=dict)
+    # A macOS notification banner when a main session finishes -- for
+    # eyes that were on another screen when the lights swept. Off by
+    # default; sub-agents never post.
+    completion_notification_enabled: bool = False
     # Webhook bridge: which MOMENT events (beyond stage-3 escalation,
     # which always fires when the URL is set) also POST to the webhook.
     # Valid keys: completion, quota_sunrise, quota_threshold, weather,
@@ -743,6 +747,9 @@ class AgentMonitorSettings:
 
     def with_night_warmth_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, night_warmth_enabled=bool(enabled))
+
+    def with_completion_notification_enabled(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, completion_notification_enabled=bool(enabled))
 
     def with_webhook_event(self, key: str, enabled: bool) -> AgentMonitorSettings:
         if key not in WEBHOOK_EVENT_KEYS:
@@ -1191,6 +1198,7 @@ class AgentMonitorSettings:
             "studio_library": [list(item) for item in self.studio_library],
             "night_warmth_enabled": self.night_warmth_enabled,
             "focus_signal_policy": dict(self.focus_signal_policy),
+            "completion_notification_enabled": self.completion_notification_enabled,
             "webhook_events": list(self.webhook_events),
             "timebox_shortcuts": {
                 key: list(pair) for key, pair in self.timebox_shortcuts.items()
@@ -1477,6 +1485,9 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             }
             if isinstance(data.get("focus_signal_policy"), dict)
             else {}
+        ),
+        completion_notification_enabled=_bool_setting(
+            data.get("completion_notification_enabled"), False
         ),
         webhook_events=tuple(
             key

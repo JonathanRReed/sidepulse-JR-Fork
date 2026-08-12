@@ -2412,6 +2412,18 @@ class StatusBarController(NSObject):
         )
 
     @objc.IBAction
+    def toggleCompletionNotification_(self, sender):
+        self.settings = self.settings.with_completion_notification_enabled(
+            checkbox_is_on(sender)
+        )
+        save_settings(self.settings)
+        self.set_settings_message(
+            "Completion notifications on."
+            if self.settings.completion_notification_enabled
+            else "Completion notifications off."
+        )
+
+    @objc.IBAction
     def toggleSubagentAsksAlert_(self, sender):
         self.settings = self.settings.with_subagent_asks_alert(checkbox_is_on(sender))
         save_settings(self.settings)
@@ -2943,6 +2955,7 @@ class StatusBarController(NSObject):
             self.settings.signal_style(signals_module.SIGNAL_COMPLETION)
         )
         self.completion_sweep_until = time.monotonic() + hold
+        self.post_completion_notification(statuses_by_id.get(agent_id))
         if self.webhook_event_enabled("completion"):
             finished_status = statuses_by_id.get(agent_id)
             self.post_webhook(
@@ -3355,6 +3368,24 @@ class StatusBarController(NSObject):
                 log_status_bar(f"webhook failed ({event_name}): {exc}")
 
         threading.Thread(target=_post, daemon=True).start()
+
+    def post_completion_notification(self, status) -> None:
+        """An opt-in macOS banner when a MAIN session finishes -- rides
+        the same fresh, edge-triggered path as the sweep, so restarts
+        and replays never post. Quiet Hour and Focus policies hold it
+        like every other courtesy signal."""
+        if (
+            status is None
+            or not self.settings.completion_notification_enabled
+            or self.courtesy_signals_held()
+        ):
+            return
+        try:
+            deliver_macos_notification(
+                f"{status.provider.title()} finished", status.display_name[:120]
+            )
+        except Exception as exc:
+            log_status_bar(f"completion notification failed: {exc}")
 
     def webhook_event_enabled(self, key: str) -> bool:
         """Moment events are opt-in per key; stage-3 escalation always
@@ -4599,6 +4630,10 @@ class StatusBarController(NSObject):
         set_checkbox_state(
             self.settings_buttons.get("night_warmth_enabled"),
             self.settings.night_warmth_enabled,
+        )
+        set_checkbox_state(
+            self.settings_buttons.get("completion_notification"),
+            self.settings.completion_notification_enabled,
         )
         for device_id, controls in self.device_settings_controls.items():
             self.refresh_device_settings_controls(device_id, controls)
@@ -7217,29 +7252,24 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
                     ),
                 )
             )
-            # Its running sub-agents, indented underneath in the SAME
-            # identity color -- one visual family per main session.
-            for child in children[:3]:
+            # Its running sub-agents roll up into ONE submenu row --
+            # three sessions each spawning a dozen workers used to
+            # balloon the top level; now the top level is main
+            # sessions, and the workers are one hover away, every row
+            # still a real click-to-jump item in the family's color.
+            if children:
                 menu.addItem_(
-                    build_session_menu_item(
-                        child,
-                        snapshot.collected_at,
-                        target,
-                        identity_color=dot_color,
-                        indent=True,
+                    build_worker_rollup_item(
+                        children, snapshot.collected_at, target, dot_color
                     )
                 )
-            if len(children) > 3:
-                more = disabled_menu_item(f"{len(children) - 3} more sub-agents working")
-                more.setIndentationLevel_(1)
-                menu.addItem_(more)
         # Sub-agents whose parent session isn't visible (rare: parent
-        # aged out while workers run on) still deserve a row.
+        # aged out while workers run on) still get a rollup.
         for children in subagent_groups.values():
-            for child in children[:3]:
+            if children:
                 menu.addItem_(
-                    build_session_menu_item(
-                        child, snapshot.collected_at, target, indent=True
+                    build_worker_rollup_item(
+                        children, snapshot.collected_at, target, None
                     )
                 )
 
@@ -7255,6 +7285,22 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
 
     menu.addItem_(NSMenuItem.separatorItem())
     menu.addItem_(disabled_menu_item("Devices"))
+    # A device whose writes are failing must say so HERE, not only in
+    # a log file -- the ENOSPC freeze sat invisible for 13 minutes
+    # while the lights played a stale program.
+    device_errors = getattr(target, "device_errors", None) or {}
+    if device_errors:
+        known_names = {
+            device.device_id: device.name
+            for device in (target.status_bar_devices() or [])
+        }
+        for device_id, error in sorted(device_errors.items()):
+            menu.addItem_(
+                disabled_menu_item(
+                    f"\u26a0 {known_names.get(device_id, device_id)}: "
+                    f"not updating \u2014 {str(error)[:48]}"
+                )
+            )
     # Calibration/brightness profiles: three named slots, applied or
     # saved in two clicks from here.
     profiles_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Profiles", None, "")
@@ -8578,6 +8624,46 @@ def status_bar_device_sort_key(candidate: DeviceCandidate) -> tuple[int, str]:
         if hint in name:
             return (index, candidate.root.name.lower())
     return (len(STATUS_BAR_DEVICE_PRIORITY), candidate.root.name.lower())
+
+
+def deliver_macos_notification(title: str, body: str) -> None:
+    """One banner through Notification Center. A plain module function
+    so tests can patch the seam -- ObjC class selectors can't be
+    mock-patched (the un-patch delattr fails on the ObjC class)."""
+    from AppKit import NSUserNotification, NSUserNotificationCenter
+
+    notification = NSUserNotification.alloc().init()
+    notification.setTitle_(title)
+    notification.setInformativeText_(body)
+    NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(
+        notification
+    )
+
+
+def build_worker_rollup_item(children, collected_at, target, dot_color):
+    """One indented '\u21b3 N workers' row whose submenu holds EVERY
+    worker as a real session item -- busiest first, active count in
+    the title."""
+    active = [c for c in children if c.mode not in (AgentMode.COMPLETED,)]
+    title = f"\u21b3 {len(children)} worker" + ("s" if len(children) != 1 else "")
+    if active and len(active) != len(children):
+        title += f" \u00b7 {len(active)} active"
+    rollup = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
+    rollup.setIndentationLevel_(1)
+    submenu = NSMenu.alloc().init()
+    submenu.setAutoenablesItems_(False)
+    ordered = sorted(
+        children,
+        key=lambda c: (c.mode == AgentMode.COMPLETED, -c.updated_at.timestamp()),
+    )
+    for child in ordered:
+        submenu.addItem_(
+            build_session_menu_item(
+                child, collected_at, target, identity_color=dot_color
+            )
+        )
+    rollup.setSubmenu_(submenu)
+    return rollup
 
 
 def build_session_menu_item(
