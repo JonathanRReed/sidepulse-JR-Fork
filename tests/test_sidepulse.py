@@ -9265,9 +9265,35 @@ class MenuTeachingTests(unittest.TestCase):
         from sidepulse import status_bar
 
         pane_keys = {key for key, _label in status_bar.SETTINGS_SIDEBAR_ITEMS}
-        for _text, pane in status_bar.DAILY_TIPS:
+        for _text, pane, _anchor in status_bar.DAILY_TIPS:
             if pane is not None:
                 self.assertIn(pane, pane_keys)
+
+    def test_dismissed_tips_are_skipped_and_tips_can_turn_off(self) -> None:
+        from sidepulse import status_bar
+        from sidepulse.settings import AgentMonitorSettings
+
+        settings = AgentMonitorSettings()
+        tip = status_bar.daily_tip(settings)
+        self.assertIsNotNone(tip)
+        settings = settings.with_dismissed_tip(tip[0])
+        replacement = status_bar.daily_tip(settings)
+        self.assertNotEqual(replacement and replacement[0], tip[0])
+        self.assertIsNone(status_bar.daily_tip(settings.with_tips_enabled(False)))
+
+    def test_every_lid_preset_parses_in_the_real_firmware_grammar(self) -> None:
+        from sidepulse import status_bar
+        from sidepulse.led_wasm import SdLedWasmController
+
+        engine = SdLedWasmController(led_count=8)
+        for presets in status_bar.LID_ANIMATION_PRESETS.values():
+            for name, duration, program in presets:
+                result = engine.parse(program, 0)
+                self.assertTrue(
+                    result.ok,
+                    f"{name}: {result.error_name} at {result.line}:{result.column}",
+                )
+                self.assertGreater(duration, 0.0)
 
 
 class StudioDisplayAndTrancheCTests(unittest.TestCase):

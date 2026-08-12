@@ -1639,11 +1639,67 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def openTipPane_(self, sender):
-        """A daily-tip row that lands you on the exact pane it teased."""
-        pane = str(sender.representedObject() or "")
+        """Show Me lands on the exact pane -- and when the tip has a
+        registered anchor, scrolls to it and flashes it so there is
+        never a "took me somewhere but I couldn't find it" moment."""
+        payload = sender.representedObject()
+        if isinstance(payload, dict):
+            pane = str(payload.get("pane") or "")
+            anchor_key = str(payload.get("anchor") or "")
+        else:
+            pane, anchor_key = str(payload or ""), ""
         self.show_settings_window()
         if pane:
             self.select_settings_pane(pane)
+        anchor = getattr(self, "tip_anchor_views", {}).get(anchor_key)
+        if anchor is not None:
+            anchor.scrollRectToVisible_(anchor.bounds())
+            self.flash_view(anchor)
+
+    def flash_view(self, view) -> None:
+        """A brief highlight pulse so the eye lands on the right card."""
+        try:
+            view.setWantsLayer_(True)
+            layer = view.layer()
+            if layer is None:
+                return
+            from AppKit import NSColor
+
+            accent = NSColor.controlAccentColor().colorWithAlphaComponent_(0.28)
+            layer.setBackgroundColor_(accent.CGColor())
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                0.9, self, "clearFlash:", view, False
+            )
+        except Exception:
+            pass
+
+    @objc.IBAction
+    def clearFlash_(self, timer):
+        view = timer.userInfo()
+        try:
+            layer = view.layer()
+            if layer is not None:
+                layer.setBackgroundColor_(None)
+        except Exception:
+            pass
+
+    @objc.IBAction
+    def dismissTip_(self, sender):
+        text = str(sender.representedObject() or "").strip()
+        if not text:
+            return
+        self.settings = self.settings.with_dismissed_tip(text)
+        save_settings(self.settings)
+        self._menu_signature = None
+        self.refresh_(None)
+
+    @objc.IBAction
+    def disableTips_(self, _sender):
+        self.settings = self.settings.with_tips_enabled(False)
+        save_settings(self.settings)
+        self.set_settings_message("Daily tips are off.")
+        self._menu_signature = None
+        self.refresh_(None)
 
     @objc.IBAction
     def openSettings_(self, _sender):
@@ -2107,6 +2163,41 @@ class StatusBarController(NSObject):
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             hold + 0.1, self, "refresh:", None, False
         )
+
+    def active_focus_summary(self) -> str:
+        """Plain-language "which Focus is on and what we're doing about
+        it" -- cached briefly; shown in the Focus pane and the dropdown."""
+        cached = getattr(self, "_focus_summary_cache", None)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < 5.0:
+            return cached[1]
+        try:
+            active = focus_sync.active_focus_mode_identifiers()
+            names = dict(focus_sync.configured_focus_modes())
+        except focus_sync.FocusSyncUnavailableError:
+            text = "Needs Full Disk Access (see Setup) to read Focus modes."
+        else:
+            if not active:
+                text = "No Focus is active."
+            elif not self.settings.focus_sync_enabled:
+                text = "A Focus is active, but Focus reactions are off."
+            else:
+                parts = []
+                for identifier in active:
+                    name = names.get(identifier, identifier)
+                    rule = self.settings.focus_dim_rules.get(identifier)
+                    if rule is None:
+                        effect = "shared dim"
+                    elif rule <= 0.0:
+                        effect = "lights off"
+                    elif rule >= 1.0:
+                        effect = "no dimming"
+                    else:
+                        effect = f"dim to {round(rule * 100)}%"
+                    parts.append(f"{name} \u2014 {effect}")
+                text = "; ".join(parts)
+        self._focus_summary_cache = (now, text)
+        return text
 
     def quiet_active(self) -> bool:
         """User-requested quiet: celebration, notification, calendar and
@@ -2655,6 +2746,28 @@ class StatusBarController(NSObject):
             for thumb in thumbs.values():
                 if not thumb.isHiddenOrHasHiddenAncestor() and thumb.visibleRect().size.width > 0:
                     thumb.setNeedsDisplay_(True)
+        for thumb in getattr(self, "lid_animation_thumbs", {}).values():
+            if not thumb.isHiddenOrHasHiddenAncestor() and thumb.visibleRect().size.width > 0:
+                thumb.setNeedsDisplay_(True)
+
+    @objc.IBAction
+    def selectLidPresetThumb_(self, recognizer):
+        view = recognizer.view()
+        kind = getattr(view, "lid_preset_kind", None)
+        name = getattr(view, "lid_preset_name", None)
+        if not kind or not name:
+            return
+        for preset_name, duration, program in LID_ANIMATION_PRESETS.get(kind, ()):
+            if preset_name == name:
+                self.settings = self.settings.with_lid_animation(
+                    kind, program=program, duration_seconds=duration
+                )
+                save_settings(self.settings)
+                self.refresh_settings_window()
+                self.set_settings_message(f"Lid animation: {name}.")
+                # Play it once so choosing feels like something happened.
+                self.play_lid_animation(kind)
+                return
 
     @objc.IBAction
     def selectModeAnimationThumb_(self, recognizer):
@@ -3350,6 +3463,9 @@ class StatusBarController(NSObject):
             self.settings_fields.get("calendar_lead_field"),
             f"{self.settings.calendar_lead_minutes:g}",
         )
+        focus_now = self.settings_fields.get("focus_now_label")
+        if focus_now is not None:
+            focus_now.setStringValue_(self.active_focus_summary())
         set_field_value(
             self.settings_fields.get("weather_latitude_field"),
             ""
@@ -5153,29 +5269,41 @@ class StatusBarController(NSObject):
 
 # One per day, keyed to the calendar: each teaches a feature people
 # don't find on their own. (text, settings pane key or None).
-DAILY_TIPS: tuple[tuple[str, str | None], ...] = (
-    ("Each agent gets its own color when several run at once", "color_studio"),
-    ("Give a session a permanent color from its row's Identity Color menu", None),
-    ("The Screen Bar hugs your notch -- style it under Screen Bar", "colors_screen_bar"),
-    ("Timer fills your lights as working time passes -- try it below", None),
-    ("Write your own light animation in the Studio", "lid_animations"),
-    ("Whites looking off? Calibrate each device under Devices", "devices"),
-    ("Day, Night, and Travel calibration profiles live under Profiles", None),
-    ("Ignored asks can escalate: light, menu bar, chime, takeover", "led_behavior"),
-    ("Severe-weather warnings can flash your lights", "led_behavior"),
-    ("Calendar events and Reminders can glow before they're due", "led_behavior"),
-    ("Every signal card in Signals has a Test button -- try one", "led_behavior"),
-    ("A macOS Focus can dim or silence your lights automatically", "power"),
-    ("A device can show Agent status, Battery, Timer, or your Studio program", "devices"),
-    ("Claude, OpenAI, Codex, and Gemini brand colors are one click away", "color_studio"),
-    ("Celebrate when finished sweeps green the moment an agent completes", "color_studio"),
+DAILY_TIPS: tuple[tuple[str, str | None, str | None], ...] = (
+    ("Each agent gets its own color when several run at once", "color_studio", None),
+    ("Give a session a permanent color from its row's Identity Color menu", None, None),
+    ("The Screen Bar hugs your notch -- style it under Screen Bar", "colors_screen_bar", None),
+    ("Timer fills your lights as working time passes -- try it below", None, None),
+    ("Write your own light animation in the Studio tab", "studio", None),
+    ("Whites looking off? Calibrate each device under Devices", "devices", None),
+    ("Day, Night, and Travel calibration profiles live under Profiles", None, None),
+    ("Ignored asks can escalate: light, menu bar, chime, takeover", "led_behavior", None),
+    ("Severe-weather warnings can flash your lights", "led_behavior", None),
+    ("Calendar events and Reminders can glow before they're due", "led_behavior", None),
+    ("Every signal card in Signals has a Test button -- try one", "led_behavior", None),
+    ("A macOS Focus can dim or silence your lights automatically", "focus", None),
+    ("A device can show Agent status, Battery, Timer, or your Studio program", "devices", None),
+    (
+        "Claude, OpenAI, Codex, and Gemini brand colors are the swatches on every Agent color row",
+        "color_studio",
+        "brand_colors",
+    ),
+    ("Celebrate when finished sweeps green the moment an agent completes", "color_studio", None),
 )
 
 
-def daily_tip() -> tuple[str, str | None]:
+def daily_tip(settings=None) -> tuple[str, str | None, str | None] | None:
+    """The day's tip, skipping anything the user dismissed. None when
+    every tip is dismissed or tips are off entirely."""
+    if settings is not None and not getattr(settings, "tips_enabled", True):
+        return None
+    dismissed = set(getattr(settings, "dismissed_tips", ()) or ())
+    tips = [tip for tip in DAILY_TIPS if tip[0] not in dismissed]
+    if not tips:
+        return None
     # Local calendar day: the tip changes overnight, like a calendar page.
     day = datetime.now().timetuple().tm_yday
-    return DAILY_TIPS[day % len(DAILY_TIPS)]
+    return tips[day % len(tips)]
 
 
 def target_quiet_active(target) -> bool:
@@ -5251,8 +5379,15 @@ def menu_content_signature(snapshot, state, target) -> tuple:
         target.settings.closed_lid_awake_policy,
         target.closed_lid_awake.last_error,
         target_quiet_active(target),
+        (
+            target.active_focus_summary()
+            if callable(getattr(target, "active_focus_summary", None))
+            else None
+        ),
         tuple(sorted(getattr(target, "cleared_session_ids", set()))),
         tuple(sorted(u.agent_id for u in unseen_completions(snapshot, target))),
+        getattr(target.settings, "tips_enabled", True),
+        len(getattr(target.settings, "dismissed_tips", ()) or ()),
         int(time.monotonic() // 30),
     )
 
@@ -5360,6 +5495,16 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
                         child, snapshot.collected_at, target, indent=True
                     )
                 )
+
+    focus_summary = (
+        target.active_focus_summary()
+        if callable(getattr(target, "active_focus_summary", None))
+        else "No Focus is active."
+    )
+    if "\u2014" in focus_summary:
+        # A Focus is active with a concrete effect -- say so where the
+        # user is already looking.
+        menu.addItem_(disabled_menu_item(f"Focus: {focus_summary}"))
 
     menu.addItem_(NSMenuItem.separatorItem())
     menu.addItem_(disabled_menu_item("Devices"))
@@ -5496,19 +5641,36 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         clear_item.setTarget_(target)
         menu.addItem_(clear_item)
 
-    menu.addItem_(NSMenuItem.separatorItem())
-    tip_text, tip_pane = daily_tip()
-    if tip_pane:
+    tip = daily_tip(getattr(target, "settings", None))
+    if tip is not None:
+        menu.addItem_(NSMenuItem.separatorItem())
+        tip_text, tip_pane, tip_anchor = tip
         tip_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            f"Tip: {tip_text}",
-            "openTipPane:",
-            "",
+            f"Tip: {tip_text}", None, ""
         )
-        tip_item.setTarget_(target)
-        tip_item.setRepresentedObject_(tip_pane)
+        tip_menu = NSMenu.alloc().init()
+        if tip_pane:
+            show_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Show Me", "openTipPane:", ""
+            )
+            show_item.setTarget_(target)
+            show_item.setRepresentedObject_(
+                {"pane": tip_pane, "anchor": tip_anchor or "", "text": tip_text}
+            )
+            tip_menu.addItem_(show_item)
+        dismiss_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Dismiss This Tip", "dismissTip:", ""
+        )
+        dismiss_item.setTarget_(target)
+        dismiss_item.setRepresentedObject_(tip_text)
+        tip_menu.addItem_(dismiss_item)
+        off_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Turn Off Tips", "disableTips:", ""
+        )
+        off_item.setTarget_(target)
+        tip_menu.addItem_(off_item)
+        tip_item.setSubmenu_(tip_menu)
         menu.addItem_(tip_item)
-    else:
-        menu.addItem_(disabled_menu_item(f"Tip: {tip_text}"))
 
     quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         "Quit",
@@ -5902,8 +6064,10 @@ SETTINGS_SIDEBAR_ITEMS: tuple[tuple[str, str], ...] = (
     ("colors_screen_bar", "Screen Bar"),
     ("agents", "Agents"),
     ("led_behavior", "Signals"),
+    ("focus", "Focus"),
     ("power", "Power"),
     ("lid_animations", "Lid Animations"),
+    ("studio", "Studio"),
     ("debug", "Debug"),
 )
 
@@ -6036,7 +6200,7 @@ def _build_devices_pane(target: StatusBarController):
                     "Working timer fill lights the strip as elapsed working "
                     "time crosses your expected length -- a timer, not a "
                     "claim about task progress. Studio program plays the "
-                    "animation you wrote in the Studio, all the time."
+                    "animation you wrote in the Studio tab, all the time."
                 ),
             )
         )
@@ -6583,51 +6747,51 @@ def make_signal_style_card(target: StatusBarController, key: str, title: str, *,
     return outer
 
 
-def _build_led_behavior_pane(target: StatusBarController):
+def _build_focus_pane(target: StatusBarController):
+    """What each macOS Focus does to the lights -- its own pane because
+    this lived at the BOTTOM of Signals and the user who asked for
+    per-Focus control had never seen that it already existed."""
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
-    outer, inner = native_ui.make_card("Dimming")
+    fields: dict[str, object] = {}
+    buttons: dict[str, object] = {}
 
-    idle_row, idle_switch = native_ui.make_switch_row(
-        "Dim further after being idle", target, "toggleIdleDim:"
+    now_outer, now_inner = native_ui.make_card("Right Now")
+    now_label = native_ui.make_label(
+        target.active_focus_summary(), secondary=False, size=13.0
     )
-    inner.addArrangedSubview_(idle_row)
+    now_inner.addArrangedSubview_(now_label)
+    fields["focus_now_label"] = now_label
+    stack.addArrangedSubview_(now_outer)
 
-    minutes_field = native_ui.make_field(
-        f"{target.settings.idle_dim_after_minutes:g}", target=target, action="applyIdleDimSettings:"
-    )
-    native_ui.constrain_width(minutes_field, 48.0)
-    fraction_field = native_ui.make_field(
-        f"{round(target.settings.idle_dim_fraction * 100)}", target=target, action="applyIdleDimSettings:"
-    )
-    native_ui.constrain_width(fraction_field, 48.0)
-    idle_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
-    idle_controls.addArrangedSubview_(minutes_field)
-    idle_controls.addArrangedSubview_(native_ui.make_label("min, dim to", secondary=True))
-    idle_controls.addArrangedSubview_(fraction_field)
-    idle_controls.addArrangedSubview_(native_ui.make_label("%", secondary=True))
-    inner.addArrangedSubview_(native_ui.make_row("After", idle_controls))
-
-    native_ui.add_separator(inner)
-
+    enable_outer, enable_inner = native_ui.make_card("Focus Dimming")
     focus_row, focus_switch = native_ui.make_switch_row(
-        "Dim while a macOS Focus is active",
+        "React when a macOS Focus turns on",
         target,
         "toggleFocusSync:",
         help_text=(
-            "Requires granting Full Disk Access to SidePulse's background process "
-            "in System Settings -- otherwise this has no effect."
+            "Needs Full Disk Access for SidePulse (granted in the Setup "
+            "window) -- otherwise this has no effect."
         ),
     )
-    inner.addArrangedSubview_(focus_row)
-    stack.addArrangedSubview_(outer)
-
-    fields = {"idle_dim_minutes_field": minutes_field, "idle_dim_fraction_field": fraction_field}
+    enable_inner.addArrangedSubview_(focus_row)
+    buttons["focus_sync_enabled"] = focus_switch
+    stack.addArrangedSubview_(enable_outer)
 
     # Per-Focus rules: each configured Focus gets its own dim choice.
     # When the Focus database can't be read (no Full Disk Access), say so
     # plainly and offer the one-click path to fix it, instead of showing
     # a feature that silently does nothing.
-    focus_outer, focus_inner = native_ui.make_card("Focus Dimming")
+    focus_outer, focus_inner = native_ui.make_card("Per-Focus Rules")
+    focus_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Each Focus can dim, turn the lights off entirely, or apply a "
+            "calibration profile the moment it activates -- e.g. School \u2192 "
+            "Turn off, Work \u2192 Dim to 50%.",
+            secondary=True,
+            size=12.0,
+            max_width=560.0,
+        )
+    )
     try:
         focus_modes = focus_sync.configured_focus_modes()
         log_status_bar(
@@ -6715,6 +6879,38 @@ def _build_led_behavior_pane(target: StatusBarController):
             fields[f"focus_rule_popup:{identifier}"] = popup
             fields[f"focus_profile_popup:{identifier}"] = profile_popup
     stack.addArrangedSubview_(focus_outer)
+
+    return native_ui.wrap_in_scroll_pane(stack), fields, buttons
+
+
+def _build_led_behavior_pane(target: StatusBarController):
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    outer, inner = native_ui.make_card("Dimming")
+
+    idle_row, idle_switch = native_ui.make_switch_row(
+        "Dim further after being idle", target, "toggleIdleDim:"
+    )
+    inner.addArrangedSubview_(idle_row)
+
+    minutes_field = native_ui.make_field(
+        f"{target.settings.idle_dim_after_minutes:g}", target=target, action="applyIdleDimSettings:"
+    )
+    native_ui.constrain_width(minutes_field, 48.0)
+    fraction_field = native_ui.make_field(
+        f"{round(target.settings.idle_dim_fraction * 100)}", target=target, action="applyIdleDimSettings:"
+    )
+    native_ui.constrain_width(fraction_field, 48.0)
+    idle_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
+    idle_controls.addArrangedSubview_(minutes_field)
+    idle_controls.addArrangedSubview_(native_ui.make_label("min, dim to", secondary=True))
+    idle_controls.addArrangedSubview_(fraction_field)
+    idle_controls.addArrangedSubview_(native_ui.make_label("%", secondary=True))
+    inner.addArrangedSubview_(native_ui.make_row("After", idle_controls))
+
+    stack.addArrangedSubview_(outer)
+
+    fields = {"idle_dim_minutes_field": minutes_field, "idle_dim_fraction_field": fraction_field}
+
 
     # Notification blinks: a moment, not a state -- flash the app's own
     # color, then agent status resumes on its own.
@@ -6882,7 +7078,6 @@ def _build_led_behavior_pane(target: StatusBarController):
 
     buttons = {
         "idle_dim_enabled": idle_switch,
-        "focus_sync_enabled": focus_switch,
         "notification_blinks_enabled": notif_switch,
         "completion_sweep_enabled": completion_switch,
         "calendar_alerts_enabled": cal_switch,
@@ -6981,7 +7176,62 @@ def _build_agents_pane(target: StatusBarController):
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
-def _build_lid_animations_pane(target: StatusBarController):
+# Curated one-shot lid looks. Built only from grammar primitives already
+# proven against the firmware (colors, durations, pulse/cosine/linear,
+# off) -- a test parses every preset through the real sdled.wasm.
+LID_ANIMATION_PRESETS: dict[str, tuple[tuple[str, float, str], ...]] = {
+    LID_ANIMATION_CLOSED: (
+        ("Fade Out", 1.0, "#8A7CFF 300ms pulse\noff 700ms cosine"),
+        ("Blink Out", 0.9, "#FF4F79 150ms pulse\noff 150ms linear\n#FF4F79 150ms pulse\noff 450ms cosine"),
+        ("Ember", 1.6, "#FF9F0A 500ms pulse\n#5A3A00 400ms cosine\noff 700ms cosine"),
+        ("Cool Down", 1.4, "#00E5FF 350ms pulse\n#0044AA 450ms cosine\noff 600ms cosine"),
+    ),
+    LID_ANIMATION_OPEN: (
+        ("Rise", 1.0, "off 100ms linear\n#00E5FF 400ms cosine\n#00E5FF 500ms pulse"),
+        ("Hello", 1.4, "#12E3B0 300ms pulse\n#0FA07C 300ms cosine\n#12E3B0 800ms pulse"),
+        ("Sunrise", 1.6, "#331A00 300ms cosine\n#FF9F0A 600ms cosine\n#FFD60A 700ms pulse"),
+        ("Quick Blink", 0.8, "#FFFFFF 150ms pulse\noff 150ms linear\n#FFFFFF 500ms pulse"),
+    ),
+}
+
+
+def _build_lid_preset_row(target: StatusBarController, kind: str, current_program: str):
+    """A strip of live-playing preset thumbnails; clicking one applies
+    it. The raw editor below stays for hand-tuning -- the picker is how
+    normal people choose."""
+    row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_M)
+    thumbs = getattr(target, "lid_animation_thumbs", None)
+    if thumbs is None:
+        thumbs = {}
+        target.lid_animation_thumbs = thumbs
+    current_normalized = (current_program or "").strip()
+    for name, duration, program in LID_ANIMATION_PRESETS[kind]:
+        cell = native_ui.make_stack(orientation="vertical", spacing=2.0)
+        view = _mini_led_view(96.0, 20.0)
+        view.setProgram_startedAt_(program + "\nrepeat", time.monotonic())
+        view.lid_preset_kind = kind
+        view.lid_preset_name = name
+        recognizer = NSClickGestureRecognizer.alloc().initWithTarget_action_(
+            target, "selectLidPresetThumb:"
+        )
+        view.addGestureRecognizer_(recognizer)
+        cell.addArrangedSubview_(view)
+        label = native_ui.make_label(name, secondary=True, size=10.0)
+        cell.addArrangedSubview_(label)
+        row.addArrangedSubview_(cell)
+        thumbs[(kind, name)] = view
+        view.setToolTip_(f"{name} \u00b7 {duration:g}s")
+        if program.strip() == current_normalized:
+            layer = view.layer()
+            if layer is not None:
+                layer.setBorderWidth_(2.0)
+    row.addArrangedSubview_(native_ui.make_hspacer())
+    return row
+
+
+def _build_studio_pane(target: StatusBarController):
+    """The Studio graduated to its own tab -- it is "write any light
+    program", not a lid feature it happened to live beside."""
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
 
     # The Studio: write any LED program by hand, preview it on every
@@ -7013,7 +7263,31 @@ def _build_lid_animations_pane(target: StatusBarController):
     stack.addArrangedSubview_(studio_outer)
     target.studio_editor = studio_editor
 
+    return native_ui.wrap_in_scroll_pane(stack), {}
+
+
+def _build_lid_animations_pane(target: StatusBarController):
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+
+
     closed_outer, closed_inner = native_ui.make_card("Lid Closed")
+    closed_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "What the lights do the moment you close the lid. Pick a "
+            "look, or edit the program below it.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    closed_inner.addArrangedSubview_(
+        _build_lid_preset_row(
+            target,
+            LID_ANIMATION_CLOSED,
+            target.settings.lid_closed_animation.program,
+        )
+    )
+    native_ui.add_separator(closed_inner)
     closed_duration = native_ui.make_field("", target=target, action="saveLidAnimations:")
     native_ui.constrain_width(closed_duration, 60.0)
     closed_inner.addArrangedSubview_(native_ui.make_row("Duration (sec)", closed_duration))
@@ -7030,6 +7304,22 @@ def _build_lid_animations_pane(target: StatusBarController):
     stack.addArrangedSubview_(closed_outer)
 
     open_outer, open_inner = native_ui.make_card("Lid Open")
+    open_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "The greeting when you open it back up.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    open_inner.addArrangedSubview_(
+        _build_lid_preset_row(
+            target,
+            LID_ANIMATION_OPEN,
+            target.settings.lid_open_animation.program,
+        )
+    )
+    native_ui.add_separator(open_inner)
     open_duration = native_ui.make_field("", target=target, action="saveLidAnimations:")
     native_ui.constrain_width(open_duration, 60.0)
     open_inner.addArrangedSubview_(native_ui.make_row("Duration (sec)", open_duration))
@@ -7158,8 +7448,10 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     colors_pane, colors_fields, colors_buttons = _build_colors_screen_bar_pane(target)
     agents_pane, agents_fields, agents_buttons = _build_agents_pane(target)
     led_behavior_pane, led_behavior_fields, led_behavior_buttons = _build_led_behavior_pane(target)
+    focus_pane, focus_fields, focus_buttons = _build_focus_pane(target)
     power_pane, power_fields, power_buttons = _build_power_pane(target)
     lid_animations_pane, lid_animations_fields = _build_lid_animations_pane(target)
+    studio_pane, _studio_fields = _build_studio_pane(target)
     debug_pane, debug_fields = _build_debug_pane(target)
 
     panes = {
@@ -7168,8 +7460,10 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         "colors_screen_bar": colors_pane,
         "agents": agents_pane,
         "led_behavior": led_behavior_pane,
+        "focus": focus_pane,
         "power": power_pane,
         "lid_animations": lid_animations_pane,
+        "studio": studio_pane,
         "debug": debug_pane,
     }
     for key, pane in panes.items():
@@ -7194,6 +7488,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         **colors_fields,
         **power_fields,
         **led_behavior_fields,
+        **focus_fields,
         "message": message,
     }
     target.settings_buttons = {
@@ -7201,6 +7496,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         **power_buttons,
         **colors_buttons,
         **led_behavior_buttons,
+        **focus_buttons,
     }
     target.device_settings_controls = device_controls
     return window
@@ -7241,9 +7537,16 @@ def _build_agent_or_mode_color_row(
     width = len(palette) * (COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP) + COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP + 80
     container = native_ui.make_fixed_area(width, 24.0)
     x = 0
+    brand_names = {hex_value.upper(): name for name, hex_value in BRAND_SWATCHES}
     for palette_hex in palette:
         button = add_color_swatch(
             container, palette_hex, x, 1, target, swatch_selector, {**swatch_represented, "hex": palette_hex}
+        )
+        brand = brand_names.get(palette_hex.upper())
+        # Anonymous colored squares made the brand-colors tip a lie --
+        # hovering now says exactly what each swatch is.
+        button.setToolTip_(
+            f"{brand} brand color \u00b7 {palette_hex}" if brand else palette_hex
         )
         set_swatch_selected(button, palette_hex.upper() == current.upper())
         swatches[(row_key, palette_hex)] = button
@@ -7364,6 +7667,19 @@ def _build_color_studio_pane(target: StatusBarController) -> NSView:
     hex_labels: dict[tuple[str, str], object] = {}
 
     agent_outer, agent_inner = native_ui.make_card("Agent Colors")
+    agent_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "The first four swatches on every row are Claude, OpenAI, "
+            "Codex, and Gemini's official brand colors \u2014 click one to "
+            "use it. Hover any swatch to see its name.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    if not hasattr(target, "tip_anchor_views"):
+        target.tip_anchor_views = {}
+    target.tip_anchor_views["brand_colors"] = agent_outer
     for spec in PROVIDER_SPECS:
         current = target.settings.colors.agent_color(spec.provider)
         agent_inner.addArrangedSubview_(
