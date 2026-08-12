@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -299,6 +299,9 @@ STATUS_BAR_REFRESH_SECONDS = 15.0
 BRIGHTNESS_WATCH_SECONDS = 3.0
 BRIGHTNESS_WATCH_MIN_DELTA = 3
 STATUS_BAR_DEVICE_POLL_SECONDS = 2.0
+# Event-driven refreshes run at most this often; bursts coalesce into
+# one trailing refresh. Direct refresh_(None) calls stay synchronous.
+EVENT_REFRESH_FLOOR_SECONDS = 0.25
 # ioreg is a subprocess fork on the main thread and refresh_ runs on
 # every hook event; power-state changes may lag by up to this TTL.
 BATTERY_SNAPSHOT_CACHE_SECONDS = 5.0
@@ -863,7 +866,40 @@ class StatusBarController(NSObject):
             snapshot.statuses,
         )
         if self.status_item is not None:
-            self.status_item.setMenu_(build_menu(snapshot, state, self))
+            self.update_status_menu(snapshot, state)
+
+    def update_status_menu(self, snapshot, state) -> None:
+        """Rebuild the dropdown only when its CONTENT changed, and never
+        while it is open. Rebuilding on every hook event re-ran icon
+        composites and row construction dozens of times a minute, and
+        re-sorting under an open menu made rows jump beneath the cursor
+        (T3's inbox keeps ordering static; signals carry the changes)."""
+        if getattr(self, "status_menu_open", False):
+            self._menu_rebuild_pending = (snapshot, state)
+            return
+        signature = menu_content_signature(snapshot, state, self)
+        if signature == getattr(self, "_menu_signature", None):
+            return
+        self._menu_signature = signature
+        menu = build_menu(snapshot, state, self)
+        menu.setDelegate_(self)
+        self.status_item.setMenu_(menu)
+
+    def menuWillOpen_(self, _menu):
+        self.status_menu_open = True
+        # Opening the menu is a "visit": it clears the unseen-done badge
+        # (mirrors T3's lastVisitedAt read/unread model).
+        self.menu_last_opened_at = datetime.now(timezone.utc)
+
+    def menuDidClose_(self, _menu):
+        self.status_menu_open = False
+        pending = getattr(self, "_menu_rebuild_pending", None)
+        self._menu_rebuild_pending = None
+        if pending is not None:
+            # Deferred: never swap the menu during tracking teardown.
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "refresh:", None, False
+            )
 
     @objc.IBAction
     def forceRefresh_(self, _sender):
@@ -2342,6 +2378,31 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def refreshFromEvent_(self, _sender):
         self.event_refresh_pending = False
+        # Time floor: event_refresh_pending only dedups events that pile
+        # up BEFORE the main thread runs; a chatty agent still drove one
+        # full refresh per event, back to back. Leading edge runs
+        # immediately; bursts get one trailing refresh instead.
+        now = time.monotonic()
+        last = getattr(self, "_last_event_refresh_at", 0.0)
+        if now - last < EVENT_REFRESH_FLOOR_SECONDS:
+            if getattr(self, "_trailing_refresh_timer", None) is None:
+                self._trailing_refresh_timer = (
+                    NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                        EVENT_REFRESH_FLOOR_SECONDS,
+                        self,
+                        "trailingRefreshFire:",
+                        None,
+                        False,
+                    )
+                )
+            return
+        self._last_event_refresh_at = now
+        self.refresh_(None)
+
+    @objc.IBAction
+    def trailingRefreshFire_(self, _timer):
+        self._trailing_refresh_timer = None
+        self._last_event_refresh_at = time.monotonic()
         self.refresh_(None)
 
     def replay_debug_logs(self) -> None:
@@ -4310,6 +4371,9 @@ class StatusBarController(NSObject):
             args=(mode, battery_snapshot, display_kind, statuses),
             daemon=True,
         )
+        # Tracked so tests can JOIN it before tempdir teardown -- a
+        # daemon write racing shutil.rmtree was a recurring test flake.
+        self.led_worker_thread = thread
         thread.start()
 
     def has_connected_physical_device(self) -> bool:
@@ -5052,6 +5116,44 @@ def daily_tip() -> tuple[str, str | None]:
     # Local calendar day: the tip changes overnight, like a calendar page.
     day = datetime.now().timetuple().tm_yday
     return DAILY_TIPS[day % len(DAILY_TIPS)]
+
+
+def menu_content_signature(snapshot, state, target) -> tuple:
+    """Everything the dropdown renders, hashed coarsely. Ages bucket to
+    the minute (rows show "4m"), and a 30s monotonic bucket is a safety
+    valve: anything this signature misses self-heals within 30s."""
+    now = snapshot.collected_at
+    def row(status):
+        return (
+            status.agent_id,
+            status.mode.value,
+            status.display_name,
+            int(status.age_seconds(now) // 60),
+        )
+
+    devices = tuple(
+        (
+            device.device_id,
+            device.connected,
+            device.display,
+            round(float(device.brightness), 1),
+        )
+        for device in target.status_bar_devices(remember=False)
+    )
+    return (
+        state.label,
+        tuple(row(status) for status in ask_statuses(snapshot)),
+        tuple(row(status) for status in recent_statuses(snapshot)),
+        tuple(
+            tuple(row(child) for child in children)
+            for children in active_subagents_by_parent(snapshot).values()
+        ),
+        devices,
+        round(target.timer_fill_fraction(), 2) if target.timebox_active() else None,
+        target.settings.closed_lid_awake_policy,
+        target.closed_lid_awake.last_error,
+        int(time.monotonic() // 30),
+    )
 
 
 def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> NSMenu:

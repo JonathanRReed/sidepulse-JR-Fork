@@ -947,14 +947,21 @@ class AgentMonitorTests(unittest.TestCase):
             ((850.0, 1075.0), (220.0, 5.0)),
         )
 
-    def test_virtual_screen_bar_redraws_at_60fps(self) -> None:
+    def test_virtual_screen_bar_frame_rate_contract(self) -> None:
+        # 30fps base (the ~90ms smoothing makes it visually identical to
+        # 60 for glow motion, at half the WASM+draw cost), dropping to a
+        # low idle rate after a second of identical frames.
         try:
             from sidepulse import virtual_device
         except (ImportError, SystemExit) as exc:
             self.skipTest(str(exc))
 
-        self.assertEqual(virtual_device.FRAME_RATE, 60.0)
-        self.assertAlmostEqual(virtual_device.FRAME_INTERVAL, 1.0 / 60.0)
+        self.assertEqual(virtual_device.FRAME_RATE, 30.0)
+        self.assertAlmostEqual(virtual_device.FRAME_INTERVAL, 1.0 / 30.0)
+        self.assertLess(virtual_device.IDLE_FRAME_RATE, virtual_device.FRAME_RATE)
+        self.assertLessEqual(
+            virtual_device.TARGET_SAMPLE_INTERVAL_VIEW_CONTRACT, 1.0 / 10.0
+        )
 
     def test_compact_mode_keeps_the_same_frame_as_normal_mode(self) -> None:
         # Alcove compatibility changes drawing style, not position -- an
@@ -7235,6 +7242,16 @@ def isolate_controller(case, *, build_controller=True):
     """
     tmp = tempfile.TemporaryDirectory()
     case.addCleanup(tmp.cleanup)
+
+    def _join_led_worker():
+        controller = getattr(case, "controller", None)
+        worker = getattr(controller, "led_worker_thread", None) if controller else None
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=5.0)
+
+    # Cleanups run LIFO: the worker join runs BEFORE tmp.cleanup, so a
+    # daemon LED write can never race shutil.rmtree (a real flake).
+    case.addCleanup(_join_led_worker)
     case._tmp = tmp
     case._settings_path = Path(tmp.name) / "settings.json"
     for target in (

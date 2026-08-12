@@ -94,7 +94,18 @@ LED_GLOW_HEIGHT = 11.0
 LED_CORE_BOOST = 1.22
 LED_HOTLINE_BOOST = 1.46
 LED_GAMMA = 0.86
-FRAME_RATE = 60.0
+# 30, not 60: each frame costs a JavaScriptCore WASM step plus the
+# 4-layer glow fill, and the ~90ms exponential smoothing in
+# _colors_for_draw makes 30fps visually identical for glow-blob motion.
+# Measured: the active-animation CPU cost is roughly linear in this.
+FRAME_RATE = 30.0
+# After a second of visually identical frames the timer drops to this
+# rate; any changed frame (or a new program) restores full rate. A
+# static program burned 60 Python+WASM ticks per second for nothing.
+IDLE_FRAME_RATE = 10.0
+IDLE_AFTER_STATIC_FRAMES = int(FRAME_RATE)
+# Mirrored module-level for the frame-rate contract test.
+TARGET_SAMPLE_INTERVAL_VIEW_CONTRACT = 1.0 / 15.0
 FRAME_INTERVAL = 1.0 / FRAME_RATE
 # Re-run reposition (Alcove tracking, churn-guarded) about every 2s.
 REPOSITION_EVERY_N_FRAMES = int(FRAME_RATE * 2)
@@ -643,7 +654,22 @@ class VirtualLedView(NSView):
         ]
         return self._smoothed_colors
 
+    # The WASM engine is sampled at this rate; _colors_for_draw's ~90ms
+    # low-pass interpolates between samples, so painting outpaces
+    # stepping without visible stepping. Also dedups the 2-3 calls the
+    # bar + riser draw paths make within one frame.
+    TARGET_SAMPLE_INTERVAL = 1.0 / 15.0
+
     def _target_colors_for_draw(self):
+        now = time.monotonic()
+        cached = getattr(self, "_target_sample", None)
+        if cached is not None and now - cached[0] < self.TARGET_SAMPLE_INTERVAL:
+            return cached[1]
+        colors = self._compute_target_colors()
+        self._target_sample = (now, colors)
+        return colors
+
+    def _compute_target_colors(self):
         if self.fixed_colors is not None:
             return self.fixed_colors
         if self.current_program is not None and self._ensure_wasm_controller():
@@ -1033,19 +1059,26 @@ class VirtualStatusDevice(NSObject):
         self.gap_width_override = gap_width
         self.wing_length_override = wing_length
 
+    def _install_frame_timer(self, interval: float) -> None:
+        if self.timer is not None:
+            self.timer.invalidate()
+        self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            interval, self, "redraw:", None, True
+        )
+        # Common modes too: a timer only in the default mode PAUSES
+        # during menu tracking and window drags -- every opened menu
+        # visibly froze the pulse mid-breath ("glitchy at times").
+        NSRunLoop.currentRunLoop().addTimer_forMode_(self.timer, NSRunLoopCommonModes)
+        self._frame_interval_current = interval
+
     def show(self):
         if self.window is None:
             self._build_window()
         self.reposition()
         self.window.orderFrontRegardless()
         if self.timer is None:
-            self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                FRAME_INTERVAL, self, "redraw:", None, True
-            )
-            # Common modes too: a timer only in the default mode PAUSES
-            # during menu tracking and window drags -- every opened menu
-            # visibly froze the pulse mid-breath ("glitchy at times").
-            NSRunLoop.currentRunLoop().addTimer_forMode_(self.timer, NSRunLoopCommonModes)
+            self._install_frame_timer(FRAME_INTERVAL)
+            self._static_frame_count = 0
 
     def hide(self):
         if self.timer is not None:
@@ -1071,6 +1104,14 @@ class VirtualStatusDevice(NSObject):
     def set_program(self, program: str, *, started_at: float | None = None):
         self.show()
         self.view.setProgram_startedAt_(program, started_at)
+        # A new program means motion may be coming -- restore full rate
+        # immediately rather than waiting for a changed frame at 10Hz.
+        self._static_frame_count = 0
+        if (
+            self.timer is not None
+            and getattr(self, "_frame_interval_current", FRAME_INTERVAL) != FRAME_INTERVAL
+        ):
+            self._install_frame_timer(FRAME_INTERVAL)
 
     def reposition(self):
         screen = NSScreen.mainScreen()
@@ -1177,6 +1218,19 @@ class VirtualStatusDevice(NSObject):
             if painted is None or painted != getattr(self, "_last_marked_colors", None):
                 self._last_marked_colors = painted
                 view.setNeedsDisplay_(True)
+                self._static_frame_count = 0
+                if getattr(self, "_frame_interval_current", FRAME_INTERVAL) != FRAME_INTERVAL:
+                    # Motion returned -- full frame rate.
+                    self._install_frame_timer(FRAME_INTERVAL)
+            else:
+                self._static_frame_count = getattr(self, "_static_frame_count", 0) + 1
+                if (
+                    self._static_frame_count >= IDLE_AFTER_STATIC_FRAMES
+                    and getattr(self, "_frame_interval_current", FRAME_INTERVAL)
+                    == FRAME_INTERVAL
+                    and self.timer is not None
+                ):
+                    self._install_frame_timer(1.0 / IDLE_FRAME_RATE)
         # Alcove's overlay resizes as live activities come and go; track
         # it by re-running the (cheap, churn-guarded) reposition about
         # every two seconds rather than only on screen changes.
