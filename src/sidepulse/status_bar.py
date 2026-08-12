@@ -958,14 +958,22 @@ class StatusBarController(NSObject):
                     )
                     percents["Codex weekly"] = float(primary["used_percent"])
                 codex_line = " \u00b7 ".join(codex_parts) if codex_parts else None
-                buckets = usage_stats.daily_buckets(totals.records)
+                graph_days = self.settings.usage_graph_days
+                buckets = usage_stats.daily_buckets(totals.records, days=graph_days)
+                label_stride = max(1, graph_days // 7)
                 day_bars = [
                     {
-                        "label": day[5:].replace("-", "/"),
+                        # Sparse labels at long ranges -- a year of 365
+                        # date stamps is noise, not an axis.
+                        "label": (
+                            day[5:].replace("-", "/")
+                            if index % label_stride == 0
+                            else ""
+                        ),
                         "claude_cost": bucket["claude_cost"],
                         "codex_tokens": bucket["codex_tokens"],
                     }
-                    for day, bucket in buckets.items()
+                    for index, (day, bucket) in enumerate(buckets.items())
                 ]
                 hourly = usage_stats.hourly_session_counts(totals.records)
                 plan_line = None
@@ -1926,6 +1934,20 @@ class StatusBarController(NSObject):
             "Resting glow off." if fraction <= 0.004 else f"Resting glow: {round(fraction * 100)}%."
         )
         self.refresh_(None)
+
+    @objc.IBAction
+    def setUsageGraphRange_(self, sender):
+        item = sender.selectedItem()
+        if item is None:
+            return
+        try:
+            self.settings = self.settings.with_usage_graph_days(int(item.representedObject()))
+        except (TypeError, ValueError):
+            return
+        save_settings(self.settings)
+        # Rescan now -- the warm cache makes a year-range rebuild cheap.
+        self._usage_refreshed_at = 0.0
+        self.maybe_refresh_usage_summary()
 
     @objc.IBAction
     def toggleQuotaAlerts_(self, sender):
@@ -6591,6 +6613,23 @@ def _build_profile_pane(target: StatusBarController):
     native_ui.constrain_height(graph, 120.0)
     today_inner.addArrangedSubview_(graph)
     fields["profile_usage_graph"] = graph
+    range_popup = native_ui.make_popup_button(target, "setUsageGraphRange:")
+    for range_label, range_days in (
+        ("7 days", 7),
+        ("30 days", 30),
+        ("90 days", 90),
+        ("Year", 365),
+    ):
+        range_popup.addItemWithTitle_(range_label)
+        item = range_popup.lastItem()
+        item.setRepresentedObject_(range_days)
+        if range_days == target.settings.usage_graph_days:
+            range_popup.selectItem_(item)
+    fields["usage_graph_range_popup"] = range_popup
+    range_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    range_row.addArrangedSubview_(range_popup)
+    range_row.addArrangedSubview_(native_ui.make_hspacer())
+    today_inner.addArrangedSubview_(range_row)
     legend = native_ui.make_label(
         "\u25a0 Claude spend \u00b7 \u25a0 Codex tokens \u00b7 last 7 days; "
         "bottom strip = today's sessions by hour",

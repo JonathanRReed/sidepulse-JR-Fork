@@ -306,6 +306,7 @@ class AgentMonitorSettings:
     # macOS prompt, so this must never default on.
     claude_plan_limits_enabled: bool = False
     quota_alerts_enabled: bool = False
+    usage_graph_days: int = 7
     quota_alert_thresholds: tuple[float, ...] = (75.0, 90.0)
     dismissed_tips: tuple[str, ...] = ()
     # Per-Focus dim rules, keyed by the Focus mode identifier (e.g.
@@ -689,6 +690,11 @@ class AgentMonitorSettings:
     def with_idle_dim_fraction(self, fraction: float) -> AgentMonitorSettings:
         return replace(self, idle_dim_fraction=normalize_idle_dim_fraction(fraction))
 
+    def with_usage_graph_days(self, days: int) -> AgentMonitorSettings:
+        if int(days) not in (7, 30, 90, 365):
+            raise ValueError("graph range is 7, 30, 90 or 365 days")
+        return replace(self, usage_graph_days=int(days))
+
     def with_quota_alerts_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, quota_alerts_enabled=bool(enabled))
 
@@ -1006,6 +1012,7 @@ class AgentMonitorSettings:
             "screen_bar_min_glow": self.screen_bar_min_glow,
             "claude_plan_limits_enabled": self.claude_plan_limits_enabled,
             "quota_alerts_enabled": self.quota_alerts_enabled,
+            "usage_graph_days": self.usage_graph_days,
             "quota_alert_thresholds": list(self.quota_alert_thresholds),
             "dismissed_tips": list(self.dismissed_tips),
             "focus_dim_rules": dict(sorted(self.focus_dim_rules.items())),
@@ -1248,6 +1255,11 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             data.get("claude_plan_limits_enabled"), False
         ),
         quota_alerts_enabled=_bool_setting(data.get("quota_alerts_enabled"), False),
+        usage_graph_days=(
+            int(data.get("usage_graph_days"))
+            if data.get("usage_graph_days") in (7, 30, 90, 365)
+            else 7
+        ),
         quota_alert_thresholds=_quota_thresholds_setting(
             data.get("quota_alert_thresholds")
         ),

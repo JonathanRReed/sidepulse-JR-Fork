@@ -9171,6 +9171,25 @@ class ClaudeQuotaTests(unittest.TestCase):
         self.assertEqual(windows_from_payload("nope"), [])
 
 
+class UsageGraphRangeTests(unittest.TestCase):
+    def test_range_validation_and_round_trip(self) -> None:
+        from sidepulse.settings import AgentMonitorSettings, load_settings, save_settings
+
+        configured = AgentMonitorSettings().with_usage_graph_days(365)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            self.assertEqual(load_settings(path).usage_graph_days, 365)
+        with self.assertRaises(ValueError):
+            AgentMonitorSettings().with_usage_graph_days(14)
+
+    def test_daily_buckets_scale_to_a_year(self) -> None:
+        from sidepulse import usage_stats
+
+        buckets = usage_stats.daily_buckets([], days=365)
+        self.assertEqual(len(buckets), 365)
+
+
 class ContextLidAnimationTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_controller(self)
