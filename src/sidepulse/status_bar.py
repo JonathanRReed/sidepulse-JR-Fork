@@ -302,6 +302,9 @@ STATUS_BAR_DEVICE_POLL_SECONDS = 2.0
 # Event-driven refreshes run at most this often; bursts coalesce into
 # one trailing refresh. Direct refresh_(None) calls stay synchronous.
 EVENT_REFRESH_FLOOR_SECONDS = 0.25
+# A completion may only ring/sweep while this fresh; older ones repaint
+# without celebrating (T3's TERMINAL_NOTIFICATION_FRESHNESS).
+COMPLETION_NOTIFY_FRESHNESS_SECONDS = 120.0
 # ioreg is a subprocess fork on the main thread and refresh_ runs on
 # every hook event; power-state changes may lag by up to this TTL.
 BATTERY_SNAPSHOT_CACHE_SECONDS = 5.0
@@ -900,6 +903,18 @@ class StatusBarController(NSObject):
         menu = build_menu(snapshot, state, self)
         menu.setDelegate_(self)
         self.status_item.setMenu_(menu)
+
+    def release_preview_engines(self) -> None:
+        """Drop the thumbnail views' WASM engines when settings closes
+        -- dozens of live JavaScriptCore contexts are pure RSS while the
+        window is gone; they rebuild lazily on next open."""
+        groups = list(getattr(self, "colors_animation_thumbs", {}).values())
+        singles = getattr(self, "lid_animation_thumbs", {})
+        for thumbs in groups:
+            for thumb in thumbs.values():
+                thumb.wasm_controller = None
+        for thumb in singles.values():
+            thumb.wasm_controller = None
 
     def menuWillOpen_(self, _menu):
         self.status_menu_open = True
@@ -1694,6 +1709,13 @@ class StatusBarController(NSObject):
         self.refresh_(None)
 
     @objc.IBAction
+    def toggleMenuBarLabel_(self, sender):
+        self.settings = self.settings.with_menu_bar_label_enabled(checkbox_is_on(sender))
+        save_settings(self.settings)
+        self.set_status(self.current_state, ask_count=self.current_ask_count)
+        self.refresh_(None)
+
+    @objc.IBAction
     def disableTips_(self, _sender):
         self.settings = self.settings.with_tips_enabled(False)
         save_settings(self.settings)
@@ -2137,10 +2159,22 @@ class StatusBarController(NSObject):
             AgentMode.WAITING_FOR_INPUT,
             AgentMode.BLOCKED_ERROR,
         )
+        statuses_by_id = {
+            status.agent_id: status
+            for status in (statuses or ())
+            if status.agent_id and not status.is_subagent
+        }
         finished = [
             agent_id
             for agent_id, mode in current_modes.items()
-            if mode == AgentMode.COMPLETED and previous_modes.get(agent_id) in active_before
+            if mode == AgentMode.COMPLETED
+            and previous_modes.get(agent_id) in active_before
+            # T3's freshness window: only a completion under 2 minutes
+            # old may CELEBRATE -- replayed transcripts and restarts
+            # repaint silently. (Display visibility is a separate,
+            # longer clock: COMPLETED_VISIBLE_SECONDS in collector.)
+            and statuses_by_id[agent_id].age_seconds()
+            <= COMPLETION_NOTIFY_FRESHNESS_SECONDS
         ]
         if not finished:
             return
@@ -2401,11 +2435,18 @@ class StatusBarController(NSObject):
             return
         # The badge: with several sessions waiting at once, the count is
         # the difference between "check sometime" and "two are stuck".
-        title = f" {state.label} ({ask_count})" if ask_count >= 2 else f" {state.label}"
+        if getattr(self.settings, "menu_bar_label_enabled", False):
+            title = (
+                f" {state.label} ({ask_count})" if ask_count >= 2 else f" {state.label}"
+            )
+        else:
+            # Icon-only, like native menu extras -- the symbol carries the
+            # state; text appears only when it MEANS something (a count).
+            title = f" ({ask_count})" if ask_count >= 2 else ""
         if done_badge and ask_count == 0:
             # "Something finished since you last looked" -- cleared the
             # moment the menu opens (the T3 lastVisitedAt read model).
-            title = f"{title} \u2713"
+            title = f"{title} \u2713" if title else " \u2713"
         button.setTitle_(title)
         button.setImage_(image_for_symbol(state.symbol, state.label))
         button.setToolTip_(f"SidePulse Agent Monitor: {state.label}")
@@ -2797,6 +2838,7 @@ class StatusBarController(NSObject):
     def animate_colors_preview_once(self) -> None:
         if self.settings_window is None or not self.settings_window.isVisible():
             self.stop_colors_preview_animation()
+            self.release_preview_engines()
             return
         now_ms = monotonic_ms()
         for row in self.color_preview_rows:
@@ -7128,6 +7170,18 @@ def _build_agents_pane(target: StatusBarController):
     provider's sessions."""
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
 
+    bar_outer, bar_inner = native_ui.make_card("Menu Bar")
+    label_row, label_switch = native_ui.make_switch_row(
+        "Show status text next to the icon",
+        target,
+        "toggleMenuBarLabel:",
+        help_text=(
+            "Off keeps SidePulse icon-only like native menu extras; a "
+            "count or check still appears when something needs you."
+        ),
+    )
+    bar_inner.addArrangedSubview_(label_row)
+    stack.addArrangedSubview_(bar_outer)
     hooks_outer, hooks_inner = native_ui.make_card("Hooks")
     fields: dict[str, object] = {}
     for index, provider in enumerate(HOOK_PROVIDERS):

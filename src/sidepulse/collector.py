@@ -38,6 +38,10 @@ TRANSCRIPT_FILE_LIST_CACHE_SECONDS = 45.0
 # re-serialized on every hook event.
 STATUS_RETENTION_SECONDS = 24 * 3600.0
 LATEST_STATE_WRITE_INTERVAL_SECONDS = 1.0
+# Transcript-derived detail text is capped before it reaches any UI
+# surface (T3 caps at 160 and redacts -- long tool output in a menu row
+# or notification is noise at best and a leak at worst).
+DETAIL_TEXT_CAP = 160
 CLAUDE_TRANSCRIPT_MTIME_HEARTBEAT_SKEW_SECONDS = 30.0
 CODEX_SESSION_INDEX_MAX_LINES = 5000
 COMPLETED_VISIBLE_SECONDS = 20 * 60.0
@@ -1060,6 +1064,15 @@ def update_metadata(metadata: StatusMetadata, record: HookEvent) -> None:
         metadata.origin = origin
 
 
+def _capped_detail(text: str | None) -> str | None:
+    if not isinstance(text, str):
+        return text
+    stripped = text.strip()
+    if len(stripped) <= DETAIL_TEXT_CAP:
+        return stripped
+    return stripped[: DETAIL_TEXT_CAP - 1] + "\u2026"
+
+
 def status_from_event(record: HookEvent, metadata: StatusMetadata | None = None) -> AgentStatus | None:
     mode = mode_for_event(record)
     if mode is None:
@@ -1090,7 +1103,7 @@ def status_from_event(record: HookEvent, metadata: StatusMetadata | None = None)
         session_id=record.session_id,
         cwd=record.cwd,
         tool_name=record.tool_name,
-        message=record.message,
+        message=_capped_detail(record.message),
         origin=record.origin or metadata.origin or origin_label_from_payload(record.provider, record.raw),
     )
 

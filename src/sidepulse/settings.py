@@ -269,6 +269,7 @@ class AgentMonitorSettings:
     # look "broken" (no visible effect) for anyone who hasn't done that.
     focus_sync_enabled: bool = False
     tips_enabled: bool = True
+    menu_bar_label_enabled: bool = False
     dismissed_tips: tuple[str, ...] = ()
     # Per-Focus dim rules, keyed by the Focus mode identifier (e.g.
     # "com.apple.donotdisturb.mode.default"): 1.0 = don't dim, 0.0 = LEDs
@@ -636,6 +637,9 @@ class AgentMonitorSettings:
     def with_idle_dim_fraction(self, fraction: float) -> AgentMonitorSettings:
         return replace(self, idle_dim_fraction=normalize_idle_dim_fraction(fraction))
 
+    def with_menu_bar_label_enabled(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, menu_bar_label_enabled=bool(enabled))
+
     def with_tips_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, tips_enabled=bool(enabled))
 
@@ -904,6 +908,7 @@ class AgentMonitorSettings:
             "idle_dim_fraction": self.idle_dim_fraction,
             "focus_sync_enabled": self.focus_sync_enabled,
             "tips_enabled": self.tips_enabled,
+            "menu_bar_label_enabled": self.menu_bar_label_enabled,
             "dismissed_tips": list(self.dismissed_tips),
             "focus_dim_rules": dict(sorted(self.focus_dim_rules.items())),
         }
@@ -1127,6 +1132,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         focus_sync_enabled=_bool_setting(data.get("focus_sync_enabled"), False),
         tips_enabled=_bool_setting(data.get("tips_enabled"), True),
+        menu_bar_label_enabled=_bool_setting(data.get("menu_bar_label_enabled"), False),
         dismissed_tips=tuple(
             str(item)
             for item in (data.get("dismissed_tips") or [])
