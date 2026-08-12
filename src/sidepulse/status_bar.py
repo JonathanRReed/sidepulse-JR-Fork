@@ -81,6 +81,7 @@ from . import (
     native_ui,
     notification_watch,
     reminders_watch,
+    usage_stats,
     weather_watch,
 )
 from . import colors as colors_module
@@ -860,6 +861,7 @@ class StatusBarController(NSObject):
         self.track_ask_blocked(snapshot.statuses)
         self.track_working(snapshot.statuses)
         self.track_completions(snapshot.statuses)
+        self.maybe_refresh_usage_summary()
         # A cleared session stays cleared until it comes back to LIFE --
         # removing only reactivated ids (rather than intersecting with
         # the currently-completed set) keeps a clear stable across the
@@ -903,6 +905,62 @@ class StatusBarController(NSObject):
         menu = build_menu(snapshot, state, self)
         menu.setDelegate_(self)
         self.status_item.setMenu_(menu)
+
+    def maybe_refresh_usage_summary(self) -> None:
+        """Recompute the "Claude today" line on a worker thread at most
+        every 5 minutes -- the scan is warm-cache cheap (T3's per-file
+        cache) but never belongs on the main thread."""
+        now = time.monotonic()
+        if getattr(self, "_usage_refresh_in_flight", False):
+            return
+        if now - getattr(self, "_usage_refreshed_at", 0.0) < 300.0:
+            return
+        self._usage_refresh_in_flight = True
+
+        def _work():
+            try:
+                midnight = datetime.now().replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                totals = usage_stats.scan_usage(
+                    Path.home() / ".claude" / "projects",
+                    default_state_dir() / "usage-scan-cache.json",
+                    since_epoch=midnight.timestamp(),
+                )
+                line = usage_stats.usage_summary_line(totals)
+                detail = (
+                    f"{totals.input_tokens:,} in \u00b7 "
+                    f"{totals.cached_input_tokens:,} cached \u00b7 "
+                    f"{totals.output_tokens:,} out"
+                    if totals.sessions
+                    else None
+                )
+            except Exception as exc:
+                log_status_bar(f"usage scan error: {exc}")
+                line = None
+                detail = None
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "applyUsageSummary:", (line, detail), False
+            )
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    @objc.IBAction
+    def applyUsageSummary_(self, payload):
+        self._usage_refresh_in_flight = False
+        self._usage_refreshed_at = time.monotonic()
+        line = payload[0] if payload else None
+        detail = payload[1] if payload and len(payload) > 1 else None
+        self.usage_detail_text = detail
+        if line != getattr(self, "usage_summary_text", None):
+            self.usage_summary_text = line
+            self._menu_signature = None
+        usage_label = self.settings_fields.get("profile_usage_label") if getattr(self, "settings_fields", None) else None
+        if usage_label is not None:
+            usage_label.setStringValue_(line or "No Claude activity yet today.")
+        detail_label = self.settings_fields.get("profile_usage_detail") if getattr(self, "settings_fields", None) else None
+        if detail_label is not None:
+            detail_label.setStringValue_(detail or "")
 
     def release_preview_engines(self) -> None:
         """Drop the thumbnail views' WASM engines when settings closes
@@ -1707,6 +1765,15 @@ class StatusBarController(NSObject):
         save_settings(self.settings)
         self._menu_signature = None
         self.refresh_(None)
+
+    @objc.IBAction
+    def openProjectPage_(self, _sender):
+        from AppKit import NSWorkspace
+        from Foundation import NSURL
+
+        NSWorkspace.sharedWorkspace().openURL_(
+            NSURL.URLWithString_("https://github.com/JonathanRReed/sidepulse-JR-Fork")
+        )
 
     @objc.IBAction
     def toggleMenuBarLabel_(self, sender):
@@ -5641,14 +5708,6 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     setup.setTarget_(target)
     menu.addItem_(setup)
 
-    colors_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Customize Colors...",
-        "openColorsWindow:",
-        "",
-    )
-    colors_item.setTarget_(target)
-    menu.addItem_(colors_item)
-
     settings = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         "Settings...",
         "openSettings:",
@@ -6101,6 +6160,7 @@ def format_byte_count(size: int) -> str:
 # nine-pane split left several panes holding two controls in an
 # otherwise empty window.
 SETTINGS_SIDEBAR_ITEMS: tuple[tuple[str, str], ...] = (
+    ("profile", "Profile"),
     ("devices", "Devices"),
     ("color_studio", "Color Studio"),
     ("colors_screen_bar", "Screen Bar"),
@@ -6112,6 +6172,68 @@ SETTINGS_SIDEBAR_ITEMS: tuple[tuple[str, str], ...] = (
     ("studio", "Studio"),
     ("debug", "Debug"),
 )
+
+
+def _build_profile_pane(target: StatusBarController):
+    """You: today's usage (the T3-exact math), and what this app is --
+    stats and about get one calm home instead of crowding the dropdown."""
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    fields: dict[str, object] = {}
+
+    today_outer, today_inner = native_ui.make_card("Today")
+    usage_label = native_ui.make_label(
+        getattr(target, "usage_summary_text", None) or "No Claude activity yet today.",
+        size=13.0,
+    )
+    today_inner.addArrangedSubview_(usage_label)
+    fields["profile_usage_label"] = usage_label
+    detail_label = native_ui.make_label(
+        getattr(target, "usage_detail_text", None) or "", secondary=True, size=11.0
+    )
+    today_inner.addArrangedSubview_(detail_label)
+    fields["profile_usage_detail"] = detail_label
+    today_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Costs use Anthropic list rates; cached reads bill at a tenth "
+            "of the uncached rate -- \u201csaved with caching\u201d is that "
+            "difference. Counted once per message, so resumed sessions "
+            "never double-count.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    stack.addArrangedSubview_(today_outer)
+
+    about_outer, about_inner = native_ui.make_card("About")
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        app_version = _pkg_version("sidepulse")
+    except Exception:
+        app_version = "dev"
+    about_inner.addArrangedSubview_(
+        native_ui.make_label(f"SidePulse {app_version}", size=13.0)
+    )
+    about_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Your agents, at a glance \u2014 as light. Watches Claude Code, "
+            "Codex, Devin and friends; shows their state on SidePulse LED "
+            "devices and the Screen Bar.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    link_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    link_row.addArrangedSubview_(
+        native_ui.make_button("Project Page", target, "openProjectPage:")
+    )
+    link_row.addArrangedSubview_(native_ui.make_hspacer())
+    about_inner.addArrangedSubview_(link_row)
+    stack.addArrangedSubview_(about_outer)
+
+    return native_ui.wrap_in_scroll_pane(stack), fields
 
 
 def _build_devices_pane(target: StatusBarController):
@@ -7498,6 +7620,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         ]
     )
 
+    profile_pane, profile_fields = _build_profile_pane(target)
     devices_pane, device_controls = _build_devices_pane(target)
     colors_pane, colors_fields, colors_buttons = _build_colors_screen_bar_pane(target)
     agents_pane, agents_fields, agents_buttons = _build_agents_pane(target)
@@ -7509,6 +7632,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     debug_pane, debug_fields = _build_debug_pane(target)
 
     panes = {
+        "profile": profile_pane,
         "devices": devices_pane,
         "color_studio": _build_color_studio_pane(target),
         "colors_screen_bar": colors_pane,
@@ -7543,6 +7667,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         **power_fields,
         **led_behavior_fields,
         **focus_fields,
+        **profile_fields,
         "message": message,
     }
     target.settings_buttons = {

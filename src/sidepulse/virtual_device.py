@@ -793,8 +793,17 @@ class VirtualLedView(NSView):
         lit -- multi-agent blends have rest glow everywhere, so the
         ripple reads -- and identity otherwise."""
         style = getattr(self, "bracket_style", "auto")
-        lit = sum(1 for c in colors if max(c[0], c[1], c[2], c[3]) > 0.004)
-        if style == "spatial" or (style == "auto" and lit >= 2):
+        # Threshold 0.0008, not 0.004: Relay's resting LEDs glow at ~1%
+        # (right AT the old threshold), so auto flickered between
+        # spatial and identity as the spotlight moved -- and identity's
+        # alpha-weighted blend follows the spotlight, which read as the
+        # bar "cycling between colors, not adhering to Relay".
+        lit = sum(1 for c in colors if max(c[0], c[1], c[2], c[3]) > 0.0008)
+        now = time.monotonic()
+        if lit >= 2:
+            self._bracket_spatial_hold_until = now + 2.0
+        spatial_held = now < getattr(self, "_bracket_spatial_hold_until", 0.0)
+        if style == "spatial" or (style == "auto" and (lit >= 2 or spatial_held)):
             return list(colors)
         return [self._bar_identity_color(colors)] * LED_COUNT
 

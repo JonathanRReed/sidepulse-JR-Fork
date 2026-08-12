@@ -1302,6 +1302,12 @@ class AgentMonitorTests(unittest.TestCase):
         crowd = [(0.2, 0.5, 1.0, 1.0), (1.0, 0.4, 0.7, 1.0)] + [(0.05, 0.02, 0.02, 0.05)] * 6
         self.assertEqual(view._bracket_colors(crowd), crowd)
         lone = [(0.2, 0.5, 1.0, 1.0)] + [(0.0, 0.0, 0.0, 0.0)] * 7
+        # Hysteresis: right after a crowd frame, a briefly-dark frame
+        # STAYS spatial -- Relay's resting glow sits at the lit
+        # threshold and flickering to identity made the bar "cycle
+        # between colors" as the spotlight moved.
+        self.assertEqual(view._bracket_colors(lone), lone)
+        view._bracket_spatial_hold_until = 0.0
         collapsed = view._bracket_colors(lone)
         self.assertEqual(len(set(collapsed)), 1)
         # Explicit styles override auto in both directions.
@@ -9133,6 +9139,94 @@ class SubagentAndPhantomAskTests(unittest.TestCase):
             title for title, level in rows if level == 0 and "claude:agent:" in title
         ]
         self.assertEqual(top_level_subs, [])
+
+
+class UsageStatsTests(unittest.TestCase):
+    """The T3-exact usage pipeline: substring gate, global first-seen
+    dedupe, per-file persisted cache, cost + cache-savings math."""
+
+    def _write_transcript(self, root, name, rows):
+        path = root / "proj" / f"{name}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        return path
+
+    def _assistant_row(self, message_id, *, model="claude-sonnet-5", inp=1000, cached=0, out=500):
+        return {
+            "type": "assistant",
+            "timestamp": "2026-08-11T12:00:00Z",
+            "message": {
+                "id": message_id,
+                "model": model,
+                "usage": {
+                    "input_tokens": inp,
+                    "cache_read_input_tokens": cached,
+                    "cache_creation_input_tokens": 0,
+                    "output_tokens": out,
+                },
+            },
+        }
+
+    def test_repeated_usage_blocks_count_once(self) -> None:
+        from sidepulse import usage_stats
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # The same message id appears twice in one file AND again in a
+            # forked session file -- T3's ~2.4x overcount bug class.
+            self._write_transcript(
+                root, "a", [self._assistant_row("msg_1"), self._assistant_row("msg_1")]
+            )
+            self._write_transcript(root, "b", [self._assistant_row("msg_1")])
+            totals = usage_stats.scan_usage(root, None)
+            self.assertEqual(totals.input_tokens, 1000)
+            self.assertEqual(totals.output_tokens, 500)
+
+    def test_cost_and_cache_savings_math(self) -> None:
+        from sidepulse import usage_stats
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_transcript(
+                root,
+                "a",
+                [self._assistant_row("msg_1", inp=1_000_000, cached=1_000_000, out=0)],
+            )
+            totals = usage_stats.scan_usage(root, None)
+            # 1M uncached at $3 + 1M cached at $0.30.
+            self.assertAlmostEqual(totals.cost_usd, 3.30, places=2)
+            # Savings: the cached MTok would have cost $3, paid $0.30.
+            self.assertAlmostEqual(totals.cache_savings_usd, 2.70, places=2)
+
+    def test_cache_warm_scan_matches_cold_and_survives_corruption(self) -> None:
+        from sidepulse import usage_stats
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = Path(tmp) / "cache.json"
+            self._write_transcript(root, "a", [self._assistant_row("msg_1")])
+            cold = usage_stats.scan_usage(root, cache)
+            self.assertTrue(cache.exists())
+            warm = usage_stats.scan_usage(root, cache)
+            self.assertEqual(cold.input_tokens, warm.input_tokens)
+            self.assertEqual(cold.sessions, warm.sessions)
+            cache.write_text("{corrupt")
+            recovered = usage_stats.scan_usage(root, cache)
+            self.assertEqual(recovered.input_tokens, cold.input_tokens)
+
+    def test_summary_line_shapes(self) -> None:
+        from sidepulse import usage_stats
+
+        empty = usage_stats.UsageTotals()
+        self.assertIsNone(usage_stats.usage_summary_line(empty))
+        totals = usage_stats.UsageTotals()
+        totals.sessions.add("s1")
+        totals.cost_usd = 1.5
+        totals.cache_savings_usd = 4.0
+        line = usage_stats.usage_summary_line(totals)
+        self.assertIn("1 session", line)
+        self.assertIn("$1.50", line)
+        self.assertIn("saved $4.00", line)
 
 
 class T3AdoptionTests(unittest.TestCase):
