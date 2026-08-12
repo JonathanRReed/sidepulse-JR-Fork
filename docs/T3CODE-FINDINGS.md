@@ -177,3 +177,139 @@ full), #3's color audit as a design pass.
 5. **Session mute with raised-hand wake** (#6).
 6. **Settle/Clear lifecycle** (#7) and **Plan Ready** (#9) as the
    bigger follow-ons.
+
+
+---
+
+# Round 2 findings (2026-08-11, second pass)
+
+Areas not covered in round 1: notification/alerting craft, transcript
+scan performance, provider snapshots, desktop window mechanics, stats,
+theming. Same source @ `5a84614`.
+
+## R2-1. Only phase TRANSITIONS alert, never state repaints
+
+Every push decision diffs against the previously DELIVERED aggregate
+(`infra/relay/src/agentActivity/ApnsDeliveries.ts:181-275`): a thread
+rings only when it ENTERS attention or newly crosses into
+completed/failed; a null previous state (fresh registration, replay)
+alerts nothing — "alerting there would buzz on reconnect, not on a
+transition."
+**Adopt:** gate LED flashes/sweeps on a per-session phase diff against
+the last RENDERED state so restarts and JSONL replays can never fire a
+phantom "done".
+
+## R2-2. Two clocks: a 2-minute may-notify window, a 15-minute display TTL
+
+`TERMINAL_NOTIFICATION_FRESHNESS_MS = 2min` (only fresh completions may
+buzz) vs `TERMINAL_AGENT_ACTIVITY_DISPLAY_TTL_MS = 15min` (a Done row
+stays VISIBLE while other agents run) — `ApnsDeliveries.ts:331`,
+`AgentActivityPublisher.ts:230-232`.
+**Adopt:** split our single completed_visible window into those two
+distinct clocks.
+
+## R2-3. Per-event notification switches + coalescing
+
+Four independent toggles (approval/input/completion/failure), unknown
+phases can never alert, prefs fail OPEN; simultaneous events collapse
+into "N agents need attention" (`ApnsDeliveries.ts:156-210`).
+**Adopt:** per-event signal switches and one coalesced moment when
+several agents fire together.
+
+## R2-4. Publish-identity dedup excludes timestamps
+
+State minus updatedAt is stringified and compared before publishing
+(`AgentAwarenessRelay.ts:96-102, 417-445`); message-sent events are
+deliberately NOT published because the shell still holds the previous
+turn's terminal state.
+**Adopt:** hash meaningful state (mode, flags — no timestamps) per
+session; never emit UI state from user-message events.
+
+## R2-5. Race-tolerant Done detection
+
+`interrupted` WITH a completedAt counts as completed (teardown races
+the write); a ready/idle session with nothing pending and no turn row
+is also Done; failure detail text is capped at 160 chars and redacted
+(`packages/shared/src/agentAwareness.ts:77-116`).
+**Adopt:** same two race rules for Claude/Codex session classification;
+cap transcript-derived text before it hits any surface.
+
+## R2-6. Durable per-file (size, mtime) transcript parse cache
+
+Append-only transcripts cached per file keyed by (size, mtimeMs):
+cold 30-day scan ~3.5s vs ~11ms warm (`usage/usageScanCache.ts:1-27`);
+interned string tables keep the cache under 6MB; corrupt cache decodes
+to empty — "one cold scan, never a broken page."
+**Adopt:** the biggest win for our ~/.claude/projects scanning — a
+persisted per-file parse cache so each poll re-reads only changed
+files' appended tails.
+
+## R2-7. Substring gate before json.loads
+
+`line.includes('"usage"')` before parsing skips ~half the lines,
+"worth about an order of magnitude" (`usageTranscripts.ts:64-73`).
+**Adopt:** substring-gate our JSONL scanners before json.loads.
+
+## R2-8. The stats users love: cost + cache savings + sessions
+
+Per-bucket: tokens, costUsd, cacheSavingsUsd, distinct session count
+(`usageAggregation.ts:49-57`).
+**Adopt:** "today: N sessions · $X spent · $Y saved by caching" as one
+dropdown line.
+
+## R2-9. Idle reaper respects background work
+
+Before reaping an idle session: check active turn AND backgroundLiveness
+— "stopping the session would kill them silently"
+(`ProviderSessionReaper.ts:63-88`).
+**Adopt:** never demote a session to gone on mtime alone while its
+sub-agent files still grow.
+
+## R2-10. Monitoring is in-memory only
+
+The working/monitoring registry is deliberately unpersisted: after a
+restart it is empty, "which matches reality: orphaned background work
+is not live" (`ThreadBackgroundLiveness.ts:1-40`).
+**Adopt:** our worker-liveness tracking stays in-memory, never in
+settings/latest.json.
+
+## R2-11. macOS overlay window craft
+
+Panel-type + floating always-on-top + visibleOnAllWorkspaces with
+skipTransformProcessType (else the app is yanked out of the Dock);
+show:false until ready-to-show so windows never flash unpainted
+(`preview/Manager.ts:2360-2419`, `DesktopWindow.ts:203-240`).
+**Adopt:** audit the Screen Bar window for
+canJoinAllSpaces/fullScreenAuxiliary/nonactivating; never order the
+panel in before first draw.
+
+## R2-12. Cached provider snapshot: paint instantly, refresh async
+
+Last known provider states persisted atomically, hydrated at boot,
+probes overwrite in background; npm latest-version cached 1h → a quiet
+"update available" pill (`providerStatusCache.ts:13-64`).
+**Adopt:** paint the menu from the persisted snapshot at launch and
+probe in background; optional "claude CLI update available" row.
+
+## R2-13. Bounded prewarm keyed to visible rows
+
+Only the 3 visible rows hold hydrated subscriptions — "a direct
+renderer-heap multiplier, keep it small" (`Sidebar.logic.ts:18-24`).
+**Adopt:** full parse state in memory for at most the top 2-3 sessions;
+snapshot structs for the rest (RSS lever).
+
+## R2-14. One shared minute-quantized clock
+
+A single module-level timer aligned to the minute boundary feeds every
+time-derived consumer; ticks re-read the wall clock so a throttled
+timer self-corrects (`useNowMinute.ts:1-38`).
+**Adopt:** one boundary-aligned minute clock for menu ages and settled
+states instead of N timers.
+
+## R2-15. Two-seed OKLCH theme derivation
+
+A full theme from background + accent: perceptually even lightness
+ramp, dark/light decided by the canvas's ACTUAL luminance (0.179
+threshold), every foreground contrast-solved (`themePalette.ts:1022-1049`).
+**Adopt:** palette presets can be TWO seeds + a ramp instead of hand-
+picking every mode color — tiny to port, impossible to make illegible.

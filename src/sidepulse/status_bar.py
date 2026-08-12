@@ -6630,7 +6630,12 @@ def _build_led_behavior_pane(target: StatusBarController):
     focus_outer, focus_inner = native_ui.make_card("Focus Dimming")
     try:
         focus_modes = focus_sync.configured_focus_modes()
-    except focus_sync.FocusSyncUnavailableError:
+        log_status_bar(
+            "focus roster: "
+            + (", ".join(name for _id, name in focus_modes) or "EMPTY")
+        )
+    except focus_sync.FocusSyncUnavailableError as exc:
+        log_status_bar(f"focus roster unavailable: {exc}")
         focus_modes = None
     if not focus_modes:
         if running_inside_bundle():
