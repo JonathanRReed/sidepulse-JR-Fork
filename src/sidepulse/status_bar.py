@@ -3019,6 +3019,23 @@ class StatusBarController(NSObject):
             return False
         return any(status.is_hard_ask for status in ask_statuses(snapshot))
 
+    def hard_ask_renders_on_device(self, device: StatusBarDevice) -> bool:
+        """Would THIS device actually show the live ask? Weather may
+        only yield to an ask the user can see on that surface --
+        yielding on a device pinned to the other provider (or parked
+        on an ambient Studio/Timer/Runway display) blanked the
+        emergency while showing nothing blocked-on-you in its place."""
+        if device.display != LED_DISPLAY_AGENT:
+            return False
+        snapshot = getattr(self, "last_snapshot", None)
+        if snapshot is None:
+            return False
+        pin = self.settings.device_provider_pin(device.device_id)
+        return any(
+            status.is_hard_ask and (not pin or status.provider == pin)
+            for status in ask_statuses(snapshot)
+        )
+
     def quiet_active(self) -> bool:
         """User-requested quiet: celebration, notification, calendar and
         reminder glows hold their tongue. Hard asks and weather always
@@ -4971,8 +4988,13 @@ class StatusBarController(NSObject):
             # device is auto-remembered with a per-device entry that
             # shadows the global -- without this loop the switch worked
             # at most once, before the first device was remembered.
+            # Only devices in the agent/battery pair follow the toggle:
+            # a device the user deliberately set to Studio, Timer, or
+            # Quota Runway keeps its choice.
             for device in self.settings.devices:
                 if device.device_id == VIRTUAL_DEVICE_ID:
+                    continue
+                if device.led_display not in (LED_DISPLAY_AGENT, LED_DISPLAY_BATTERY):
                     continue
                 self.settings = self.settings.with_device_display(
                     device.device_id, display
@@ -5769,7 +5791,7 @@ class StatusBarController(NSObject):
                 lambda: (
                     self.settings.weather_alerts_enabled
                     and self.weather_alert_active
-                    and not self.hard_ask_live()
+                    and not self.hard_ask_renders_on_device(device)
                 ),
             ),
             (LED_DISPLAY_LOW_BATTERY, lambda: self.low_power_active(battery_snapshot)),
@@ -9149,8 +9171,6 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
 
 # --- Extraction seam (backlog #14): the Settings window's construction
 # lives in settings_window.py, executing against THIS module's namespace
@@ -9158,6 +9178,7 @@ if __name__ == "__main__":
 # and callers keep addressing status_bar.<name>. settings_window never
 # imports status_bar, so no import cycle can exist.
 from . import settings_window as _settings_window  # noqa: E402
+from .virtual_device import LED_COUNT  # noqa: E402, F401 -- re-export; tests address status_bar.LED_COUNT
 
 _settings_window._install(dict(globals()))
 from .settings_window import (  # noqa: E402, F401 -- re-export: tests and
@@ -9205,3 +9226,10 @@ from .settings_window import (  # noqa: E402, F401 -- re-export: tests and
     refresh_blend_and_speed_fields,
     select_focus_dim_choice,
 )
+
+# Direct execution (python -m sidepulse.status_bar) must run AFTER the
+# extraction seam above -- main() blocks for the app's whole life, so
+# anything below the guard would never execute (the seam sat below it
+# briefly, and every Settings path NameError'd under -m).
+if __name__ == "__main__":
+    raise SystemExit(main())

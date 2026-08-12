@@ -9713,6 +9713,40 @@ class BacklogBehaviorTests(unittest.TestCase):
         )
 
 
+class LazyPaneBuildTests(unittest.TestCase):
+    """Audit #5's actual contract: only the default pane exists after
+    the window opens, and the sidebar's selection path builds the rest
+    (the production trigger the ensure_all test shims bypass)."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_open_builds_only_the_default_pane(self) -> None:
+        self.controller.show_settings_window()
+        self.assertEqual(
+            set(self.controller.settings_panes),
+            {self.status_bar.DEFAULT_SETTINGS_PANE},
+        )
+
+    def test_sidebar_selection_builds_and_unhides_the_pane(self) -> None:
+        self.controller.show_settings_window()
+        row = next(
+            index
+            for index, (key, _label) in enumerate(self.status_bar.SETTINGS_SIDEBAR_ITEMS)
+            if key == "focus"
+        )
+        table = self.controller.settings_sidebar_table
+        table.selectRowIndexes_byExtendingSelection_(
+            self.status_bar.NSIndexSet.indexSetWithIndex_(row), False
+        )
+        self.controller.tableViewSelectionDidChange_(
+            SimpleNamespace(object=lambda: table)
+        )
+        self.assertIn("focus", self.controller.settings_panes)
+        self.assertFalse(self.controller.settings_panes["focus"].isHidden())
+        self.assertEqual(self.controller.current_settings_pane, "focus")
+
+
 class SingleInstanceProbeTests(unittest.TestCase):
     """Backlog #15: the second instance bows out instead of stealing
     the socket."""
@@ -9765,6 +9799,50 @@ class ResilienceHardeningTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "1:#FF0000; 500ms")
             leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "LEDS.LED"]
             self.assertEqual(leftovers, [])
+
+    def test_led_write_failure_leaves_previous_program_intact(self) -> None:
+        """The atomicity guarantee itself: when the final rename fails
+        (eject mid-write), the OLD program survives untouched -- a
+        plain truncate-then-write would already have destroyed it."""
+        from sidepulse import device_writer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = device_writer.write_led_program(
+                "1:#00FF00; 1s", device_path=Path(tmp), file_name="LEDS.LED"
+            )
+            with patch(
+                "sidepulse.device_writer.os.replace",
+                side_effect=OSError("device ejected"),
+            ):
+                with self.assertRaises(OSError):
+                    device_writer.write_led_program(
+                        "1:#FF0000; 1s", device_path=Path(tmp), file_name="LEDS.LED"
+                    )
+            self.assertEqual(target.read_text(encoding="utf-8"), "1:#00FF00; 1s")
+            leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "LEDS.LED"]
+            self.assertEqual(leftovers, [])
+
+    def test_burn_refuses_to_write_init_led_when_parser_is_gone(self) -> None:
+        """The WIRING half of fail-closed: with the parser broken, the
+        burn path must write no INIT.LED at all (dropping strict=True
+        from applyStudioAsPowerUp_ would pass every other test)."""
+        isolate_controller(self)
+        self.controller.studio_editor = SimpleNamespace(
+            string=lambda: "1:#FF0000; 1s"
+        )
+        writes: list = []
+        with (
+            patch(
+                "sidepulse.led_wasm.SdLedWasmController",
+                side_effect=RuntimeError("no JavaScriptCore"),
+            ),
+            patch(
+                "sidepulse.status_bar.write_led_program",
+                side_effect=lambda *a, **k: writes.append((a, k)),
+            ),
+        ):
+            self.controller.applyStudioAsPowerUp_(None)
+        self.assertEqual(writes, [])
 
     def test_burn_validation_fails_closed_when_parser_is_gone(self) -> None:
         isolate_controller(self)
@@ -10596,7 +10674,7 @@ class MenuTeachingTests(unittest.TestCase):
     """The dropdown teaches: empty state says what happens next, and a
     daily tip advertises a feature (clicking it opens the right pane)."""
 
-    def _menu(self):
+    def _menu(self, *, hooks_installed: bool = True):
         from sidepulse import status_bar
         from sidepulse.settings import AgentMonitorSettings
 
@@ -10609,6 +10687,10 @@ class MenuTeachingTests(unittest.TestCase):
             settings=AgentMonitorSettings(),
             closed_lid_awake=SimpleNamespace(last_error=None),
             status_bar_devices=list,
+            # Pre-seed the hooks probe so the empty state is decided by
+            # the TEST, not by whatever hooks the dev machine happens to
+            # have installed (the probe reads the real filesystem).
+            _menu_hooks_probe=(float("inf"), hooks_installed),
         )
         return status_bar.build_menu(snapshot, status_bar.STATE_IDLE, target)
 
@@ -10619,6 +10701,25 @@ class MenuTeachingTests(unittest.TestCase):
         ]
         self.assertIn("No agents yet", titles)
         self.assertTrue(any("Start Claude Code" in title for title in titles))
+
+    def test_empty_state_offers_setup_when_no_hooks_installed(self) -> None:
+        menu = self._menu(hooks_installed=False)
+        connect = next(
+            (
+                menu.itemAtIndex_(index)
+                for index in range(menu.numberOfItems())
+                if "Connect your agents" in menu.itemAtIndex_(index).title()
+            ),
+            None,
+        )
+        self.assertIsNotNone(connect)
+        self.assertEqual(connect.action(), "openSetup:")
+        self.assertFalse(
+            any(
+                "Start Claude Code" in menu.itemAtIndex_(index).title()
+                for index in range(menu.numberOfItems())
+            )
+        )
 
     def test_menu_carries_a_daily_tip(self) -> None:
         menu = self._menu()
