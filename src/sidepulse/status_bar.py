@@ -290,6 +290,7 @@ REMINDERS_WATCH_SECONDS = 60.0
 REMINDERS_WATCH_RETRY_SECONDS = 300.0
 LED_DISPLAY_WEATHER = "weather"
 LED_DISPLAY_QUOTA = "quota_alert"
+LED_DISPLAY_ALL_CLEAR = "all_clear"
 WEATHER_WATCH_SECONDS = 600.0
 WEATHER_WATCH_RETRY_SECONDS = 1800.0
 CALENDAR_WATCH_SECONDS = 30.0
@@ -1033,9 +1034,14 @@ class StatusBarController(NSObject):
         codex_label = fields.get("profile_codex_label")
         if codex_label is not None:
             codex_label.setStringValue_(self.codex_summary_text or "")
+        # Stash for panes built AFTER this publish -- the first worker
+        # cycle usually finishes before the settings window ever exists,
+        # and the graph sat empty until the next 5-minute pass.
+        self.usage_day_bars = payload[3] if payload and len(payload) > 3 else []
+        self.usage_hourly = payload[4] if payload and len(payload) > 4 else []
         graph = fields.get("profile_usage_graph")
-        if graph is not None and payload and len(payload) > 4:
-            graph.setData_hourly_(payload[3], payload[4])
+        if graph is not None:
+            graph.setData_hourly_(self.usage_day_bars, self.usage_hourly)
         self.claude_plan_text = (
             payload[5] if payload and len(payload) > 5 else None
         )
@@ -1296,7 +1302,19 @@ class StatusBarController(NSObject):
         self.refresh_(None)
 
     def refresh_signal_card(self, key: str) -> None:
-        self._render_signal_card(key, self.settings.signal_style(key))
+        # Card rendering builds WASM thumbnail programs -- skip entirely
+        # when the style hasn't changed since the last render (switching
+        # TO the Signals pane re-rendered all seven cards synchronously,
+        # which read as "going between menus is so laggy").
+        style = self.settings.signal_style(key)
+        cache = getattr(self, "_signal_card_rendered", None)
+        if cache is None:
+            cache = {}
+            self._signal_card_rendered = cache
+        if cache.get(key) == style:
+            return
+        cache[key] = style
+        self._render_signal_card(key, style)
 
     def _render_signal_card(self, key: str, style) -> None:
         """Re-renders one card's thumbnails, preview, and selection ring
@@ -2476,6 +2494,21 @@ class StatusBarController(NSObject):
             self.settings.signal_style(signals_module.SIGNAL_COMPLETION)
         )
         self.completion_sweep_until = time.monotonic() + hold
+        # The Exhale: when the LAST working session just finished and
+        # nothing needs you, the bar takes one slow warm breath after
+        # the sweep -- "you're free" as a felt moment, not a light that
+        # merely stops. Same freshness discipline as the sweep (we are
+        # inside the edge-triggered, 2-minute-fresh path already).
+        all_done = all(
+            mode == AgentMode.COMPLETED for mode in current_modes.values()
+        )
+        snapshot = getattr(self, "last_snapshot", None)
+        no_asks = snapshot is None or not ask_statuses(snapshot)
+        if all_done and no_asks:
+            self.all_clear_until = self.completion_sweep_until + 3.6
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                hold + 3.8, self, "refresh:", None, False
+            )
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             hold + 0.1, self, "refresh:", None, False
         )
@@ -3695,9 +3728,15 @@ class StatusBarController(NSObject):
             return
 
         current_pane = getattr(self, "current_settings_pane", None)
-        if current_pane == "agents":
+        now_probe = time.monotonic()
+        probes_fresh = (
+            now_probe - getattr(self, "_provider_probe_at", 0.0) < 20.0
+        )
+        if current_pane == "agents" and not probes_fresh:
+            self._provider_probe_at = now_probe
             # Detector probes hit the filesystem per provider -- only
-            # worth it when the Agents pane is actually on screen.
+            # worth it when the Agents pane is on screen, at most every
+            # 20s (install/uninstall actions reset the stamp).
             for provider in HOOK_PROVIDERS:
                 config = provider_spec(provider).detector(None)
                 set_field_value(self.settings_fields.get(f"{provider}_hook_status"), hook_status_text(config))
@@ -4861,6 +4900,15 @@ class StatusBarController(NSObject):
                 ),
             ),
             (
+                LED_DISPLAY_ALL_CLEAR,
+                lambda: (
+                    self.settings.completion_sweep_enabled
+                    and not self.quiet_active()
+                    and now >= getattr(self, "completion_sweep_until", 0.0)
+                    and now < getattr(self, "all_clear_until", 0.0)
+                ),
+            ),
+            (
                 LED_DISPLAY_CALENDAR,
                 lambda: (
                     self.settings.calendar_alerts_enabled
@@ -5032,6 +5080,10 @@ class StatusBarController(NSObject):
                 style_to_program(
                     self.settings.signal_style(signals_module.SIGNAL_WEATHER), brightness
                 )
+            )
+        elif display == LED_DISPLAY_ALL_CLEAR:
+            _set_virtual(
+                apply_brightness("off 400ms cosine\n#F5EDE0 3200ms pulse", brightness)
             )
         elif display == LED_DISPLAY_QUOTA:
             _set_virtual(
@@ -5244,6 +5296,13 @@ class StatusBarController(NSObject):
                 lambda device, _snapshot: (
                     f"{device.name} Weather {self.weather_alert_event or 'alert'}"
                 ),
+            ),
+            LED_DISPLAY_ALL_CLEAR: (
+                lambda brightness, led_count: apply_brightness(
+                    "off 400ms cosine\n#F5EDE0 3200ms pulse", brightness
+                ),
+                LedDisplayState.DONE,
+                lambda device, _snapshot: f"{device.name} All clear",
             ),
             LED_DISPLAY_QUOTA: (
                 lambda brightness, led_count: styled(
@@ -6569,10 +6628,9 @@ class UsageGraphView(NSView):
         spark_height = 24.0
         label_height = 14.0
         bars_bottom = spark_height + label_height + 6.0
-        bars_height = max(10.0, height - bars_bottom - 4.0)
+        bars_height = max(10.0, height - bars_bottom - 16.0)
         count = len(self.day_bars)
         slot = width / count
-        bar_width = min(34.0, slot * 0.6)
         max_cost = max((bar["claude_cost"] for bar in self.day_bars), default=0.0) or 1.0
         max_tokens = max((bar["codex_tokens"] for bar in self.day_bars), default=0) or 1
         claude_color = nscolor_from_hex("#D97757")
@@ -6580,28 +6638,76 @@ class UsageGraphView(NSView):
         label_attrs = {
             NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
         }
+        # Baseline hairline (the T3/CodexBar look: bars sit ON a line).
+        NSColor.tertiaryLabelColor().colorWithAlphaComponent_(0.35).setFill()
+        NSBezierPath.bezierPathWithRect_(
+            ((0.0, bars_bottom - 1.0), (width, 1.0))
+        ).fill()
+        # Series maxima as tiny axis captions in the top corners.
+        cost_caption = NSString.stringWithString_(f"${max_cost:,.0f}")
+        cost_caption.drawAtPoint_withAttributes_((2.0, height - 13.0), label_attrs)
+        token_caption = NSString.stringWithString_(
+            f"{max_tokens / 1_000_000_000:.1f}B tok"
+            if max_tokens >= 1_000_000_000
+            else f"{max_tokens / 1_000_000:.0f}M tok"
+        )
+        token_size = token_caption.sizeWithAttributes_(label_attrs)
+        token_caption.drawAtPoint_withAttributes_(
+            (width - token_size.width - 2.0, height - 13.0), label_attrs
+        )
+        # Bars: side-by-side down to ~4pt slots, overlaid single-pixel
+        # columns below that -- a YEAR must render, not vanish (the old
+        # half-minus-one math went NEGATIVE at 365 bars and drew nothing).
+        paired = slot >= 4.0
+        radius = min(2.0, slot * 0.2)
         for index, bar in enumerate(self.day_bars):
-            center = slot * index + slot / 2.0
-            half = bar_width / 2.0
+            left = slot * index
             claude_h = bars_height * (bar["claude_cost"] / max_cost)
             codex_h = bars_height * (bar["codex_tokens"] / max_tokens)
-            claude_color.setFill()
-            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                ((center - half, bars_bottom), (half - 1.0, max(2.0, claude_h))),
-                2.0,
-                2.0,
-            ).fill()
-            codex_color.setFill()
-            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                ((center + 1.0, bars_bottom), (half - 1.0, max(2.0, codex_h))),
-                2.0,
-                2.0,
-            ).fill()
-            label = NSString.stringWithString_(bar.get("label", ""))
-            size = label.sizeWithAttributes_(label_attrs)
-            label.drawAtPoint_withAttributes_(
-                (center - size.width / 2.0, spark_height + 2.0), label_attrs
-            )
+            if paired:
+                series_width = max(1.0, (slot * 0.72) / 2.0)
+                gap = min(1.0, slot * 0.06)
+                start = left + (slot - (series_width * 2.0 + gap)) / 2.0
+                if bar["claude_cost"] > 0:
+                    claude_color.setFill()
+                    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                        ((start, bars_bottom), (series_width, max(1.5, claude_h))),
+                        radius,
+                        radius,
+                    ).fill()
+                if bar["codex_tokens"] > 0:
+                    codex_color.setFill()
+                    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                        (
+                            (start + series_width + gap, bars_bottom),
+                            (series_width, max(1.5, codex_h)),
+                        ),
+                        radius,
+                        radius,
+                    ).fill()
+            else:
+                column = max(0.8, slot * 0.9)
+                if bar["codex_tokens"] > 0:
+                    codex_color.colorWithAlphaComponent_(0.75).setFill()
+                    NSBezierPath.bezierPathWithRect_(
+                        ((left, bars_bottom), (column, max(1.0, codex_h)))
+                    ).fill()
+                if bar["claude_cost"] > 0:
+                    claude_color.setFill()
+                    NSBezierPath.bezierPathWithRect_(
+                        ((left, bars_bottom), (column, max(1.0, claude_h)))
+                    ).fill()
+            label_text = bar.get("label", "")
+            if label_text:
+                label = NSString.stringWithString_(label_text)
+                size = label.sizeWithAttributes_(label_attrs)
+                label.drawAtPoint_withAttributes_(
+                    (
+                        min(max(0.0, left + slot / 2.0 - size.width / 2.0), width - size.width),
+                        spark_height + 2.0,
+                    ),
+                    label_attrs,
+                )
         if self.hourly:
             peak = max(self.hourly) or 1
             step = width / len(self.hourly)
@@ -6615,7 +6721,6 @@ class UsageGraphView(NSView):
                     1.0,
                     1.0,
                 ).fill()
-
 
 def _build_profile_pane(target: StatusBarController):
     """You: today's usage (the T3-exact math), and what this app is --
@@ -6645,6 +6750,9 @@ def _build_profile_pane(target: StatusBarController):
     native_ui.constrain_width(graph, 560.0)
     native_ui.constrain_height(graph, 120.0)
     today_inner.addArrangedSubview_(graph)
+    graph.setData_hourly_(
+        getattr(target, "usage_day_bars", []), getattr(target, "usage_hourly", [])
+    )
     fields["profile_usage_graph"] = graph
     range_popup = native_ui.make_popup_button(target, "setUsageGraphRange:")
     for range_label, range_days in (
@@ -6664,8 +6772,8 @@ def _build_profile_pane(target: StatusBarController):
     range_row.addArrangedSubview_(native_ui.make_hspacer())
     today_inner.addArrangedSubview_(range_row)
     legend = native_ui.make_label(
-        "\u25a0 Claude spend \u00b7 \u25a0 Codex tokens \u00b7 last 7 days; "
-        "bottom strip = today's sessions by hour",
+        "\u25a0 Claude spend \u00b7 \u25a0 Codex tokens \u00b7 bottom strip = "
+        "today's sessions by hour",
         secondary=True,
         size=10.0,
     )
