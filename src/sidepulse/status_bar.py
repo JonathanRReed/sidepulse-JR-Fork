@@ -3118,19 +3118,47 @@ class StatusBarController(NSObject):
         self.set_settings_message(f"Exported {count} debug events to {path}.")
 
     def update_hooks(self, provider: str, *, install: bool) -> None:
-        try:
-            result = (
-                install_provider_hooks(provider)
-                if install
-                else uninstall_provider_hooks(provider)
+        """Installer runs on a worker thread: the Codex trust refresh
+        spawns `codex app-server` and can wait ~8s per round-trip --
+        running it inline beachballed the whole app for up to ~16s."""
+        if getattr(self, "hooks_update_in_flight", False):
+            return
+        self.hooks_update_in_flight = True
+        self.set_settings_message(
+            f"{'Installing' if install else 'Removing'} {provider.title()} hooks…"
+        )
+
+        def _work():
+            try:
+                result = (
+                    install_provider_hooks(provider)
+                    if install
+                    else uninstall_provider_hooks(provider)
+                )
+                payload = {"ok": True, "changed": bool(result.changed)}
+            except Exception as exc:
+                payload = {"ok": False, "error": str(exc)}
+            payload["provider"] = provider
+            payload["install"] = install
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "hooksUpdated:", payload, False
             )
-        except Exception as exc:
-            self.set_settings_message(f"{provider.title()} hooks failed: {exc}")
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    @objc.IBAction
+    def hooksUpdated_(self, payload):
+        self.hooks_update_in_flight = False
+        provider = str(payload.get("provider") or "")
+        install = bool(payload.get("install"))
+        if not payload.get("ok"):
+            self.set_settings_message(
+                f"{provider.title()} hooks failed: {payload.get('error')}"
+            )
             self.refresh_settings_window()
             return
-
         action = "installed" if install else "removed"
-        if not result.changed:
+        if not payload.get("changed"):
             action = "already installed" if install else "already removed"
         self.set_settings_message(f"{provider.title()} hooks {action}.")
         self.reload_monitor()

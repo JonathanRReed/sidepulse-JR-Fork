@@ -1,4 +1,41 @@
-# sidepulse
+# sidepulse — JR fork
+
+A quality-first divergence of [inteliwear/sidepulse](https://github.com/inteliwear/sidepulse)
+that turns SidePulse into a **universal status indicator** for the Mac:
+agent status at the core, computer signals layered on top, deeply
+customizable behind good defaults.
+
+What this fork adds over upstream:
+
+- **Signal Engine** — every light-claiming signal (low battery,
+  notifications, reminders, calendar, weather, completions) is one
+  model with one renderer, an explicit precedence order, and a
+  per-signal **style card**: color, animating pattern thumbnails
+  (breathe / blink / sweep / ripple / comet / sparkle / heartbeat),
+  speed, intensity, live preview, and a Test button.
+- **Ask escalation** — an ignored "agent needs you" ramps, flashes the
+  menu-bar icon, and can optionally chime or take over every surface;
+  an **Ask Inbox** pins "Needs You (N)" atop the dropdown.
+- **Color = agent** — with several sessions live, each gets a stable
+  identity hue across the LEDs, the Screen Bar, and the dropdown;
+  a **completion sweep** in that hue fires when any agent finishes.
+- **Screen Bar** — pixel-measures the hardware notch (no model
+  tables), coexists with Alcove as a rounded bracket that mirrors the
+  physical LEDs' animation, with manual size sliders.
+- **System signals** — per-Focus dimming and profiles (Day/Night/
+  Travel, auto-applied when a Focus activates), calendar lead glow,
+  reminders-due glow, notification blinks (iMessage/WhatsApp/
+  Telegram), NWS severe-weather heartbeat, working-timer fill, and a
+  dropdown **Timebox**.
+- **A real app bundle** — `~/Applications/SidePulse.app` with a valid
+  sealed signature, so macOS privacy grants (Full Disk Access,
+  Calendars, Reminders) attach to "SidePulse" by name.
+- **More providers** — Cursor, Hermes Agent, and OpenClaw hooks
+  alongside upstream's set.
+
+The full build ledger lives in [`docs/FORK-ROADMAP.md`](docs/FORK-ROADMAP.md).
+
+---
 
 `sidepulse` is the command-line and macOS companion project for
 [SidePulse](https://sidepulse.io).
