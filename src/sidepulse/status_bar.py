@@ -4335,9 +4335,16 @@ class StatusBarController(NSObject):
             if self.current_escalation_stage() >= 1
             else 1.0
         )
-        return normalize_brightness(
-            base * self.idle_dim_scale_factor() * self.focus_sync_scale_factor() * boost
-        )
+        scaled = base * self.idle_dim_scale_factor() * self.focus_sync_scale_factor() * boost
+        if device.device_id == VIRTUAL_DEVICE_ID and scaled > 0.0:
+            # The Screen Bar gets a visibility FLOOR: shared Focus dim
+            # stacked with nighttime auto-brightness multiplied it down
+            # to a whisper and the bar read as "gone" ("I don't see the
+            # screen bar anymore"). A rule that resolves to exactly 0
+            # (School -> Turn off) still turns it fully off -- the floor
+            # only guards against accidental invisibility, never intent.
+            scaled = max(scaled, 255.0 * 0.25)
+        return normalize_brightness(scaled)
 
     def idle_dim_scale_factor(self) -> float:
         """1.0 normally; idle_dim_fraction once idle_dim_after_minutes of

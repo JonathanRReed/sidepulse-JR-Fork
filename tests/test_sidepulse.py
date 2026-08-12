@@ -1299,8 +1299,13 @@ class AgentMonitorTests(unittest.TestCase):
         except (ImportError, SystemExit) as exc:
             self.skipTest(str(exc))
         view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (400.0, 37.0)))
+        # Alphas at/above the legibility floor pass through unchanged;
+        # the dim 0.05 rest glow gets boosted to the floor (the bracket
+        # is a status surface -- see _legibility_boost).
         crowd = [(0.2, 0.5, 1.0, 1.0), (1.0, 0.4, 0.7, 1.0)] + [(0.05, 0.02, 0.02, 0.05)] * 6
-        self.assertEqual(view._bracket_colors(crowd), crowd)
+        rendered = view._bracket_colors(crowd)
+        self.assertEqual(rendered[:2], crowd[:2])
+        self.assertGreaterEqual(rendered[2][3], 0.17)
         lone = [(0.2, 0.5, 1.0, 1.0)] + [(0.0, 0.0, 0.0, 0.0)] * 7
         # Hysteresis: right after a crowd frame, a briefly-dark frame
         # STAYS spatial -- Relay's resting glow sits at the lit

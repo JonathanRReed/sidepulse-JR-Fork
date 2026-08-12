@@ -67,7 +67,11 @@ WING_MAX_WIDTH = 110.0
 # read as overhang, and 10pt "could be a little tighter". At 6pt the
 # riser IS the wing. Anyone who wants longer wings has the Wing
 # Length slider (up to 400pt).
-WING_AUTO_LENGTH = 6.0
+# 14, not 6: the pixel-measured notch width wobbles run to run (dark
+# wallpapers and the bar's own glow skew the pure-black scan by up to
+# ~40pt), and with 6pt wings a wide measurement hid the ENTIRE bar
+# behind the physical notch -- "I don't see the screen bar anymore".
+WING_AUTO_LENGTH = 14.0
 # The bracket is clipped to a rounded rect: the underline's ends curve
 # up into the risers and the riser tops are capped instead of ending
 # in hard right angles -- "more rounded on the corners so they feel
@@ -313,6 +317,25 @@ def is_alcove_running() -> bool:
 
 def led_band_rect(width: float):
     return ((0.0, 0.0), (float(width), LED_BAND_HEIGHT))
+
+
+def _legibility_boost(color, floor: float = 0.18):
+    """The bracket is a STATUS surface: any lit LED renders at least
+    this visible on it, whatever fade floors and Focus dimming did to
+    the underlying program. Relay's 1% resting glow stacked with
+    nighttime dimming made the whole bar read as "gone" -- the physical
+    LEDs may whisper; the on-screen bracket must stay readable. Truly
+    off (alpha 0) stays off."""
+    red, green, blue, alpha = color
+    if alpha <= 0.0005 or alpha >= floor:
+        return color
+    factor = floor / alpha
+    return (
+        min(1.0, red * factor),
+        min(1.0, green * factor),
+        min(1.0, blue * factor),
+        floor,
+    )
 
 
 def notch_bar_path(rect):
@@ -804,8 +827,8 @@ class VirtualLedView(NSView):
             self._bracket_spatial_hold_until = now + 2.0
         spatial_held = now < getattr(self, "_bracket_spatial_hold_until", 0.0)
         if style == "spatial" or (style == "auto" and (lit >= 2 or spatial_held)):
-            return list(colors)
-        return [self._bar_identity_color(colors)] * LED_COUNT
+            return [_legibility_boost(c) for c in colors]
+        return [_legibility_boost(self._bar_identity_color(colors))] * LED_COUNT
 
     def setBracketStyle_(self, style):
         self.bracket_style = str(style or "auto")
