@@ -1603,3 +1603,90 @@ class AgentLayoutStabilizer:
         self._committed_order = statuses
         self._pending_signature = None
         self._pending_since = None
+
+
+# --- Palettes -------------------------------------------------------
+# A two-seed OKLCH derivation in the spirit of T3 Code's themePalette:
+# perceptually even steps, chroma reduced until the color fits sRGB --
+# derived sets stay legible by construction.
+
+def _oklch_to_linear_srgb(lightness: float, chroma: float, hue_degrees: float):
+    import math
+
+    hue = math.radians(hue_degrees)
+    a = chroma * math.cos(hue)
+    b = chroma * math.sin(hue)
+    l_ = lightness + 0.3963377774 * a + 0.2158037573 * b
+    m_ = lightness - 0.1055613458 * a - 0.0638541728 * b
+    s_ = lightness - 0.0894841775 * a - 1.2914855480 * b
+    l3, m3, s3 = l_**3, m_**3, s_**3
+    return (
+        +4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3,
+        -1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3,
+        -0.0041960863 * l3 - 0.7034186147 * m3 + 1.7076147010 * s3,
+    )
+
+
+def oklch_hex(lightness: float, chroma: float, hue_degrees: float) -> str:
+    """sRGB hex for an OKLCH color, walking chroma down until the color
+    fits the gamut -- out-of-gamut requests desaturate, never clip to a
+    different hue."""
+
+    def _encode(channel: float) -> int:
+        channel = max(0.0, min(1.0, channel))
+        if channel <= 0.0031308:
+            value = channel * 12.92
+        else:
+            value = 1.055 * (channel ** (1 / 2.4)) - 0.055
+        return round(value * 255)
+
+    current = max(0.0, chroma)
+    for _ in range(24):
+        red, green, blue = _oklch_to_linear_srgb(lightness, current, hue_degrees)
+        if -0.0005 <= min(red, green, blue) and max(red, green, blue) <= 1.0005:
+            return f"#{_encode(red):02X}{_encode(green):02X}{_encode(blue):02X}"
+        current *= 0.86
+    red, green, blue = _oklch_to_linear_srgb(lightness, 0.0, hue_degrees)
+    return f"#{_encode(red):02X}{_encode(green):02X}{_encode(blue):02X}"
+
+
+def _hex_to_oklch_hue(hex_value: str) -> float:
+    import colorsys
+
+    red, green, blue = (int(hex_value[i : i + 2], 16) / 255.0 for i in (1, 3, 5))
+    hue, _light, _sat = colorsys.rgb_to_hls(red, green, blue)
+    return (hue * 360.0) % 360.0
+
+
+def derive_palette(accent_hex: str) -> dict[str, dict[str, str]]:
+    """A full mode+agent color set from ONE accent: working takes the
+    accent hue at a vivid weight, done sits opposite-ish so "finished"
+    can never be confused with "busy", ask leans warm (attention), and
+    idle is the accent at whisper chroma. Agents fan out around the
+    wheel from the accent so a crowd stays tellable-apart."""
+    hue = _hex_to_oklch_hue(normalize_hex(accent_hex, "#00E5FF"))
+    return {
+        "modes": {
+            "working": oklch_hex(0.72, 0.16, hue),
+            "done": oklch_hex(0.78, 0.15, (hue + 140.0) % 360.0),
+            "ask": oklch_hex(0.74, 0.17, (hue + 300.0) % 360.0),
+            "idle": oklch_hex(0.55, 0.035, hue),
+        },
+        "agents": {
+            "claude": oklch_hex(0.72, 0.15, hue),
+            "codex": oklch_hex(0.72, 0.15, (hue + 90.0) % 360.0),
+            "gemini": oklch_hex(0.72, 0.15, (hue + 180.0) % 360.0),
+            "devin": oklch_hex(0.72, 0.15, (hue + 270.0) % 360.0),
+        },
+    }
+
+
+# One-click looks, each derived through the same engine so every set is
+# gamut-safe, then seeded with a deliberately different personality.
+CURATED_PALETTES: dict[str, dict[str, dict[str, str]]] = {
+    "Neon": derive_palette("#00E5FF"),
+    "Sunset": derive_palette("#FF6A3D"),
+    "Forest": derive_palette("#2FBF71"),
+    "Orchid": derive_palette("#B26EFF"),
+    "Ember": derive_palette("#FF9F0A"),
+}

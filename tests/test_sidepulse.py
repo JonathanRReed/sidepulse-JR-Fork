@@ -9141,6 +9141,49 @@ class SubagentAndPhantomAskTests(unittest.TestCase):
         self.assertEqual(top_level_subs, [])
 
 
+class PaletteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_curated_palettes_are_complete_and_valid(self) -> None:
+        from sidepulse.colors import CURATED_PALETTES
+
+        for name, palette in CURATED_PALETTES.items():
+            for key in ("working", "done", "ask", "idle"):
+                value = palette["modes"][key]
+                self.assertRegex(value, r"^#[0-9A-F]{6}$", f"{name}/{key}")
+            self.assertEqual(
+                set(palette["agents"]), {"claude", "codex", "gemini", "devin"}
+            )
+            # Working, done and ask must be tellable apart.
+            self.assertEqual(
+                len({palette["modes"][k] for k in ("working", "done", "ask")}), 3
+            )
+
+    def test_oklch_out_of_gamut_desaturates_instead_of_clipping(self) -> None:
+        from sidepulse.colors import oklch_hex
+
+        value = oklch_hex(0.5, 5.0, 200.0)
+        self.assertRegex(value, r"^#[0-9A-F]{6}$")
+
+    def test_apply_palette_round_trip(self) -> None:
+        from types import SimpleNamespace as NS
+
+        from sidepulse.colors import CURATED_PALETTES
+
+        sender = NS(identifier=lambda: "Sunset")
+        self.controller.applyPalette_(sender)
+        expected = CURATED_PALETTES["Sunset"]
+        self.assertEqual(
+            self.controller.settings.colors.mode_colors["working"],
+            expected["modes"]["working"],
+        )
+        self.assertEqual(
+            self.controller.settings.colors.agent_color("gemini"),
+            expected["agents"]["gemini"],
+        )
+
+
 class UsageStatsTests(unittest.TestCase):
     """The T3-exact usage pipeline: substring gate, global first-seen
     dedupe, per-file persisted cache, cost + cache-savings math."""

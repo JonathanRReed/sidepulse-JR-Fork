@@ -1205,6 +1205,9 @@ class VirtualStatusDevice(NSObject):
         self.window.setCollectionBehavior_(
             NSWindowCollectionBehaviorCanJoinAllSpaces
             | NSWindowCollectionBehaviorFullScreenAuxiliary
+            # Stationary: Mission Control / Expose must not scoop up the
+            # notch bar and float it around like a document window.
+            | (1 << 4)
         )
         self.view = VirtualLedView.alloc().initWithFrame_(((0, 0), (WINDOW_WIDTH, WINDOW_HEIGHT)))
         self.window.setContentView_(self.view)

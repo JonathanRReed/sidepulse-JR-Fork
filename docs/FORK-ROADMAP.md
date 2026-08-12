@@ -155,6 +155,27 @@ Decisions locked 2026-08-11 (grilling session with Jonathan):
 - **Jonathan's Focus modes** (for per-Focus rules): Do Not Disturb, Work,
   Sleep, School (custom), Personal (custom).
 
+## DEPTH WAVE (2026-08-11, late night) -- T3 round 2 + depth over breadth
+
+- Focus pane (per-mode rules found + promoted, live "Right Now" card,
+  dropdown line), honest tips (Show Me/Dismiss/Turn Off + scroll-and-
+  flash anchors, labeled brand swatches), Studio tab, lid-animation
+  preset picker (8 firmware-verified looks).
+- T3-exact alerting: 2-min celebrate freshness vs 20-min display TTL,
+  160-char detail caps.
+- T3-exact usage stats (usage_stats.py): substring gate, message-id
+  first-seen dedupe, persisted per-file (size,mtime) cache with
+  interned tables, cost + cache-savings. Profile pane (stats + About);
+  dropdown decluttered (stats + Customize Colors rows removed).
+- Relay bracket fix: lit threshold 0.004 -> 0.0008 + 2s spatial
+  hysteresis (identity blend was chasing the relay spotlight).
+- Perf: event-refresh floor, signature-gated menu frozen while open,
+  30fps bar + 15Hz WASM sampling + 10Hz idle, preview engines released
+  on window close, icon-only menu bar. ~20% -> ~12% CPU active,
+  kernel-wait at idle.
+- Palettes: OKLCH two-seed engine (gamut-safe derivation) + five
+  curated one-click looks in Color Studio.
+
 ## FINISH WAVE (2026-08-11, evening) -- review-driven hardening + normie polish
 
 Adversarial code-quality review (risks / speedups / maintainability /

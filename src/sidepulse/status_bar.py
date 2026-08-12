@@ -1767,6 +1767,23 @@ class StatusBarController(NSObject):
         self.refresh_(None)
 
     @objc.IBAction
+    def applyPalette_(self, sender):
+        name = str(sender.identifier() or "")
+        palette = colors_module.CURATED_PALETTES.get(name)
+        if palette is None:
+            return
+        colors = self.settings.colors
+        for mode_key, hex_value in palette["modes"].items():
+            colors = colors.with_mode_color(mode_key, hex_value)
+        for provider, hex_value in palette["agents"].items():
+            colors = colors.with_agent_color(provider, hex_value)
+        self.settings = self.settings.with_colors(colors)
+        save_settings(self.settings)
+        self.refresh_colors_window()
+        self.refresh_(None)
+        self.set_settings_message(f"Palette: {name}. Every light just changed outfits.")
+
+    @objc.IBAction
     def openProjectPage_(self, _sender):
         from AppKit import NSWorkspace
         from Foundation import NSURL
@@ -7840,6 +7857,31 @@ def _build_color_studio_pane(target: StatusBarController) -> NSView:
     cycle_row.addArrangedSubview_(native_ui.make_hspacer())
     cycle_row.addArrangedSubview_(cycle_speed_field)
     behavior_inner.addArrangedSubview_(cycle_row)
+    palette_outer, palette_inner = native_ui.make_card("Palettes")
+    palette_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "A complete look in one click -- mode colors and agent colors "
+            "together, derived so every set stays legible. Individual "
+            "colors below still override anything.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    palette_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    for palette_name, palette in colors_module.CURATED_PALETTES.items():
+        palette_button = native_ui.make_button(palette_name, target, "applyPalette:")
+        palette_button.setIdentifier_(palette_name)
+        modes = palette["modes"]
+        palette_button.setToolTip_(
+            f"working {modes['working']} \u00b7 done {modes['done']} \u00b7 "
+            f"ask {modes['ask']}"
+        )
+        palette_row.addArrangedSubview_(palette_button)
+    palette_row.addArrangedSubview_(native_ui.make_hspacer())
+    palette_inner.addArrangedSubview_(palette_row)
+    scroll_stack.addArrangedSubview_(palette_outer)
+
     scroll_stack.addArrangedSubview_(behavior_outer)
 
     swatches: dict[tuple[tuple[str, str], str], object] = {}
