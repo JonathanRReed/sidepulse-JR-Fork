@@ -7262,7 +7262,11 @@ def isolate_controller(case, *, build_controller=True):
     remember_connected_devices could then flush temp-test state into the
     user's real settings.json.
     """
-    tmp = tempfile.TemporaryDirectory()
+    # ignore_cleanup_errors: a daemon LED/keepalive write racing rmtree
+    # must never FAIL a test -- the join below handles the common case,
+    # this handles the tail. Isolation (no real-device writes) is
+    # unaffected.
+    tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
     case.addCleanup(tmp.cleanup)
 
     def _join_led_worker():

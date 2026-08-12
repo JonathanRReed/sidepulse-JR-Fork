@@ -76,6 +76,7 @@ except ImportError as exc:  # pragma: no cover - only exercised on non-macOS set
 
 from . import (
     calendar_watch,
+    claude_quota,
     display_brightness,
     focus_sync,
     native_ui,
@@ -955,6 +956,15 @@ class StatusBarController(NSObject):
                     for day, bucket in buckets.items()
                 ]
                 hourly = usage_stats.hourly_session_counts(totals.records)
+                plan_line = None
+                if self.settings.claude_plan_limits_enabled:
+                    try:
+                        plan_line = claude_quota.summary_line(
+                            claude_quota.fetch_windows()
+                        )
+                    except claude_quota.ClaudeQuotaUnavailableError as exc:
+                        log_status_bar(f"claude quota unavailable: {exc}")
+                        plan_line = "Claude plan: unavailable right now."
                 detail = (
                     f"{totals.input_tokens:,} in \u00b7 "
                     f"{totals.cached_input_tokens:,} cached \u00b7 "
@@ -969,8 +979,11 @@ class StatusBarController(NSObject):
                 codex_line = None
                 day_bars = []
                 hourly = []
+                plan_line = None
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "applyUsageSummary:", (line, detail, codex_line, day_bars, hourly), False
+                "applyUsageSummary:",
+                (line, detail, codex_line, day_bars, hourly, plan_line),
+                False,
             )
 
         threading.Thread(target=_work, daemon=True).start()
@@ -990,6 +1003,12 @@ class StatusBarController(NSObject):
         graph = fields.get("profile_usage_graph")
         if graph is not None and payload and len(payload) > 4:
             graph.setData_hourly_(payload[3], payload[4])
+        self.claude_plan_text = (
+            payload[5] if payload and len(payload) > 5 else None
+        )
+        plan_label = fields.get("profile_plan_label")
+        if plan_label is not None:
+            plan_label.setStringValue_(self.claude_plan_text or "")
         if line != getattr(self, "usage_summary_text", None):
             self.usage_summary_text = line
             self._menu_signature = None
@@ -1853,6 +1872,17 @@ class StatusBarController(NSObject):
         self.set_settings_message(
             "Resting glow off." if fraction <= 0.004 else f"Resting glow: {round(fraction * 100)}%."
         )
+        self.refresh_(None)
+
+    @objc.IBAction
+    def toggleClaudePlanLimits_(self, sender):
+        self.settings = self.settings.with_claude_plan_limits_enabled(
+            checkbox_is_on(sender)
+        )
+        save_settings(self.settings)
+        # Refresh immediately so the line appears without the 5-min wait.
+        self._usage_refreshed_at = 0.0
+        self.maybe_refresh_usage_summary()
         self.refresh_(None)
 
     @objc.IBAction
@@ -6415,6 +6445,24 @@ def _build_profile_pane(target: StatusBarController):
         size=10.0,
     )
     today_inner.addArrangedSubview_(legend)
+    plan_label = native_ui.make_label(
+        getattr(target, "claude_plan_text", None) or "", secondary=False, size=13.0
+    )
+    today_inner.addArrangedSubview_(plan_label)
+    fields["profile_plan_label"] = plan_label
+    plan_row, plan_switch = native_ui.make_switch_row(
+        "Show Claude plan limits (official)",
+        target,
+        "toggleClaudePlanLimits:",
+        help_text=(
+            "Asks Anthropic's own usage endpoint for your REAL 5-hour "
+            "and weekly utilization, using the Claude Code sign-in this "
+            "Mac already has. First use may show one macOS Keychain "
+            "prompt -- choose Always Allow and it never asks again."
+        ),
+    )
+    plan_switch.setState_(1 if target.settings.claude_plan_limits_enabled else 0)
+    today_inner.addArrangedSubview_(plan_row)
     today_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "Costs use Anthropic list rates; cached reads bill at a tenth "

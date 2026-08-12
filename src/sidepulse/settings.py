@@ -277,6 +277,9 @@ class AgentMonitorSettings:
     # the moving signal shows (the relay dot ticking round, the timer
     # filling). 0.25 preserves the pre-dial behavior.
     screen_bar_min_glow: float = 0.25
+    # Opt-in: reading the Claude Code keychain item triggers a one-time
+    # macOS prompt, so this must never default on.
+    claude_plan_limits_enabled: bool = False
     dismissed_tips: tuple[str, ...] = ()
     # Per-Focus dim rules, keyed by the Focus mode identifier (e.g.
     # "com.apple.donotdisturb.mode.default"): 1.0 = don't dim, 0.0 = LEDs
@@ -644,6 +647,9 @@ class AgentMonitorSettings:
     def with_idle_dim_fraction(self, fraction: float) -> AgentMonitorSettings:
         return replace(self, idle_dim_fraction=normalize_idle_dim_fraction(fraction))
 
+    def with_claude_plan_limits_enabled(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, claude_plan_limits_enabled=bool(enabled))
+
     def with_screen_bar_min_glow(self, fraction: float) -> AgentMonitorSettings:
         return replace(
             self, screen_bar_min_glow=max(0.0, min(1.0, float(fraction)))
@@ -939,6 +945,7 @@ class AgentMonitorSettings:
             "tips_enabled": self.tips_enabled,
             "menu_bar_label_enabled": self.menu_bar_label_enabled,
             "screen_bar_min_glow": self.screen_bar_min_glow,
+            "claude_plan_limits_enabled": self.claude_plan_limits_enabled,
             "dismissed_tips": list(self.dismissed_tips),
             "focus_dim_rules": dict(sorted(self.focus_dim_rules.items())),
         }
@@ -1164,6 +1171,9 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         tips_enabled=_bool_setting(data.get("tips_enabled"), True),
         menu_bar_label_enabled=_bool_setting(data.get("menu_bar_label_enabled"), False),
         screen_bar_min_glow=_fraction_setting(data.get("screen_bar_min_glow"), 0.25),
+        claude_plan_limits_enabled=_bool_setting(
+            data.get("claude_plan_limits_enabled"), False
+        ),
         dismissed_tips=tuple(
             str(item)
             for item in (data.get("dismissed_tips") or [])
