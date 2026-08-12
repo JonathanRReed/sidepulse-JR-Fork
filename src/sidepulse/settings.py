@@ -37,6 +37,14 @@ DEFAULT_NOTIFICATION_APP_COLORS: dict[str, str] = {
     NOTIFICATION_APP_WHATSAPP: "#25D366",
     NOTIFICATION_APP_TELEGRAM: "#2AABEE",
 }
+
+WEBHOOK_EVENT_KEYS = (
+    "completion",
+    "quota_sunrise",
+    "quota_threshold",
+    "weather",
+    "timebox",
+)
 CLOSED_LID_AWAKE_NEVER = "never"
 CLOSED_LID_AWAKE_AGENTS = "agents"
 CLOSED_LID_AWAKE_ALWAYS = "always"
@@ -155,6 +163,11 @@ class DeviceDisplaySetting:
     # None = aggregate. A pinned device shows only its provider's
     # sessions and rests dark when none are live.
     provider_pin: str | None = None
+    # Per-device courtesy-signal muting: "asks_only" keeps this device
+    # to agent status + asks/escalation (and weather/low-battery, which
+    # are never muted); None = every signal. The per-Focus policy's
+    # per-DEVICE sibling.
+    signal_policy: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -169,6 +182,7 @@ class DeviceDisplaySetting:
             "blue_gain": self.blue_gain,
             "blend_mode": self.blend_mode,
             "provider_pin": self.provider_pin,
+            "signal_policy": self.signal_policy,
         }
 
     def channel_gains(self) -> tuple[float, float, float]:
@@ -330,6 +344,11 @@ class AgentMonitorSettings:
     studio_library: tuple[tuple[str, str], ...] = ()
     night_warmth_enabled: bool = False
     focus_signal_policy: dict[str, str] = field(default_factory=dict)
+    # Webhook bridge: which MOMENT events (beyond stage-3 escalation,
+    # which always fires when the URL is set) also POST to the webhook.
+    # Valid keys: completion, quota_sunrise, quota_threshold, weather,
+    # timebox. Empty = escalation only, the pre-bridge behavior.
+    webhook_events: tuple[str, ...] = ()
     # Story #10: timebox preset -> (start Shortcut, end Shortcut). Keys
     # are the preset minutes as strings ("25"); either name may be "".
     timebox_shortcuts: dict[str, tuple[str, str]] = field(default_factory=dict)
@@ -725,6 +744,14 @@ class AgentMonitorSettings:
     def with_night_warmth_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, night_warmth_enabled=bool(enabled))
 
+    def with_webhook_event(self, key: str, enabled: bool) -> AgentMonitorSettings:
+        if key not in WEBHOOK_EVENT_KEYS:
+            raise ValueError(f"Unknown webhook event: {key}")
+        events = tuple(k for k in self.webhook_events if k != key)
+        if enabled:
+            events = (*events, key)
+        return replace(self, webhook_events=events)
+
     def timebox_shortcut_pair(self, preset_key: str) -> tuple[str, str]:
         pair = self.timebox_shortcuts.get(preset_key)
         if not pair:
@@ -872,6 +899,26 @@ class AgentMonitorSettings:
             if device.device_id == device_id:
                 return device.blend_mode
         return None
+
+    def device_signal_policy(self, device_id: str) -> str | None:
+        for device in self.devices:
+            if device.device_id == device_id:
+                return device.signal_policy
+        return None
+
+    def with_device_signal_policy(
+        self, device_id: str, policy: str | None
+    ) -> AgentMonitorSettings:
+        """policy=None restores every signal."""
+        if policy is not None and policy != "asks_only":
+            raise ValueError(f"Unknown device signal policy: {policy}")
+        devices = tuple(
+            replace(device, signal_policy=policy)
+            if device.device_id == device_id
+            else device
+            for device in self.devices
+        )
+        return replace(self, devices=devices)
 
     def device_provider_pin(self, device_id: str) -> str | None:
         for device in self.devices:
@@ -1144,6 +1191,7 @@ class AgentMonitorSettings:
             "studio_library": [list(item) for item in self.studio_library],
             "night_warmth_enabled": self.night_warmth_enabled,
             "focus_signal_policy": dict(self.focus_signal_policy),
+            "webhook_events": list(self.webhook_events),
             "timebox_shortcuts": {
                 key: list(pair) for key, pair in self.timebox_shortcuts.items()
             },
@@ -1430,6 +1478,13 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             if isinstance(data.get("focus_signal_policy"), dict)
             else {}
         ),
+        webhook_events=tuple(
+            key
+            for key in (data.get("webhook_events") or [])
+            if isinstance(key, str) and key in WEBHOOK_EVENT_KEYS
+        )
+        if isinstance(data.get("webhook_events"), list)
+        else (),
         timebox_shortcuts=(
             {
                 str(key): (str(pair[0]), str(pair[1]))
@@ -1585,6 +1640,11 @@ def _device_display_settings(value: object, default_display: str) -> tuple[Devic
                 provider_pin=(
                     item.get("provider_pin")
                     if item.get("provider_pin") in ("claude", "codex")
+                    else None
+                ),
+                signal_policy=(
+                    item.get("signal_policy")
+                    if item.get("signal_policy") == "asks_only"
                     else None
                 ),
                 resting_glow=_fraction_setting(item.get("resting_glow"), 0.0),

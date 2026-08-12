@@ -267,6 +267,7 @@ class StatusBarDevice:
     auto_brightness_enabled: bool = False
     channel_gains: tuple[float, float, float] = (1.0, 1.0, 1.0)
     resting_glow: float = 0.0
+    signal_policy: str | None = None
     reason: str = ""
 
 
@@ -322,6 +323,21 @@ MIN_ESCALATION_VISIBLE_BRIGHTNESS = 12
 # brightness should be 100%"). An explicit per-Focus "Turn off" (scale
 # exactly 0) still silences them.
 SIGNAL_DISPLAY_KINDS = frozenset()
+# Per-device "asks only" mutes exactly these courtesy moments -- never
+# test, escalation, weather, or low battery (documented invariants:
+# low battery is "every device at once"; blocked-on-you and emergencies
+# always break through).
+DEVICE_MUTABLE_SIGNAL_KINDS = frozenset(
+    {
+        LED_DISPLAY_NOTIFICATION,
+        LED_DISPLAY_QUOTA,
+        LED_DISPLAY_REMINDERS,
+        LED_DISPLAY_COMPLETION,
+        LED_DISPLAY_ALL_CLEAR,
+        LED_DISPLAY_CALENDAR,
+        LED_DISPLAY_PEEK,
+    }
+)
 # A completion may only ring/sweep while this fresh; older ones repaint
 # without celebrating (T3's TERMINAL_NOTIFICATION_FRESHNESS).
 COMPLETION_NOTIFY_FRESHNESS_SECONDS = 120.0
@@ -676,6 +692,8 @@ class StatusBarController(NSObject):
             self.timebox_overtime_since = time.monotonic()
             # Story #10: the drain ending gives the Focus back.
             self.fire_timebox_off_shortcut()
+            if self.webhook_event_enabled("timebox"):
+                self.post_webhook({"event": "sidepulse.timebox_finished"})
             try:
                 from AppKit import NSSound
 
@@ -853,6 +871,13 @@ class StatusBarController(NSObject):
         self.weather_alert_active = bool(alerts)
         self.weather_alert_event = str(alerts[0][2]) if alerts else None
         if self.weather_alert_active != was_active:
+            if self.weather_alert_active and self.webhook_event_enabled("weather"):
+                self.post_webhook(
+                    {
+                        "event": "sidepulse.weather",
+                        "headline": self.weather_alert_event or "",
+                    }
+                )
             self.refresh_(None)
 
     @objc.IBAction
@@ -1139,6 +1164,10 @@ class StatusBarController(NSObject):
             )
             self.completion_sweep_until = time.monotonic() + hold
             log_status_bar(f"quota sunrise: {window_key} reset")
+            if self.webhook_event_enabled("quota_sunrise"):
+                self.post_webhook(
+                    {"event": "sidepulse.quota_sunrise", "window": window_key}
+                )
             self.refresh_(None)
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 hold + 0.1, self, "refresh:", None, False
@@ -1160,6 +1189,14 @@ class StatusBarController(NSObject):
         )
         self.quota_blink_until = time.monotonic() + hold
         log_status_bar(f"quota alert: {self.quota_blink_label}")
+        if self.webhook_event_enabled("quota_threshold"):
+            self.post_webhook(
+                {
+                    "event": "sidepulse.quota_threshold",
+                    "window": window_key,
+                    "threshold": threshold,
+                }
+            )
         self.refresh_(None)
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             hold + 0.1, self, "refresh:", None, False
@@ -1933,6 +1970,21 @@ class StatusBarController(NSObject):
         self.set_settings_message(f"Display: {item.title()}.")
 
     @objc.IBAction
+    def setDeviceSignalPolicy_(self, sender):
+        device_id = str(sender.identifier() or "")
+        if not device_id:
+            return
+        item = sender.selectedItem()
+        policy = str(item.representedObject() or "") if item is not None else ""
+        self.settings = self.settings.with_device_signal_policy(
+            device_id, policy or None
+        )
+        save_settings(self.settings)
+        label = item.title() if item is not None else "All signals"
+        self.set_settings_message(f"Device signals: {label.lower()}.")
+        self.refresh_(None)
+
+    @objc.IBAction
     def setDeviceProviderPin_(self, sender):
         device_id = str(sender.identifier() or "")
         if not device_id:
@@ -2280,6 +2332,20 @@ class StatusBarController(NSObject):
         # Rescan now -- the warm cache makes a year-range rebuild cheap.
         self._usage_refreshed_at = 0.0
         self.maybe_refresh_usage_summary()
+
+    @objc.IBAction
+    def toggleWebhookEvent_(self, sender):
+        event_key = str(sender.identifier() or "")
+        if not event_key:
+            return
+        try:
+            self.settings = self.settings.with_webhook_event(
+                event_key, checkbox_is_on(sender)
+            )
+        except ValueError:
+            return
+        save_settings(self.settings)
+        self.set_settings_message("Webhook events saved.")
 
     @objc.IBAction
     def applyEscalationWebhook_(self, sender):
@@ -2825,6 +2891,16 @@ class StatusBarController(NSObject):
             self.settings.signal_style(signals_module.SIGNAL_COMPLETION)
         )
         self.completion_sweep_until = time.monotonic() + hold
+        if self.webhook_event_enabled("completion"):
+            finished_status = statuses_by_id.get(agent_id)
+            self.post_webhook(
+                {
+                    "event": "sidepulse.completion",
+                    "provider": finished_status.provider if finished_status else "",
+                    "label": (finished_status.display_name[:80] if finished_status else ""),
+                    "color": self.completion_sweep_color,
+                }
+            )
         # The Exhale: when the LAST working session just finished and
         # nothing needs you, the bar takes one slow warm breath after
         # the sweep -- "you're free" as a felt moment, not a light that
@@ -3183,6 +3259,39 @@ class StatusBarController(NSObject):
                 colors = colors.with_cycle_speed(colors.cycle_speed_seconds * factor)
         return colors
 
+    def post_webhook(self, payload_dict: dict) -> None:
+        """The outbound bridge: one JSON POST on a daemon thread to the
+        configured URL. Failures log quietly and never retry -- same
+        contract as every watcher. Callers own their own edge/latch
+        semantics; this just delivers."""
+        url = (self.settings.escalation_webhook_url or "").strip()
+        if not url:
+            return
+        payload = json.dumps(payload_dict).encode("utf-8")
+        event_name = str(payload_dict.get("event", "webhook"))
+
+        def _post():
+            try:
+                import urllib.request
+
+                request = urllib.request.Request(
+                    url,
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(request, timeout=10).close()
+                log_status_bar(f"webhook delivered: {event_name}")
+            except Exception as exc:
+                log_status_bar(f"webhook failed ({event_name}): {exc}")
+
+        threading.Thread(target=_post, daemon=True).start()
+
+    def webhook_event_enabled(self, key: str) -> bool:
+        """Moment events are opt-in per key; stage-3 escalation always
+        fires when a URL is set (the pre-bridge contract)."""
+        return key in self.settings.webhook_events
+
     def fire_escalation_webhook(self, stage: int) -> None:
         """One POST per ask episode when stage 3 lands (latched beside
         the chime): "an agent has been blocked on you for minutes" can
@@ -3198,7 +3307,7 @@ class StatusBarController(NSObject):
         oldest_age = 0.0
         if getattr(self, "ask_blocked_since", None) is not None:
             oldest_age = max(0.0, time.monotonic() - self.ask_blocked_since)
-        payload = json.dumps(
+        self.post_webhook(
             {
                 "event": "sidepulse.escalation",
                 "stage": stage,
@@ -3209,24 +3318,7 @@ class StatusBarController(NSObject):
                     for status in asks[:5]
                 ],
             }
-        ).encode("utf-8")
-
-        def _post():
-            try:
-                import urllib.request
-
-                request = urllib.request.Request(
-                    url,
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                urllib.request.urlopen(request, timeout=10).close()
-                log_status_bar("escalation webhook delivered")
-            except Exception as exc:
-                log_status_bar(f"escalation webhook failed: {exc}")
-
-        threading.Thread(target=_post, daemon=True).start()
+        )
 
     def escalation_takeover_active(self) -> bool:
         return (
@@ -4600,6 +4692,14 @@ class StatusBarController(NSObject):
                 if str(item.representedObject() or "") == wanted_pin:
                     pin_popup.selectItem_(item)
                     break
+        policy_popup = controls.get("signal_policy_popup")
+        if policy_popup is not None:
+            wanted_policy = self.settings.device_signal_policy(device_id) or ""
+            for index in range(policy_popup.numberOfItems()):
+                item = policy_popup.itemAtIndex_(index)
+                if str(item.representedObject() or "") == wanted_policy:
+                    policy_popup.selectItem_(item)
+                    break
 
     def set_brightness_preview_dots(self, dots, brightness) -> None:
         """A plain white dot strip, one per LED, showing at a glance how
@@ -5420,6 +5520,7 @@ class StatusBarController(NSObject):
                     self.settings.channel_gains_for_device(device_id)
                 ),
                 resting_glow=self.settings.resting_glow_for_device(device_id),
+                signal_policy=self.settings.device_signal_policy(device_id),
                 reason=candidate.reason,
             )
 
@@ -5440,6 +5541,7 @@ class StatusBarController(NSObject):
                         auto_brightness_enabled=device.auto_brightness_enabled,
                         channel_gains=self.apply_night_warmth(device.channel_gains()),
                         resting_glow=device.resting_glow,
+                        signal_policy=device.signal_policy,
                         reason="on-screen device",
                     )
                 continue
@@ -5457,6 +5559,7 @@ class StatusBarController(NSObject):
                 auto_brightness_enabled=device.auto_brightness_enabled,
                 channel_gains=self.apply_night_warmth(device.channel_gains()),
                 resting_glow=device.resting_glow,
+                signal_policy=device.signal_policy,
                 reason="previously connected",
             )
 
@@ -5660,7 +5763,14 @@ class StatusBarController(NSObject):
                 lambda: device.display == LED_DISPLAY_QUOTA_RUNWAY,
             ),
         )
+        # Per-device "asks only" (backlog #21): this device skips the
+        # courtesy moments entirely -- agent status, asks/escalation,
+        # weather and low battery still land. The per-Focus policy's
+        # per-device sibling.
+        muted = device.signal_policy == "asks_only"
         for key, active in claims:
+            if muted and key in DEVICE_MUTABLE_SIGNAL_KINDS:
+                continue
             try:
                 if active():
                     return key
@@ -8095,6 +8205,33 @@ def _build_devices_pane(target: StatusBarController):
             )
         )
 
+        # Backlog #21: per-device courtesy muting -- "the Dot only
+        # speaks asks" while the Pro carries the full signal chorus.
+        policy_popup = native_ui.make_popup_button(target, "setDeviceSignalPolicy:")
+        policy_popup.setIdentifier_(device.device_id)
+        current_device_policy = target.settings.device_signal_policy(device.device_id)
+        for label, policy_key in (
+            ("All signals", ""),
+            ("Asks only", "asks_only"),
+        ):
+            policy_popup.addItemWithTitle_(label)
+            item = policy_popup.lastItem()
+            item.setRepresentedObject_(policy_key)
+            if (policy_key or None) == current_device_policy:
+                policy_popup.selectItem_(item)
+        inner.addArrangedSubview_(
+            native_ui.make_row(
+                "Signals",
+                policy_popup,
+                help_text=(
+                    "Asks only keeps this device to agent status and "
+                    "blocked-on-you -- completions, notifications, quota, "
+                    "calendar and reminder glows stay off it. Weather and "
+                    "low battery always land."
+                ),
+            )
+        )
+
         stack.addArrangedSubview_(outer)
         device_controls[device.device_id] = {
             "brightness_slider": brightness_slider,
@@ -8106,6 +8243,7 @@ def _build_devices_pane(target: StatusBarController):
             "display_popup": display_popup,
             "blend_popup": blend_popup,
             "pin_popup": pin_popup,
+            "signal_policy_popup": policy_popup,
         }
     return native_ui.wrap_in_scroll_pane(stack), device_controls
 
@@ -9131,6 +9269,36 @@ def _build_led_behavior_pane(target: StatusBarController):
         )
     )
     fields["escalation_webhook_field"] = webhook_field
+    native_ui.add_separator(esc_inner)
+    # Webhook bridge: moment events beyond stage-3, each opt-in. The
+    # indicator escapes the device -- Home Assistant, ntfy, a Hue
+    # scene, anything that takes JSON.
+    bridge_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    webhook_event_boxes: dict[str, object] = {}
+    for label, event_key in (
+        ("Completions", "completion"),
+        ("Quota", "quota_threshold"),
+        ("Quota resets", "quota_sunrise"),
+        ("Weather", "weather"),
+        ("Timebox", "timebox"),
+    ):
+        box = native_ui.make_checkbox(label, target, "toggleWebhookEvent:")
+        box.setIdentifier_(event_key)
+        set_checkbox_state(box, event_key in target.settings.webhook_events)
+        bridge_row.addArrangedSubview_(box)
+        webhook_event_boxes[f"webhook_event:{event_key}"] = box
+    bridge_row.addArrangedSubview_(native_ui.make_hspacer())
+    esc_inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Also send",
+            bridge_row,
+            help_text=(
+                "Each ticked moment POSTs one JSON event to the same "
+                "URL: completions, quota threshold crossings and "
+                "resets, severe-weather onset, timebox finish."
+            ),
+        )
+    )
     stack.addArrangedSubview_(esc_outer)
 
     # Style cards: pick every signal's look by eye.
@@ -9151,6 +9319,7 @@ def _build_led_behavior_pane(target: StatusBarController):
         "quota_alerts_enabled": quota_switch,
         "subagent_asks_alert": subask_switch,
     }
+    buttons.update(webhook_event_boxes)
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 

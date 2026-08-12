@@ -9528,6 +9528,116 @@ class ContextLidAnimationTests(unittest.TestCase):
         )
 
 
+class WebhookBridgeTests(unittest.TestCase):
+    """Backlog #9: the stage-3 webhook grows into an opt-in event bus."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.posted: list[dict] = []
+        self.controller.post_webhook = self.posted.append
+
+    def test_events_are_opt_in_and_escalation_always_fires(self) -> None:
+        settings = AgentMonitorSettings()
+        self.assertEqual(settings.webhook_events, ())
+        enabled = settings.with_webhook_event("completion", True)
+        self.assertIn("completion", enabled.webhook_events)
+        self.assertNotIn(
+            "completion",
+            enabled.with_webhook_event("completion", False).webhook_events,
+        )
+        with self.assertRaises(ValueError):
+            settings.with_webhook_event("nope", True)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(enabled, path)
+            self.assertEqual(load_settings(path).webhook_events, ("completion",))
+
+    def test_quota_threshold_posts_when_ticked(self) -> None:
+        self.controller.settings = (
+            self.controller.settings
+            .with_quota_alerts_enabled(True)
+            .with_escalation_webhook_url("https://example.invalid/hook")
+            .with_webhook_event("quota_threshold", True)
+        )
+        self.controller.track_quota_thresholds({"Codex weekly": 70.0})
+        self.controller.track_quota_thresholds({"Codex weekly": 95.0})
+        events = [p["event"] for p in self.posted]
+        self.assertIn("sidepulse.quota_threshold", events)
+
+    def test_quota_threshold_stays_quiet_without_opt_in(self) -> None:
+        self.controller.settings = (
+            self.controller.settings
+            .with_quota_alerts_enabled(True)
+            .with_escalation_webhook_url("https://example.invalid/hook")
+        )
+        self.controller.track_quota_thresholds({"Codex weekly": 70.0})
+        self.controller.track_quota_thresholds({"Codex weekly": 95.0})
+        self.assertEqual(self.posted, [])
+
+
+class DeviceSignalPolicyTests(unittest.TestCase):
+    """Backlog #21: a device pinned to asks-only skips courtesy claims
+    while asks and emergencies still land."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def _device(self, policy):
+        return self.status_bar.StatusBarDevice(
+            device_id="Dot",
+            name="SidePulse Dot",
+            root=Path("/Volumes/Dot"),
+            target=Path("/Volumes/Dot/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+            signal_policy=policy,
+        )
+
+    def test_asks_only_skips_completion_but_not_escalation(self) -> None:
+        self.controller.completion_sweep_until = time.monotonic() + 5.0
+        self.controller.completion_sweep_color = "#00FF66"
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(self._device(None), None),
+            self.status_bar.LED_DISPLAY_COMPLETION,
+        )
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(
+                self._device("asks_only"), None
+            ),
+            self.status_bar.LED_DISPLAY_AGENT,
+        )
+        self.controller.settings = self.controller.settings.with_escalation_tier(
+            "takeover"
+        )
+        self.controller.ask_blocked_since = time.monotonic() - 400.0
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(
+                self._device("asks_only"), None
+            ),
+            self.status_bar.LED_DISPLAY_ESCALATION,
+        )
+
+    def test_policy_round_trips(self) -> None:
+        settings = AgentMonitorSettings(
+            devices=(
+                DeviceDisplaySetting(
+                    device_id="Dot", name="Dot", path="/Volumes/Dot"
+                ),
+            )
+        ).with_device_signal_policy("Dot", "asks_only")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(settings, path)
+            self.assertEqual(
+                load_settings(path).device_signal_policy("Dot"), "asks_only"
+            )
+        self.assertIsNone(
+            settings.with_device_signal_policy("Dot", None).device_signal_policy("Dot")
+        )
+        with self.assertRaises(ValueError):
+            settings.with_device_signal_policy("Dot", "sometimes")
+
+
 class BacklogBehaviorTests(unittest.TestCase):
     """Backlog #8 and #12: weather yields to live asks; the battery
     switch survives device remembering."""
