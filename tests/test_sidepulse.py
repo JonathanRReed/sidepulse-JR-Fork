@@ -9528,6 +9528,59 @@ class ContextLidAnimationTests(unittest.TestCase):
         )
 
 
+class BacklogBehaviorTests(unittest.TestCase):
+    """Backlog #8 and #12: weather yields to live asks; the battery
+    switch survives device remembering."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_weather_yields_to_a_live_hard_ask(self) -> None:
+        device = self.status_bar.StatusBarDevice(
+            device_id="SidePulsePro",
+            name="SidePulse Pro",
+            root=Path("/Volumes/SidePulsePro"),
+            target=Path("/Volumes/SidePulsePro/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        self.controller.settings = (
+            self.controller.settings.with_weather_alerts_enabled(True)
+        )
+        self.controller.weather_alert_active = True
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_WEATHER,
+        )
+        ask = _status("codex", AgentMode.WAITING_FOR_INPUT)
+        self.controller.last_snapshot = SimpleNamespace(
+            statuses=(ask,),
+            collected_at=datetime.now(timezone.utc),
+            aggregate=SimpleNamespace(mode=AgentMode.WAITING_FOR_INPUT),
+        )
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_AGENT,
+        )
+
+    def test_battery_toggle_reaches_remembered_devices(self) -> None:
+        self.controller.settings = self.controller.settings.with_remembered_device(
+            device_id="Dot", name="SidePulse Dot", path="/Volumes/Dot"
+        )
+        # A remembered device snapshots the then-current global display,
+        # which used to shadow the switch forever after.
+        self.controller.set_battery_led_display(True)
+        self.assertEqual(
+            self.controller.settings.display_for_device("Dot"),
+            self.status_bar.LED_DISPLAY_BATTERY,
+        )
+        self.controller.set_battery_led_display(False)
+        self.assertEqual(
+            self.controller.settings.display_for_device("Dot"),
+            self.status_bar.LED_DISPLAY_AGENT,
+        )
+
+
 class ResilienceHardeningTests(unittest.TestCase):
     """Backlog #6/#7/#19: corruption keeps its evidence, device writes
     are atomic, and the INIT.LED burn fails closed."""

@@ -2855,7 +2855,7 @@ class StatusBarController(NSObject):
             active = focus_sync.active_focus_mode_identifiers()
             names = dict(focus_sync.configured_focus_modes())
         except focus_sync.FocusSyncUnavailableError:
-            text = "Needs Full Disk Access (see Setup) to read Focus modes."
+            text = "Needs Full Disk Access (see Settings > Focus) to read Focus modes."
         else:
             if not active:
                 text = "No Focus is active."
@@ -2883,6 +2883,13 @@ class StatusBarController(NSObject):
                 text = "; ".join(parts)
         self._focus_summary_cache = (now, text)
         return text
+
+    def hard_ask_live(self) -> bool:
+        """A tracked blocked-on-you request is waiting right now."""
+        snapshot = getattr(self, "last_snapshot", None)
+        if snapshot is None:
+            return False
+        return any(status.is_hard_ask for status in ask_statuses(snapshot))
 
     def quiet_active(self) -> bool:
         """User-requested quiet: celebration, notification, calendar and
@@ -3559,9 +3566,15 @@ class StatusBarController(NSObject):
             floor, ceiling = colors.fade_range(key)
             set_field_value(fields.get("floor"), f"{round(floor * 100)}")
             set_field_value(fields.get("ceiling"), f"{round(ceiling * 100)}")
-        animation_popups = self.color_fields.get("animation_popups") or {}
-        for key, animation_popup in animation_popups.items():
-            select_animation_style(animation_popup, colors.animation_style(key))
+        # Animation Style thumbnails: re-ring the selected style and
+        # re-bake each thumb's program -- presets/palettes change both
+        # the style AND the mode colors the thumbs preview, and these
+        # only got set at build time (the popups this loop used to sync
+        # were replaced by thumbnails and never existed at runtime).
+        for key, thumbs in getattr(self, "colors_animation_thumbs", {}).items():
+            _apply_thumb_selection(thumbs, colors.animation_style(key))
+            for style, thumb in thumbs.items():
+                thumb.setProgram_(_mode_animation_thumb_program(self, key, style))
         self.refresh_colors_preview()
 
     def refresh_color_row(self, key: tuple[str, str], hex_value: str) -> None:
@@ -3669,6 +3682,31 @@ class StatusBarController(NSObject):
             for thumb in getattr(self, "lid_animation_thumbs", {}).values():
                 if not thumb.isHiddenOrHasHiddenAncestor() and thumb.visibleRect().size.width > 0:
                     thumb.setNeedsDisplay_(True)
+
+    def _refresh_lid_thumb_selection(self) -> None:
+        """Re-ring the lid preset thumbnails against the CURRENT saved
+        programs -- the ring used to be painted only at build time, so
+        picking a new preset left the old one highlighted until app
+        restart (and rendered in default black, not the accent)."""
+        thumbs = getattr(self, "lid_animation_thumbs", None) or {}
+        for (kind, name), view in thumbs.items():
+            layer = view.layer()
+            if layer is None:
+                continue
+            current = (self.settings.lid_animation(kind).program or "").strip()
+            preset_program = next(
+                (
+                    program
+                    for preset_name, _duration, program in LID_ANIMATION_PRESETS.get(kind, ())
+                    if preset_name == name
+                ),
+                None,
+            )
+            if preset_program is not None and preset_program.strip() == current:
+                layer.setBorderWidth_(2.0)
+                layer.setBorderColor_(NSColor.controlAccentColor().CGColor())
+            else:
+                layer.setBorderWidth_(0.0)
 
     @objc.IBAction
     def selectLidPresetThumb_(self, recognizer):
@@ -4231,6 +4269,27 @@ class StatusBarController(NSObject):
             self.refresh_setup_window()
             return
 
+        # Agent monitoring is the whole point: pressing the default
+        # Set Up button with zero provider hooks installed used to mark
+        # setup complete and close the window anyway. Hold the window
+        # open ONCE with a plain explanation; a second press respects
+        # the user's choice.
+        try:
+            any_hooks = any(
+                provider_hooks_installed(provider_spec(provider).detector(None))
+                for provider in HOOK_PROVIDERS
+            )
+        except Exception:
+            any_hooks = True
+        if not any_hooks and not getattr(self, "_setup_no_hooks_warned", False):
+            self._setup_no_hooks_warned = True
+            set_field_value(
+                self.setup_fields.get("message"),
+                "No agents connected yet -- sessions won't appear until "
+                "you install a hook above. Set Up again to finish anyway.",
+            )
+            self.refresh_setup_window()
+            return
         if not messages:
             messages.append("Nothing to install.")
         self.complete_first_launch_setup("  ".join(messages))
@@ -4463,6 +4522,7 @@ class StatusBarController(NSObject):
                     self.settings.session_open_action(provider)
                     or default_provider_open_action(provider),
                 )
+        self._refresh_lid_thumb_selection()
         closed = self.settings.lid_closed_animation
         opened = self.settings.lid_open_animation
         set_text_control_value(
@@ -4586,6 +4646,13 @@ class StatusBarController(NSObject):
     def set_settings_message(self, message: str) -> None:
         label = self.settings_fields.get("message")
         set_field_value(label, message)
+        # First run has only the Welcome window (settings_fields is
+        # empty until Settings first opens): mirror there whenever it's
+        # up, so hook install progress -- and especially failures --
+        # are visible somewhere other than the log.
+        setup_window = getattr(self, "setup_window", None)
+        if setup_window is not None and setup_window.isVisible():
+            set_field_value(self.setup_fields.get("message"), message)
         if message:
             log_status_bar(f"settings: {message}")
         # Toast semantics: the confirmation fades away after a beat
@@ -4678,6 +4745,9 @@ class StatusBarController(NSObject):
                 f"{provider.title()} hooks failed: {payload.get('error')}"
             )
             self.refresh_settings_window()
+            # The Welcome window's Install button must not just sit
+            # there after a failure -- refresh its row status too.
+            self.refresh_setup_window()
             return
         action = "installed" if install else "removed"
         if not payload.get("changed"):
@@ -4709,6 +4779,16 @@ class StatusBarController(NSObject):
         try:
             display = LED_DISPLAY_BATTERY if enabled else LED_DISPLAY_AGENT
             self.settings = self.settings.with_led_display(display)
+            # Rendering resolves display PER DEVICE, and every connected
+            # device is auto-remembered with a per-device entry that
+            # shadows the global -- without this loop the switch worked
+            # at most once, before the first device was remembered.
+            for device in self.settings.devices:
+                if device.device_id == VIRTUAL_DEVICE_ID:
+                    continue
+                self.settings = self.settings.with_device_display(
+                    device.device_id, display
+                )
             save_settings(self.settings)
         except Exception as exc:
             self.set_settings_message(f"Could not save settings: {exc}")
@@ -5489,10 +5569,17 @@ class StatusBarController(NSObject):
             # explicitly chose "don't let me miss this".
             (LED_DISPLAY_ESCALATION, self.escalation_takeover_active),
             # A Severe/Extreme weather warning outranks every routine
-            # signal -- it is the definition of "emergency".
+            # signal -- it is the definition of "emergency". But NWS
+            # warnings run for hours, and an agent blocked on YOU is
+            # the one signal this app exists for: while a hard ask is
+            # live, the ask renders and the weather heartbeat waits.
             (
                 LED_DISPLAY_WEATHER,
-                lambda: self.settings.weather_alerts_enabled and self.weather_alert_active,
+                lambda: (
+                    self.settings.weather_alerts_enabled
+                    and self.weather_alert_active
+                    and not self.hard_ask_live()
+                ),
             ),
             (LED_DISPLAY_LOW_BATTERY, lambda: self.low_power_active(battery_snapshot)),
             (
@@ -6841,11 +6928,36 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     statuses = recent_statuses(snapshot)
     if not statuses:
         # The empty state teaches instead of dead-ending: a brand-new
-        # user's first open should say what will happen next.
+        # user's first open should say what will happen next. With zero
+        # hooks installed the old teaching text ("start Claude Code --
+        # sessions appear here") could never come true, so that case
+        # gets an enabled row straight into Setup instead. The probe is
+        # cached: detector() hits the filesystem per provider, and this
+        # runs on every menu build.
         menu.addItem_(disabled_menu_item("No agents yet"))
-        menu.addItem_(
-            disabled_menu_item("Start Claude Code or Codex -- sessions appear here")
-        )
+        hooks_probe = getattr(target, "_menu_hooks_probe", None)
+        now_probe = time.monotonic()
+        if hooks_probe is None or now_probe - hooks_probe[0] > 30.0:
+            try:
+                any_hooks = any(
+                    provider_hooks_installed(provider_spec(provider).detector(None))
+                    for provider in HOOK_PROVIDERS
+                )
+            except Exception:
+                any_hooks = True
+            target._menu_hooks_probe = (now_probe, any_hooks)
+        else:
+            any_hooks = hooks_probe[1]
+        if any_hooks:
+            menu.addItem_(
+                disabled_menu_item("Start Claude Code or Codex -- sessions appear here")
+            )
+        else:
+            connect_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Connect your agents in Setup\u2026", "openSetup:", ""
+            )
+            connect_item.setTarget_(target)
+            menu.addItem_(connect_item)
     else:
         # "Color = agent": with several sessions, each row leads with
         # its identity dot -- the same hue the LEDs and Screen Bar use
@@ -7351,16 +7463,25 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
     # and hands the user the Privacy pane.
     fda_status = native_ui.make_label("", secondary=True, size=12.0)
     fda_button = native_ui.make_button("Grant…", target, "openFullDiskAccessSettings:")
+    fda_reveal = native_ui.make_button(
+        "Reveal SidePulse" if running_inside_bundle() else "Reveal Program",
+        target,
+        "revealFocusBinaryInFinder:",
+    )
     fda_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     fda_cluster.addArrangedSubview_(fda_status)
+    fda_cluster.addArrangedSubview_(fda_reveal)
     fda_cluster.addArrangedSubview_(fda_button)
     mac_inner.addArrangedSubview_(
         native_ui.make_row(
             "Focus Detection (Full Disk Access)",
             fda_cluster,
             help_text=(
-                "Lets SidePulse see which macOS Focus is active, so LEDs can "
-                "dim or turn off per Focus. Details in Settings > LED Behavior."
+                "Lets SidePulse see which macOS Focus is active, so LEDs "
+                "can dim or turn off per Focus. Grant\u2026 opens the "
+                "Privacy pane; click +, then pick the app Reveal shows "
+                "you (macOS won't list it by itself). The full "
+                "walkthrough lives in Settings > Focus."
             ),
         )
     )
@@ -8833,9 +8954,11 @@ def _build_led_behavior_pane(target: StatusBarController):
         fields[f"notification_color:{bundle_id}"] = color_field
     stack.addArrangedSubview_(notif_outer)
 
-    # Calendar glow: a warning light, not a calendar app -- one switch,
-    # one lead time. Enabling it presents the system Calendars prompt.
-    cal_outer, cal_inner = native_ui.make_card("Calendar")
+    # Calendar & Reminders: warning lights, not a calendar app.
+    # (This card used to be a five-feature grab-bag titled "Calendar",
+    # with weather's location fields orphaned three rows from the
+    # weather switch. One card per subject now.)
+    cal_outer, cal_inner = native_ui.make_card("Calendar & Reminders")
     cal_row, cal_switch = native_ui.make_switch_row(
         "Glow before events start",
         target,
@@ -8869,7 +8992,11 @@ def _build_led_behavior_pane(target: StatusBarController):
         ),
     )
     cal_inner.addArrangedSubview_(rem_row)
-    native_ui.add_separator(cal_inner)
+    stack.addArrangedSubview_(cal_outer)
+    fields["calendar_lead_field"] = lead_field
+
+    # Weather: the switch and ITS location fields, together.
+    weather_outer, weather_inner = native_ui.make_card("Weather")
     weather_row, weather_switch = native_ui.make_switch_row(
         "Flash on severe weather warnings",
         target,
@@ -8877,45 +9004,12 @@ def _build_led_behavior_pane(target: StatusBarController):
         help_text=(
             "An urgent heartbeat while a Severe or Extreme National "
             "Weather Service warning covers your area. Location comes "
-            "from your network address -- no Location permission needed."
+            "from your network address -- no Location permission "
+            "needed. A live agent ask still takes the bar first."
         ),
     )
-    cal_inner.addArrangedSubview_(weather_row)
-    native_ui.add_separator(cal_inner)
-    quota_row, quota_switch = native_ui.make_switch_row(
-        "Blink when a quota threshold is crossed",
-        target,
-        "toggleQuotaAlerts:",
-        help_text=(
-            "A double-tap in the provider's color the moment Codex's "
-            "weekly limit (or a Claude plan window, when plan limits "
-            "are on) crosses a threshold below. Quiet hour holds it."
-        ),
-    )
-    cal_inner.addArrangedSubview_(quota_row)
-    quota_field = native_ui.make_field(
-        ", ".join(f"{value:g}" for value in target.settings.quota_alert_thresholds),
-        target=target,
-        action="applyQuotaThresholds:",
-    )
-    native_ui.constrain_width(quota_field, 110.0)
-    quota_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
-    quota_controls.addArrangedSubview_(quota_field)
-    quota_controls.addArrangedSubview_(native_ui.make_label("% used", secondary=True))
-    cal_inner.addArrangedSubview_(native_ui.make_row("Thresholds", quota_controls))
-    fields["quota_thresholds_field"] = quota_field
-    native_ui.add_separator(cal_inner)
-    subask_row, subask_switch = native_ui.make_switch_row(
-        "Sub-agent asks ring the Ask signal",
-        target,
-        "toggleSubagentAsksAlert:",
-        help_text=(
-            "Workers often end with question-shaped text nobody can "
-            "answer -- off (default) means only MAIN sessions turn the "
-            "lights amber."
-        ),
-    )
-    cal_inner.addArrangedSubview_(subask_row)
+    weather_inner.addArrangedSubview_(weather_row)
+    native_ui.add_separator(weather_inner)
     lat_field = native_ui.make_field(
         ""
         if target.settings.weather_latitude is None
@@ -8939,7 +9033,7 @@ def _build_led_behavior_pane(target: StatusBarController):
     location_controls.addArrangedSubview_(native_ui.make_label("lat", secondary=True))
     location_controls.addArrangedSubview_(lon_field)
     location_controls.addArrangedSubview_(native_ui.make_label("lon", secondary=True))
-    cal_inner.addArrangedSubview_(
+    weather_inner.addArrangedSubview_(
         native_ui.make_row(
             "Location override",
             location_controls,
@@ -8952,8 +9046,33 @@ def _build_led_behavior_pane(target: StatusBarController):
     )
     fields["weather_latitude_field"] = lat_field
     fields["weather_longitude_field"] = lon_field
-    stack.addArrangedSubview_(cal_outer)
-    fields["calendar_lead_field"] = lead_field
+    stack.addArrangedSubview_(weather_outer)
+
+    # Quota: threshold blinks in the provider's color.
+    quota_outer, quota_inner = native_ui.make_card("Quota")
+    quota_row, quota_switch = native_ui.make_switch_row(
+        "Blink when a quota threshold is crossed",
+        target,
+        "toggleQuotaAlerts:",
+        help_text=(
+            "A double-tap in the provider's color the moment Codex's "
+            "weekly limit (or a Claude plan window, when plan limits "
+            "are on) crosses a threshold below. Quiet hour holds it."
+        ),
+    )
+    quota_inner.addArrangedSubview_(quota_row)
+    quota_field = native_ui.make_field(
+        ", ".join(f"{value:g}" for value in target.settings.quota_alert_thresholds),
+        target=target,
+        action="applyQuotaThresholds:",
+    )
+    native_ui.constrain_width(quota_field, 110.0)
+    quota_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
+    quota_controls.addArrangedSubview_(quota_field)
+    quota_controls.addArrangedSubview_(native_ui.make_label("% used", secondary=True))
+    quota_inner.addArrangedSubview_(native_ui.make_row("Thresholds", quota_controls))
+    fields["quota_thresholds_field"] = quota_field
+    stack.addArrangedSubview_(quota_outer)
 
     # Needs-you escalation: how loud an ignored ask may get.
     esc_outer, esc_inner = native_ui.make_card("Needs-You Escalation")
@@ -8966,6 +9085,18 @@ def _build_led_behavior_pane(target: StatusBarController):
             tier_popup.selectItem_(item)
     esc_inner.addArrangedSubview_(native_ui.make_row("Ceiling", tier_popup))
     fields["escalation_tier_popup"] = tier_popup
+    native_ui.add_separator(esc_inner)
+    subask_row, subask_switch = native_ui.make_switch_row(
+        "Sub-agent asks ring the Ask signal",
+        target,
+        "toggleSubagentAsksAlert:",
+        help_text=(
+            "Workers often end with question-shaped text nobody can "
+            "answer -- off (default) means only MAIN sessions turn the "
+            "lights amber."
+        ),
+    )
+    esc_inner.addArrangedSubview_(subask_row)
     native_ui.add_separator(esc_inner)
     threshold_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
     for field_key, seconds, suffix in (
@@ -9187,6 +9318,7 @@ def _build_lid_preset_row(target: StatusBarController, kind: str, current_progra
             layer = view.layer()
             if layer is not None:
                 layer.setBorderWidth_(2.0)
+                layer.setBorderColor_(NSColor.controlAccentColor().CGColor())
     row.addArrangedSubview_(native_ui.make_hspacer())
     return row
 
@@ -9791,7 +9923,6 @@ def _build_color_studio_pane(target: StatusBarController) -> NSView:
     scroll_stack.addArrangedSubview_(mode_outer)
 
     anim_outer, anim_inner = native_ui.make_card("Animation Style")
-    animation_popups: dict[str, object] = {}
     animation_thumbs: dict[str, dict[str, object]] = {}
     for index, key in enumerate(ANIMATION_MODE_KEYS):
         thumb_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
@@ -9932,7 +10063,6 @@ def _build_color_studio_pane(target: StatusBarController) -> NSView:
         "cycle_speed_field": cycle_speed_field,
         "live_toggle": live_toggle,
         "fade_fields": fade_fields,
-        "animation_popups": animation_popups,
     }
     target.color_preview_rows = preview_rows
     refresh_blend_and_speed_fields(target)
@@ -10104,18 +10234,6 @@ ANIMATION_STYLE_DISPLAY_LABELS: dict[str, str] = {
     "solid": "Solid (no animation)",
     "blink": "Blink (hard on/off)",
 }
-
-
-def make_animation_style_popup(target, mode_key: str):
-    popup = native_ui.make_popup_button(target, "setAnimationStyle:")
-    for style in ANIMATION_STYLE_CHOICES:
-        popup.addItemWithTitle_(ANIMATION_STYLE_DISPLAY_LABELS.get(style, style.title()))
-        popup.lastItem().setRepresentedObject_({"mode_key": mode_key, "style": style})
-    return popup
-
-
-def select_animation_style(popup, style: str) -> None:
-    select_popup_item(popup, "style", style)
 
 
 def make_closed_lid_awake_policy_popup(target):
