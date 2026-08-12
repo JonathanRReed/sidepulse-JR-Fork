@@ -268,6 +268,8 @@ LED_DISPLAY_LOW_BATTERY = "low_battery"
 LED_DISPLAY_NOTIFICATION = "notification"
 LED_DISPLAY_CALENDAR = "calendar"
 LED_DISPLAY_ESCALATION = "escalation"
+LED_DISPLAY_TEST = "signal_test"
+SIGNAL_TEST_SECONDS = 5.0
 LED_DISPLAY_REMINDERS = "reminders"
 REMINDERS_WATCH_SECONDS = 60.0
 REMINDERS_WATCH_RETRY_SECONDS = 300.0
@@ -588,6 +590,41 @@ class StatusBarController(NSObject):
                 needs_refresh = True
             self.last_watched_focus_scale = scale
 
+        # Focus -> profile automation: a NEWLY activated Focus with a
+        # rule applies its profile exactly once per activation.
+        if self.settings.focus_profile_rules:
+            try:
+                active_focus = set(focus_sync.active_focus_mode_identifiers())
+            except focus_sync.FocusSyncUnavailableError:
+                active_focus = set()
+            previous_focus = getattr(self, "last_active_focus_ids", set())
+            newly_active = active_focus - previous_focus
+            self.last_active_focus_ids = active_focus
+            for focus_id in sorted(newly_active):
+                slot = self.settings.focus_profile_rules.get(focus_id)
+                if slot:
+                    self.settings = self.settings.with_applied_calibration_profile(slot)
+                    save_settings(self.settings)
+                    self.set_settings_message(f"Focus started — applied the {slot} profile.")
+                    needs_refresh = True
+                    break
+
+        # Timebox: chime once and revert when the countdown hits zero.
+        ends_at = getattr(self, "timebox_ends_at", None)
+        if ends_at is not None and time.monotonic() >= ends_at:
+            self.timebox_ends_at = None
+            self.timebox_total_seconds = 0.0
+            try:
+                from AppKit import NSSound
+
+                sound = NSSound.soundNamed_("Glass")
+                if sound is not None:
+                    sound.play()
+            except Exception:
+                pass
+            self.set_settings_message("Timebox finished.")
+            needs_refresh = True
+
         # Escalation stages advance with TIME, not events -- this shared
         # watcher tick is what promotes an ignored ask to the next stage.
         self.apply_escalation(allow_refresh=True)
@@ -793,7 +830,7 @@ class StatusBarController(NSObject):
         self.observe_connected_devices()
         self.track_ask_blocked(snapshot.statuses)
         self.track_working(snapshot.statuses)
-        self.set_status(state)
+        self.set_status(state, ask_count=len(ask_statuses(snapshot)))
         self.sync_keep_awake(snapshot.aggregate.mode)
         self.sync_leds(
             snapshot.aggregate.mode,
@@ -1179,6 +1216,22 @@ class StatusBarController(NSObject):
                         thumb.setNeedsDisplay_(True)
 
     @objc.IBAction
+    def setFocusProfileRule_(self, sender):
+        identifier = str(sender.identifier() or "")
+        item = sender.selectedItem()
+        slot = str(item.representedObject() or "") if item is not None else ""
+        if not identifier:
+            return
+        try:
+            self.settings = self.settings.with_focus_profile_rule(identifier, slot or None)
+        except ValueError:
+            return
+        save_settings(self.settings)
+        self.set_settings_message(
+            f"Focus rule saved: {item.title() if item is not None else 'No profile'}."
+        )
+
+    @objc.IBAction
     def setSessionIdentityColor_(self, sender):
         payload = sender.representedObject() or {}
         agent_id = str(payload.get("agent_id") or "")
@@ -1225,6 +1278,30 @@ class StatusBarController(NSObject):
                 "Reminders access is denied — enable SidePulse under "
                 "Privacy & Security → Reminders."
             )
+
+    def test_signal_program(self, brightness: int | float, led_count: int = 8) -> str:
+        key = getattr(self, "test_signal_key", None) or signals_module.SIGNAL_LOW_BATTERY
+        return style_to_program(
+            self.settings.signal_style(key),
+            brightness,
+            color=_signal_preview_color(self, key),
+            led_count=led_count,
+        )
+
+    @objc.IBAction
+    def testSignal_(self, sender):
+        key = str(sender.identifier() or "")
+        if key not in signals_module.DEFAULT_SIGNAL_STYLES:
+            return
+        self.test_signal_key = key
+        self.test_signal_until = time.monotonic() + SIGNAL_TEST_SECONDS
+        self.refresh_(None)
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            SIGNAL_TEST_SECONDS + 0.1, self, "refresh:", None, False
+        )
+        self.set_settings_message(
+            f"Testing the {key.replace('_', ' ')} signal on every surface…"
+        )
 
     @objc.IBAction
     def applyTimerMinutes_(self, sender):
@@ -1763,13 +1840,38 @@ class StatusBarController(NSObject):
             else None
         )
 
+    def timebox_active(self) -> bool:
+        ends_at = getattr(self, "timebox_ends_at", None)
+        return ends_at is not None and time.monotonic() < ends_at
+
     def timer_fill_fraction(self) -> float:
+        # An active timebox owns the fill: it DRAINS toward zero (a
+        # countdown reads as remaining time, not elapsed).
+        if self.timebox_active():
+            total = max(1.0, getattr(self, "timebox_total_seconds", 0.0))
+            remaining = max(0.0, self.timebox_ends_at - time.monotonic())
+            return min(1.0, remaining / total)
         if getattr(self, "working_since", None) is None:
             return 0.0
         expected_seconds = self.settings.timer_expected_minutes * 60.0
         if expected_seconds <= 0.0:
             return 1.0
         return min(1.0, (time.monotonic() - self.working_since) / expected_seconds)
+
+    @objc.IBAction
+    def startTimebox_(self, sender):
+        minutes = float(sender.representedObject() or 25)
+        self.timebox_total_seconds = minutes * 60.0
+        self.timebox_ends_at = time.monotonic() + self.timebox_total_seconds
+        self.refresh_(None)
+        self.set_settings_message(f"Timebox: {minutes:g} minutes on the bar.")
+
+    @objc.IBAction
+    def stopTimebox_(self, _sender):
+        self.timebox_ends_at = None
+        self.timebox_total_seconds = 0.0
+        self.refresh_(None)
+        self.set_settings_message("Timebox stopped.")
 
     def current_escalation_stage(self) -> int:
         elapsed = (
@@ -1867,9 +1969,10 @@ class StatusBarController(NSObject):
             and self.current_escalation_stage() >= 3
         )
 
-    def set_status(self, state: StatusBarState) -> None:
+    def set_status(self, state: StatusBarState, *, ask_count: int = 0) -> None:
         previous = self.current_state
         self.current_state = state
+        self.current_ask_count = ask_count
         if state == STATE_IDLE:
             if previous != STATE_IDLE or self.idle_since_monotonic is None:
                 self.idle_since_monotonic = time.monotonic()
@@ -1880,7 +1983,10 @@ class StatusBarController(NSObject):
         button = self.status_item.button()
         if button is None:
             return
-        button.setTitle_(f" {state.label}")
+        # The badge: with several sessions waiting at once, the count is
+        # the difference between "check sometime" and "two are stuck".
+        title = f" {state.label} ({ask_count})" if ask_count >= 2 else f" {state.label}"
+        button.setTitle_(title)
         button.setImage_(image_for_symbol(state.symbol, state.label))
         button.setToolTip_(f"SidePulse Agent Monitor: {state.label}")
         if previous != state:
@@ -3712,6 +3818,15 @@ class StatusBarController(NSObject):
         # the always-active default.
         now = time.monotonic()
         claims = (
+            # A just-clicked Test button outranks everything briefly --
+            # the user explicitly asked to SEE this signal right now.
+            (
+                LED_DISPLAY_TEST,
+                lambda: (
+                    getattr(self, "test_signal_key", None) is not None
+                    and now < getattr(self, "test_signal_until", 0.0)
+                ),
+            ),
             # Opt-in stage-3 takeover outranks everything: the user
             # explicitly chose "don't let me miss this".
             (LED_DISPLAY_ESCALATION, self.escalation_takeover_active),
@@ -3749,7 +3864,10 @@ class StatusBarController(NSObject):
                     or (battery_snapshot is not None and now < self.battery_preview_until)
                 ),
             ),
-            (LED_DISPLAY_TIMER, lambda: device.display == LED_DISPLAY_TIMER),
+            (
+                LED_DISPLAY_TIMER,
+                lambda: device.display == LED_DISPLAY_TIMER or self.timebox_active(),
+            ),
         )
         for key, active in claims:
             try:
@@ -3840,7 +3958,11 @@ class StatusBarController(NSObject):
         # any of them.
         brightness = self.effective_brightness_for_device(device)
         display = self.active_led_display_kind_for_device(device, battery_snapshot)
-        if display == LED_DISPLAY_ESCALATION:
+        if display == LED_DISPLAY_TEST:
+            self.virtual_status_device.set_program(
+                self.test_signal_program(brightness), started_at=started_at
+            )
+        elif display == LED_DISPLAY_ESCALATION:
             self.virtual_status_device.set_program(
                 self.escalation_takeover_program(brightness), started_at=started_at
             )
@@ -4002,7 +4124,18 @@ class StatusBarController(NSObject):
                 self.last_led_display_kind_by_device[device.device_id] = device_display_kind
 
             device_led_count = led_count_for_target(device.target)
-            if device_display_kind == LED_DISPLAY_ESCALATION:
+            if device_display_kind == LED_DISPLAY_TEST:
+                controller = self.agent_controller_for_device(device)
+                result = controller.sync_program(
+                    self.test_signal_program(controller.brightness, led_count=device_led_count),
+                    LedDisplayState.ASK,
+                )
+                label = f"{device.name} Signal test"
+                if result.error:
+                    agent_write_failed = True
+                elif result.changed:
+                    agent_write_changed = True
+            elif device_display_kind == LED_DISPLAY_ESCALATION:
                 controller = self.agent_controller_for_device(device)
                 result = controller.sync_program(
                     self.escalation_takeover_program(
@@ -4421,6 +4554,30 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     the keep-awake policy is a submenu, not four inline rows."""
     menu = NSMenu.alloc().init()
 
+    # The Ask Inbox: WHO needs you, pinned first -- the reason the menu
+    # got opened. Rows are the same one-click session jumps as below.
+    asks = ask_statuses(snapshot)
+    if asks:
+        menu.addItem_(disabled_menu_item(f"Needs You ({len(asks)})"))
+        ask_identity: dict[str, str] = {}
+        if len(asks) > 1:
+            ask_identity = colors_module.identity_colors_for_agents(
+                [status.agent_id for status in asks]
+            )
+        for status in asks:
+            dot = None
+            if getattr(target, "settings", None) is not None:
+                dot = target.settings.colors.session_color(status.agent_id)
+            menu.addItem_(
+                build_session_menu_item(
+                    status,
+                    snapshot.collected_at,
+                    target,
+                    identity_color=dot or ask_identity.get(status.agent_id),
+                )
+            )
+        menu.addItem_(NSMenuItem.separatorItem())
+
     menu.addItem_(disabled_menu_item("Agents"))
 
     statuses = recent_statuses(snapshot)
@@ -4476,6 +4633,27 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         profiles_menu.addItem_(save_item)
     profiles_item.setSubmenu_(profiles_menu)
     menu.addItem_(profiles_item)
+    # Timebox: the bar as an ambient countdown.
+    timebox_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Timebox", None, "")
+    timebox_menu = NSMenu.alloc().init()
+    timebox_menu.setAutoenablesItems_(False)
+    for minutes in (15, 25, 45, 60):
+        start_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"Start {minutes} Minutes", "startTimebox:", ""
+        )
+        start_item.setTarget_(target)
+        start_item.setRepresentedObject_(minutes)
+        timebox_menu.addItem_(start_item)
+    if getattr(target, "timebox_ends_at", None) is not None and target.timebox_active():
+        timebox_menu.addItem_(NSMenuItem.separatorItem())
+        remaining_minutes = max(0, round((target.timebox_ends_at - time.monotonic()) / 60.0))
+        stop_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"Stop (~{remaining_minutes} min left)", "stopTimebox:", ""
+        )
+        stop_item.setTarget_(target)
+        timebox_menu.addItem_(stop_item)
+    timebox_item.setSubmenu_(timebox_menu)
+    menu.addItem_(timebox_item)
     devices = target.status_bar_devices()
     if devices:
         for device in devices:
@@ -5520,7 +5698,16 @@ def make_signal_style_card(target: StatusBarController, key: str, title: str, *,
 
     preview = _mini_led_view(*SIGNAL_PREVIEW_SIZE)
     preview.setProgram_(style_to_program(style, 255, color=preview_color))
-    inner.addArrangedSubview_(native_ui.make_row("Preview", preview))
+    preview_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    preview_cluster.addArrangedSubview_(preview)
+    test_button = native_ui.make_button("Test", target, "testSignal:")
+    test_button.setIdentifier_(key)
+    test_button.setToolTip_(
+        "Play this signal's current style on the Screen Bar and every "
+        "connected device for a few seconds."
+    )
+    preview_cluster.addArrangedSubview_(test_button)
+    inner.addArrangedSubview_(native_ui.make_row("Preview", preview_cluster))
     fields[f"signal_preview:{key}"] = preview
     return outer
 
@@ -5628,10 +5815,29 @@ def _build_led_behavior_pane(target: StatusBarController):
     else:
         for index, (identifier, name) in enumerate(focus_modes):
             popup = make_focus_dim_popup(target, identifier)
-            focus_inner.addArrangedSubview_(native_ui.make_row(name, popup))
+            # Focus -> profile automation: this Focus can also apply a
+            # calibration/brightness profile the moment it activates.
+            profile_popup = native_ui.make_popup_button(target, "setFocusProfileRule:")
+            profile_popup.setIdentifier_(identifier)
+            current_rule = target.settings.focus_profile_rules.get(identifier)
+            profile_popup.addItemWithTitle_("No profile")
+            profile_popup.lastItem().setRepresentedObject_("")
+            if current_rule is None:
+                profile_popup.selectItem_(profile_popup.lastItem())
+            for slot in CALIBRATION_PROFILE_SLOTS:
+                profile_popup.addItemWithTitle_(f"Apply {slot}")
+                item = profile_popup.lastItem()
+                item.setRepresentedObject_(slot)
+                if slot == current_rule:
+                    profile_popup.selectItem_(item)
+            row_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+            row_cluster.addArrangedSubview_(popup)
+            row_cluster.addArrangedSubview_(profile_popup)
+            focus_inner.addArrangedSubview_(native_ui.make_row(name, row_cluster))
             if index < len(focus_modes) - 1:
                 native_ui.add_separator(focus_inner)
             fields[f"focus_rule_popup:{identifier}"] = popup
+            fields[f"focus_profile_popup:{identifier}"] = profile_popup
     stack.addArrangedSubview_(focus_outer)
 
     # Notification blinks: a moment, not a state -- flash the app's own
@@ -7415,6 +7621,15 @@ def recent_statuses(snapshot) -> list[AgentStatus]:
         statuses = list(snapshot.stale_statuses)
     statuses.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
     return statuses[:12]
+
+
+def ask_statuses(snapshot) -> list[AgentStatus]:
+    """The sessions currently waiting on the user -- the Ask Inbox."""
+    return [
+        status
+        for status in snapshot.statuses
+        if status.mode in (AgentMode.WAITING_FOR_INPUT, AgentMode.BLOCKED_ERROR)
+    ]
 
 
 def menu_title_for_status(status: AgentStatus, now: datetime) -> str:

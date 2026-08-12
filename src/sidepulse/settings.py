@@ -209,6 +209,9 @@ class AgentMonitorSettings:
     # this many expected minutes. Honest: it's a TIMER, not task
     # progress -- hooks deliver no truthful progress fraction.
     timer_expected_minutes: float = 10.0
+    # Focus -> profile automation: when a Focus activates, apply this
+    # calibration/brightness profile slot (focus id -> slot name).
+    focus_profile_rules: dict[str, str] = field(default_factory=dict)
     # Per-signal look overrides (Signal Engine). Keys/values validated
     # by signals.SignalStyle; absent keys mean the built-in defaults.
     signal_styles: dict[str, dict] = field(default_factory=dict)
@@ -714,6 +717,17 @@ class AgentMonitorSettings:
     def with_weather_alerts_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, weather_alerts_enabled=bool(enabled))
 
+    def with_focus_profile_rule(self, focus_identifier: str, slot: str | None) -> "AgentMonitorSettings":
+        """slot=None removes the rule."""
+        if slot is not None and slot not in CALIBRATION_PROFILE_SLOTS:
+            raise ValueError(f"Unknown profile slot: {slot}")
+        rules = dict(self.focus_profile_rules)
+        if slot is None:
+            rules.pop(focus_identifier, None)
+        else:
+            rules[focus_identifier] = slot
+        return replace(self, focus_profile_rules=rules)
+
     def with_timer_expected_minutes(self, minutes: float) -> "AgentMonitorSettings":
         return replace(self, timer_expected_minutes=max(1.0, min(480.0, float(minutes))))
 
@@ -853,6 +867,7 @@ class AgentMonitorSettings:
             "weather_longitude": self.weather_longitude,
             "calibration_profiles": dict(sorted(self.calibration_profiles.items())),
             "timer_expected_minutes": self.timer_expected_minutes,
+            "focus_profile_rules": dict(sorted(self.focus_profile_rules.items())),
             "signal_styles": dict(sorted(self.signal_styles.items())),
             "escalation_tier": self.escalation_tier,
             "escalation_ramp_seconds": self.escalation_ramp_seconds,
@@ -1059,6 +1074,15 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         timer_expected_minutes=max(
             1.0, min(480.0, _float_setting(data.get("timer_expected_minutes"), 10.0))
+        ),
+        focus_profile_rules=(
+            {
+                str(focus_id): slot
+                for focus_id, slot in data.get("focus_profile_rules", {}).items()
+                if isinstance(slot, str) and slot in CALIBRATION_PROFILE_SLOTS
+            }
+            if isinstance(data.get("focus_profile_rules"), dict)
+            else {}
         ),
         signal_styles=_signal_styles(data.get("signal_styles")),
         escalation_tier=_escalation_tier(data.get("escalation_tier")),

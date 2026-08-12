@@ -8702,6 +8702,113 @@ class EscalationControllerTests(unittest.TestCase):
         self.assertGreater(boosted, baseline * 1.05)
 
 
+class AskInboxAndActionsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        settings_path = Path(self._tmp.name) / "settings.json"
+        patcher_settings = patch("sidepulse.settings.default_settings_path", return_value=settings_path)
+        patcher_status_bar = patch("sidepulse.status_bar.default_settings_path", return_value=settings_path)
+        patcher_settings.start()
+        patcher_status_bar.start()
+        self.addCleanup(patcher_settings.stop)
+        self.addCleanup(patcher_status_bar.stop)
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+        self.status_bar = status_bar
+        self.controller = status_bar.StatusBarController.alloc().init()
+
+    def test_ask_statuses_filters_to_sessions_needing_the_user(self) -> None:
+        from sidepulse.collector import snapshot_from_statuses
+        from datetime import datetime, timezone
+
+        statuses = (
+            _status("codex", AgentMode.WORKING),
+            _status("claude", AgentMode.WAITING_FOR_INPUT),
+            _status("devin", AgentMode.BLOCKED_ERROR),
+        )
+        snapshot = snapshot_from_statuses(
+            statuses,
+            sources=(),
+            collected_at=datetime.now(timezone.utc),
+            stale_after_seconds=3600.0,
+            tool_running_timeout_seconds=0.0,
+            completed_visible_seconds=60.0,
+            idle_visible_seconds=60.0,
+        )
+        asks = self.status_bar.ask_statuses(snapshot)
+        self.assertEqual({status.provider for status in asks}, {"claude", "devin"})
+
+    def test_badge_counts_two_or_more_asks(self) -> None:
+        self.controller.set_status(self.status_bar.STATE_ASK, ask_count=2)
+        self.assertEqual(self.controller.current_ask_count, 2)
+        self.controller.set_status(self.status_bar.STATE_ASK, ask_count=1)
+        self.assertEqual(self.controller.current_ask_count, 1)
+
+    def test_signal_test_claims_the_top_briefly_then_expires(self) -> None:
+        device = self.status_bar.StatusBarDevice(
+            device_id="SidePulsePro",
+            name="SidePulse Pro",
+            root=Path("/Volumes/SidePulsePro"),
+            target=Path("/Volumes/SidePulsePro/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        self.controller.test_signal_key = "calendar"
+        self.controller.test_signal_until = time.monotonic() + 5.0
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_TEST,
+        )
+        program = self.controller.test_signal_program(255)
+        self.assertTrue(program)
+        self.controller.test_signal_until = 0.0
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_AGENT,
+        )
+
+    def test_focus_profile_rule_round_trips_and_validates(self) -> None:
+        configured = AgentMonitorSettings().with_focus_profile_rule("com.apple.focus.work", "Day")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            reloaded = load_settings(path)
+        self.assertEqual(reloaded.focus_profile_rules["com.apple.focus.work"], "Day")
+        cleared = reloaded.with_focus_profile_rule("com.apple.focus.work", None)
+        self.assertNotIn("com.apple.focus.work", cleared.focus_profile_rules)
+        with self.assertRaises(ValueError):
+            AgentMonitorSettings().with_focus_profile_rule("x", "Disco")
+
+    def test_timebox_owns_the_timer_fill_and_drains(self) -> None:
+        device = self.status_bar.StatusBarDevice(
+            device_id="SidePulsePro",
+            name="SidePulse Pro",
+            root=Path("/Volumes/SidePulsePro"),
+            target=Path("/Volumes/SidePulsePro/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        self.controller.timebox_total_seconds = 100.0
+        self.controller.timebox_ends_at = time.monotonic() + 50.0
+        self.assertTrue(self.controller.timebox_active())
+        # Half elapsed -> roughly half remaining (draining fill).
+        self.assertAlmostEqual(self.controller.timer_fill_fraction(), 0.5, delta=0.02)
+        # An active timebox claims the timer display on ANY device.
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_TIMER,
+        )
+        self.controller.timebox_ends_at = None
+        self.assertFalse(self.controller.timebox_active())
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_AGENT,
+        )
+
+
 class DeferredRoadmapTests(unittest.TestCase):
     def test_per_device_blend_override_round_trips(self) -> None:
         from sidepulse.settings import DeviceDisplaySetting
