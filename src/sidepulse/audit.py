@@ -177,3 +177,33 @@ def table_row(record: dict[str, str]) -> str:
         css_class = ' class="raw"' if column == "raw_preview" else ""
         cells.append(f"<td{css_class}>{html.escape(record.get(column, ''))}</td>")
     return "<tr>" + "".join(cells) + "</tr>"
+
+
+TRIM_THRESHOLD_BYTES = 5 * 1024 * 1024
+TRIM_KEEP_LINES = 4000
+
+
+def trim_oversized_logs(state_dir: Path) -> int:
+    """Rotates every .jsonl under the state dir that has grown past
+    TRIM_THRESHOLD_BYTES down to its last TRIM_KEEP_LINES lines
+    (atomic replace). Hook logs and the event ledger appended forever
+    with no cap -- a long-lived install accumulated unbounded disk and
+    made every export read the whole history into memory. Returns how
+    many files were trimmed; never raises."""
+    trimmed = 0
+    try:
+        candidates = list(Path(state_dir).rglob("*.jsonl"))
+    except OSError:
+        return 0
+    for path in candidates:
+        try:
+            if path.stat().st_size <= TRIM_THRESHOLD_BYTES:
+                continue
+            lines = path.read_text(errors="replace").splitlines(keepends=True)
+            scratch = path.with_suffix(".jsonl.tmp")
+            scratch.write_text("".join(lines[-TRIM_KEEP_LINES:]))
+            scratch.replace(path)
+            trimmed += 1
+        except OSError:
+            continue
+    return trimmed

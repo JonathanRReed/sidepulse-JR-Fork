@@ -3308,8 +3308,10 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertIn(f"3:{BATTERY_CHARGING_MINT} 360ms ease", lines[0])
         self.assertIn("4:#000000 360ms ease", lines[0])
         self.assertEqual(lines[1], f"4:{BATTERY_CHARGING_MINT} 790ms pulse")
-        self.assertEqual(len(lines), 2)
-        self.assertNotIn("repeat", program)
+        # The charge pulse LOOPS now -- without repeat it played once
+        # per device write and froze until the next 15s sync.
+        self.assertEqual(lines[2], "repeat")
+        self.assertEqual(len(lines), 3)
         self.assertNotIn("\noff", program)
 
     def test_unplugged_battery_program_eases_to_static_level(self) -> None:
@@ -3357,7 +3359,7 @@ class AgentMonitorTests(unittest.TestCase):
 
         validate_led_text(program)
         self.assertIn(f"6:{BATTERY_CHARGING_MINT} 1400ms pulse", program)
-        self.assertNotIn("repeat", program)
+        self.assertIn("repeat", program)
         self.assertNotIn("none", program)
 
     def test_battery_led_controller_animates_charging_on_cadence(self) -> None:
@@ -8700,6 +8702,37 @@ class EscalationControllerTests(unittest.TestCase):
         self.controller.ask_blocked_since = time.monotonic() - 60.0
         boosted = self.controller.effective_brightness_for_device(device)
         self.assertGreater(boosted, baseline * 1.05)
+
+
+class HardeningTests(unittest.TestCase):
+    def test_charging_program_repeats(self) -> None:
+        # Without repeat the charge pulse played once per device write
+        # and froze until the next 15s sync -- four blinks a minute.
+        from sidepulse.battery import BatterySnapshot, program_for_battery
+
+        snapshot = BatterySnapshot(
+            percent=50, is_plugged=True, is_charging=True, battery_present=True, adapter_watts=60
+        )
+        program = program_for_battery(snapshot, led_count=8)
+        self.assertIn("pulse", program)
+        self.assertIn("repeat", program)
+
+    def test_trim_oversized_logs_keeps_the_tail_only(self) -> None:
+        from sidepulse import audit
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            big = state / "hooks" / "codex.jsonl"
+            big.parent.mkdir(parents=True)
+            line = json.dumps({"event": "x", "pad": "y" * 200}) + "\n"
+            count = (audit.TRIM_THRESHOLD_BYTES // len(line)) + 100
+            big.write_text(line * count)
+            small = state / "tiny.jsonl"
+            small.write_text(line * 3)
+            trimmed = audit.trim_oversized_logs(state)
+            self.assertEqual(trimmed, 1)
+            self.assertEqual(len(big.read_text().splitlines()), audit.TRIM_KEEP_LINES)
+            self.assertEqual(len(small.read_text().splitlines()), 3)
 
 
 class AskInboxAndActionsTests(unittest.TestCase):

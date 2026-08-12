@@ -94,6 +94,7 @@ from .audit import (
     default_status_audit_log_path,
     export_status_audit_csv,
     export_status_audit_html,
+    trim_oversized_logs,
 )
 from .collector import (
     CLAUDE_TRANSCRIPT_PROVIDER,
@@ -558,6 +559,11 @@ class StatusBarController(NSObject):
         # Tornado Warning must not stay dark for 10 minutes after launch.
         if self.settings.weather_alerts_enabled:
             self.pollWeather_(None)
+        # Rotate oversized hook/event logs off the main thread.
+        threading.Thread(
+            target=lambda: trim_oversized_logs(default_state_dir()),
+            daemon=True,
+        ).start()
         self.show_setup_window_if_needed()
         if SCREEN_BAR_FEATURE_ENABLED and self.settings.virtual_status_device_enabled:
             self.virtual_status_device.show()
@@ -1954,8 +1960,24 @@ class StatusBarController(NSObject):
         """ColorSettings for agent rendering with the stage>=1
         quickening applied: blend cycles run at x0.75 speed, so the
         ramp stays visible even at full brightness where the boost
-        alone would clamp away to nothing."""
+        alone would clamp away to nothing.
+
+        Also honors "Preview live on device" being OFF: while the
+        Colors window is open with preview disabled, hardware keeps
+        rendering the colors from when the window opened -- edits
+        used to leak to the device within one sync tick anyway."""
         colors = self.settings.colors
+        colors_window = getattr(self, "colors_window", None)
+        if (
+            colors_window is not None
+            and colors_window.isVisible()
+            and not getattr(self, "color_preview_enabled", True)
+        ):
+            if getattr(self, "colors_preview_baseline", None) is None:
+                self.colors_preview_baseline = colors
+            colors = self.colors_preview_baseline
+        else:
+            self.colors_preview_baseline = None
         if self.current_escalation_stage() >= 1:
             quickened = max(
                 colors_module.MIN_CYCLE_SPEED_SECONDS, colors.cycle_speed_seconds * 0.75
@@ -2350,6 +2372,10 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def applyCustomColorFromPanel_(self, sender):
         if self.active_color_target is None:
+            return
+        # Commit on release only: the panel's continuous action fired a
+        # settings save + full Colors-window rebuild per drag tick.
+        if self._slider_event_is_drag():
             return
         hex_value = hex_from_nscolor(sender.color())
         self.apply_color_change(self.active_color_target, hex_value)

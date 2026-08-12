@@ -333,6 +333,10 @@ def program_for_battery(
     lines.extend(
         [
             f"{pulse_index}:{color} {pulse_ms}ms pulse",
+            # Loop: without repeat the charge pulse played ONCE per
+            # device write and then sat frozen until the next sync tick
+            # (up to 15s) -- "pulsing" that blinked four times a minute.
+            "repeat",
         ]
     )
     return apply_brightness("\n".join(lines), brightness)
