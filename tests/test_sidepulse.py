@@ -9247,6 +9247,75 @@ class UsageGraphRangeTests(unittest.TestCase):
         self.assertEqual(len(buckets), 365)
 
 
+class QuotaRunwayTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_runway_program_fill_split_and_firmware_law(self) -> None:
+        from sidepulse.led_status import quota_runway_program
+
+        program = quota_runway_program(0.5, led_count=8, brightness=255, color="#10A37F")
+        self.assertNotIn(":off", program)
+        self.assertIn("#000000", program)
+        self.assertIn("repeat", program)
+        lit = [seg for seg in program.split(";") if "#000000" not in seg]
+        self.assertEqual(len(lit), 4)
+
+    def test_runway_state_picks_worst_window_and_brand(self) -> None:
+        self.controller.quota_last_percents = {
+            "Claude weekly": 30.0,
+            "Codex weekly": 80.0,
+        }
+        state = self.controller.quota_runway_state()
+        self.assertAlmostEqual(state[0], 0.2)
+        self.assertEqual(state[1], "#10A37F")
+        self.controller.quota_last_percents = {}
+        self.assertIsNone(self.controller.quota_runway_state())
+
+    def test_runway_display_claims_when_selected(self) -> None:
+        from sidepulse.settings import LED_DISPLAY_QUOTA_RUNWAY
+
+        device = self.status_bar.StatusBarDevice(
+            device_id="SidePulsePro",
+            name="SidePulse Pro",
+            root=Path("/Volumes/SidePulsePro"),
+            target=Path("/Volumes/SidePulsePro/LEDS.LED"),
+            connected=True,
+            display=LED_DISPLAY_QUOTA_RUNWAY,
+        )
+        kind = self.controller.active_led_display_kind_for_device(device, None)
+        self.assertEqual(kind, LED_DISPLAY_QUOTA_RUNWAY)
+
+
+class PowerUpLookTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_power_up_writes_init_led_on_connected_hardware(self) -> None:
+        volume_root = Path(self._tmp.name) / "volumes"
+        (volume_root / "SidePulseDot").mkdir(parents=True)
+        devices = discover_devices(mount_root=volume_root)
+        self.controller.show_settings_window()
+        self.controller.studio_editor.setString_("#00E5FF 500ms pulse\nrepeat")
+        with patch("sidepulse.status_bar.discover_devices", return_value=devices):
+            self.controller.applyStudioAsPowerUp_(None)
+        init_path = volume_root / "SidePulseDot" / "INIT.LED"
+        self.assertTrue(init_path.exists())
+        self.assertIn("pulse", init_path.read_text())
+        # LEDS.LED untouched by the power-up write.
+        self.assertFalse((volume_root / "SidePulseDot" / "LEDS.LED").exists())
+
+    def test_invalid_program_writes_nothing(self) -> None:
+        volume_root = Path(self._tmp.name) / "volumes"
+        (volume_root / "SidePulseDot").mkdir(parents=True)
+        devices = discover_devices(mount_root=volume_root)
+        self.controller.show_settings_window()
+        self.controller.studio_editor.setString_("")
+        with patch("sidepulse.status_bar.discover_devices", return_value=devices):
+            self.controller.applyStudioAsPowerUp_(None)
+        self.assertFalse((volume_root / "SidePulseDot" / "INIT.LED").exists())
+
+
 class ContextLidAnimationTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_controller(self)

@@ -162,6 +162,7 @@ from .led_status import (
     normalize_brightness,
     normalized_device_name,
     program_for_display_state,
+    quota_runway_program,
     style_to_program,
     timer_fill_program,
     write_mode_to_leds,
@@ -210,6 +211,7 @@ from .settings import (
     LED_DISPLAY_AGENT,
     LED_DISPLAY_BATTERY,
     LED_DISPLAY_CHOICES,
+    LED_DISPLAY_QUOTA_RUNWAY,
     LED_DISPLAY_STUDIO,
     LED_DISPLAY_TIMER,
     LID_ANIMATION_CLOSED,
@@ -1554,6 +1556,51 @@ class StatusBarController(NSObject):
             color=_signal_preview_color(self, key),
             led_count=led_count,
         )
+
+    @objc.IBAction
+    def applyStudioAsPowerUp_(self, _sender):
+        """Burns the Studio program into every connected device's
+        INIT.LED so the hardware BOOTS wearing your light -- validated
+        through the real firmware grammar first; the firmware confirms
+        by playing it immediately (documented INIT.LED behavior)."""
+        editor = getattr(self, "studio_editor", None)
+        if editor is None:
+            return
+        program = str(editor.string()).strip()
+        if not program:
+            self.set_settings_message("Write a program first.")
+            return
+        try:
+            normalized = normalize_led_text(program)
+            validate_led_text(normalized)
+        except Exception as exc:
+            self.set_settings_message(f"Power-up look invalid: {exc}")
+            return
+        dsl_error = self.validate_studio_program(normalized)
+        if dsl_error:
+            self.set_settings_message(f"Power-up look invalid: {dsl_error}.")
+            return
+        written = 0
+        for device in self.status_bar_devices(remember=False):
+            if not device.connected or device.device_id == VIRTUAL_DEVICE_ID:
+                continue
+            try:
+                write_led_program(
+                    normalized, device_path=device.root, file_name="INIT.LED"
+                )
+                written += 1
+            except Exception as exc:
+                log_status_bar(f"INIT.LED write failed for {device.name}: {exc}")
+        if written:
+            plural = "device" if written == 1 else "devices"
+            self.set_settings_message(
+                f"Power-up look written to {written} {plural} -- it plays now "
+                "and every time the hardware boots."
+            )
+        else:
+            self.set_settings_message(
+                "No connected SidePulse hardware to write to."
+            )
 
     @objc.IBAction
     def previewStudioProgram_(self, _sender):
@@ -4153,6 +4200,7 @@ class StatusBarController(NSObject):
             LED_DISPLAY_BATTERY: "Battery Level",
             LED_DISPLAY_TIMER: "Working Timer",
             LED_DISPLAY_STUDIO: "Studio Program",
+            LED_DISPLAY_QUOTA_RUNWAY: "Quota Runway",
         }.get(display, display)
         self.set_settings_message(f"{device.name if device else device_id}: {label}.")
         self.refresh_settings_window()
@@ -4931,6 +4979,10 @@ class StatusBarController(NSObject):
                 LED_DISPLAY_STUDIO,
                 lambda: device.display == LED_DISPLAY_STUDIO,
             ),
+            (
+                LED_DISPLAY_QUOTA_RUNWAY,
+                lambda: device.display == LED_DISPLAY_QUOTA_RUNWAY,
+            ),
         )
         for key, active in claims:
             try:
@@ -5132,6 +5184,14 @@ class StatusBarController(NSObject):
             studio_program := self.studio_display_program(brightness)
         ):
             _set_virtual(studio_program)
+        elif display == LED_DISPLAY_QUOTA_RUNWAY and (
+            runway := self.quota_runway_state()
+        ):
+            _set_virtual(
+                quota_runway_program(
+                    runway[0], led_count=8, brightness=brightness, color=runway[1]
+                )
+            )
         else:
             colors_for_render = self.agent_render_colors()
             override = self.settings.device_blend_mode(VIRTUAL_DEVICE_ID)
@@ -5214,6 +5274,22 @@ class StatusBarController(NSObject):
         if result.ok:
             return None
         return f"{result.error_name} at line {result.line}, column {result.column}"
+
+    def quota_runway_state(self) -> tuple[float, str] | None:
+        """(fraction_left, brand color) for the WORST tracked quota
+        window, or None before any data -- factory-None falls back to
+        Agent display by the documented table contract."""
+        percents = getattr(self, "quota_last_percents", None) or {}
+        if not percents:
+            return None
+        worst_key = max(percents, key=lambda key: percents[key])
+        used = max(0.0, min(100.0, float(percents[worst_key])))
+        brand = {"Claude": "#D97757", "Codex": "#10A37F"}
+        color = next(
+            (hex_value for name, hex_value in brand.items() if worst_key.startswith(name)),
+            "#10A37F",
+        )
+        return (1.0 - used / 100.0, color)
 
     def studio_display_program(self, brightness: float) -> str | None:
         """The persistent Studio render: the saved program, validated and
@@ -5350,6 +5426,20 @@ class StatusBarController(NSObject):
                 lambda brightness, led_count: self.studio_display_program(brightness),
                 LedDisplayState.WORKING,
                 lambda device, _snapshot: f"{device.name} Studio program",
+            ),
+            LED_DISPLAY_QUOTA_RUNWAY: (
+                lambda brightness, led_count: (
+                    quota_runway_program(
+                        self.quota_runway_state()[0],
+                        led_count=led_count,
+                        brightness=brightness,
+                        color=self.quota_runway_state()[1],
+                    )
+                    if self.quota_runway_state() is not None
+                    else None
+                ),
+                LedDisplayState.WORKING,
+                lambda device, _snapshot: f"{device.name} Quota runway",
             ),
         }
 
@@ -6974,6 +7064,7 @@ def _build_devices_pane(target: StatusBarController):
             ("Battery fill", LED_DISPLAY_BATTERY),
             ("Working timer fill", LED_DISPLAY_TIMER),
             ("Studio program", LED_DISPLAY_STUDIO),
+            ("Quota runway", LED_DISPLAY_QUOTA_RUNWAY),
         ):
             display_popup.addItemWithTitle_(label)
             item = display_popup.lastItem()
@@ -8129,6 +8220,9 @@ def _add_studio_card(target: StatusBarController, stack) -> None:
         native_ui.make_button("Preview on Everything", target, "previewStudioProgram:")
     )
     studio_buttons.addArrangedSubview_(native_ui.make_button("Stop", target, "stopStudioProgram:"))
+    studio_buttons.addArrangedSubview_(
+        native_ui.make_button("Set as Power-Up Look", target, "applyStudioAsPowerUp:")
+    )
     studio_buttons.addArrangedSubview_(native_ui.make_hspacer())
     studio_inner.addArrangedSubview_(studio_buttons)
     stack.addArrangedSubview_(studio_outer)

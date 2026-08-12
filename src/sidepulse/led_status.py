@@ -473,6 +473,34 @@ def low_battery_program(brightness: float = 255) -> str:
     return style_to_program(DEFAULT_SIGNAL_STYLES[SIGNAL_LOW_BATTERY], brightness)
 
 
+def quota_runway_program(
+    fraction_left: float,
+    *,
+    led_count: int = 8,
+    brightness: float = 255,
+    color: str = "#10A37F",
+) -> str:
+    """Remaining quota headroom as a static left-anchored fill -- the
+    honest shape for a slow-moving number (no trickle, no motion). Same
+    indexed-fill body as timer_fill_program including the invariant that
+    unlit segments are #000000, never `off` (firmware parse law)."""
+    fraction_left = max(0.0, min(1.0, float(fraction_left)))
+    filled = fraction_left * max(1, led_count)
+    stripped = color.lstrip("#")
+    red, green, blue = (int(stripped[i : i + 2], 16) for i in (0, 2, 4))
+    segments = []
+    for index in range(led_count):
+        level = max(0.0, min(1.0, filled - index))
+        if level <= 0.0:
+            segments.append(f"{index}:#000000 60000ms linear")
+            continue
+        lit = scale_hex_brightness(
+            f"#{red:02X}{green:02X}{blue:02X}", level * (brightness / 255.0)
+        )
+        segments.append(f"{index}:{lit} 60000ms linear")
+    return "\n".join(["; ".join(segments), "repeat"])
+
+
 def timer_fill_program(
     fraction: float,
     *,
