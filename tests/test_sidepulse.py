@@ -9171,6 +9171,85 @@ class ClaudeQuotaTests(unittest.TestCase):
         self.assertEqual(windows_from_payload("nope"), [])
 
 
+class ContextLidAnimationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_context_picks_the_active_variant_only_when_agents_run(self) -> None:
+        from sidepulse.settings import (
+            LID_ANIMATION_CLOSED,
+            LID_ANIMATION_CLOSED_ACTIVE,
+            LID_ANIMATION_OPEN_ACTIVE,
+        )
+
+        settings = self.controller.settings
+        self.assertEqual(
+            settings.lid_animation_for_context(True, False), LID_ANIMATION_CLOSED
+        )
+        self.assertEqual(
+            settings.lid_animation_for_context(True, True), LID_ANIMATION_CLOSED_ACTIVE
+        )
+        self.assertEqual(
+            settings.lid_animation_for_context(False, True), LID_ANIMATION_OPEN_ACTIVE
+        )
+
+    def test_agents_active_now_ignores_subagents_and_idle(self) -> None:
+        from types import SimpleNamespace as NS
+
+        working_sub = AgentStatus(
+            provider="claude",
+            agent_id="claude:agent:w1",
+            display_name="w1",
+            mode=AgentMode.WORKING,
+            updated_at=datetime.now(timezone.utc),
+            event_name="PostToolUse",
+            session_id="s1",
+        )
+        idle_main = AgentStatus(
+            provider="claude",
+            agent_id="claude:session:s1",
+            display_name="s1",
+            mode=AgentMode.COMPLETED,
+            updated_at=datetime.now(timezone.utc),
+            event_name="Stop",
+            session_id="s1",
+        )
+        self.controller.last_snapshot = NS(statuses=[working_sub, idle_main])
+        self.assertFalse(self.controller.agents_active_now())
+        busy_main = AgentStatus(
+            provider="claude",
+            agent_id="claude:session:s2",
+            display_name="s2",
+            mode=AgentMode.TOOL_RUNNING,
+            updated_at=datetime.now(timezone.utc),
+            event_name="PreToolUse",
+            session_id="s2",
+        )
+        self.controller.last_snapshot = NS(statuses=[busy_main])
+        self.assertTrue(self.controller.agents_active_now())
+
+    def test_active_variants_round_trip(self) -> None:
+        from sidepulse.settings import (
+            LID_ANIMATION_OPEN_ACTIVE,
+            AgentMonitorSettings,
+            load_settings,
+            save_settings,
+        )
+
+        configured = AgentMonitorSettings().with_lid_animation(
+            LID_ANIMATION_OPEN_ACTIVE,
+            program="#12E3B0 500ms pulse",
+            duration_seconds=0.9,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            loaded = load_settings(path)
+        self.assertEqual(
+            loaded.lid_open_active_animation.program, "#12E3B0 500ms pulse"
+        )
+
+
 class QuotaAlertTests(unittest.TestCase):
     """Quota threshold blinks: edge-triggered, opt-in, quiet-aware."""
 

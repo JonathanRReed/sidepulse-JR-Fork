@@ -212,7 +212,9 @@ from .settings import (
     LED_DISPLAY_STUDIO,
     LED_DISPLAY_TIMER,
     LID_ANIMATION_CLOSED,
+    LID_ANIMATION_CLOSED_ACTIVE,
     LID_ANIMATION_OPEN,
+    LID_ANIMATION_OPEN_ACTIVE,
     NOTIFICATION_APP_IMESSAGE,
     NOTIFICATION_APP_TELEGRAM,
     NOTIFICATION_APP_WHATSAPP,
@@ -322,6 +324,8 @@ LID_ANIMATION_RESTORE_FUDGE_SECONDS = 0.15
 LID_ANIMATION_LABELS = {
     LID_ANIMATION_CLOSED: "Lid Closed",
     LID_ANIMATION_OPEN: "Lid Open",
+    LID_ANIMATION_CLOSED_ACTIVE: "Lid Closed (agents running)",
+    LID_ANIMATION_OPEN_ACTIVE: "Lid Open (agents running)",
 }
 CLOSED_LID_AWAKE_LABELS = {
     CLOSED_LID_AWAKE_NEVER: "Never",
@@ -5533,9 +5537,24 @@ class StatusBarController(NSObject):
             return
 
         self.last_lid_closed = closed
-        kind = LID_ANIMATION_CLOSED if closed else LID_ANIMATION_OPEN
-        log_status_bar(f"lid_state={'closed' if closed else 'open'}")
+        kind = self.settings.lid_animation_for_context(closed, self.agents_active_now())
+        log_status_bar(
+            f"lid_state={'closed' if closed else 'open'} animation={kind}"
+        )
         self.play_lid_animation(kind)
+
+    def agents_active_now(self) -> bool:
+        """Any MAIN session actually working at this instant -- the lid
+        animation says "your agents are still cooking" vs "all quiet"
+        before the strip settles into its normal display."""
+        snapshot = self.last_snapshot
+        if snapshot is None:
+            return False
+        busy = (AgentMode.WORKING, AgentMode.TOOL_RUNNING, AgentMode.LONG_TASK_PROGRESS)
+        return any(
+            not status.is_subagent and status.mode in busy
+            for status in snapshot.statuses
+        )
 
     @objc.IBAction
     def pollDevices_(self, _sender):
@@ -7840,6 +7859,20 @@ LID_ANIMATION_PRESETS: dict[str, tuple[tuple[str, float, str], ...]] = {
         ("Sunrise", 1.6, "#331A00 300ms cosine\n#FF9F0A 600ms cosine\n#FFD60A 700ms pulse"),
         ("Quick Blink", 0.8, "#FFFFFF 150ms pulse\noff 150ms linear\n#FFFFFF 500ms pulse"),
     ),
+    # Agents-running variants: unmistakably different rhythms so the
+    # lid itself tells you work is still cooking.
+    LID_ANIMATION_CLOSED_ACTIVE: (
+        ("Still Cooking", 1.5, "#FF9F0A 300ms pulse\n#FF9F0A 250ms cosine\n#5A3A00 350ms cosine\n#1A1200 600ms cosine"),
+        ("Baton Pass", 1.2, "#00E5FF 250ms pulse\n#8A7CFF 250ms cosine\n#12E3B0 250ms pulse\noff 450ms cosine"),
+        ("Ember Watch", 1.8, "#FF6A3D 400ms pulse\n#802000 500ms cosine\n#331000 900ms cosine"),
+        ("Heartbeat Out", 1.3, "#FF2D55 150ms pulse\noff 120ms linear\n#FF2D55 150ms pulse\noff 880ms cosine"),
+    ),
+    LID_ANIMATION_OPEN_ACTIVE: (
+        ("Back On It", 1.2, "#12E3B0 200ms pulse\n#00E5FF 300ms cosine\n#00E5FF 700ms pulse"),
+        ("Status Sweep", 1.4, "#8A7CFF 250ms pulse\n#00E5FF 250ms cosine\n#12E3B0 250ms pulse\n#12E3B0 650ms pulse"),
+        ("Rekindle", 1.6, "#331000 300ms cosine\n#FF6A3D 500ms cosine\n#FFD60A 800ms pulse"),
+        ("Double Take", 1.0, "#FFFFFF 120ms pulse\noff 100ms linear\n#00E5FF 180ms pulse\n#00E5FF 600ms pulse"),
+    ),
 }
 
 
@@ -7934,6 +7967,23 @@ def _build_lid_animations_pane(target: StatusBarController):
         )
     )
     native_ui.add_separator(closed_inner)
+    closed_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "When agents are RUNNING as you close it, this plays instead "
+            "-- so the lid itself says \u201cstill cooking\u201d:",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    closed_inner.addArrangedSubview_(
+        _build_lid_preset_row(
+            target,
+            LID_ANIMATION_CLOSED_ACTIVE,
+            target.settings.lid_closed_active_animation.program,
+        )
+    )
+    native_ui.add_separator(closed_inner)
     closed_duration = native_ui.make_field("", target=target, action="saveLidAnimations:")
     native_ui.constrain_width(closed_duration, 60.0)
     closed_inner.addArrangedSubview_(native_ui.make_row("Duration (sec)", closed_duration))
@@ -7963,6 +8013,22 @@ def _build_lid_animations_pane(target: StatusBarController):
             target,
             LID_ANIMATION_OPEN,
             target.settings.lid_open_animation.program,
+        )
+    )
+    native_ui.add_separator(open_inner)
+    open_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "And the greeting when you come back to live agents:",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    open_inner.addArrangedSubview_(
+        _build_lid_preset_row(
+            target,
+            LID_ANIMATION_OPEN_ACTIVE,
+            target.settings.lid_open_active_animation.program,
         )
     )
     native_ui.add_separator(open_inner)

@@ -45,7 +45,22 @@ CLOSED_LID_AWAKE_CHOICES = (
 )
 LID_ANIMATION_CLOSED = "closed"
 LID_ANIMATION_OPEN = "open"
-LID_ANIMATION_CHOICES = (LID_ANIMATION_CLOSED, LID_ANIMATION_OPEN)
+LID_ANIMATION_CLOSED_ACTIVE = "closed_active"
+LID_ANIMATION_OPEN_ACTIVE = "open_active"
+LID_ANIMATION_CHOICES = (
+    LID_ANIMATION_CLOSED,
+    LID_ANIMATION_OPEN,
+    LID_ANIMATION_CLOSED_ACTIVE,
+    LID_ANIMATION_OPEN_ACTIVE,
+)
+# Distinct out-of-the-box looks for "agents were RUNNING when the lid
+# moved" -- the whole point is that you can TELL without looking twice.
+DEFAULT_LID_CLOSED_ACTIVE_PROGRAM = (
+    "#FF9F0A 300ms pulse\n#FF9F0A 250ms cosine\n#5A3A00 350ms cosine\n#1A1200 600ms cosine"
+)
+DEFAULT_LID_OPEN_ACTIVE_PROGRAM = (
+    "#12E3B0 200ms pulse\n#00E5FF 300ms cosine\n#00E5FF 700ms pulse"
+)
 
 DEFAULT_IDLE_DIM_AFTER_MINUTES = 10.0
 MIN_IDLE_DIM_AFTER_MINUTES = 1.0
@@ -174,6 +189,16 @@ class AgentMonitorSettings:
     )
     lid_open_animation: LedAnimationSetting = field(
         default_factory=lambda: default_lid_animation(LID_ANIMATION_OPEN)
+    )
+    lid_closed_active_animation: LedAnimationSetting = field(
+        default_factory=lambda: LedAnimationSetting(
+            program=DEFAULT_LID_CLOSED_ACTIVE_PROGRAM, duration_seconds=1.5
+        )
+    )
+    lid_open_active_animation: LedAnimationSetting = field(
+        default_factory=lambda: LedAnimationSetting(
+            program=DEFAULT_LID_OPEN_ACTIVE_PROGRAM, duration_seconds=1.2
+        )
     )
     battery_full_charge_watts: float | None = None
     battery_show_on_power_change: bool = True
@@ -598,7 +623,18 @@ class AgentMonitorSettings:
             return self.lid_closed_animation
         if kind == LID_ANIMATION_OPEN:
             return self.lid_open_animation
+        if kind == LID_ANIMATION_CLOSED_ACTIVE:
+            return self.lid_closed_active_animation
+        if kind == LID_ANIMATION_OPEN_ACTIVE:
+            return self.lid_open_active_animation
         raise ValueError(f"Unknown lid animation: {kind}")
+
+    def lid_animation_for_context(self, closed: bool, agents_active: bool) -> str:
+        """Which lid animation KIND applies right now: the agent-aware
+        variant when any main agent was live at the transition."""
+        if closed:
+            return LID_ANIMATION_CLOSED_ACTIVE if agents_active else LID_ANIMATION_CLOSED
+        return LID_ANIMATION_OPEN_ACTIVE if agents_active else LID_ANIMATION_OPEN
 
     def with_closed_lid_awake_policy(self, policy: str) -> AgentMonitorSettings:
         if policy not in CLOSED_LID_AWAKE_CHOICES:
@@ -624,6 +660,10 @@ class AgentMonitorSettings:
         )
         if kind == LID_ANIMATION_CLOSED:
             return replace(self, lid_closed_animation=animation)
+        if kind == LID_ANIMATION_CLOSED_ACTIVE:
+            return replace(self, lid_closed_active_animation=animation)
+        if kind == LID_ANIMATION_OPEN_ACTIVE:
+            return replace(self, lid_open_active_animation=animation)
         if kind == LID_ANIMATION_OPEN:
             return replace(self, lid_open_animation=animation)
         raise ValueError(f"Unknown lid animation: {kind}")
@@ -922,6 +962,8 @@ class AgentMonitorSettings:
             "closed_lid_system_override_enabled": self.closed_lid_system_override_enabled,
             "closed_lid_grace_minutes": self.closed_lid_grace_minutes,
             "lid_closed_animation": self.lid_closed_animation.to_dict(),
+            "lid_closed_active_animation": self.lid_closed_active_animation.to_dict(),
+            "lid_open_active_animation": self.lid_open_active_animation.to_dict(),
             "lid_open_animation": self.lid_open_animation.to_dict(),
             "transcript_monitoring": {
                 "codex": self.codex_transcripts_enabled,
@@ -1122,6 +1164,18 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         lid_open_animation=_lid_animation_setting(
             data.get("lid_open_animation"),
             default_lid_animation(LID_ANIMATION_OPEN),
+        ),
+        lid_closed_active_animation=_lid_animation_setting(
+            data.get("lid_closed_active_animation"),
+            LedAnimationSetting(
+                program=DEFAULT_LID_CLOSED_ACTIVE_PROGRAM, duration_seconds=1.5
+            ),
+        ),
+        lid_open_active_animation=_lid_animation_setting(
+            data.get("lid_open_active_animation"),
+            LedAnimationSetting(
+                program=DEFAULT_LID_OPEN_ACTIVE_PROGRAM, duration_seconds=1.2
+            ),
         ),
         battery_full_charge_watts=_optional_float_setting(
             battery.get("full_charge_watts"),
