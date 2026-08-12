@@ -9822,6 +9822,29 @@ class ResilienceHardeningTests(unittest.TestCase):
             leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "LEDS.LED"]
             self.assertEqual(leftovers, [])
 
+    def test_led_write_falls_back_in_place_when_volume_is_full(self) -> None:
+        """ENOSPC (tiny FAT data area OR a full fixed-size directory
+        table -- the real incident) must degrade to the in-place write,
+        never freeze the device."""
+        import errno as errno_module
+
+        from sidepulse import device_writer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            device_writer.write_led_program(
+                "1:#00FF00; 1s", device_path=Path(tmp), file_name="LEDS.LED"
+            )
+            with patch(
+                "sidepulse.device_writer.os.replace",
+                side_effect=OSError(errno_module.ENOSPC, "No space left on device"),
+            ):
+                target = device_writer.write_led_program(
+                    "1:#FF0000; 1s", device_path=Path(tmp), file_name="LEDS.LED"
+                )
+            self.assertEqual(target.read_text(encoding="utf-8"), "1:#FF0000; 1s")
+            leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "LEDS.LED"]
+            self.assertEqual(leftovers, [])
+
     def test_burn_refuses_to_write_init_led_when_parser_is_gone(self) -> None:
         """The WIRING half of fail-closed: with the parser broken, the
         burn path must write no INIT.LED at all (dropping strict=True

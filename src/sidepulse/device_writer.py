@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -49,10 +50,29 @@ def write_led_program(
     # replays at every boot). Same discipline settings.save_settings
     # documents; FAT rename shrinks the failure window from the whole
     # payload to a metadata blink.
-    scratch = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    #
+    # The scratch name is 8.3-safe ON PURPOSE: the Pro's card is a
+    # ~170KiB FAT volume whose root directory is a fixed-size table,
+    # and a long filename burns SEVERAL directory entries -- the first
+    # scratch name here (".LEDS.LED.<pid>.tmp") filled the table and
+    # every LED write died with ENOSPC, freezing the device.
+    scratch = target.with_name(f"W{os.getpid() % 10000000}.TMP")
     try:
         scratch.write_text(program, encoding="utf-8")
         os.replace(scratch, target)
+    except OSError as exc:
+        try:
+            scratch.unlink()
+        except OSError:
+            pass
+        if exc.errno == errno.ENOSPC:
+            # No room for even the transient second file (tiny FAT
+            # data area or a full directory table). A rare torn-write
+            # window beats a permanently frozen device: fall back to
+            # the in-place write.
+            target.write_text(program, encoding="utf-8")
+            return target
+        raise
     except BaseException:
         try:
             scratch.unlink()
