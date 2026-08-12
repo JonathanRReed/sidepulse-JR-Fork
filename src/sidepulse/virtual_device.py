@@ -734,7 +734,7 @@ class VirtualLedView(NSView):
         # display the window remains transparent and contains only LED color.
         # This shape always matches the *real* notch width -- wings (below)
         # only ever extend the LED glow past it, never the housing itself.
-        if self.has_notch:
+        if self.has_notch and (rim := max(0.0, min(1.0, getattr(self, "min_glow", 0.25)))) > 0.0:
             NSColor.colorWithCalibratedRed_green_blue_alpha_(
                 0.006, 0.007, 0.010, 0.93
             ).set()
@@ -794,16 +794,16 @@ class VirtualLedView(NSView):
         # was, before wings existed) -- with wings on, this reads as one
         # continuous strip rather than having a visible seam where the
         # notch's own housing ends and the wing begins.
-        if self.has_notch:
+        if self.has_notch and (rim := max(0.0, min(1.0, getattr(self, "min_glow", 0.25)))) > 0.0:
             fill_rect_with_cg(
                 cg_context,
                 ((0.0, LED_BAND_HEIGHT - 0.55), (width, 0.55)),
-                (0.0, 0.0, 0.0, 0.18),
+                (0.0, 0.0, 0.0, 0.18 * rim),
             )
             fill_rect_with_cg(
                 cg_context,
                 ((0.0, 0.0), (width, 0.45)),
-                (1.0, 1.0, 1.0, 0.055),
+                (1.0, 1.0, 1.0, 0.055 * rim),
             )
 
     def _bracket_colors(self, colors):

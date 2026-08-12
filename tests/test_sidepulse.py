@@ -9210,6 +9210,13 @@ class GlowDialTests(unittest.TestCase):
         rendered = view._bracket_colors(dim)
         self.assertTrue(all(c[3] <= 0.011 for c in rendered))
 
+    def test_screen_bar_resting_glow_reaches_the_program(self) -> None:
+        from sidepulse.led_status import apply_resting_glow_to_program
+
+        program = "off 300ms cosine\n#FF0000 200ms pulse\nrepeat"
+        rendered = apply_resting_glow_to_program(program, 0.12)
+        self.assertNotIn("off ", rendered)
+
     def test_device_resting_glow_round_trip(self) -> None:
         from sidepulse.settings import AgentMonitorSettings
 

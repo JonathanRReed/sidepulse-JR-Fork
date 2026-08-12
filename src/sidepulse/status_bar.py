@@ -155,6 +155,7 @@ from .led_status import (
     LedDisplayState,
     apply_brightness,
     apply_channel_gain_to_program,
+    apply_resting_glow_to_program,
     brightness_percent,
     led_count_for_target,
     normalize_brightness,
@@ -1854,6 +1855,13 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def setScreenBarMinGlow_(self, sender):
         fraction = max(0.0, min(1.0, float(sender.doubleValue()) / 100.0))
+        # Track the thumb live on the pane's miniature; commit on release.
+        preview = self.settings_fields.get("screen_bar_preview_view")
+        if preview is not None:
+            preview.setMinGlow_(fraction)
+        event = NSApp.currentEvent()
+        if event is not None and event.type() == NSEventTypeLeftMouseDragged:
+            return
         self.settings = self.settings.with_screen_bar_min_glow(fraction)
         save_settings(self.settings)
         label = "pitch black" if fraction <= 0.004 else f"{round(fraction * 100)}%"
@@ -3829,6 +3837,7 @@ class StatusBarController(NSObject):
         if preview is None or container is None:
             return
         preview.setPreviewWhiteBrightness_(self.settings.brightness_for_device(VIRTUAL_DEVICE_ID))
+        preview.setMinGlow_(float(self.settings.screen_bar_min_glow))
         # The preview always shows the full wrap look -- Alcove handling
         # is automatic on the real bar and needs no demonstration here.
         preview.setCompactMode_(False)
@@ -4861,7 +4870,13 @@ class StatusBarController(NSObject):
             # physical device -- gains applied at the write boundary
             # (the Colors-window previews stay uncorrected "true" hex).
             self.virtual_status_device.set_program(
-                apply_channel_gain_to_program(program, device.channel_gains),
+                apply_channel_gain_to_program(
+                    # Ember first, calibration second -- same order as
+                    # AgentLedController. Without this the Screen Bar's
+                    # Resting glow slider was a silent no-op.
+                    apply_resting_glow_to_program(program, device.resting_glow),
+                    device.channel_gains,
+                ),
                 started_at=started_at,
             )
 
@@ -6625,7 +6640,7 @@ def _build_devices_pane(target: StatusBarController):
         native_ui.add_separator(inner)
         resting_slider = native_ui.make_slider(
             min_value=0.0,
-            max_value=25.0,
+            max_value=35.0,
             value=float(device.resting_glow) * 100.0,
             target=target,
             action="setDeviceRestingGlow:",
@@ -6820,6 +6835,7 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         value=float(target.settings.screen_bar_min_glow) * 100.0,
         target=target,
         action="setScreenBarMinGlow:",
+        continuous=True,
     )
     glow_inner.addArrangedSubview_(
         native_ui.make_row(
@@ -6851,6 +6867,7 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         ((0.0, 0.0), (SCREEN_BAR_PREVIEW_NOTCH_WIDTH, SCREEN_BAR_PREVIEW_HEIGHT))
     )
     preview_view.setHasNotch_(True)
+    preview_view.setMinGlow_(float(target.settings.screen_bar_min_glow))
     preview_container.addSubview_(preview_view)
     inner.addArrangedSubview_(preview_container)
 
