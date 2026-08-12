@@ -2922,6 +2922,9 @@ class StatusBarController(NSObject):
             pane.setHidden_(key != selected_key)
         if selected_key == "color_studio":
             self.refresh_colors_window()
+        # Gated sections (provider probes, signal cards) refresh as
+        # their pane appears rather than on every unrelated click.
+        self.refresh_settings_window()
 
     @objc.IBAction
     def openColorsWindow_(self, _sender):
@@ -3046,7 +3049,7 @@ class StatusBarController(NSObject):
         if self.color_preview_timer is not None:
             return
         self.color_preview_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            1.0 / 20.0, self, "animateColorsPreviewTick:", None, True
+            1.0 / 12.0, self, "animateColorsPreviewTick:", None, True
         )
 
     def stop_colors_preview_animation(self) -> None:
@@ -3058,13 +3061,19 @@ class StatusBarController(NSObject):
     def animateColorsPreviewTick_(self, _sender):
         self.animate_colors_preview_once()
         # The unified animation thumbnails animate on the same tick.
-        for thumbs in getattr(self, "colors_animation_thumbs", {}).values():
-            for thumb in thumbs.values():
+        # Only the pane on screen animates: with mode, lid and preview
+        # thumbs all ticking regardless of pane, scrolling ANY pane
+        # dragged a fleet of JavaScriptCore steps behind it.
+        pane = getattr(self, "current_settings_pane", None)
+        if pane == "color_studio":
+            for thumbs in getattr(self, "colors_animation_thumbs", {}).values():
+                for thumb in thumbs.values():
+                    if not thumb.isHiddenOrHasHiddenAncestor() and thumb.visibleRect().size.width > 0:
+                        thumb.setNeedsDisplay_(True)
+        elif pane == "animations":
+            for thumb in getattr(self, "lid_animation_thumbs", {}).values():
                 if not thumb.isHiddenOrHasHiddenAncestor() and thumb.visibleRect().size.width > 0:
                     thumb.setNeedsDisplay_(True)
-        for thumb in getattr(self, "lid_animation_thumbs", {}).values():
-            if not thumb.isHiddenOrHasHiddenAncestor() and thumb.visibleRect().size.width > 0:
-                thumb.setNeedsDisplay_(True)
 
     @objc.IBAction
     def selectLidPresetThumb_(self, recognizer):
@@ -3651,16 +3660,20 @@ class StatusBarController(NSObject):
         if self.settings_window is None:
             return
 
-        for provider in HOOK_PROVIDERS:
-            config = provider_spec(provider).detector(None)
-            set_field_value(self.settings_fields.get(f"{provider}_hook_status"), hook_status_text(config))
-            installed = provider_hooks_installed(config)
-            install_button = self.settings_fields.get(f"{provider}_hook_install")
-            uninstall_button = self.settings_fields.get(f"{provider}_hook_uninstall")
-            if install_button is not None:
-                install_button.setHidden_(installed)
-            if uninstall_button is not None:
-                uninstall_button.setHidden_(not installed)
+        current_pane = getattr(self, "current_settings_pane", None)
+        if current_pane == "agents":
+            # Detector probes hit the filesystem per provider -- only
+            # worth it when the Agents pane is actually on screen.
+            for provider in HOOK_PROVIDERS:
+                config = provider_spec(provider).detector(None)
+                set_field_value(self.settings_fields.get(f"{provider}_hook_status"), hook_status_text(config))
+                installed = provider_hooks_installed(config)
+                install_button = self.settings_fields.get(f"{provider}_hook_install")
+                uninstall_button = self.settings_fields.get(f"{provider}_hook_uninstall")
+                if install_button is not None:
+                    install_button.setHidden_(installed)
+                if uninstall_button is not None:
+                    uninstall_button.setHidden_(not installed)
         set_field_value(
             self.settings_fields.get("settings_path"),
             f"Settings: {default_settings_path()}",
@@ -3755,8 +3768,9 @@ class StatusBarController(NSObject):
         # Signals cards: re-render each from saved state, and sync the
         # escalation controls -- like every other control here, they must
         # reflect changes made outside their own handlers.
-        for signal_key in signals_module.DEFAULT_SIGNAL_STYLES:
-            self.refresh_signal_card(signal_key)
+        if current_pane == "led_behavior":
+            for signal_key in signals_module.DEFAULT_SIGNAL_STYLES:
+                self.refresh_signal_card(signal_key)
         bracket_popup = self.settings_fields.get("bracket_style_popup")
         if bracket_popup is not None:
             for index in range(bracket_popup.numberOfItems()):
