@@ -48,6 +48,8 @@ try:
         NSColor,
         NSFont,
         NSFontWeightSemibold,
+        NSImage,
+        NSImageView,
         NSLayoutAttributeCenterY,
         NSLayoutConstraint,
         NSLayoutConstraintOrientationHorizontal,
@@ -685,18 +687,46 @@ def make_fixed_area(width: float, height: float) -> NSView:
     return view
 
 
-def sidebar_cell_view(label_text: str) -> NSView:
-    """One row's content view for the sidebar table -- plain label, no
-    disclosure/icon complexity needed for a flat single-level list."""
+def sidebar_cell_view(label_text: str, symbol: str | None = None) -> NSView:
+    """One row's content view for the sidebar table. With a symbol name
+    the row leads with a template SF Symbol at secondary weight -- the
+    Raycast/System Settings idiom that makes a sidebar scannable by
+    shape before you read a single word."""
     label = NSTextField.labelWithString_(label_text)
     label.setFont_(NSFont.systemFontOfSize_(13.0))
     container = NSView.alloc().init()
     container.addSubview_(label)
     label.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    text_leading = 8.0
+    if symbol:
+        image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            symbol, label_text
+        )
+        if image is not None:
+            icon = NSImageView.imageViewWithImage_(image)
+            icon.setContentTintColor_(NSColor.secondaryLabelColor())
+            icon.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            container.addSubview_(icon)
+            NSLayoutConstraint.activateConstraints_(
+                [
+                    icon.leadingAnchor().constraintEqualToAnchor_constant_(
+                        container.leadingAnchor(), 8.0
+                    ),
+                    icon.centerYAnchor().constraintEqualToAnchor_(
+                        container.centerYAnchor()
+                    ),
+                    icon.widthAnchor().constraintEqualToConstant_(18.0),
+                ]
+            )
+            text_leading = 32.0
     NSLayoutConstraint.activateConstraints_(
         [
-            label.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), 8.0),
-            label.trailingAnchor().constraintLessThanOrEqualToAnchor_constant_(container.trailingAnchor(), -8.0),
+            label.leadingAnchor().constraintEqualToAnchor_constant_(
+                container.leadingAnchor(), text_leading
+            ),
+            label.trailingAnchor().constraintLessThanOrEqualToAnchor_constant_(
+                container.trailingAnchor(), -8.0
+            ),
             label.centerYAnchor().constraintEqualToAnchor_(container.centerYAnchor()),
         ]
     )

@@ -2830,7 +2830,7 @@ class StatusBarController(NSObject):
                 ]
             )
             return holder
-        return native_ui.sidebar_cell_view(label)
+        return native_ui.sidebar_cell_view(label, SIDEBAR_ICONS.get(key))
 
     def tableView_shouldSelectRow_(self, _table_view, row) -> bool:
         return not SETTINGS_SIDEBAR_ITEMS[row][0].startswith("header:")
@@ -6329,6 +6329,18 @@ SETTINGS_SIDEBAR_ITEMS: tuple[tuple[str, str], ...] = (
     ("debug", "Debug"),
 )
 DEFAULT_SETTINGS_PANE = "profile"
+SIDEBAR_ICONS: dict[str, str] = {
+    "profile": "person.crop.circle",
+    "devices": "cpu",
+    "agents": "sparkles",
+    "color_studio": "paintpalette",
+    "colors_screen_bar": "menubar.rectangle",
+    "animations": "film",
+    "led_behavior": "bell.badge",
+    "focus": "moon",
+    "power": "bolt",
+    "debug": "wrench.and.screwdriver",
+}
 
 
 class UsageGraphView(NSView):
