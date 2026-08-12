@@ -313,6 +313,7 @@ class AgentMonitorSettings:
     # the CodexBar presentation); "cost" leads with dollars.
     usage_display_mode: str = "tokens"
     codex_percent_enabled: bool = True
+    escalation_webhook_url: str = ""
     # Sub-agent asks can't be answered (their parent handles them), so
     # by default only MAIN sessions may ring the Ask signal.
     subagent_asks_alert: bool = False
@@ -702,6 +703,9 @@ class AgentMonitorSettings:
     def with_subagent_asks_alert(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, subagent_asks_alert=bool(enabled))
 
+    def with_escalation_webhook_url(self, url: str) -> AgentMonitorSettings:
+        return replace(self, escalation_webhook_url=str(url).strip())
+
     def with_usage_display_mode(self, mode: str) -> AgentMonitorSettings:
         if mode not in ("tokens", "cost"):
             raise ValueError("usage display mode is tokens or cost")
@@ -1035,6 +1039,7 @@ class AgentMonitorSettings:
             "usage_graph_days": self.usage_graph_days,
             "usage_display_mode": self.usage_display_mode,
             "codex_percent_enabled": self.codex_percent_enabled,
+            "escalation_webhook_url": self.escalation_webhook_url,
             "subagent_asks_alert": self.subagent_asks_alert,
             "quota_alert_thresholds": list(self.quota_alert_thresholds),
             "dismissed_tips": list(self.dismissed_tips),
@@ -1285,6 +1290,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             else "tokens"
         ),
         codex_percent_enabled=_bool_setting(data.get("codex_percent_enabled"), True),
+        escalation_webhook_url=str(data.get("escalation_webhook_url") or "").strip(),
         usage_graph_days=(
             int(data.get("usage_graph_days"))
             if data.get("usage_graph_days") in (7, 30, 90, 365)

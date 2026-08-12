@@ -9354,6 +9354,51 @@ class PowerUpLookTests(unittest.TestCase):
         self.assertFalse((volume_root / "SidePulseDot" / "INIT.LED").exists())
 
 
+class OvertimePatinaWebhookTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_overtime_ember_engages_and_stop_clears(self) -> None:
+        self.controller.timebox_overtime_since = time.monotonic() - 120.0
+        self.assertTrue(self.controller.timebox_overtime())
+        self.assertEqual(self.controller.timebox_overtime_minutes(), 2)
+        program = self.controller.timer_display_program(255, 8)
+        self.assertIn("pulse", program)
+        self.assertIn("repeat", program)
+        self.controller.stopTimebox_(None)
+        self.assertFalse(self.controller.timebox_overtime())
+
+    def test_final_minute_turns_amber(self) -> None:
+        self.controller.timebox_ends_at = time.monotonic() + 30.0
+        self.controller.timebox_total_seconds = 300.0
+        program = self.controller.timer_display_program(255, 8)
+        self.assertIn("FFB340", program.upper().replace("#", "#"))
+
+    def test_patina_slows_only_without_escalation(self) -> None:
+        base_speed = self.controller.settings.colors.cycle_speed_seconds
+        self.controller.working_since = time.monotonic() - 3600.0
+        slowed = self.controller.agent_render_colors().cycle_speed_seconds
+        self.assertGreater(slowed, base_speed)
+        fresh = time.monotonic() - 60.0
+        self.controller.working_since = fresh
+        self.assertEqual(
+            self.controller.agent_render_colors().cycle_speed_seconds, base_speed
+        )
+
+    def test_webhook_latches_once_and_requires_url(self) -> None:
+        with patch("threading.Thread") as thread:
+            self.controller.fire_escalation_webhook(3)
+            self.assertEqual(thread.call_count, 0)  # no URL -> off
+            self.controller.settings = (
+                self.controller.settings.with_escalation_webhook_url(
+                    "https://example.invalid/hook"
+                )
+            )
+            self.controller.fire_escalation_webhook(3)
+            self.controller.fire_escalation_webhook(3)
+            self.assertEqual(thread.call_count, 1)  # latched per episode
+
+
 class ContextLidAnimationTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_controller(self)

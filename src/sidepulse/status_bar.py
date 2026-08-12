@@ -664,6 +664,8 @@ class StatusBarController(NSObject):
         if ends_at is not None and time.monotonic() >= ends_at:
             self.timebox_ends_at = None
             self.timebox_total_seconds = 0.0
+            # Overtime ember: hold a deepening glow until Stop.
+            self.timebox_overtime_since = time.monotonic()
             try:
                 from AppKit import NSSound
 
@@ -2128,6 +2130,18 @@ class StatusBarController(NSObject):
         self.maybe_refresh_usage_summary()
 
     @objc.IBAction
+    def applyEscalationWebhook_(self, sender):
+        url = str(sender.stringValue()).strip()
+        if url and not url.startswith(("http://", "https://")):
+            self.set_settings_message("Webhook must be an http(s) URL.")
+            return
+        self.settings = self.settings.with_escalation_webhook_url(url)
+        save_settings(self.settings)
+        self.set_settings_message(
+            "Stage-3 webhook set." if url else "Stage-3 webhook off."
+        )
+
+    @objc.IBAction
     def toggleSubagentAsksAlert_(self, sender):
         self.settings = self.settings.with_subagent_asks_alert(checkbox_is_on(sender))
         save_settings(self.settings)
@@ -2561,8 +2575,10 @@ class StatusBarController(NSObject):
             oldest = min(updated.values())
             if self.ask_blocked_since != oldest:
                 # A new oldest episode (fresh ask, or the previous oldest
-                # was answered) gets a fresh one-chime latch.
+                # was answered) gets a fresh one-chime latch (and a
+                # fresh one-webhook latch).
                 self.escalation_chimed = False
+                self.escalation_webhooked = False
             self.ask_blocked_since = oldest
         else:
             self.ask_blocked_since = None
@@ -2736,6 +2752,44 @@ class StatusBarController(NSObject):
         self._menu_signature = None
         self.refresh_(None)
 
+    def timebox_overtime(self) -> bool:
+        return getattr(self, "timebox_overtime_since", None) is not None
+
+    def timebox_overtime_minutes(self) -> int:
+        since = getattr(self, "timebox_overtime_since", None)
+        if since is None:
+            return 0
+        return int((time.monotonic() - since) // 60)
+
+    def timer_display_program(self, brightness: float, led_count: int) -> str:
+        """The Timer display's three faces: the working-color fill, an
+        AMBER final minute, and the post-zero overtime ember deepening
+        toward red the longer you run over -- blowing through your own
+        deadline is visible, not a silent nothing."""
+        if self.timebox_overtime():
+            depth = min(1.0, (time.monotonic() - self.timebox_overtime_since) / 600.0)
+            green = round(159 * (1.0 - depth * 0.82))
+            blue = round(10 * (1.0 - depth))
+            ember = f"#FF{green:02X}{blue:02X}"
+            dim = scale_hex_brightness(ember, 0.25)
+            return apply_brightness(
+                f"{ember} 1400ms pulse\n{dim} 1800ms cosine\nrepeat", brightness
+            )
+        remaining = (
+            max(0.0, self.timebox_ends_at - time.monotonic())
+            if getattr(self, "timebox_ends_at", None) is not None
+            else None
+        )
+        color = self.settings.colors.mode_colors.get("working", "#00E5FF")
+        if remaining is not None and remaining < 60.0:
+            color = "#FFB340"
+        return timer_fill_program(
+            self.timer_fill_fraction(),
+            led_count=led_count,
+            brightness=brightness,
+            color=color,
+        )
+
     def timebox_active(self) -> bool:
         ends_at = getattr(self, "timebox_ends_at", None)
         return ends_at is not None and time.monotonic() < ends_at
@@ -2764,6 +2818,7 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def stopTimebox_(self, _sender):
+        self.timebox_overtime_since = None
         self.timebox_ends_at = None
         self.timebox_total_seconds = 0.0
         self.refresh_(None)
@@ -2827,6 +2882,7 @@ class StatusBarController(NSObject):
                     sound.play()
             except Exception:
                 pass
+            self.fire_escalation_webhook(stage)
 
         if changed and allow_refresh:
             self.refresh_(None)
@@ -2881,7 +2937,61 @@ class StatusBarController(NSObject):
                 colors_module.MIN_CYCLE_SPEED_SECONDS, colors.cycle_speed_seconds * 0.75
             )
             colors = colors.with_cycle_speed(quickened)
+        elif getattr(self, "working_since", None) is not None:
+            # Deep-work patina: breathing slows the longer the oldest
+            # session works uninterrupted -- skittish when fresh,
+            # oceanic after an hour. Elif, never else: an ask's
+            # quickening always wins over patina's calm.
+            worked = time.monotonic() - self.working_since
+            if worked > 900.0:
+                factor = 1.0 + min(0.8, (worked - 900.0) / 2700.0 * 0.8)
+                colors = colors.with_cycle_speed(colors.cycle_speed_seconds * factor)
         return colors
+
+    def fire_escalation_webhook(self, stage: int) -> None:
+        """One POST per ask episode when stage 3 lands (latched beside
+        the chime): "an agent has been blocked on you for minutes" can
+        find you in the kitchen -- an ntfy topic, Home Assistant,
+        anything that takes JSON. Empty URL = off; failures log quietly
+        and never retry into spam."""
+        url = (self.settings.escalation_webhook_url or "").strip()
+        if not url or getattr(self, "escalation_webhooked", False):
+            return
+        self.escalation_webhooked = True
+        snapshot = getattr(self, "last_snapshot", None)
+        asks = ask_statuses(snapshot) if snapshot is not None else []
+        oldest_age = 0.0
+        if getattr(self, "ask_blocked_since", None) is not None:
+            oldest_age = max(0.0, time.monotonic() - self.ask_blocked_since)
+        payload = json.dumps(
+            {
+                "event": "sidepulse.escalation",
+                "stage": stage,
+                "ask_count": len(asks),
+                "oldest_ask_seconds": round(oldest_age),
+                "sessions": [
+                    {"provider": status.provider, "label": status.display_name[:80]}
+                    for status in asks[:5]
+                ],
+            }
+        ).encode("utf-8")
+
+        def _post():
+            try:
+                import urllib.request
+
+                request = urllib.request.Request(
+                    url,
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(request, timeout=10).close()
+                log_status_bar("escalation webhook delivered")
+            except Exception as exc:
+                log_status_bar(f"escalation webhook failed: {exc}")
+
+        threading.Thread(target=_post, daemon=True).start()
 
     def escalation_takeover_active(self) -> bool:
         return (
@@ -5199,7 +5309,11 @@ class StatusBarController(NSObject):
             ),
             (
                 LED_DISPLAY_TIMER,
-                lambda: device.display == LED_DISPLAY_TIMER or self.timebox_active(),
+                lambda: (
+                    device.display == LED_DISPLAY_TIMER
+                    or self.timebox_active()
+                    or self.timebox_overtime()
+                ),
             ),
             (
                 LED_DISPLAY_STUDIO,
@@ -5423,14 +5537,7 @@ class StatusBarController(NSObject):
                 )
             )
         elif display == LED_DISPLAY_TIMER:
-            _set_virtual(
-                timer_fill_program(
-                    self.timer_fill_fraction(),
-                    led_count=8,
-                    brightness=brightness,
-                    color=self.settings.colors.mode_colors.get("working", "#00E5FF"),
-                )
-            )
+            _set_virtual(self.timer_display_program(brightness, 8))
         elif display == LED_DISPLAY_STUDIO and (
             studio_program := self.studio_display_program(brightness)
         ):
@@ -5767,11 +5874,8 @@ class StatusBarController(NSObject):
                 ),
             ),
             LED_DISPLAY_TIMER: (
-                lambda brightness, led_count: timer_fill_program(
-                    self.timer_fill_fraction(),
-                    led_count=led_count,
-                    brightness=brightness,
-                    color=self.settings.colors.mode_colors.get("working", "#00E5FF"),
+                lambda brightness, led_count: self.timer_display_program(
+                    brightness, led_count
                 ),
                 LedDisplayState.WORKING,
                 lambda device, _snapshot: (
@@ -8448,6 +8552,25 @@ def _build_led_behavior_pane(target: StatusBarController):
         threshold_controls.addArrangedSubview_(native_ui.make_label(suffix, secondary=True))
         fields[field_key] = threshold_field
     esc_inner.addArrangedSubview_(native_ui.make_row("After", threshold_controls))
+    webhook_field = native_ui.make_field(
+        target.settings.escalation_webhook_url,
+        target=target,
+        action="applyEscalationWebhook:",
+    )
+    native_ui.constrain_width(webhook_field, 280.0)
+    esc_inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Stage-3 webhook",
+            webhook_field,
+            help_text=(
+                "Optional: when the chime stage lands, POST one JSON "
+                "payload here (an ntfy topic, Home Assistant...) so a "
+                "blocked agent can find you away from the desk. Blank "
+                "= off; one call per ask episode, never retried."
+            ),
+        )
+    )
+    fields["escalation_webhook_field"] = webhook_field
     stack.addArrangedSubview_(esc_outer)
 
     # Style cards: pick every signal's look by eye.
