@@ -8041,7 +8041,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
             return ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1
 
         for key, pane in self.controller.settings_panes.items():
-            if key == "color_studio":
+            if key == "color_studio" or key.startswith("header:"):
                 # Custom container (pinned preview + own scroll), not a
                 # wrap_in_scroll_pane -- covered by its own tests.
                 continue
@@ -8072,7 +8072,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         self.controller.show_settings_window()
         self.controller.settings_window.contentView().layoutSubtreeIfNeeded()
         for key, pane in self.controller.settings_panes.items():
-            if key == "color_studio":
+            if key == "color_studio" or key.startswith("header:"):
                 continue
             pane.layoutSubtreeIfNeeded()
             self.assertGreater(
@@ -8090,7 +8090,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         self.controller.show_settings_window()
         self.controller.settings_window.contentView().layoutSubtreeIfNeeded()
         for key, pane in self.controller.settings_panes.items():
-            if key == "color_studio":
+            if key == "color_studio" or key.startswith("header:"):
                 continue
             pane.layoutSubtreeIfNeeded()
             clip = pane.contentView()

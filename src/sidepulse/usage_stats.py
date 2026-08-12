@@ -36,8 +36,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 USAGE_MARKER = '"usage"'
+CODEX_MARKER = '"token_count"'
+
 
 # (input $/MTok, output $/MTok) by model-id substring, first match wins.
 # Cache reads bill at 0.1x input; cache writes at 1.25x input.
@@ -54,6 +56,9 @@ CACHE_WRITE_RATE = 1.25
 @dataclass
 class UsageTotals:
     sessions: set[str] = field(default_factory=set)
+    codex_sessions: set[str] = field(default_factory=set)
+    codex_tokens: int = 0
+    records: list = field(default_factory=list)
     input_tokens: int = 0
     cached_input_tokens: int = 0
     cache_creation_tokens: int = 0
@@ -102,6 +107,7 @@ def _record_from_line(line: str, session_id: str) -> tuple | None:
         # No message id means no safe dedupe; skip rather than overcount.
         return None
     return (
+        "claude",
         session_id,
         str(message.get("model") or ""),
         epoch,
@@ -111,6 +117,95 @@ def _record_from_line(line: str, session_id: str) -> tuple | None:
         _int("output_tokens"),
         dedupe,
     )
+
+
+def _parse_codex_file(path: Path) -> list[tuple]:
+    """One record per rollout: total_token_usage is CUMULATIVE per
+    session, so the LAST token_count event is the exact session total --
+    no dedupe gymnastics needed (CodexBar's reading of the format)."""
+    last_info = None
+    last_epoch = None
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if CODEX_MARKER not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                payload = row.get("payload") if isinstance(row, dict) else None
+                if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                    continue
+                info = payload.get("info")
+                if not isinstance(info, dict):
+                    continue
+                totals = info.get("total_token_usage")
+                if not isinstance(totals, dict):
+                    continue
+                timestamp = row.get("timestamp")
+                try:
+                    last_epoch = datetime.fromisoformat(
+                        str(timestamp).replace("Z", "+00:00")
+                    ).timestamp()
+                except (TypeError, ValueError):
+                    continue
+                last_info = totals
+    except OSError:
+        return []
+    if last_info is None or last_epoch is None:
+        return []
+
+    def _int(key: str) -> int:
+        value = last_info.get(key)
+        return int(value) if isinstance(value, (int, float)) else 0
+
+    return [
+        (
+            "codex",
+            path.stem,
+            "codex",
+            last_epoch,
+            _int("input_tokens"),
+            _int("cached_input_tokens"),
+            _int("cache_write_input_tokens"),
+            _int("output_tokens"),
+            str(path),
+        )
+    ]
+
+
+def codex_rate_limits(root: Path) -> dict | None:
+    """The newest rollout's embedded rate_limits: Codex ships its own
+    5h/weekly used-percent right in the session file (CodexBar finding)
+    -- read ONE file, no API call, no auth."""
+    try:
+        newest = max(
+            (p for p in root.rglob("*.jsonl") if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            default=None,
+        )
+    except OSError:
+        newest = None
+    if newest is None:
+        return None
+    latest = None
+    try:
+        with newest.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if '"rate_limits"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                payload = row.get("payload") if isinstance(row, dict) else None
+                limits = payload.get("rate_limits") if isinstance(payload, dict) else None
+                if isinstance(limits, dict):
+                    latest = limits
+    except OSError:
+        return None
+    return latest
 
 
 def _parse_file(path: Path) -> list[tuple]:
@@ -153,14 +248,15 @@ def _decode_records(entry: dict, sessions: list, models: list, dedupes: list) ->
         try:
             records.append(
                 (
-                    str(sessions[row[0]]),
-                    str(models[row[1]]),
-                    float(row[2]),
-                    int(row[3]),
+                    str(models[row[0]]),
+                    str(sessions[row[1]]),
+                    str(models[row[2]]),
+                    float(row[3]),
                     int(row[4]),
                     int(row[5]),
                     int(row[6]),
-                    str(dedupes[row[7]]),
+                    int(row[7]),
+                    str(dedupes[row[8]]),
                 )
             )
         except (IndexError, TypeError, ValueError):
@@ -182,6 +278,7 @@ def scan_usage(
     cache_path: Path | None = None,
     *,
     since_epoch: float = 0.0,
+    codex_root: Path | None = None,
 ) -> UsageTotals:
     """Aggregate usage for records at/after ``since_epoch``, warm from
     the persisted cache, re-parsing only files whose (size, mtime)
@@ -202,10 +299,19 @@ def scan_usage(
 
     all_records: list[tuple] = []
     try:
-        paths = [p for p in root.rglob("*.jsonl") if p.is_file()]
+        paths = [(p, _parse_file) for p in root.rglob("*.jsonl") if p.is_file()]
     except OSError:
         paths = []
-    for path in paths:
+    if codex_root is not None:
+        try:
+            paths.extend(
+                (p, _parse_codex_file)
+                for p in codex_root.rglob("*.jsonl")
+                if p.is_file()
+            )
+        except OSError:
+            pass
+    for path, parser in paths:
         try:
             stat = path.stat()
         except OSError:
@@ -219,21 +325,22 @@ def scan_usage(
         ):
             records = _decode_records(entry, cached_sessions, cached_models, cached_dedupes)
         else:
-            records = _parse_file(path)
+            records = parser(path)
         all_records.extend(records)
         new_files[key] = {
             "size": stat.st_size,
             "mtime": stat.st_mtime,
             "records": [
                 [
-                    _intern(r[0], sessions_table, sessions_index),
-                    _intern(r[1], models_table, models_index),
-                    r[2],
+                    _intern(r[0], models_table, models_index),
+                    _intern(r[1], sessions_table, sessions_index),
+                    _intern(r[2], models_table, models_index),
                     r[3],
                     r[4],
                     r[5],
                     r[6],
-                    _intern(r[7], dedupes_table, dedupes_index),
+                    r[7],
+                    _intern(r[8], dedupes_table, dedupes_index),
                 ]
                 for r in records
             ],
@@ -258,8 +365,9 @@ def scan_usage(
             pass
 
     totals = UsageTotals()
+    totals.records = [r for r in all_records]
     seen: set[str] = set()
-    for session, model, epoch, inp, cached_in, cache_create, out, dedupe in all_records:
+    for provider, session, model, epoch, inp, cached_in, cache_create, out, dedupe in all_records:
         # Global first-seen dedupe across ALL files -- resumed/forked
         # sessions copy records forward and content blocks repeat usage.
         if dedupe in seen:
@@ -268,6 +376,10 @@ def scan_usage(
         if epoch < since_epoch:
             continue
         totals.sessions.add(session)
+        if provider == "codex":
+            totals.codex_sessions.add(session)
+            totals.codex_tokens += inp + cached_in + out
+            continue
         totals.input_tokens += inp
         totals.cached_input_tokens += cached_in
         totals.cache_creation_tokens += cache_create
@@ -298,3 +410,52 @@ def usage_summary_line(totals: UsageTotals) -> str | None:
     if totals.cache_savings_usd >= 0.005:
         parts.append(f"saved ${totals.cache_savings_usd:.2f} with caching")
     return "Claude today: " + " · ".join(parts)
+
+
+def daily_buckets(records, days: int = 7, *, now: datetime | None = None):
+    """Per local-calendar-day totals for the last N days:
+    {day_iso: {"claude_cost": float, "codex_tokens": int, "sessions": int}}.
+    Day keys come from each record's own timestamp converted to LOCAL
+    time (the CodexBar rule: a 23:30 UTC session lands in YOUR day)."""
+    current = now or datetime.now()
+    day_keys = [
+        (current - __import__("datetime").timedelta(days=offset)).date().isoformat()
+        for offset in range(days - 1, -1, -1)
+    ]
+    buckets = {key: {"claude_cost": 0.0, "codex_tokens": 0, "sessions": set()} for key in day_keys}
+    seen: set[str] = set()
+    for provider, session, model, epoch, inp, cached_in, cache_create, out, dedupe in records:
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        day = datetime.fromtimestamp(epoch).date().isoformat()
+        bucket = buckets.get(day)
+        if bucket is None:
+            continue
+        bucket["sessions"].add(session)
+        if provider == "codex":
+            bucket["codex_tokens"] += inp + cached_in + out
+        else:
+            input_rate, output_rate = _pricing_for_model(model)
+            bucket["claude_cost"] += (
+                inp * input_rate
+                + cached_in * input_rate * CACHE_READ_RATE
+                + cache_create * input_rate * CACHE_WRITE_RATE
+                + out * output_rate
+            ) / 1_000_000.0
+    for bucket in buckets.values():
+        bucket["sessions"] = len(bucket["sessions"])
+    return buckets
+
+
+def hourly_session_counts(records, *, now: datetime | None = None) -> list[int]:
+    """Today's distinct sessions per hour (local), for the sparkline."""
+    current = now or datetime.now()
+    today = current.date()
+    hours: list[set] = [set() for _ in range(24)]
+    for provider, session, _model, epoch, *_rest in records:
+        stamp = datetime.fromtimestamp(epoch)
+        if stamp.date() != today:
+            continue
+        hours[stamp.hour].add(session)
+    return [len(bucket) for bucket in hours]

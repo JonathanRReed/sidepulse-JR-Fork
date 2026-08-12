@@ -1690,3 +1690,12 @@ CURATED_PALETTES: dict[str, dict[str, dict[str, str]]] = {
     "Orchid": derive_palette("#B26EFF"),
     "Ember": derive_palette("#FF9F0A"),
 }
+
+# Brand-seeded looks: one per provider, mix-and-match with anything --
+# apply "Claude" then hand-pick a different done color, etc.
+PROVIDER_PALETTES: dict[str, dict[str, dict[str, str]]] = {
+    "Claude": derive_palette("#D97757"),
+    "OpenAI": derive_palette("#10A37F"),
+    "Codex": derive_palette("#FF3A00"),
+    "Gemini": derive_palette("#4796E3"),
+}

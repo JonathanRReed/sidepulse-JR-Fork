@@ -926,8 +926,34 @@ class StatusBarController(NSObject):
                     Path.home() / ".claude" / "projects",
                     default_state_dir() / "usage-scan-cache.json",
                     since_epoch=midnight.timestamp(),
+                    codex_root=Path.home() / ".codex" / "sessions",
                 )
                 line = usage_stats.usage_summary_line(totals)
+                codex_parts = []
+                if totals.codex_sessions:
+                    codex_parts.append(
+                        f"Codex today: {len(totals.codex_sessions)} sessions "
+                        f"\u00b7 {totals.codex_tokens / 1_000_000:.0f}M tokens"
+                    )
+                limits = usage_stats.codex_rate_limits(
+                    Path.home() / ".codex" / "sessions"
+                )
+                primary = (limits or {}).get("primary") or {}
+                if primary.get("used_percent") is not None:
+                    codex_parts.append(
+                        f"weekly limit {primary['used_percent']:.0f}% used"
+                    )
+                codex_line = " \u00b7 ".join(codex_parts) if codex_parts else None
+                buckets = usage_stats.daily_buckets(totals.records)
+                day_bars = [
+                    {
+                        "label": day[5:].replace("-", "/"),
+                        "claude_cost": bucket["claude_cost"],
+                        "codex_tokens": bucket["codex_tokens"],
+                    }
+                    for day, bucket in buckets.items()
+                ]
+                hourly = usage_stats.hourly_session_counts(totals.records)
                 detail = (
                     f"{totals.input_tokens:,} in \u00b7 "
                     f"{totals.cached_input_tokens:,} cached \u00b7 "
@@ -939,8 +965,11 @@ class StatusBarController(NSObject):
                 log_status_bar(f"usage scan error: {exc}")
                 line = None
                 detail = None
+                codex_line = None
+                day_bars = []
+                hourly = []
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "applyUsageSummary:", (line, detail), False
+                "applyUsageSummary:", (line, detail, codex_line, day_bars, hourly), False
             )
 
         threading.Thread(target=_work, daemon=True).start()
@@ -952,6 +981,14 @@ class StatusBarController(NSObject):
         line = payload[0] if payload else None
         detail = payload[1] if payload and len(payload) > 1 else None
         self.usage_detail_text = detail
+        self.codex_summary_text = payload[2] if payload and len(payload) > 2 else None
+        fields = getattr(self, "settings_fields", None) or {}
+        codex_label = fields.get("profile_codex_label")
+        if codex_label is not None:
+            codex_label.setStringValue_(self.codex_summary_text or "")
+        graph = fields.get("profile_usage_graph")
+        if graph is not None and payload and len(payload) > 4:
+            graph.setData_hourly_(payload[3], payload[4])
         if line != getattr(self, "usage_summary_text", None):
             self.usage_summary_text = line
             self._menu_signature = None
@@ -1769,7 +1806,9 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def applyPalette_(self, sender):
         name = str(sender.identifier() or "")
-        palette = colors_module.CURATED_PALETTES.get(name)
+        palette = colors_module.CURATED_PALETTES.get(
+            name
+        ) or colors_module.PROVIDER_PALETTES.get(name)
         if palette is None:
             return
         colors = self.settings.colors
@@ -2684,8 +2723,13 @@ class StatusBarController(NSObject):
         if self.settings_window is None:
             self.settings_window = build_settings_window(self)
             if self.settings_sidebar_table is not None:
+                default_row = next(
+                    index
+                    for index, (key, _label) in enumerate(SETTINGS_SIDEBAR_ITEMS)
+                    if key == DEFAULT_SETTINGS_PANE
+                )
                 self.settings_sidebar_table.selectRowIndexes_byExtendingSelection_(
-                    NSIndexSet.indexSetWithIndex_(0), False
+                    NSIndexSet.indexSetWithIndex_(default_row), False
                 )
         self.refresh_settings_window()
         # Animate the Signals pane's pattern thumbnails and previews
@@ -2714,8 +2758,28 @@ class StatusBarController(NSObject):
         return len(SETTINGS_SIDEBAR_ITEMS)
 
     def tableView_viewForTableColumn_row_(self, _table_view, _column, row):
-        _key, label = SETTINGS_SIDEBAR_ITEMS[row]
+        key, label = SETTINGS_SIDEBAR_ITEMS[row]
+        if key.startswith("header:"):
+            header = native_ui.make_label(label, secondary=True, size=10.0)
+            holder = NSView.alloc().init()
+            holder.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            header.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            holder.addSubview_(header)
+            NSLayoutConstraint.activateConstraints_(
+                [
+                    header.leadingAnchor().constraintEqualToAnchor_constant_(
+                        holder.leadingAnchor(), 12.0
+                    ),
+                    header.bottomAnchor().constraintEqualToAnchor_constant_(
+                        holder.bottomAnchor(), -3.0
+                    ),
+                ]
+            )
+            return holder
         return native_ui.sidebar_cell_view(label)
+
+    def tableView_shouldSelectRow_(self, _table_view, row) -> bool:
+        return not SETTINGS_SIDEBAR_ITEMS[row][0].startswith("header:")
 
     def tableView_isGroupRow_(self, _table_view, _row) -> bool:
         return False
@@ -2726,6 +2790,8 @@ class StatusBarController(NSObject):
         if row < 0 or row >= len(SETTINGS_SIDEBAR_ITEMS):
             return
         selected_key = SETTINGS_SIDEBAR_ITEMS[row][0]
+        if selected_key.startswith("header:"):
+            return
         self.current_settings_pane = selected_key
         for key, pane in self.settings_panes.items():
             pane.setHidden_(key != selected_key)
@@ -5407,7 +5473,7 @@ DAILY_TIPS: tuple[tuple[str, str | None, str | None], ...] = (
     ("Give a session a permanent color from its row's Identity Color menu", None, None),
     ("The Screen Bar hugs your notch -- style it under Screen Bar", "colors_screen_bar", None),
     ("Timer fills your lights as working time passes -- try it below", None, None),
-    ("Write your own light animation in the Studio tab", "studio", None),
+    ("Write your own light animation under Animations", "animations", None),
     ("Whites looking off? Calibrate each device under Devices", "devices", None),
     ("Day, Night, and Travel calibration profiles live under Profiles", None, None),
     ("Ignored asks can escalate: light, menu bar, chime, takeover", "led_behavior", None),
@@ -6183,19 +6249,104 @@ def format_byte_count(size: int) -> str:
 # Power = closed-lid awake + battery (both power management). The old
 # nine-pane split left several panes holding two controls in an
 # otherwise empty window.
+# "header:" rows are unselectable section labels -- the sidebar had
+# grown to a 12-item flat list nobody could scan.
 SETTINGS_SIDEBAR_ITEMS: tuple[tuple[str, str], ...] = (
+    ("header:you", "YOU"),
     ("profile", "Profile"),
+    ("header:setup", "SET UP"),
     ("devices", "Devices"),
+    ("agents", "Agents"),
+    ("header:looks", "LOOKS"),
     ("color_studio", "Color Studio"),
     ("colors_screen_bar", "Screen Bar"),
-    ("agents", "Agents"),
+    ("animations", "Animations"),
+    ("header:behavior", "BEHAVIOR"),
     ("led_behavior", "Signals"),
     ("focus", "Focus"),
     ("power", "Power"),
-    ("lid_animations", "Lid Animations"),
-    ("studio", "Studio"),
+    ("header:advanced", "ADVANCED"),
     ("debug", "Debug"),
 )
+DEFAULT_SETTINGS_PANE = "profile"
+
+
+class UsageGraphView(NSView):
+    """Seven day bars (Claude spend in Claude's brand orange, Codex
+    tokens in OpenAI green, normalized per series) over an hourly
+    session sparkline for today. Flat, no dependencies, redrawn only
+    when data changes."""
+
+    def initWithFrame_(self, frame):
+        self = objc.super(UsageGraphView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self.day_bars = []
+        self.hourly = []
+        return self
+
+    def setData_hourly_(self, day_bars, hourly):
+        self.day_bars = list(day_bars or [])
+        self.hourly = list(hourly or [])
+        self.setNeedsDisplay_(True)
+
+    def isFlipped(self):
+        return False
+
+    def drawRect_(self, _rect):
+        bounds = self.bounds().size
+        width, height = bounds.width, bounds.height
+        if width <= 0 or not self.day_bars:
+            return
+        spark_height = 24.0
+        label_height = 14.0
+        bars_bottom = spark_height + label_height + 6.0
+        bars_height = max(10.0, height - bars_bottom - 4.0)
+        count = len(self.day_bars)
+        slot = width / count
+        bar_width = min(34.0, slot * 0.6)
+        max_cost = max((bar["claude_cost"] for bar in self.day_bars), default=0.0) or 1.0
+        max_tokens = max((bar["codex_tokens"] for bar in self.day_bars), default=0) or 1
+        claude_color = nscolor_from_hex("#D97757")
+        codex_color = nscolor_from_hex("#10A37F")
+        label_attrs = {
+            NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
+        }
+        for index, bar in enumerate(self.day_bars):
+            center = slot * index + slot / 2.0
+            half = bar_width / 2.0
+            claude_h = bars_height * (bar["claude_cost"] / max_cost)
+            codex_h = bars_height * (bar["codex_tokens"] / max_tokens)
+            claude_color.setFill()
+            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                ((center - half, bars_bottom), (half - 1.0, max(2.0, claude_h))),
+                2.0,
+                2.0,
+            ).fill()
+            codex_color.setFill()
+            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                ((center + 1.0, bars_bottom), (half - 1.0, max(2.0, codex_h))),
+                2.0,
+                2.0,
+            ).fill()
+            label = NSString.stringWithString_(bar.get("label", ""))
+            size = label.sizeWithAttributes_(label_attrs)
+            label.drawAtPoint_withAttributes_(
+                (center - size.width / 2.0, spark_height + 2.0), label_attrs
+            )
+        if self.hourly:
+            peak = max(self.hourly) or 1
+            step = width / len(self.hourly)
+            NSColor.tertiaryLabelColor().setFill()
+            for hour, value in enumerate(self.hourly):
+                if value <= 0:
+                    continue
+                bar_h = max(1.5, (spark_height - 4.0) * value / peak)
+                NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                    ((step * hour + 1.0, 0.0), (max(1.5, step - 2.0), bar_h)),
+                    1.0,
+                    1.0,
+                ).fill()
 
 
 def _build_profile_pane(target: StatusBarController):
@@ -6216,6 +6367,24 @@ def _build_profile_pane(target: StatusBarController):
     )
     today_inner.addArrangedSubview_(detail_label)
     fields["profile_usage_detail"] = detail_label
+    codex_label = native_ui.make_label(
+        getattr(target, "codex_summary_text", None) or "", secondary=False, size=13.0
+    )
+    today_inner.addArrangedSubview_(codex_label)
+    fields["profile_codex_label"] = codex_label
+    graph = UsageGraphView.alloc().initWithFrame_(((0, 0), (560.0, 120.0)))
+    graph.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    native_ui.constrain_width(graph, 560.0)
+    native_ui.constrain_height(graph, 120.0)
+    today_inner.addArrangedSubview_(graph)
+    fields["profile_usage_graph"] = graph
+    legend = native_ui.make_label(
+        "\u25a0 Claude spend \u00b7 \u25a0 Codex tokens \u00b7 last 7 days; "
+        "bottom strip = today's sessions by hour",
+        secondary=True,
+        size=10.0,
+    )
+    today_inner.addArrangedSubview_(legend)
     today_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "Costs use Anthropic list rates; cached reads bill at a tenth "
@@ -7429,10 +7598,7 @@ def _build_lid_preset_row(target: StatusBarController, kind: str, current_progra
     return row
 
 
-def _build_studio_pane(target: StatusBarController):
-    """The Studio graduated to its own tab -- it is "write any light
-    program", not a lid feature it happened to live beside."""
-    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+def _add_studio_card(target: StatusBarController, stack) -> None:
 
     # The Studio: write any LED program by hand, preview it on every
     # surface, and it's saved as yours. The DSL reference lives in
@@ -7463,11 +7629,12 @@ def _build_studio_pane(target: StatusBarController):
     stack.addArrangedSubview_(studio_outer)
     target.studio_editor = studio_editor
 
-    return native_ui.wrap_in_scroll_pane(stack), {}
+
 
 
 def _build_lid_animations_pane(target: StatusBarController):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    _add_studio_card(target, stack)
 
 
     closed_outer, closed_inner = native_ui.make_card("Lid Closed")
@@ -7652,7 +7819,6 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     focus_pane, focus_fields, focus_buttons = _build_focus_pane(target)
     power_pane, power_fields, power_buttons = _build_power_pane(target)
     lid_animations_pane, lid_animations_fields = _build_lid_animations_pane(target)
-    studio_pane, _studio_fields = _build_studio_pane(target)
     debug_pane, debug_fields = _build_debug_pane(target)
 
     panes = {
@@ -7664,8 +7830,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         "led_behavior": led_behavior_pane,
         "focus": focus_pane,
         "power": power_pane,
-        "lid_animations": lid_animations_pane,
-        "studio": studio_pane,
+        "animations": lid_animations_pane,
         "debug": debug_pane,
     }
     for key, pane in panes.items():
@@ -7678,7 +7843,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
                 pane.bottomAnchor().constraintEqualToAnchor_(content_container.bottomAnchor()),
             ]
         )
-        pane.setHidden_(key != SETTINGS_SIDEBAR_ITEMS[0][0])
+        pane.setHidden_(key != DEFAULT_SETTINGS_PANE)
 
     target.settings_sidebar_table = sidebar_table
     target.settings_panes = panes
@@ -7887,6 +8052,19 @@ def _build_color_studio_pane(target: StatusBarController) -> NSView:
         palette_row.addArrangedSubview_(palette_button)
     palette_row.addArrangedSubview_(native_ui.make_hspacer())
     palette_inner.addArrangedSubview_(palette_row)
+    provider_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    provider_row.addArrangedSubview_(
+        native_ui.make_label("Provider looks:", secondary=True, size=11.0)
+    )
+    for palette_name in colors_module.PROVIDER_PALETTES:
+        provider_button = native_ui.make_button(palette_name, target, "applyPalette:")
+        provider_button.setIdentifier_(palette_name)
+        provider_button.setToolTip_(
+            f"A full look seeded from {palette_name}'s brand color"
+        )
+        provider_row.addArrangedSubview_(provider_button)
+    provider_row.addArrangedSubview_(native_ui.make_hspacer())
+    palette_inner.addArrangedSubview_(provider_row)
     scroll_stack.addArrangedSubview_(palette_outer)
 
     scroll_stack.addArrangedSubview_(behavior_outer)
