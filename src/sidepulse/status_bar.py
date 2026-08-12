@@ -163,6 +163,7 @@ from .led_status import (
     normalized_device_name,
     program_for_display_state,
     quota_runway_program,
+    scale_hex_brightness,
     style_to_program,
     timer_fill_program,
     write_mode_to_leds,
@@ -293,6 +294,7 @@ REMINDERS_WATCH_RETRY_SECONDS = 300.0
 LED_DISPLAY_WEATHER = "weather"
 LED_DISPLAY_QUOTA = "quota_alert"
 LED_DISPLAY_ALL_CLEAR = "all_clear"
+LED_DISPLAY_PEEK = "peek"
 WEATHER_WATCH_SECONDS = 600.0
 WEATHER_WATCH_RETRY_SECONDS = 1800.0
 CALENDAR_WATCH_SECONDS = 30.0
@@ -4948,6 +4950,10 @@ class StatusBarController(NSObject):
                 ),
             ),
             (
+                LED_DISPLAY_PEEK,
+                lambda: now < getattr(self, "peek_until", 0.0),
+            ),
+            (
                 LED_DISPLAY_ALL_CLEAR,
                 lambda: (
                     self.settings.completion_sweep_enabled
@@ -5080,6 +5086,7 @@ class StatusBarController(NSObject):
         # oldest unanswered ask's terminal comes forward. With no ask,
         # the window stays fully click-through (mouse events ignored),
         # exactly as before.
+        self.ensure_peek_timer()
         click_target = self.screen_bar_click_status()
         if click_target is not None:
             self.virtual_status_device.set_click_handler(
@@ -5147,6 +5154,8 @@ class StatusBarController(NSObject):
                     self.settings.signal_style(signals_module.SIGNAL_WEATHER), brightness
                 )
             )
+        elif display == LED_DISPLAY_PEEK:
+            _set_virtual(self.peek_program(brightness))
         elif display == LED_DISPLAY_ALL_CLEAR:
             _set_virtual(
                 apply_brightness("off 400ms cosine\n#F5EDE0 3200ms pulse", brightness)
@@ -5289,6 +5298,88 @@ class StatusBarController(NSObject):
             return None
         return f"{result.error_name} at line {result.line}, column {result.column}"
 
+    def ensure_peek_timer(self) -> None:
+        """A 5Hz NSEvent.mouseLocation() poll (class method, zero
+        permissions -- NOT an event tap) while the Screen Bar is shown:
+        dwell on the bar for ~0.6s and it answers with a 4s vitals
+        readout. An NSTrackingArea can't work here -- the window
+        deliberately ignores mouse events."""
+        if getattr(self, "_peek_timer", None) is not None:
+            return
+        self._peek_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            0.2, self, "peekTick:", None, True
+        )
+
+    @objc.IBAction
+    def peekTick_(self, _timer):
+        window = getattr(self.virtual_status_device, "window", None)
+        if window is None or getattr(self, "status_menu_open", False):
+            self._peek_hits = 0
+            return
+        from AppKit import NSEvent
+
+        location = NSEvent.mouseLocation()
+        frame = window.frame()
+        inside = (
+            frame.origin.x <= location.x <= frame.origin.x + frame.size.width
+            and frame.origin.y <= location.y <= frame.origin.y + frame.size.height
+        )
+        now = time.monotonic()
+        peeking = now < getattr(self, "peek_until", 0.0)
+        if inside:
+            self._peek_hits = getattr(self, "_peek_hits", 0) + 1
+            if self._peek_hits == 3 and not peeking:
+                self.peek_until = now + 4.0
+                self.refresh_(None)
+                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    4.1, self, "refresh:", None, False
+                )
+        else:
+            self._peek_hits = 0
+            if peeking:
+                self.peek_until = 0.0
+                self.refresh_(None)
+
+    def peek_program(self, brightness: float, led_count: int = 8) -> str:
+        """The vitals readout: an active timebox shows the timer fill;
+        otherwise the left half is Claude runway, the right half Codex,
+        each brand-colored and scaled by remaining headroom."""
+        if self.timebox_active():
+            return timer_fill_program(
+                self.timer_fill_fraction(),
+                led_count=led_count,
+                brightness=brightness,
+                color=self.settings.colors.mode_colors.get("working", "#00E5FF"),
+            )
+        percents = getattr(self, "quota_last_percents", None) or {}
+
+        def _fraction(prefix):
+            values = [v for k, v in percents.items() if k.startswith(prefix)]
+            return 1.0 - (max(values) / 100.0) if values else None
+
+        halves = (
+            (_fraction("Claude"), "#D97757"),
+            (_fraction("Codex"), "#10A37F"),
+        )
+        half = max(1, led_count // 2)
+        segments = []
+        for side, (fraction, color) in enumerate(halves):
+            for position in range(half):
+                index = side * half + position
+                if index >= led_count:
+                    break
+                if fraction is None:
+                    segments.append(f"{index}:#1A1A1A 60000ms linear")
+                    continue
+                level = max(0.0, min(1.0, fraction * half - position))
+                lit = (
+                    scale_hex_brightness(color, max(0.08, level) * (brightness / 255.0))
+                    if level > 0.0
+                    else "#000000"
+                )
+                segments.append(f"{index}:{lit} 60000ms linear")
+        return "\n".join(["; ".join(segments), "repeat"])
+
     def screen_bar_click_status(self):
         """The session a Screen Bar click should open: the OLDEST
         unanswered hard ask (the same episode ordering escalation
@@ -5402,6 +5493,13 @@ class StatusBarController(NSObject):
                 lambda device, _snapshot: (
                     f"{device.name} Weather {self.weather_alert_event or 'alert'}"
                 ),
+            ),
+            LED_DISPLAY_PEEK: (
+                lambda brightness, led_count: self.peek_program(
+                    brightness, led_count=led_count
+                ),
+                LedDisplayState.WORKING,
+                lambda device, _snapshot: f"{device.name} Peek",
             ),
             LED_DISPLAY_ALL_CLEAR: (
                 lambda brightness, led_count: apply_brightness(
