@@ -213,6 +213,9 @@ class AgentMonitorSettings:
     # this many expected minutes. Honest: it's a TIMER, not task
     # progress -- hooks deliver no truthful progress fraction.
     timer_expected_minutes: float = 10.0
+    # The Studio: the user's own hand-written LED program (see the
+    # Studio card in the Animations pane). Persisted verbatim.
+    studio_program: str = ""
     # Focus -> profile automation: when a Focus activates, apply this
     # calibration/brightness profile slot (focus id -> slot name).
     focus_profile_rules: dict[str, str] = field(default_factory=dict)
@@ -724,6 +727,9 @@ class AgentMonitorSettings:
     def with_weather_alerts_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, weather_alerts_enabled=bool(enabled))
 
+    def with_studio_program(self, program: str) -> "AgentMonitorSettings":
+        return replace(self, studio_program=str(program))
+
     def with_focus_profile_rule(self, focus_identifier: str, slot: str | None) -> "AgentMonitorSettings":
         """slot=None removes the rule."""
         if slot is not None and slot not in CALIBRATION_PROFILE_SLOTS:
@@ -876,6 +882,7 @@ class AgentMonitorSettings:
             "calibration_profiles": dict(sorted(self.calibration_profiles.items())),
             "timer_expected_minutes": self.timer_expected_minutes,
             "focus_profile_rules": dict(sorted(self.focus_profile_rules.items())),
+            "studio_program": self.studio_program,
             "signal_styles": dict(sorted(self.signal_styles.items())),
             "escalation_tier": self.escalation_tier,
             "escalation_ramp_seconds": self.escalation_ramp_seconds,
@@ -1083,6 +1090,9 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         timer_expected_minutes=max(
             1.0, min(480.0, _float_setting(data.get("timer_expected_minutes"), 10.0))
+        ),
+        studio_program=(
+            data.get("studio_program") if isinstance(data.get("studio_program"), str) else ""
         ),
         focus_profile_rules=(
             {

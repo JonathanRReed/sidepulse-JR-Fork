@@ -6063,9 +6063,12 @@ class ColorSettingsTests(unittest.TestCase):
         statuses = (_status("devin", AgentMode.BLOCKED_ERROR), _status("codex", AgentMode.WORKING))
         _, program = program_for_snapshot(statuses, led_count=8, colors=settings)
         reset_line = _program_body(program)[0]
-        # Devin (Ask, floor 0) resets to literal "off"; Codex (Working, floor
-        # 0.2) resets to a scaled, non-off color.
-        self.assertIn("off", reset_line)
+        # Devin (Ask, floor 0) resets to #000000 -- NEVER "N:off", which
+        # the firmware's indexed parser rejects (red-strobe parse error;
+        # "floor to zero flashed red and turned off"). Codex (Working,
+        # floor 0.2) resets to a scaled, non-black color.
+        self.assertIn(":#000000", reset_line)
+        self.assertNotIn(":off", reset_line)
         working_floor_color = colors_module.scale_hex_brightness(
             _identity_color(statuses, "codex"), 0.2
         )

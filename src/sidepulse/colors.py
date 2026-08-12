@@ -999,7 +999,7 @@ def _round_robin_program(
             pulse_segments.append(f"{index}:{color} {settle_ms}ms cosine")
             continue
         floor, ceiling = settings.fade_range(_STATE_TO_MODE_KEY[agent.state])
-        floor_color = "off" if floor <= 0.0 else scale_hex_brightness(color, floor)
+        floor_color = "#000000" if floor <= 0.0 else scale_hex_brightness(color, floor)
         peak_color = color if ceiling >= 1.0 else scale_hex_brightness(color, ceiling)
         delay = (index * stagger_ms) % duration_ms
         reset_segments.append(f"{index}:{floor_color} {settle_ms}ms cosine")
@@ -1047,7 +1047,7 @@ def _relay_program(
             pulse_segments.append(f"{index}:{color} {settle_ms}ms cosine")
             continue
         floor, ceiling = settings.fade_range(_STATE_TO_MODE_KEY[agent.state])
-        floor_color = "off" if floor <= 0.0 else scale_hex_brightness(color, floor)
+        floor_color = "#000000" if floor <= 0.0 else scale_hex_brightness(color, floor)
         peak_color = color if ceiling >= 1.0 else scale_hex_brightness(color, ceiling)
         # Full stagger -- one LED's entire turn elapses before the next
         # one's delay expires, so only one LED is ever mid-flare.
@@ -1176,7 +1176,7 @@ def _reset_segment_for_agent(led_index: int, agent: _ActiveAgent, settings: Colo
         )
         return f"{led_index}:{agent.color} {settle_ms}ms cosine"
     floor, _ceiling = settings.fade_range(mode_key)
-    floor_color = "off" if floor <= 0.0 else scale_hex_brightness(agent.color, floor)
+    floor_color = "#000000" if floor <= 0.0 else scale_hex_brightness(agent.color, floor)
     settle_ms = settle_duration_ms(_SEGMENT_DURATION_MS_BY_STATE[agent.state])
     return f"{led_index}:{floor_color} {settle_ms}ms cosine"
 

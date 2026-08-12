@@ -168,7 +168,6 @@ from .virtual_device import (
     VirtualStatusDevice,
     monotonic_ms,
     slot_width_for_screen,
-    wing_width_for_screen,
 )
 from .led_wasm import LedWasmUnavailableError, SdLedWasmController
 from .lid_sleep import (
@@ -1198,11 +1197,14 @@ class StatusBarController(NSObject):
             return
         for field_key, view in self.settings_fields.items():
             if field_key.startswith("signal_preview:"):
-                if not view.isHiddenOrHasHiddenAncestor():
+                if not view.isHiddenOrHasHiddenAncestor() and view.visibleRect().size.width > 0:
                     view.setNeedsDisplay_(True)
             elif field_key.startswith("signal_thumbs:") and isinstance(view, dict):
                 for thumb in view.values():
-                    if not thumb.isHiddenOrHasHiddenAncestor():
+                    # Viewport culling: only thumbnails actually scrolled
+                    # into view animate -- 50+ off-screen WASM steppers
+                    # were the Settings lag.
+                    if not thumb.isHiddenOrHasHiddenAncestor() and thumb.visibleRect().size.width > 0:
                         thumb.setNeedsDisplay_(True)
 
     @objc.IBAction
@@ -1271,12 +1273,68 @@ class StatusBarController(NSObject):
 
     def test_signal_program(self, brightness: int | float, led_count: int = 8) -> str:
         key = getattr(self, "test_signal_key", None) or signals_module.SIGNAL_LOW_BATTERY
+        if key == "__studio__":
+            program = getattr(self, "studio_preview_program", "") or "#00E5FF"
+            return apply_brightness(program, brightness)
         return style_to_program(
             self.settings.signal_style(key),
             brightness,
             color=_signal_preview_color(self, key),
             led_count=led_count,
         )
+
+    @objc.IBAction
+    def previewStudioProgram_(self, _sender):
+        editor = getattr(self, "studio_editor", None)
+        if editor is None:
+            return
+        program = str(editor.string()).strip()
+        if not program:
+            return
+        try:
+            validate_led_text(normalize_led_text(program))
+        except Exception as exc:
+            self.set_settings_message(f"Studio program error: {exc}")
+            return
+        self.settings = self.settings.with_studio_program(program)
+        save_settings(self.settings)
+        self.studio_preview_program = program
+        self.test_signal_key = "__studio__"
+        self.test_signal_until = time.monotonic() + 12.0
+        self.refresh_(None)
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            12.1, self, "refresh:", None, False
+        )
+        self.set_settings_message("Studio: playing your program on everything for 12s.")
+
+    @objc.IBAction
+    def stopStudioProgram_(self, _sender):
+        self.test_signal_until = 0.0
+        self.test_signal_key = None
+        self.refresh_(None)
+        self.set_settings_message("Studio preview stopped.")
+
+    @objc.IBAction
+    def applyFadePreset_(self, sender):
+        identifier = str(sender.identifier() or "")
+        if "|" not in identifier:
+            return
+        floor_pct, ceiling_pct = identifier.split("|", 1)
+        floor = max(0.0, min(1.0, float(floor_pct) / 100.0))
+        ceiling = max(0.0, min(1.0, float(ceiling_pct) / 100.0))
+        colors = self.settings.colors
+        for mode_key in FADE_MODE_KEYS:
+            colors = colors.with_fade_floor(mode_key, floor).with_fade_ceiling(
+                mode_key, ceiling
+            )
+        self.settings = self.settings.with_colors(colors)
+        save_settings(self.settings)
+        self.refresh_colors_window()
+        self.refresh_colors_preview()
+        if self.color_preview_enabled:
+            self.push_colors_preview_to_device()
+        self.refresh_(None)
+        self.set_settings_message(f"Fade preset: {sender.title()} ({floor_pct}–{ceiling_pct}%).")
 
     @objc.IBAction
     def testSignal_(self, sender):
@@ -2174,7 +2232,7 @@ class StatusBarController(NSObject):
             # thumbnails read fine at 12 and the CPU cost drops by ~60%.
             self.signal_preview_timer = (
                 NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                    1.0 / 12.0, self, "redrawSignalPreviews:", None, True
+                    1.0 / 8.0, self, "redrawSignalPreviews:", None, True
                 )
             )
         self.settings_window.makeKeyAndOrderFront_(None)
@@ -2333,7 +2391,7 @@ class StatusBarController(NSObject):
         # The unified animation thumbnails animate on the same tick.
         for thumbs in getattr(self, "colors_animation_thumbs", {}).values():
             for thumb in thumbs.values():
-                if not thumb.isHiddenOrHasHiddenAncestor():
+                if not thumb.isHiddenOrHasHiddenAncestor() and thumb.visibleRect().size.width > 0:
                     thumb.setNeedsDisplay_(True)
 
     @objc.IBAction
@@ -2533,7 +2591,9 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def toggleDoneCelebration_(self, sender):
-        colors = self.settings.colors.with_done_celebration_enabled(checkbox_is_on(sender))
+        enabled = checkbox_is_on(sender)
+        self.settings = self.settings.with_completion_sweep_enabled(enabled)
+        colors = self.settings.colors.with_done_celebration_enabled(enabled)
         self._commit_colors_and_refresh(colors)
 
     @objc.IBAction
@@ -2643,19 +2703,17 @@ class StatusBarController(NSObject):
         settings save on release -- the same feel as the brightness
         slider, so the bar visibly follows the thumb."""
         gap_slider = self.settings_fields.get("screen_bar_gap_slider")
-        wing_slider = self.settings_fields.get("screen_bar_wing_slider")
-        if gap_slider is None or wing_slider is None:
+        if gap_slider is None:
             return
         gap = float(gap_slider.doubleValue())
-        wing = float(wing_slider.doubleValue())
         if not commit:
-            self.virtual_status_device.set_geometry_overrides(gap, wing)
+            self.virtual_status_device.set_geometry_overrides(gap, None)
             self.virtual_status_device.reposition()
             return
-        self.settings = self.settings.with_screen_bar_gap_width(gap).with_screen_bar_wing_length(wing)
+        self.settings = self.settings.with_screen_bar_gap_width(gap)
         save_settings(self.settings)
         self.reposition_virtual_status_device_now()
-        self.set_settings_message(f"Bar size: gap {gap:g} pt, wings {wing:g} pt.")
+        self.set_settings_message(f"Bar size: gap {gap:g} pt.")
 
     @objc.IBAction
     def resetScreenBarGeometry_(self, _sender):
@@ -2665,15 +2723,11 @@ class StatusBarController(NSObject):
         # Snap the sliders back to what Automatic computes right now.
         try:
             auto_gap = slot_width_for_screen(NSScreen.mainScreen())
-            auto_wing = wing_width_for_screen(NSScreen.mainScreen(), auto_gap)
         except Exception:
-            auto_gap, auto_wing = 232.0, 90.0
+            auto_gap = 232.0
         gap_slider = self.settings_fields.get("screen_bar_gap_slider")
         if gap_slider is not None:
             gap_slider.setDoubleValue_(float(auto_gap))
-        wing_slider = self.settings_fields.get("screen_bar_wing_slider")
-        if wing_slider is not None:
-            wing_slider.setDoubleValue_(float(auto_wing))
         self.set_settings_message("Bar size back to Automatic.")
 
     @objc.IBAction
@@ -5536,7 +5590,7 @@ SCREEN_BAR_PREVIEW_NOTCH_WIDTH = 200.0
 # wing_width_for_screen computes -- this preview shows the *shape* of
 # "extend glow along the menu bar" (does the light actually reach the
 # edge it's given?) rather than standing in for any one real screen.
-SCREEN_BAR_PREVIEW_WING_WIDTH = 70.0
+SCREEN_BAR_PREVIEW_WING_WIDTH = 12.0
 
 
 def _build_colors_screen_bar_pane(target: StatusBarController):
@@ -5603,16 +5657,7 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         auto_gap = slot_width_for_screen(NSScreen.mainScreen())
     except Exception:
         auto_gap = 232.0
-    try:
-        auto_wing = wing_width_for_screen(NSScreen.mainScreen(), auto_gap)
-    except Exception:
-        auto_wing = 90.0
     gap_value = target.settings.screen_bar_gap_width or auto_gap
-    wing_value = (
-        target.settings.screen_bar_wing_length
-        if target.settings.screen_bar_wing_length is not None
-        else auto_wing
-    )
     gap_slider = native_ui.make_slider(
         min_value=140.0,
         max_value=900.0,
@@ -5629,22 +5674,6 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
             help_text="How wide the dark center is -- widen it to clear Alcove's pill.",
         )
     )
-    wing_slider = native_ui.make_slider(
-        min_value=24.0,
-        max_value=300.0,
-        value=max(24.0, float(wing_value)),
-        target=target,
-        action="setScreenBarWingLength:",
-        continuous=True,
-    )
-    size_inner.addArrangedSubview_(
-        native_ui.make_row(
-            "Wing length",
-            wing_slider,
-            fill_control=True,
-            help_text="How far each horizontal stroke reaches along the menu bar.",
-        )
-    )
     auto_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     auto_cluster.addArrangedSubview_(
         native_ui.make_button("Use Automatic Size", target, "resetScreenBarGeometry:")
@@ -5656,7 +5685,6 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         "screen_bar_preview_view": preview_view,
         "screen_bar_preview_container": preview_container,
         "screen_bar_gap_slider": gap_slider,
-        "screen_bar_wing_slider": wing_slider,
         "bracket_style_popup": bracket_popup,
     }
     buttons = {"screen_bar_wraps_menu_bar": wraps_switch}
@@ -5834,7 +5862,17 @@ def _mode_animation_thumb_program(target: StatusBarController, mode_key: str, st
     if spec is None:
         return "#FFFFFF"
     state, color_kwarg = spec
-    kwargs = {color_kwarg: target.settings.colors.mode_color(mode_key)}
+    mode_hex = target.settings.colors.mode_color(mode_key)
+    stripped = mode_hex.lstrip("#")
+    try:
+        luminance = sum(int(stripped[i : i + 2], 16) for i in (0, 2, 4)) / 3.0
+    except ValueError:
+        luminance = 255.0
+    if luminance < 24.0:
+        # A near-black mode color (Idle ships at #030302) makes an
+        # invisible thumbnail; preview the SHAPE in neutral gray.
+        mode_hex = "#9A9A9A"
+    kwargs = {color_kwarg: mode_hex}
     style_kwarg = colors_module._MODE_KEY_TO_STYLE_KWARG.get(mode_key)
     if style_kwarg:
         kwargs[style_kwarg] = style
@@ -6318,6 +6356,35 @@ def _build_agents_pane(target: StatusBarController):
 def _build_lid_animations_pane(target: StatusBarController):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
 
+    # The Studio: write any LED program by hand, preview it on every
+    # surface, and it's saved as yours. The DSL reference lives in
+    # LEDS_FORMAT.md; the lid animations below use the same language.
+    studio_outer, studio_inner = native_ui.make_card("Studio")
+    studio_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Write your own light. Lines are steps — a color, a duration, "
+            "an easing — and `repeat` loops them. Preview plays your "
+            "program on the Screen Bar and every connected device.",
+            secondary=True,
+            size=11.0,
+            max_width=520.0,
+        )
+    )
+    studio_scroll, studio_editor = native_ui.make_text_editor(
+        target.settings.studio_program or "#00E5FF 800ms pulse\noff 300ms cosine\nrepeat",
+        height=110.0,
+    )
+    studio_inner.addArrangedSubview_(studio_scroll)
+    studio_buttons = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    studio_buttons.addArrangedSubview_(
+        native_ui.make_button("Preview on Everything", target, "previewStudioProgram:")
+    )
+    studio_buttons.addArrangedSubview_(native_ui.make_button("Stop", target, "stopStudioProgram:"))
+    studio_buttons.addArrangedSubview_(native_ui.make_hspacer())
+    studio_inner.addArrangedSubview_(studio_buttons)
+    stack.addArrangedSubview_(studio_outer)
+    target.studio_editor = studio_editor
+
     closed_outer, closed_inner = native_ui.make_card("Lid Closed")
     closed_duration = native_ui.make_field("", target=target, action="saveLidAnimations:")
     native_ui.constrain_width(closed_duration, 60.0)
@@ -6764,6 +6831,17 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
             size=11.0,
         )
     )
+    fade_preset_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    for label, floor_pct, ceiling_pct in (
+        ("Subtle", 35, 70),
+        ("Balanced", 12, 85),
+        ("Full Range", 0, 100),
+    ):
+        preset_button = native_ui.make_button(label, target, "applyFadePreset:")
+        preset_button.setIdentifier_(f"{floor_pct}|{ceiling_pct}")
+        fade_preset_row.addArrangedSubview_(preset_button)
+    fade_preset_row.addArrangedSubview_(native_ui.make_hspacer())
+    fade_inner.addArrangedSubview_(fade_preset_row)
     fade_fields: dict[str, dict[str, object]] = {}
     for key in FADE_MODE_KEYS:
         floor, ceiling = target.settings.colors.fade_range(key)

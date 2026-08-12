@@ -489,9 +489,24 @@ def timer_fill_program(
             segments.append(f"{index}:{scaled}")
     body = "; ".join(segments)
     if 0.0 < fraction < 1.0:
-        # The plink: the frontier LED breathes, so a slow timer reads
-        # as alive grains landing rather than a frozen bar.
-        body += f"\n{frontier}:{color} 1200ms pulse\nrepeat"
+        # The plink: the frontier LED breathes -- a grain landing --
+        # and faint grains trickle across the unfilled section toward
+        # it, so a slow timer reads as alive, not frozen.
+        lines = [body, f"{frontier}:{color} 1200ms pulse"]
+        unfilled = [index for index in range(led_count) if index > frontier]
+        if unfilled:
+            dim = "#" + "".join(
+                f"{round(channel * 0.28):02X}" for channel in (red, green, blue)
+            )
+            span = max(1, len(unfilled))
+            trickle = "; ".join(
+                f"{index}:{dim} 260ms pulse "
+                f"{min(65535, round((len(unfilled) - 1 - position) * 2400 / span))}ms"
+                for position, index in enumerate(unfilled)
+            )
+            lines.append(trickle)
+        lines.append("repeat")
+        body = "\n".join(lines)
     return apply_brightness(body, brightness)
 
 
