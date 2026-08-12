@@ -258,6 +258,7 @@ class StatusBarDevice:
     brightness: int = 255
     auto_brightness_enabled: bool = False
     channel_gains: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    resting_glow: float = 0.0
     reason: str = ""
 
 
@@ -1830,6 +1831,29 @@ class StatusBarController(NSObject):
         NSWorkspace.sharedWorkspace().openURL_(
             NSURL.URLWithString_("https://github.com/JonathanRReed/sidepulse-JR-Fork")
         )
+
+    @objc.IBAction
+    def setScreenBarMinGlow_(self, sender):
+        fraction = max(0.0, min(1.0, float(sender.doubleValue()) / 100.0))
+        self.settings = self.settings.with_screen_bar_min_glow(fraction)
+        save_settings(self.settings)
+        label = "pitch black" if fraction <= 0.004 else f"{round(fraction * 100)}%"
+        self.set_settings_message(f"Screen Bar dim floor: {label}.")
+        self.refresh_(None)
+
+    @objc.IBAction
+    def setDeviceRestingGlow_(self, sender):
+        device_id = str(sender.identifier() or "")
+        if not device_id:
+            return
+        fraction = max(0.0, min(0.35, float(sender.doubleValue()) / 100.0))
+        self.settings = self.settings.with_device_resting_glow(device_id, fraction)
+        save_settings(self.settings)
+        self.reset_led_controllers_for_device(device_id)
+        self.set_settings_message(
+            "Resting glow off." if fraction <= 0.004 else f"Resting glow: {round(fraction * 100)}%."
+        )
+        self.refresh_(None)
 
     @objc.IBAction
     def toggleMenuBarLabel_(self, sender):
@@ -4364,6 +4388,7 @@ class StatusBarController(NSObject):
         controller.device_path = device.target
         controller.brightness = self.effective_brightness_for_device(device)
         controller.channel_gains = device.channel_gains
+        controller.resting_glow = device.resting_glow
         return controller
 
     def battery_controller_for_device(self, device: StatusBarDevice) -> BatteryLedController:
@@ -4374,6 +4399,7 @@ class StatusBarController(NSObject):
         controller.device_path = device.target
         controller.brightness = self.effective_brightness_for_device(device)
         controller.channel_gains = device.channel_gains
+        controller.resting_glow = device.resting_glow
         return controller
 
     def effective_brightness_for_device(self, device: StatusBarDevice) -> int:
@@ -4409,7 +4435,7 @@ class StatusBarController(NSObject):
             # screen bar anymore"). A rule that resolves to exactly 0
             # (School -> Turn off) still turns it fully off -- the floor
             # only guards against accidental invisibility, never intent.
-            scaled = max(scaled, 255.0 * 0.25)
+            scaled = max(scaled, 255.0 * float(self.settings.screen_bar_min_glow))
         return normalize_brightness(scaled)
 
     def idle_dim_scale_factor(self) -> float:
@@ -4487,6 +4513,7 @@ class StatusBarController(NSObject):
                 brightness=self.settings.brightness_for_device(device_id),
                 auto_brightness_enabled=self.settings.auto_brightness_enabled_for_device(device_id),
                 channel_gains=self.settings.channel_gains_for_device(device_id),
+                resting_glow=self.settings.resting_glow_for_device(device_id),
                 reason=candidate.reason,
             )
 
@@ -4506,6 +4533,7 @@ class StatusBarController(NSObject):
                         brightness=device.brightness,
                         auto_brightness_enabled=device.auto_brightness_enabled,
                         channel_gains=device.channel_gains(),
+                        resting_glow=device.resting_glow,
                         reason="on-screen device",
                     )
                 continue
@@ -4522,6 +4550,7 @@ class StatusBarController(NSObject):
                 brightness=device.brightness,
                 auto_brightness_enabled=device.auto_brightness_enabled,
                 channel_gains=device.channel_gains(),
+                resting_glow=device.resting_glow,
                 reason="previously connected",
             )
 
@@ -4779,6 +4808,7 @@ class StatusBarController(NSObject):
             self.settings.screen_bar_gap_width, self.settings.screen_bar_wing_length
         )
         self.virtual_status_device.set_bracket_style(self.settings.screen_bar_bracket_style)
+        self.virtual_status_device.set_min_glow(self.settings.screen_bar_min_glow)
         device = next(
             (
                 item for item in self.status_bar_devices(remember=False)
@@ -6533,6 +6563,26 @@ def _build_devices_pane(target: StatusBarController):
         color_row_controls.addArrangedSubview_(calibration_label)
         inner.addArrangedSubview_(native_ui.make_row("Color", color_row_controls))
         native_ui.add_separator(inner)
+        resting_slider = native_ui.make_slider(
+            min_value=0.0,
+            max_value=25.0,
+            value=float(device.resting_glow) * 100.0,
+            target=target,
+            action="setDeviceRestingGlow:",
+            identifier=device.device_id,
+        )
+        inner.addArrangedSubview_(
+            native_ui.make_row(
+                "Resting glow",
+                resting_slider,
+                help_text=(
+                    "A faint ember on every LED, even the unlit ones -- "
+                    "the dots read as physical objects instead of "
+                    "vanishing. 0% is classic full dark."
+                ),
+            )
+        )
+        native_ui.add_separator(inner)
 
         # Per-device display choice: agent status, battery fill, or the
         # honest working-timer fill.
@@ -6703,6 +6753,26 @@ SCREEN_BAR_PREVIEW_WING_WIDTH = 12.0
 
 def _build_colors_screen_bar_pane(target: StatusBarController):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    glow_outer, glow_inner = native_ui.make_card("Minimum Glow")
+    glow_slider = native_ui.make_slider(
+        min_value=0.0,
+        max_value=100.0,
+        value=float(target.settings.screen_bar_min_glow) * 100.0,
+        target=target,
+        action="setScreenBarMinGlow:",
+    )
+    glow_inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Dim floor",
+            glow_slider,
+            help_text=(
+                "How dark the bar may get. 0% = pitch black: only the "
+                "moving signal shows -- the relay dot ticking around, "
+                "the timer filling up. Higher keeps a soft outline."
+            ),
+        )
+    )
+    stack.addArrangedSubview_(glow_outer)
     outer, inner = native_ui.make_card()
 
     inner.addArrangedSubview_(

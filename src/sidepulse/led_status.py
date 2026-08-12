@@ -136,6 +136,22 @@ def apply_channel_gain_to_hex(hex_color: str, gains: tuple[float, float, float])
     return f"#{channel(red, red_gain):02X}{channel(green, green_gain):02X}{channel(blue, blue_gain):02X}"
 
 
+def apply_resting_glow_to_program(program: str, fraction: float) -> str:
+    """Replaces every fully-dark token (the word `off`, the literal
+    #000000) with a faint gray ember so unlit LEDs stay barely visible
+    -- "the dots appear more physical". Applied per device, BEFORE
+    channel gains so calibration shapes the ember too. fraction <= 0 is
+    a no-op (classic full dark)."""
+    if fraction <= 0.004:
+        return program
+    level = max(1, min(90, round(255 * fraction)))
+    glow_hex = f"#{level:02X}{level:02X}{level:02X}"
+    import re as _re
+
+    program = program.replace("#000000", glow_hex)
+    return _re.sub(r"\boff\b", glow_hex, program)
+
+
 def apply_channel_gain_to_program(program: str, gains: tuple[float, float, float]) -> str:
     """Rewrites every literal ``#RRGGBB`` color in a rendered LED DSL
     program through apply_channel_gain_to_hex, leaving everything else
@@ -745,6 +761,7 @@ class AgentLedController:
         # written -- a gain change alone (with statuses/colors unchanged)
         # still produces a different string here and correctly triggers a
         # rewrite, with no separate "did gains change" tracking needed.
+        program = apply_resting_glow_to_program(program, getattr(self, "resting_glow", 0.0))
         program = apply_channel_gain_to_program(program, self.channel_gains)
         return self._write_deduped_program(state, program)
 
@@ -752,6 +769,7 @@ class AgentLedController:
         """Writes a pre-rendered program through the same gain/dedup/retry
         path sync_snapshot uses -- for displays that aren't derived from
         agent statuses at all (e.g. the low-battery reminder)."""
+        program = apply_resting_glow_to_program(program, getattr(self, "resting_glow", 0.0))
         program = apply_channel_gain_to_program(program, self.channel_gains)
         return self._write_deduped_program(state, program)
 

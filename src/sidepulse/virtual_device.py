@@ -319,7 +319,7 @@ def led_band_rect(width: float):
     return ((0.0, 0.0), (float(width), LED_BAND_HEIGHT))
 
 
-def _legibility_boost(color, floor: float = 0.18):
+def _legibility_boost(color, floor: float):
     """The bracket is a STATUS surface: any lit LED renders at least
     this visible on it, whatever fade floors and Focus dimming did to
     the underlying program. Relay's 1% resting glow stacked with
@@ -327,7 +327,7 @@ def _legibility_boost(color, floor: float = 0.18):
     LEDs may whisper; the on-screen bracket must stay readable. Truly
     off (alpha 0) stays off."""
     red, green, blue, alpha = color
-    if alpha <= 0.0005 or alpha >= floor:
+    if floor <= 0.0 or alpha <= 0.0005 or alpha >= floor:
         return color
     factor = floor / alpha
     return (
@@ -826,12 +826,19 @@ class VirtualLedView(NSView):
         if lit >= 2:
             self._bracket_spatial_hold_until = now + 2.0
         spatial_held = now < getattr(self, "_bracket_spatial_hold_until", 0.0)
+        # The legibility floor scales with the user's dim-floor dial: at
+        # 0 the bar is allowed to go PITCH BLACK -- only the moving
+        # signal (relay dot, timer frontier) renders.
+        floor = max(0.0, min(1.0, getattr(self, "min_glow", 0.25))) * 0.72
         if style == "spatial" or (style == "auto" and (lit >= 2 or spatial_held)):
-            return [_legibility_boost(c) for c in colors]
-        return [_legibility_boost(self._bar_identity_color(colors))] * LED_COUNT
+            return [_legibility_boost(c, floor) for c in colors]
+        return [_legibility_boost(self._bar_identity_color(colors), floor)] * LED_COUNT
 
     def setBracketStyle_(self, style):
         self.bracket_style = str(style or "auto")
+
+    def setMinGlow_(self, fraction):
+        self.min_glow = max(0.0, min(1.0, float(fraction)))
 
     def _bar_identity_color(self, colors):
         """ONE color representing the whole strip: the alpha-weighted
@@ -1080,6 +1087,10 @@ class VirtualStatusDevice(NSObject):
 
     def set_wraps_menu_bar(self, enabled: bool) -> None:
         self.wraps_menu_bar = bool(enabled)
+
+    def set_min_glow(self, fraction: float) -> None:
+        if self.view is not None:
+            self.view.setMinGlow_(fraction)
 
     def set_bracket_style(self, style: str) -> None:
         if self.view is not None:

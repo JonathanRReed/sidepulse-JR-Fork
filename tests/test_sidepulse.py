@@ -9146,6 +9146,75 @@ class SubagentAndPhantomAskTests(unittest.TestCase):
         self.assertEqual(top_level_subs, [])
 
 
+class GlowDialTests(unittest.TestCase):
+    """The dimming dials: pitch-black Screen Bar, physical resting glow."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_resting_glow_replaces_dark_tokens_before_gains(self) -> None:
+        from sidepulse.led_status import apply_resting_glow_to_program
+
+        program = "#FF0000 300ms pulse\noff 200ms cosine\n3:#000000 100ms ease\nrepeat"
+        glowed = apply_resting_glow_to_program(program, 0.1)
+        self.assertNotIn("off ", glowed)
+        self.assertNotIn("#000000", glowed)
+        self.assertIn("#1A1A1A", glowed)
+        # Zero is a strict no-op -- classic full dark.
+        self.assertEqual(apply_resting_glow_to_program(program, 0.0), program)
+
+    def test_screen_bar_min_glow_round_trip_and_pitch_black(self) -> None:
+        from sidepulse.settings import AgentMonitorSettings, load_settings, save_settings
+
+        configured = AgentMonitorSettings().with_screen_bar_min_glow(0.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            self.assertEqual(load_settings(path).screen_bar_min_glow, 0.0)
+        self.assertEqual(
+            AgentMonitorSettings().with_screen_bar_min_glow(2.0).screen_bar_min_glow,
+            1.0,
+        )
+
+    def test_pitch_black_floor_lets_bar_go_fully_dark(self) -> None:
+        self.controller.settings = self.controller.settings.with_screen_bar_min_glow(0.0)
+        device = self.status_bar.StatusBarDevice(
+            device_id=self.status_bar.VIRTUAL_DEVICE_ID,
+            name="Screen Bar",
+            root=Path(self.status_bar.VIRTUAL_DEVICE_ID),
+            target=Path(self.status_bar.VIRTUAL_DEVICE_ID),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+            brightness=10,
+            auto_brightness_enabled=False,
+        )
+        # With the dial at zero no floor applies -- tiny stays tiny.
+        self.assertLessEqual(
+            self.controller.effective_brightness_for_device(device), 10
+        )
+        self.controller.settings = self.controller.settings.with_screen_bar_min_glow(0.25)
+        self.assertGreaterEqual(
+            self.controller.effective_brightness_for_device(device), 63
+        )
+
+    def test_bracket_floor_zero_means_pitch_black(self) -> None:
+        from sidepulse import virtual_device
+
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (400.0, 37.0)))
+        view.setMinGlow_(0.0)
+        dim = [(0.02, 0.01, 0.01, 0.01)] * 8
+        rendered = view._bracket_colors(dim)
+        self.assertTrue(all(c[3] <= 0.011 for c in rendered))
+
+    def test_device_resting_glow_round_trip(self) -> None:
+        from sidepulse.settings import AgentMonitorSettings
+
+        settings = AgentMonitorSettings()
+        # No devices yet: setter is a safe no-op, getter defaults 0.
+        settings = settings.with_device_resting_glow("nope", 0.1)
+        self.assertEqual(settings.resting_glow_for_device("nope"), 0.0)
+
+
 class PaletteTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_controller(self)

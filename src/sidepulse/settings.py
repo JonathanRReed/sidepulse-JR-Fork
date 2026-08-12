@@ -128,6 +128,9 @@ class DeviceDisplaySetting:
     red_gain: float = DEFAULT_CHANNEL_GAIN
     green_gain: float = DEFAULT_CHANNEL_GAIN
     blue_gain: float = DEFAULT_CHANNEL_GAIN
+    # A faint ember on every LED even when a segment is "off" -- makes
+    # the dots read as physical objects. 0 = classic full-dark.
+    resting_glow: float = 0.0
     # Per-device blend-mode override (None = the global Colors-window
     # choice) -- the Pro can run Spatial Split while the Dot relays.
     blend_mode: str | None = None
@@ -270,6 +273,10 @@ class AgentMonitorSettings:
     focus_sync_enabled: bool = False
     tips_enabled: bool = True
     menu_bar_label_enabled: bool = False
+    # The Screen Bar's dim floor as a USER dial. 0 = pitch black: only
+    # the moving signal shows (the relay dot ticking round, the timer
+    # filling). 0.25 preserves the pre-dial behavior.
+    screen_bar_min_glow: float = 0.25
     dismissed_tips: tuple[str, ...] = ()
     # Per-Focus dim rules, keyed by the Focus mode identifier (e.g.
     # "com.apple.donotdisturb.mode.default"): 1.0 = don't dim, 0.0 = LEDs
@@ -637,6 +644,27 @@ class AgentMonitorSettings:
     def with_idle_dim_fraction(self, fraction: float) -> AgentMonitorSettings:
         return replace(self, idle_dim_fraction=normalize_idle_dim_fraction(fraction))
 
+    def with_screen_bar_min_glow(self, fraction: float) -> AgentMonitorSettings:
+        return replace(
+            self, screen_bar_min_glow=max(0.0, min(1.0, float(fraction)))
+        )
+
+    def with_device_resting_glow(self, device_id: str, fraction: float) -> AgentMonitorSettings:
+        clamped = max(0.0, min(0.35, float(fraction)))
+        devices = tuple(
+            replace(device, resting_glow=clamped)
+            if device.device_id == device_id
+            else device
+            for device in self.devices
+        )
+        return replace(self, devices=devices)
+
+    def resting_glow_for_device(self, device_id: str) -> float:
+        for device in self.devices:
+            if device.device_id == device_id:
+                return device.resting_glow
+        return 0.0
+
     def with_menu_bar_label_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, menu_bar_label_enabled=bool(enabled))
 
@@ -688,6 +716,7 @@ class AgentMonitorSettings:
             device.device_id: {
                 "brightness": device.brightness,
                 "red_gain": device.red_gain,
+                "resting_glow": device.resting_glow,
                 "green_gain": device.green_gain,
                 "blue_gain": device.blue_gain,
             }
@@ -909,6 +938,7 @@ class AgentMonitorSettings:
             "focus_sync_enabled": self.focus_sync_enabled,
             "tips_enabled": self.tips_enabled,
             "menu_bar_label_enabled": self.menu_bar_label_enabled,
+            "screen_bar_min_glow": self.screen_bar_min_glow,
             "dismissed_tips": list(self.dismissed_tips),
             "focus_dim_rules": dict(sorted(self.focus_dim_rules.items())),
         }
@@ -1133,6 +1163,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         focus_sync_enabled=_bool_setting(data.get("focus_sync_enabled"), False),
         tips_enabled=_bool_setting(data.get("tips_enabled"), True),
         menu_bar_label_enabled=_bool_setting(data.get("menu_bar_label_enabled"), False),
+        screen_bar_min_glow=_fraction_setting(data.get("screen_bar_min_glow"), 0.25),
         dismissed_tips=tuple(
             str(item)
             for item in (data.get("dismissed_tips") or [])
@@ -1164,6 +1195,12 @@ def save_settings(
     scratch.write_text(payload)
     os.replace(scratch, target)
     return target
+
+
+def _fraction_setting(value: object, default: float) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return max(0.0, min(1.0, float(value)))
+    return default
 
 
 def _bool_setting(value: object, default: bool) -> bool:
@@ -1241,6 +1278,7 @@ def _device_display_settings(value: object, default_display: str) -> tuple[Devic
                 green_gain=normalize_channel_gain(item.get("green_gain")),
                 blue_gain=normalize_channel_gain(item.get("blue_gain")),
                 blend_mode=_device_blend_mode_setting(item.get("blend_mode")),
+                resting_glow=_fraction_setting(item.get("resting_glow"), 0.0),
             )
         )
         seen.add(device_id)

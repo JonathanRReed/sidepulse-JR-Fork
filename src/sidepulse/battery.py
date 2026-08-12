@@ -454,6 +454,11 @@ class BatteryLedController:
                 led_count=led_count_for_target(target),
                 brightness=self.brightness,
             )
+            from .led_status import apply_resting_glow_to_program
+
+            program = apply_resting_glow_to_program(
+                program, getattr(self, "resting_glow", 0.0)
+            )
             program = apply_channel_gain_to_program(program, self.channel_gains)
         except (DeviceWriteError, OSError) as exc:
             self.last_error = str(exc)
