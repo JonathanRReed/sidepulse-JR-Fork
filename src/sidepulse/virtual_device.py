@@ -657,6 +657,19 @@ class VirtualLedView(NSView):
             self.wasm_error = str(exc)
             return False
 
+    def _colors_for_draw_cached(self):
+        """The paint-path twin of _colors_for_draw: redraw_'s change
+        gate already computed this frame's smoothed colors -- the three
+        draw sites reuse that snapshot instead of advancing the filter
+        a second (or third) time per frame. Falls through to a live
+        compute on expose events that arrive outside our tick."""
+        cached = getattr(self, "_frame_colors", None)
+        if cached is not None and time.monotonic() - cached[0] < 0.045:
+            return cached[1]
+        colors = self._colors_for_draw()
+        self._frame_colors = (time.monotonic(), colors)
+        return colors
+
     def _colors_for_draw(self):
         """The colors actually painted this frame: the engine's target
         colors run through a short exponential low-pass (~90ms). The
@@ -732,7 +745,7 @@ class VirtualLedView(NSView):
             self._draw_compact_accent()
             return
 
-        colors = self._colors_for_draw()
+        colors = self._colors_for_draw_cached()
         width = self.bounds().size.width
         height = self.bounds().size.height
         notch_width, wing_offset = self._notch_geometry()
@@ -883,7 +896,7 @@ class VirtualLedView(NSView):
         agent state, and the risers turn it into the |____| bracket.
         Painted in the single identity color (_bar_identity_color), not
         the spatial per-LED layout."""
-        colors = self._bracket_colors(self._colors_for_draw())
+        colors = self._bracket_colors(self._colors_for_draw_cached())
         width = self.bounds().size.width
         height = self.bounds().size.height
         notch_width, wing_offset = self._notch_geometry()
@@ -1061,7 +1074,7 @@ class VirtualLedView(NSView):
         widget. No body fill, no glow layers, no edge highlights.
         Painted in the single identity color -- see _bar_identity_color
         for why a spatial per-LED accent was mostly invisible."""
-        colors = self._bracket_colors(self._colors_for_draw())
+        colors = self._bracket_colors(self._colors_for_draw_cached())
         width = self.bounds().size.width
         cg_context = current_cg_context()
         notch_width, wing_offset = self._notch_geometry()
@@ -1275,9 +1288,11 @@ class VirtualStatusDevice(NSObject):
             # re-run the full 4-layer glow -- ~28k bridged fill calls
             # per second -- at 60fps for identical pixels.
             try:
+                frame_colors = view._colors_for_draw()
+                view._frame_colors = (time.monotonic(), frame_colors)
                 painted = tuple(
                     tuple(int(round(channel * 1024.0)) for channel in color)
-                    for color in view._colors_for_draw()
+                    for color in frame_colors
                 )
             except Exception:
                 painted = None

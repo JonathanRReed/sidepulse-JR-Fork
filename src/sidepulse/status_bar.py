@@ -688,19 +688,54 @@ class StatusBarController(NSObject):
         now = time.monotonic()
         if now < self.notification_watch_retry_at:
             return
-        try:
-            if self.notification_record_cursor is None:
-                # First successful read just primes the cursor --
-                # pre-existing notifications must not replay as blinks.
-                self.notification_record_cursor = notification_watch.latest_record_id()
-                return
-            cursor, identifiers = notification_watch.delivered_after(
-                self.notification_record_cursor
+        # sqlite on the Notification Center store blocked the main run
+        # loop every 2s (0.5s worst case when usernoted holds the DB) --
+        # audit finding #3. Worker thread, always-post contract.
+        if getattr(self, "notification_poll_in_flight", False):
+            return
+        self.notification_poll_in_flight = True
+        primed_cursor = self.notification_record_cursor
+
+        def _work():
+            try:
+                if primed_cursor is None:
+                    # First successful read just primes the cursor --
+                    # pre-existing notifications must not replay.
+                    payload = {
+                        "ok": True,
+                        "cursor": notification_watch.latest_record_id(),
+                        "identifiers": [],
+                    }
+                else:
+                    cursor, identifiers = notification_watch.delivered_after(
+                        primed_cursor
+                    )
+                    payload = {
+                        "ok": True,
+                        "cursor": cursor,
+                        "identifiers": list(identifiers),
+                    }
+            except notification_watch.NotificationWatchUnavailableError as exc:
+                payload = {"ok": False, "error": str(exc)}
+            except Exception as exc:
+                payload = {"ok": False, "error": f"unexpected: {exc!r}"}
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "notificationsChecked:", payload, False
             )
-        except notification_watch.NotificationWatchUnavailableError:
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    @objc.IBAction
+    def notificationsChecked_(self, payload):
+        self.notification_poll_in_flight = False
+        now = time.monotonic()
+        if not payload.get("ok"):
             self.notification_watch_retry_at = now + NOTIFICATION_WATCH_RETRY_SECONDS
             return
-        self.notification_record_cursor = cursor
+        self.notification_record_cursor = payload.get("cursor")
+        identifiers = payload.get("identifiers") or []
+        if not identifiers:
+            return
         colors_by_app = self.settings.notification_app_colors
         matched = [colors_by_app[app] for app in identifiers if app in colors_by_app]
         if not matched:
@@ -5852,15 +5887,35 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def pollLid_(self, _sender):
-        try:
-            closed = read_lid_closed()
-        except Exception as exc:
-            error = str(exc)
+        # read_lid_closed forks ioreg -- this ran ON the main thread
+        # every second for every user (the audit's #1 finding). Same
+        # worker contract as pollWeather_: the thread must ALWAYS post
+        # its payload or the in-flight flag strands.
+        if getattr(self, "lid_poll_in_flight", False):
+            return
+        self.lid_poll_in_flight = True
+
+        def _work():
+            try:
+                payload = {"ok": True, "closed": read_lid_closed()}
+            except Exception as exc:
+                payload = {"ok": False, "error": str(exc)}
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "lidChecked:", payload, False
+            )
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    @objc.IBAction
+    def lidChecked_(self, payload):
+        self.lid_poll_in_flight = False
+        if not payload.get("ok"):
+            error = str(payload.get("error"))
             if error != self.last_lid_error:
                 self.last_lid_error = error
                 log_status_bar(f"lid_state error: {error}")
             return
-
+        closed = payload.get("closed")
         if closed is None:
             return
         self.last_lid_error = None
