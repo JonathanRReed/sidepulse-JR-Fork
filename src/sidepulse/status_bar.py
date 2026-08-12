@@ -271,6 +271,7 @@ LED_DISPLAY_CALENDAR = "calendar"
 LED_DISPLAY_ESCALATION = "escalation"
 LED_DISPLAY_TEST = "signal_test"
 SIGNAL_TEST_SECONDS = 5.0
+LED_DISPLAY_COMPLETION = "completion"
 LED_DISPLAY_REMINDERS = "reminders"
 REMINDERS_WATCH_SECONDS = 60.0
 REMINDERS_WATCH_RETRY_SECONDS = 300.0
@@ -836,6 +837,7 @@ class StatusBarController(NSObject):
         self.observe_connected_devices()
         self.track_ask_blocked(snapshot.statuses)
         self.track_working(snapshot.statuses)
+        self.track_completions(snapshot.statuses)
         self.set_status(state, ask_count=len(ask_statuses(snapshot)))
         self.sync_keep_awake(snapshot.aggregate.mode)
         self.sync_leds(
@@ -1426,6 +1428,15 @@ class StatusBarController(NSObject):
         )
 
     @objc.IBAction
+    def toggleCompletionSweep_(self, sender):
+        enabled = bool(sender.state())
+        self.settings = self.settings.with_completion_sweep_enabled(enabled)
+        save_settings(self.settings)
+        self.set_settings_message(
+            "Completion sweep on." if enabled else "Completion sweep off."
+        )
+
+    @objc.IBAction
     def toggleNotificationBlinks_(self, sender):
         enabled = bool(sender.state())
         self.settings = self.settings.with_notification_blinks_enabled(enabled)
@@ -1844,6 +1855,53 @@ class StatusBarController(NSObject):
             min(self.working_since_by_agent.values())
             if self.working_since_by_agent
             else None
+        )
+
+    def track_completions(self, statuses) -> None:
+        """Fires the completion sweep when an agent TRANSITIONS into
+        Completed from an active state -- the aggregate hides these
+        whenever another agent's Working outranks them. The sweep runs
+        in the finishing agent's identity color when several sessions
+        are live."""
+        previous_modes = getattr(self, "last_agent_modes", {})
+        current_modes = {
+            status.agent_id: status.mode for status in (statuses or ()) if status.agent_id
+        }
+        self.last_agent_modes = current_modes
+        if not self.settings.completion_sweep_enabled:
+            return
+        active_before = (
+            AgentMode.WORKING,
+            AgentMode.TOOL_RUNNING,
+            AgentMode.LONG_TASK_PROGRESS,
+            AgentMode.WAITING_FOR_INPUT,
+            AgentMode.BLOCKED_ERROR,
+        )
+        finished = [
+            agent_id
+            for agent_id, mode in current_modes.items()
+            if mode == AgentMode.COMPLETED and previous_modes.get(agent_id) in active_before
+        ]
+        if not finished:
+            return
+        ordered_ids = sorted(current_modes)
+        identity = (
+            colors_module.identity_colors_for_agents(ordered_ids)
+            if len(ordered_ids) > 1
+            else {}
+        )
+        agent_id = finished[-1]
+        self.completion_sweep_color = (
+            self.settings.colors.session_color(agent_id)
+            or identity.get(agent_id)
+            or self.settings.signal_style(signals_module.SIGNAL_COMPLETION).color
+        )
+        hold = signals_module.signal_hold_seconds(
+            self.settings.signal_style(signals_module.SIGNAL_COMPLETION)
+        )
+        self.completion_sweep_until = time.monotonic() + hold
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            hold + 0.1, self, "refresh:", None, False
         )
 
     def timebox_active(self) -> bool:
@@ -2914,6 +2972,10 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("notification_blinks_enabled"),
             self.settings.notification_blinks_enabled,
         )
+        set_checkbox_state(
+            self.settings_buttons.get("completion_sweep_enabled"),
+            self.settings.completion_sweep_enabled,
+        )
         for bundle_id in DEFAULT_NOTIFICATION_APP_COLORS:
             set_field_value(
                 self.settings_fields.get(f"notification_color:{bundle_id}"),
@@ -3878,6 +3940,13 @@ class StatusBarController(NSObject):
                 ),
             ),
             (
+                LED_DISPLAY_COMPLETION,
+                lambda: (
+                    self.settings.completion_sweep_enabled
+                    and now < getattr(self, "completion_sweep_until", 0.0)
+                ),
+            ),
+            (
                 LED_DISPLAY_CALENDAR,
                 lambda: (
                     self.settings.calendar_alerts_enabled and now < self.calendar_glow_until
@@ -3998,6 +4067,15 @@ class StatusBarController(NSObject):
                     self.settings.signal_style(signals_module.SIGNAL_NOTIFICATION),
                     brightness,
                     color=self.notification_blink_color,
+                ),
+                started_at=started_at,
+            )
+        elif display == LED_DISPLAY_COMPLETION:
+            self.virtual_status_device.set_program(
+                style_to_program(
+                    self.settings.signal_style(signals_module.SIGNAL_COMPLETION),
+                    brightness,
+                    color=getattr(self, "completion_sweep_color", None),
                 ),
                 started_at=started_at,
             )
@@ -4186,6 +4264,22 @@ class StatusBarController(NSObject):
                     LedDisplayState.ASK,
                 )
                 label = f"{device.name} Notification blink"
+                if result.error:
+                    agent_write_failed = True
+                elif result.changed:
+                    agent_write_changed = True
+            elif device_display_kind == LED_DISPLAY_COMPLETION:
+                controller = self.agent_controller_for_device(device)
+                result = controller.sync_program(
+                    style_to_program(
+                        self.settings.signal_style(signals_module.SIGNAL_COMPLETION),
+                        controller.brightness,
+                        color=getattr(self, "completion_sweep_color", None),
+                        led_count=device_led_count,
+                    ),
+                    LedDisplayState.DONE,
+                )
+                label = f"{device.name} Completion sweep"
                 if result.error:
                     agent_write_failed = True
                 elif result.changed:
@@ -5601,6 +5695,7 @@ SIGNAL_STYLE_CARDS: tuple[tuple[str, str, bool], ...] = (
     ("reminders", "Reminder Style", True),
     ("calendar", "Calendar Style", True),
     ("weather", "Weather Alert Style", True),
+    ("completion", "Completion Sweep Style", True),
 )
 SIGNAL_THUMB_SIZE = (52.0, 20.0)
 SIGNAL_PREVIEW_SIZE = (220.0, 22.0)
@@ -5879,6 +5974,18 @@ def _build_led_behavior_pane(target: StatusBarController):
         ),
     )
     notif_inner.addArrangedSubview_(notif_row)
+    native_ui.add_separator(notif_inner)
+    completion_row, completion_switch = native_ui.make_switch_row(
+        "Sweep when any agent finishes",
+        target,
+        "toggleCompletionSweep:",
+        help_text=(
+            "A brief sweep in the finishing agent's own color -- without "
+            "it, a completion is invisible whenever another agent is "
+            "still working."
+        ),
+    )
+    notif_inner.addArrangedSubview_(completion_row)
     for bundle_id, app_label in (
         (NOTIFICATION_APP_IMESSAGE, "iMessage"),
         (NOTIFICATION_APP_WHATSAPP, "WhatsApp"),
@@ -5986,6 +6093,7 @@ def _build_led_behavior_pane(target: StatusBarController):
         "idle_dim_enabled": idle_switch,
         "focus_sync_enabled": focus_switch,
         "notification_blinks_enabled": notif_switch,
+        "completion_sweep_enabled": completion_switch,
         "calendar_alerts_enabled": cal_switch,
         "reminder_alerts_enabled": rem_switch,
         "weather_alerts_enabled": weather_switch,

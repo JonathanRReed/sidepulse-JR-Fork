@@ -184,6 +184,10 @@ class AgentMonitorSettings:
     # Center store, so it needs Full Disk Access (the same grant the
     # Focus rules use) and stays silently inert without it.
     notification_blinks_enabled: bool = True
+    # Sweep the bar in the finishing agent's color the moment ANY
+    # session completes -- the aggregate hides completions whenever
+    # another agent is still working.
+    completion_sweep_enabled: bool = True
     notification_app_colors: dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_NOTIFICATION_APP_COLORS)
     )
@@ -708,6 +712,9 @@ class AgentMonitorSettings:
     def with_notification_blinks_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, notification_blinks_enabled=bool(enabled))
 
+    def with_completion_sweep_enabled(self, enabled: bool) -> "AgentMonitorSettings":
+        return replace(self, completion_sweep_enabled=bool(enabled))
+
     def with_calendar_alerts_enabled(self, enabled: bool) -> "AgentMonitorSettings":
         return replace(self, calendar_alerts_enabled=bool(enabled))
 
@@ -858,6 +865,7 @@ class AgentMonitorSettings:
                 "low_battery_threshold_percent": self.low_battery_threshold_percent,
             },
             "notification_blinks_enabled": self.notification_blinks_enabled,
+            "completion_sweep_enabled": self.completion_sweep_enabled,
             "notification_app_colors": dict(sorted(self.notification_app_colors.items())),
             "calendar_alerts_enabled": self.calendar_alerts_enabled,
             "calendar_lead_minutes": self.calendar_lead_minutes,
@@ -1054,6 +1062,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             1.0, min(50.0, _float_setting(battery.get("low_battery_threshold_percent"), 5.0))
         ),
         notification_blinks_enabled=_bool_setting(data.get("notification_blinks_enabled"), True),
+        completion_sweep_enabled=_bool_setting(data.get("completion_sweep_enabled"), True),
         notification_app_colors=_notification_app_colors(data.get("notification_app_colors")),
         calendar_alerts_enabled=_bool_setting(data.get("calendar_alerts_enabled"), False),
         calendar_lead_minutes=max(

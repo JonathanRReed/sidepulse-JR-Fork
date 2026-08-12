@@ -61,6 +61,7 @@ SIGNAL_NOTIFICATION = "notification"
 SIGNAL_REMINDERS = "reminders"
 SIGNAL_CALENDAR = "calendar"
 SIGNAL_WEATHER = "weather"
+SIGNAL_COMPLETION = "completion"
 
 _HEX_RE = re.compile(r"#?[0-9a-fA-F]{6}")
 
@@ -125,6 +126,11 @@ DEFAULT_SIGNAL_STYLES: dict[str, SignalStyle] = {
     # Emergency weather: an urgent heartbeat in warning pink-red --
     # unmistakable, and unlike any agent state's rhythm or hue.
     SIGNAL_WEATHER: SignalStyle("#FF2D55", PATTERN_HEARTBEAT, 1.4, 1.0),
+    # Completion sweep: ANY agent finishing claims the bar briefly, in
+    # that agent's identity color when several are running -- without
+    # this, a completion was invisible whenever another agent's
+    # WORKING state outranked it in the aggregate.
+    SIGNAL_COMPLETION: SignalStyle("#00FF66", PATTERN_SWEEP, 0.8, 1.0),
 }
 
 

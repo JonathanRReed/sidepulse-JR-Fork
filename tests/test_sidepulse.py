@@ -8803,6 +8803,47 @@ class AskInboxAndActionsTests(unittest.TestCase):
             self.status_bar.LED_DISPLAY_AGENT,
         )
 
+    def test_completion_sweep_fires_on_transition_and_claims_the_bar(self) -> None:
+        device = self.status_bar.StatusBarDevice(
+            device_id="SidePulsePro",
+            name="SidePulse Pro",
+            root=Path("/Volumes/SidePulsePro"),
+            target=Path("/Volumes/SidePulsePro/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        working = _status("codex", AgentMode.WORKING)
+        done = _status("codex", AgentMode.COMPLETED)
+        other_working = _status("claude", AgentMode.WORKING)
+        # Transition working -> completed fires the sweep, EVEN with
+        # another agent still working (the exact case the aggregate
+        # display hid: "I finished and saw no sign of it").
+        self.controller.track_completions((working, other_working))
+        self.assertEqual(getattr(self.controller, "completion_sweep_until", 0.0), 0.0)
+        self.controller.track_completions((done, other_working))
+        self.assertGreater(self.controller.completion_sweep_until, time.monotonic())
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_COMPLETION,
+        )
+        # Same snapshot again: already completed, no re-fire.
+        self.controller.completion_sweep_until = 0.0
+        self.controller.track_completions((done, other_working))
+        self.assertEqual(self.controller.completion_sweep_until, 0.0)
+        # Expired -> the aggregate resumes.
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_AGENT,
+        )
+
+    def test_completion_sweep_setting_round_trips(self) -> None:
+        configured = AgentMonitorSettings().with_completion_sweep_enabled(False)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            reloaded = load_settings(path)
+        self.assertFalse(reloaded.completion_sweep_enabled)
+
     def test_focus_profile_rule_round_trips_and_validates(self) -> None:
         configured = AgentMonitorSettings().with_focus_profile_rule("com.apple.focus.work", "Day")
         with tempfile.TemporaryDirectory() as tmp:
