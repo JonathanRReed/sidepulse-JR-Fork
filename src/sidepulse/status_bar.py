@@ -2939,6 +2939,10 @@ class StatusBarController(NSObject):
             for agent_id, mode in current_modes.items()
             if mode == AgentMode.COMPLETED
             and previous_modes.get(agent_id) in active_before
+            # Closing a terminal (SessionEnd) is the USER'S own act --
+            # sweeping green and posting "finished" for it turned every
+            # window close into a phantom celebration.
+            and statuses_by_id[agent_id].event_name != "SessionEnd"
             # T3's freshness window: only a completion under 2 minutes
             # old may CELEBRATE -- replayed transcripts and restarts
             # repaint silently. (Display visibility is a separate,
@@ -7353,14 +7357,15 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
                     )
                 )
         # Sub-agents whose parent session isn't visible (rare: parent
-        # aged out while workers run on) still get a rollup.
+        # aged out while workers run on) still get a rollup -- labeled,
+        # so it doesn't read as a stray floating row.
         for children in subagent_groups.values():
             if children:
-                menu.addItem_(
-                    build_worker_rollup_item(
-                        children, snapshot.collected_at, target, None
-                    )
+                orphan = build_worker_rollup_item(
+                    children, snapshot.collected_at, target, None
                 )
+                orphan.setTitle_(orphan.title() + " (session ended)")
+                menu.addItem_(orphan)
 
     focus_summary = (
         target.active_focus_summary()
@@ -9149,6 +9154,9 @@ def unseen_completions(snapshot, target) -> list[AgentStatus]:
     for status in candidates:
         if status.is_subagent or status.mode != AgentMode.COMPLETED:
             continue
+        if status.event_name == "SessionEnd":
+            # The user closed that terminal themselves -- not news.
+            continue
         if (
             snapshot.collected_at - status.updated_at
         ).total_seconds() > COMPLETED_VISIBLE_SECONDS:
@@ -9169,15 +9177,20 @@ def recent_statuses(snapshot) -> list[AgentStatus]:
     # even while other sessions keep working -- the collector demotes
     # them to stale the moment anything is active.
     seen_ids = {status.agent_id for status in statuses}
-    for status in getattr(snapshot, "stale_statuses", ()):
-        if (
-            not status.is_subagent
-            and status.agent_id not in seen_ids
-            and status.mode == AgentMode.COMPLETED
-            and (snapshot.collected_at - status.updated_at).total_seconds()
-            <= COMPLETED_VISIBLE_SECONDS
-        ):
-            statuses.append(status)
+    finished_rows = [
+        status
+        for status in getattr(snapshot, "stale_statuses", ())
+        if not status.is_subagent
+        and status.agent_id not in seen_ids
+        and status.mode == AgentMode.COMPLETED
+        # Stop = a turn finished (news). SessionEnd = the user closed
+        # that terminal (61 of those were badging as "new" at once).
+        and status.event_name != "SessionEnd"
+        and (snapshot.collected_at - status.updated_at).total_seconds()
+        <= COMPLETED_VISIBLE_SECONDS
+    ]
+    finished_rows.sort(key=lambda status: -status.updated_at.timestamp())
+    statuses.extend(finished_rows[:3])
     if not statuses:
         statuses = [
             status for status in snapshot.stale_statuses if not status.is_subagent

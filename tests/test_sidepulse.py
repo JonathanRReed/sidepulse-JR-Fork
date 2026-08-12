@@ -9770,6 +9770,26 @@ class CompletionThroughSnapshotTests(unittest.TestCase):
         self.assertEqual(len(self.posted), 1)
         self.assertEqual(self.posted[0].agent_id, "claude:session:hero")
 
+    def test_closing_a_terminal_never_celebrates_or_badges(self) -> None:
+        """SessionEnd is the user's own act: no sweep, no banner, no
+        'new' badge, no finished menu row -- 61 closed terminals were
+        badging at once."""
+        self._ingest("busy", "UserPromptSubmit", prompt="keep going")
+        self._ingest("hero", "UserPromptSubmit", prompt="working then closed")
+        self.controller.refresh_(None)
+        self._ingest("hero", "SessionEnd", reason="window closed")
+        self.controller.refresh_(None)
+        self.assertLessEqual(
+            getattr(self.controller, "completion_sweep_until", 0.0),
+            time.monotonic(),
+        )
+        self.assertEqual(self.posted, [])
+        snapshot = self.controller.monitor.snapshot()
+        unseen = self.status_bar.unseen_completions(snapshot, self.controller)
+        self.assertNotIn("claude:session:hero", [s.agent_id for s in unseen])
+        rows = self.status_bar.recent_statuses(snapshot)
+        self.assertNotIn("claude:session:hero", [s.agent_id for s in rows])
+
     def test_unseen_badge_and_menu_row_survive_active_sessions(self) -> None:
         self._ingest("busy", "UserPromptSubmit", prompt="keep going")
         self._ingest("hero", "UserPromptSubmit", prompt="finish this")
