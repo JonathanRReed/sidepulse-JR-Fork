@@ -88,6 +88,9 @@ ALCOVE_CAPSULE_MAX_BAND_FACTOR = 1.8
 ALCOVE_CAPSULE_MARGIN = 2.0
 # Hard ceiling on the followed width, whatever the measurement says.
 ALCOVE_FOLLOW_MAX_WIDTH = 520.0
+# Re-measure at most this often, whatever cadence reposition() runs at
+# (the sync path can drive it at 4Hz during agent-event bursts).
+ALCOVE_MEASURE_TTL_SECONDS = 1.5
 # Widen instantly; adopt a NARROWER capsule only after it has held for
 # this long (media pills flicker during track changes).
 ALCOVE_NARROW_AFTER_SECONDS = 3.0
@@ -359,6 +362,48 @@ def is_alcove_running() -> bool:
 # panel open past the hold window).
 
 
+def _row_alpha_bounds(rep, row: int, stride: int, threshold: float):
+    """(min_x, max_x, samples_over) for one bitmap row's alpha channel,
+    scanning raw bytes -- the bridged colorAtX_y_ path allocates an
+    NSColor per pixel and this runs on the main thread. Falls back to
+    the bridged reads on any unexpected bitmap layout."""
+    width_px = int(rep.pixelsWide())
+    min_x = None
+    max_x = None
+    over = 0
+    try:
+        if (
+            int(rep.bitsPerSample()) == 8
+            and rep.hasAlpha()
+            and not rep.isPlanar()
+        ):
+            data = rep.bitmapData()
+            bytes_per_pixel = max(1, int(rep.bitsPerPixel()) // 8)
+            samples = int(rep.samplesPerPixel())
+            alpha_first = bool(int(rep.bitmapFormat()) & 1)  # NSBitmapFormatAlphaFirst
+            alpha_index = 0 if alpha_first else samples - 1
+            start = row * int(rep.bytesPerRow())
+            row_bytes = bytes(data[start : start + width_px * bytes_per_pixel])
+            byte_threshold = int(threshold * 255)
+            for x in range(0, width_px, stride):
+                if row_bytes[x * bytes_per_pixel + alpha_index] > byte_threshold:
+                    if min_x is None:
+                        min_x = x
+                    max_x = x
+                    over += 1
+            return (min_x, max_x, over)
+    except Exception:
+        pass
+    for x in range(0, width_px, stride):
+        color = rep.colorAtX_y_(x, row)
+        if color is not None and color.alphaComponent() > threshold:
+            if min_x is None:
+                min_x = x
+            max_x = x
+            over += 1
+    return (min_x, max_x, over)
+
+
 def measured_alcove_capsule_width(menu_band_height: float) -> float | None:
     """Width in points of Alcove's VISIBLE capsule, or None when there
     is no trustworthy reading (no Alcove window, capture unavailable,
@@ -414,28 +459,18 @@ def measured_alcove_capsule_width(menu_band_height: float) -> float | None:
             min_x = None
             max_x = None
             for row in capsule_rows:
-                for x in range(0, width_px, 2):
-                    color = rep.colorAtX_y_(x, row)
-                    if (
-                        color is not None
-                        and color.alphaComponent() > ALCOVE_CAPSULE_ALPHA_THRESHOLD
-                    ):
-                        if min_x is None or x < min_x:
-                            min_x = x
-                        if max_x is None or x > max_x:
-                            max_x = x
+                row_min, row_max, _count = _row_alpha_bounds(
+                    rep, row, 2, ALCOVE_CAPSULE_ALPHA_THRESHOLD
+                )
+                if row_min is not None and (min_x is None or row_min < min_x):
+                    min_x = row_min
+                if row_max is not None and (max_x is None or row_max > max_x):
+                    max_x = row_max
             if min_x is None or max_x is None or max_x <= min_x:
                 continue
-            panel_lit = 0
-            for x in range(0, width_px, 4):
-                color = rep.colorAtX_y_(x, panel_row)
-                if (
-                    color is not None
-                    and color.alphaComponent() > ALCOVE_CAPSULE_ALPHA_THRESHOLD
-                ):
-                    panel_lit += 1
-                    if panel_lit >= 3:
-                        break
+            _p_min, _p_max, panel_lit = _row_alpha_bounds(
+                rep, panel_row, 4, ALCOVE_CAPSULE_ALPHA_THRESHOLD
+            )
             if panel_lit >= 3:
                 # Hover panel open: nothing here describes the capsule.
                 continue
@@ -462,6 +497,8 @@ class AlcoveCapsuleTracker:
         # measured_alcove_capsule_width and every tracker sees it.
         self._measure = measure
         self._clock = clock
+        self._measured_at: float | None = None
+        self._measured_value: float | None = None
         self._adopted: float | None = None
         self._narrow_candidate: float | None = None
         self._narrow_since: float | None = None
@@ -471,10 +508,24 @@ class AlcoveCapsuleTracker:
         """The bar's minimum total width in points, or None for
         hardware geometry."""
         now = self._clock()
-        measure = (
-            self._measure if self._measure is not None else measured_alcove_capsule_width
-        )
-        reading = measure(menu_band_height)
+        # Measurement TTL: the window capture is the expensive part and
+        # reposition() can be driven at 4Hz by the sync path -- the
+        # capsule doesn't move that fast, and adoption hysteresis below
+        # already works on seconds.
+        if (
+            self._measured_at is not None
+            and now - self._measured_at < ALCOVE_MEASURE_TTL_SECONDS
+        ):
+            reading = self._measured_value
+        else:
+            measure = (
+                self._measure
+                if self._measure is not None
+                else measured_alcove_capsule_width
+            )
+            reading = measure(menu_band_height)
+            self._measured_at = now
+            self._measured_value = reading
         if reading is not None:
             reading = min(reading + 2.0 * ALCOVE_CAPSULE_MARGIN, ALCOVE_FOLLOW_MAX_WIDTH)
             self._last_good = now
@@ -746,20 +797,36 @@ class VirtualLedView(NSView):
             self.notch_width = None
         return self
 
+    # These four are driven by reposition() every couple of seconds;
+    # change-gated so a static bar is never dirtied by a no-op sync
+    # (the improvement hunt caught them forcing full 4-layer glow
+    # repaints of an unchanged frame).
     def setHasNotch_(self, has_notch):
-        self.has_notch = bool(has_notch)
+        value = bool(has_notch)
+        if value == self.has_notch:
+            return
+        self.has_notch = value
         self.setNeedsDisplay_(True)
 
     def setCompactMode_(self, compact_mode):
-        self.compact_mode = bool(compact_mode)
+        value = bool(compact_mode)
+        if value == self.compact_mode:
+            return
+        self.compact_mode = value
         self.setNeedsDisplay_(True)
 
     def setWingsOnlyMode_(self, wings_only_mode):
-        self.wings_only_mode = bool(wings_only_mode)
+        value = bool(wings_only_mode)
+        if value == self.wings_only_mode:
+            return
+        self.wings_only_mode = value
         self.setNeedsDisplay_(True)
 
     def setNotchWidth_(self, notch_width):
-        self.notch_width = None if notch_width is None else float(notch_width)
+        value = None if notch_width is None else float(notch_width)
+        if value == self.notch_width:
+            return
+        self.notch_width = value
         self.setNeedsDisplay_(True)
 
     def _notch_geometry(self):
@@ -792,7 +859,9 @@ class VirtualLedView(NSView):
 
     def setProgram_startedAt_(self, program, started_at):
         if program == self.current_program:
-            self.setNeedsDisplay_(True)
+            # Unchanged program: the redraw tick's own frame-color gate
+            # decides whether pixels move; dirtying here forced a full
+            # repaint of a static bar on every sync tick.
             return
         self.current_program = str(program)
         self.fixed_colors = None
@@ -1438,6 +1507,20 @@ class VirtualStatusDevice(NSObject):
         self.view.setBatteryPercent_brightness_(percent, brightness)
 
     def set_program(self, program: str, *, started_at: float | None = None):
+        # Change-gated: the sync path repeats an unchanged program at up
+        # to 4Hz during agent events; re-fronting the window, re-running
+        # reposition() and resetting the 10Hz idle downshift every time
+        # defeated the static-frame gate. (started_at is irrelevant when
+        # the program is unchanged -- the view early-returns before
+        # reading it.)
+        if (
+            self.window is not None
+            and self.window.isVisible()
+            and self.timer is not None
+            and self.view is not None
+            and str(program) == getattr(self.view, "current_program", None)
+        ):
+            return
         self.show()
         self.view.setProgram_startedAt_(program, started_at)
         # A new program means motion may be coming -- restore full rate
@@ -1466,7 +1549,15 @@ class VirtualStatusDevice(NSObject):
         # invisible) window whose bounds say nothing about what it's
         # drawing, so the bar ballooned across the menu bar. The user's
         # Bar Size sliders are the override for anything else.
-        alcove_active = is_alcove_running()
+        running_cache = getattr(self, "_alcove_running_cache", None)
+        now = time.monotonic()
+        if running_cache is not None and now - running_cache[0] < 3.0:
+            alcove_active = running_cache[1]
+        else:
+            # Iterating every running app with bridged bundleIdentifier()
+            # calls is too rich for a 2s cadence -- 3s TTL.
+            alcove_active = is_alcove_running()
+            self._alcove_running_cache = (now, alcove_active)
         wings_only = alcove_active and self.wraps_menu_bar
         compact = alcove_active and not self.wraps_menu_bar
 
