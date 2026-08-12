@@ -316,6 +316,8 @@ class AgentMonitorSettings:
     escalation_webhook_url: str = ""
     # Named Studio programs -- a shelf of looks.
     studio_library: tuple[tuple[str, str], ...] = ()
+    night_warmth_enabled: bool = False
+    focus_signal_policy: dict[str, str] = field(default_factory=dict)
     # Sub-agent asks can't be answered (their parent handles them), so
     # by default only MAIN sessions may ring the Ask signal.
     subagent_asks_alert: bool = False
@@ -705,6 +707,19 @@ class AgentMonitorSettings:
     def with_subagent_asks_alert(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, subagent_asks_alert=bool(enabled))
 
+    def with_night_warmth_enabled(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, night_warmth_enabled=bool(enabled))
+
+    def with_focus_signal_policy(self, identifier: str, policy: str) -> AgentMonitorSettings:
+        if policy not in ("all", "asks_only", "silent"):
+            raise ValueError(f"unknown focus signal policy: {policy}")
+        rules = dict(self.focus_signal_policy)
+        if policy == "all":
+            rules.pop(identifier, None)
+        else:
+            rules[identifier] = policy
+        return replace(self, focus_signal_policy=rules)
+
     def with_studio_saved_look(self, name: str, program: str) -> AgentMonitorSettings:
         cleaned = str(name).strip()
         if not cleaned:
@@ -1064,6 +1079,8 @@ class AgentMonitorSettings:
             "codex_percent_enabled": self.codex_percent_enabled,
             "escalation_webhook_url": self.escalation_webhook_url,
             "studio_library": [list(item) for item in self.studio_library],
+            "night_warmth_enabled": self.night_warmth_enabled,
+            "focus_signal_policy": dict(self.focus_signal_policy),
             "subagent_asks_alert": self.subagent_asks_alert,
             "quota_alert_thresholds": list(self.quota_alert_thresholds),
             "dismissed_tips": list(self.dismissed_tips),
@@ -1315,6 +1332,16 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         codex_percent_enabled=_bool_setting(data.get("codex_percent_enabled"), True),
         escalation_webhook_url=str(data.get("escalation_webhook_url") or "").strip(),
+        night_warmth_enabled=_bool_setting(data.get("night_warmth_enabled"), False),
+        focus_signal_policy=(
+            {
+                str(key): str(value)
+                for key, value in data.get("focus_signal_policy").items()
+                if str(value) in ("asks_only", "silent")
+            }
+            if isinstance(data.get("focus_signal_policy"), dict)
+            else {}
+        ),
         studio_library=tuple(
             (str(item[0]), str(item[1]))
             for item in (data.get("studio_library") or [])

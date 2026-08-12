@@ -9516,6 +9516,100 @@ class ContextLidAnimationTests(unittest.TestCase):
         )
 
 
+class NightWarmthTests(unittest.TestCase):
+    """Story #8: 19:00-07:00 warmth composes with calibration gains."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_off_by_default_and_daytime_identity(self) -> None:
+        gains = (1.0, 1.0, 1.0)
+        self.assertEqual(self.controller.apply_night_warmth(gains, hour=22), gains)
+        self.controller.settings = (
+            self.controller.settings.with_night_warmth_enabled(True)
+        )
+        self.assertEqual(self.controller.apply_night_warmth(gains, hour=12), gains)
+
+    def test_evening_composes_with_calibration(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_night_warmth_enabled(True)
+        )
+        warmed = self.controller.apply_night_warmth((0.8, 1.0, 0.5), hour=22)
+        self.assertAlmostEqual(warmed[0], 0.8)
+        self.assertAlmostEqual(warmed[1], 0.87)
+        self.assertAlmostEqual(warmed[2], 0.35)
+        # The overnight side of the window counts too.
+        self.assertNotEqual(
+            self.controller.apply_night_warmth((1.0, 1.0, 1.0), hour=3),
+            (1.0, 1.0, 1.0),
+        )
+
+    def test_window_edges(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_night_warmth_enabled(True)
+        )
+        self.assertTrue(self.controller.night_warmth_active(hour=19))
+        self.assertTrue(self.controller.night_warmth_active(hour=6))
+        self.assertFalse(self.controller.night_warmth_active(hour=7))
+        self.assertFalse(self.controller.night_warmth_active(hour=18))
+
+
+class FocusSignalPolicyTests(unittest.TestCase):
+    """Story #12: per-Focus signal policies hold courtesy glows."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_policy_defaults_to_all(self) -> None:
+        self.assertEqual(self.controller.active_focus_policy(), "all")
+        self.assertFalse(self.controller.courtesy_signals_held())
+
+    def test_strictest_active_policy_wins(self) -> None:
+        self.controller.settings = (
+            self.controller.settings
+            .with_focus_signal_policy("focus-work", "asks_only")
+            .with_focus_signal_policy("focus-sleep", "silent")
+        )
+        self.controller._focus_ids_cache = (float("inf"), ["focus-work"])
+        self.assertEqual(self.controller.active_focus_policy(), "asks_only")
+        self.assertTrue(self.controller.courtesy_signals_held())
+        self.controller._focus_ids_cache = (
+            float("inf"),
+            ["focus-work", "focus-sleep"],
+        )
+        self.assertEqual(self.controller.active_focus_policy(), "silent")
+
+    def test_inactive_policy_holds_nothing(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_focus_signal_policy("focus-work", "silent")
+        )
+        self.controller._focus_ids_cache = (float("inf"), [])
+        self.assertEqual(self.controller.active_focus_policy(), "all")
+        self.assertFalse(self.controller.courtesy_signals_held())
+
+    def test_quiet_hour_still_holds(self) -> None:
+        self.controller.quiet_until_monotonic = time.monotonic() + 60.0
+        self.assertTrue(self.controller.courtesy_signals_held())
+
+    def test_policy_holds_quota_blink(self) -> None:
+        self.controller.settings = (
+            self.controller.settings
+            .with_quota_alerts_enabled(True)
+            .with_focus_signal_policy("focus-work", "asks_only")
+        )
+        self.controller._focus_ids_cache = (float("inf"), ["focus-work"])
+        self.controller.track_quota_thresholds({"Codex weekly": 70.0})
+        self.controller.track_quota_thresholds({"Codex weekly": 95.0})
+        self.assertEqual(self.controller.quota_blink_until, 0.0)
+
+    def test_setting_all_removes_the_key(self) -> None:
+        settings = AgentMonitorSettings().with_focus_signal_policy("x", "silent")
+        self.assertEqual(settings.focus_signal_policy, {"x": "silent"})
+        self.assertEqual(
+            settings.with_focus_signal_policy("x", "all").focus_signal_policy, {}
+        )
+
+
 class QuotaAlertTests(unittest.TestCase):
     """Quota threshold blinks: edge-triggered, opt-in, quiet-aware."""
 

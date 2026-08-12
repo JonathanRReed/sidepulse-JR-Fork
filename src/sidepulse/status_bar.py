@@ -325,6 +325,11 @@ SIGNAL_DISPLAY_KINDS = frozenset()
 # A completion may only ring/sweep while this fresh; older ones repaint
 # without celebrating (T3's TERMINAL_NOTIFICATION_FRESHNESS).
 COMPLETION_NOTIFY_FRESHNESS_SECONDS = 120.0
+
+# Story #8 (night warmth): per-channel multipliers applied 19:00-07:00
+# when the toggle is on. Red full, green -13%, blue -30% -- warm enough
+# to notice, subtle enough that status colors stay unambiguous.
+NIGHT_WARMTH_GAINS = (1.0, 0.87, 0.70)
 # ioreg is a subprocess fork on the main thread and refresh_ runs on
 # every hook event; power-state changes may lag by up to this TTL.
 BATTERY_SNAPSHOT_CACHE_SECONDS = 5.0
@@ -1113,7 +1118,7 @@ class StatusBarController(NSObject):
         # Quota sunrise: the moment a window RESETS, one upward sweep in
         # the provider's color -- "you're rich again" announces itself.
         resets = signals_module.quota_resets(previous, percents)
-        if resets and not self.quiet_active():
+        if resets and not self.courtesy_signals_held():
             window_key = resets[-1]
             brand = {"Claude": "#D97757", "Codex": "#10A37F"}
             self.completion_sweep_color = next(
@@ -1136,7 +1141,7 @@ class StatusBarController(NSObject):
         fired = signals_module.quota_crossings(
             previous, percents, self.settings.quota_alert_thresholds
         )
-        if not fired or self.quiet_active():
+        if not fired or self.courtesy_signals_held():
             return
         window_key, threshold = fired[-1]
         brand = {"Claude": "#D97757", "Codex": "#10A37F"}
@@ -1308,6 +1313,13 @@ class StatusBarController(NSObject):
         self.refresh_settings_window()
 
     @objc.IBAction
+    def toggleNightWarmth_(self, sender):
+        self.settings = self.settings.with_night_warmth_enabled(checkbox_is_on(sender))
+        save_settings(self.settings)
+        self.refresh_settings_window()
+        self.refresh_(None)
+
+    @objc.IBAction
     def setFocusDimRule_(self, sender):
         identifier = str(sender.identifier() or "")
         if not identifier:
@@ -1319,6 +1331,20 @@ class StatusBarController(NSObject):
         save_settings(self.settings)
         label = item.title() if item is not None else "Shared dim"
         self.set_settings_message(f"Focus rule saved: {label}.")
+        self.refresh_(None)
+
+    @objc.IBAction
+    def setFocusSignalPolicy_(self, sender):
+        identifier = str(sender.identifier() or "")
+        if not identifier:
+            return
+        item = sender.selectedItem()
+        policy = str(item.representedObject() or "all") if item is not None else "all"
+        self.settings = self.settings.with_focus_signal_policy(identifier, policy)
+        save_settings(self.settings)
+        label = item.title() if item is not None else "All signals"
+        self.set_settings_message(f"Focus signals: {label.lower()}.")
+        self._focus_summary_cache = None
         self.refresh_(None)
 
     @objc.IBAction
@@ -2808,6 +2834,11 @@ class StatusBarController(NSObject):
                         effect = "no dimming"
                     else:
                         effect = f"dim to {round(rule * 100)}%"
+                    policy = self.settings.focus_signal_policy.get(identifier)
+                    if policy == "asks_only":
+                        effect += ", asks only"
+                    elif policy == "silent":
+                        effect += ", silent"
                     parts.append(f"{name} \u2014 {effect}")
                 text = "; ".join(parts)
         self._focus_summary_cache = (now, text)
@@ -2818,6 +2849,29 @@ class StatusBarController(NSObject):
         reminder glows hold their tongue. Hard asks and weather always
         break through (T3: blocked-on-you outranks snooze)."""
         return time.monotonic() < getattr(self, "quiet_until_monotonic", 0.0)
+
+    def active_focus_policy(self) -> str:
+        """Story #12: the strictest per-Focus signal policy among the
+        Focus modes active right now -- "silent" beats "asks_only" beats
+        "all". Absent keys mean "all"; no Focus active means "all"."""
+        policy_map = self.settings.focus_signal_policy
+        if not policy_map:
+            return "all"
+        ranking = {"all": 0, "asks_only": 1, "silent": 2}
+        best = "all"
+        for identifier in self.active_focus_ids_cached():
+            candidate = policy_map.get(identifier, "all")
+            if ranking.get(candidate, 0) > ranking[best]:
+                best = candidate
+        return best
+
+    def courtesy_signals_held(self) -> bool:
+        """Quiet Hour OR an active Focus with a non-"all" policy: the
+        courtesy glows (celebration, notification, quota, calendar,
+        reminders) stay quiet. Hard asks and weather still break
+        through -- only a "silent" policy hushes the escalation chime,
+        and even that never hides the ask itself."""
+        return self.quiet_active() or self.active_focus_policy() != "all"
 
     @objc.IBAction
     def toggleQuietHour_(self, _sender):
@@ -2965,14 +3019,18 @@ class StatusBarController(NSObject):
             and not self.escalation_chimed
         ):
             self.escalation_chimed = True
-            try:
-                from AppKit import NSSound
+            # Story #12: a "silent" Focus policy hushes the sound but
+            # latches the chime stage normally -- the light, menu-bar
+            # takeover and webhook still tell the story.
+            if self.active_focus_policy() != "silent":
+                try:
+                    from AppKit import NSSound
 
-                sound = NSSound.soundNamed_("Glass")
-                if sound is not None:
-                    sound.play()
-            except Exception:
-                pass
+                    sound = NSSound.soundNamed_("Glass")
+                    if sound is not None:
+                        sound.play()
+                except Exception:
+                    pass
             self.fire_escalation_webhook(stage)
 
         if changed and allow_refresh:
@@ -4174,6 +4232,10 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("focus_sync_enabled"),
             self.settings.focus_sync_enabled,
         )
+        set_checkbox_state(
+            self.settings_buttons.get("night_warmth_enabled"),
+            self.settings.night_warmth_enabled,
+        )
         for device_id, controls in self.device_settings_controls.items():
             self.refresh_device_settings_controls(device_id, controls)
         set_checkbox_state(
@@ -5104,6 +5166,31 @@ class StatusBarController(NSObject):
         self._focus_ids_cache = (now, active)
         return active
 
+    def night_warmth_active(self, hour: int | None = None) -> bool:
+        """Story #8: between 19:00 and 07:00 local, warm every device --
+        red untouched, green and blue eased down, the amber shift
+        screens learned from Night Shift. Pure wall-clock schedule."""
+        if not self.settings.night_warmth_enabled:
+            return False
+        if hour is None:
+            hour = datetime.now().hour
+        return hour >= 19 or hour < 7
+
+    def apply_night_warmth(
+        self, gains: tuple[float, float, float], hour: int | None = None
+    ) -> tuple[float, float, float]:
+        """Compose (never replace) the user's calibration gains with the
+        warmth curve, so a calibrated device stays calibrated -- just
+        warmer. Safe against persistence: with_remembered_device only
+        stores id/name/path, never gains, so warmth cannot leak into
+        the settings file."""
+        if not self.night_warmth_active(hour=hour):
+            return gains
+        warm = NIGHT_WARMTH_GAINS
+        return tuple(
+            float(gain) * warm[index] for index, gain in enumerate(gains[:3])
+        )
+
     def focus_sync_scale_factor(self) -> float:
         """1.0 normally; idle_dim_fraction (the same "how much to dim"
         amount idle-timeout dimming uses -- one shared dial rather than a
@@ -5180,7 +5267,9 @@ class StatusBarController(NSObject):
                 display=self.settings.display_for_device(device_id),
                 brightness=self.settings.brightness_for_device(device_id),
                 auto_brightness_enabled=self.settings.auto_brightness_enabled_for_device(device_id),
-                channel_gains=self.settings.channel_gains_for_device(device_id),
+                channel_gains=self.apply_night_warmth(
+                    self.settings.channel_gains_for_device(device_id)
+                ),
                 resting_glow=self.settings.resting_glow_for_device(device_id),
                 reason=candidate.reason,
             )
@@ -5200,7 +5289,7 @@ class StatusBarController(NSObject):
                         display=device.led_display,
                         brightness=device.brightness,
                         auto_brightness_enabled=device.auto_brightness_enabled,
-                        channel_gains=device.channel_gains(),
+                        channel_gains=self.apply_night_warmth(device.channel_gains()),
                         resting_glow=device.resting_glow,
                         reason="on-screen device",
                     )
@@ -5217,7 +5306,7 @@ class StatusBarController(NSObject):
                 display=device.led_display,
                 brightness=device.brightness,
                 auto_brightness_enabled=device.auto_brightness_enabled,
-                channel_gains=device.channel_gains(),
+                channel_gains=self.apply_night_warmth(device.channel_gains()),
                 resting_glow=device.resting_glow,
                 reason="previously connected",
             )
@@ -5341,7 +5430,7 @@ class StatusBarController(NSObject):
                 LED_DISPLAY_NOTIFICATION,
                 lambda: (
                     self.settings.notification_blinks_enabled
-                    and not self.quiet_active()
+                    and not self.courtesy_signals_held()
                     and self.notification_blink_color is not None
                     and now < self.notification_blink_until
                 ),
@@ -5350,7 +5439,7 @@ class StatusBarController(NSObject):
                 LED_DISPLAY_QUOTA,
                 lambda: (
                     self.settings.quota_alerts_enabled
-                    and not self.quiet_active()
+                    and not self.courtesy_signals_held()
                     and now < self.quota_blink_until
                 ),
             ),
@@ -5358,7 +5447,7 @@ class StatusBarController(NSObject):
                 LED_DISPLAY_REMINDERS,
                 lambda: (
                     self.settings.reminder_alerts_enabled
-                    and not self.quiet_active()
+                    and not self.courtesy_signals_held()
                     and now < self.reminders_glow_until
                 ),
             ),
@@ -5366,7 +5455,7 @@ class StatusBarController(NSObject):
                 LED_DISPLAY_COMPLETION,
                 lambda: (
                     self.settings.completion_sweep_enabled
-                    and not self.quiet_active()
+                    and not self.courtesy_signals_held()
                     and now < getattr(self, "completion_sweep_until", 0.0)
                 ),
             ),
@@ -5378,7 +5467,7 @@ class StatusBarController(NSObject):
                 LED_DISPLAY_ALL_CLEAR,
                 lambda: (
                     self.settings.completion_sweep_enabled
-                    and not self.quiet_active()
+                    and not self.courtesy_signals_held()
                     and now >= getattr(self, "completion_sweep_until", 0.0)
                     and now < getattr(self, "all_clear_until", 0.0)
                 ),
@@ -5387,7 +5476,7 @@ class StatusBarController(NSObject):
                 LED_DISPLAY_CALENDAR,
                 lambda: (
                     self.settings.calendar_alerts_enabled
-                    and not self.quiet_active()
+                    and not self.courtesy_signals_held()
                     and now < self.calendar_glow_until
                 ),
             ),
@@ -8319,6 +8408,20 @@ def _build_focus_pane(target: StatusBarController):
     buttons["focus_sync_enabled"] = focus_switch
     stack.addArrangedSubview_(enable_outer)
 
+    warmth_outer, warmth_inner = native_ui.make_card("Night Warmth")
+    warmth_row, warmth_switch = native_ui.make_switch_row(
+        "Warm the lights from 7 PM to 7 AM",
+        target,
+        "toggleNightWarmth:",
+        help_text=(
+            "Eases green and blue down after dark -- like Night Shift, "
+            "for your LEDs. Composes with each device's calibration."
+        ),
+    )
+    warmth_inner.addArrangedSubview_(warmth_row)
+    buttons["night_warmth_enabled"] = warmth_switch
+    stack.addArrangedSubview_(warmth_outer)
+
     # Per-Focus rules: each configured Focus gets its own dim choice.
     # When the Focus database can't be read (no Full Disk Access), say so
     # plainly and offer the one-click path to fix it, instead of showing
@@ -8412,14 +8515,31 @@ def _build_focus_pane(target: StatusBarController):
                 item.setRepresentedObject_(slot)
                 if slot == current_rule:
                     profile_popup.selectItem_(item)
+            # Story #12: what this Focus does to SIGNALS (not just
+            # brightness) -- hold the courtesy glows, or go fully silent.
+            signal_popup = native_ui.make_popup_button(target, "setFocusSignalPolicy:")
+            signal_popup.setIdentifier_(identifier)
+            current_policy = target.settings.focus_signal_policy.get(identifier, "all")
+            for title, policy_value in (
+                ("All signals", "all"),
+                ("Asks only", "asks_only"),
+                ("Silent", "silent"),
+            ):
+                signal_popup.addItemWithTitle_(title)
+                item = signal_popup.lastItem()
+                item.setRepresentedObject_(policy_value)
+                if policy_value == current_policy:
+                    signal_popup.selectItem_(item)
             row_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
             row_cluster.addArrangedSubview_(popup)
             row_cluster.addArrangedSubview_(profile_popup)
+            row_cluster.addArrangedSubview_(signal_popup)
             focus_inner.addArrangedSubview_(native_ui.make_row(name, row_cluster))
             if index < len(focus_modes) - 1:
                 native_ui.add_separator(focus_inner)
             fields[f"focus_rule_popup:{identifier}"] = popup
             fields[f"focus_profile_popup:{identifier}"] = profile_popup
+            fields[f"focus_signal_popup:{identifier}"] = signal_popup
     stack.addArrangedSubview_(focus_outer)
 
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
