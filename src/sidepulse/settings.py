@@ -345,9 +345,10 @@ class AgentMonitorSettings:
     night_warmth_enabled: bool = False
     focus_signal_policy: dict[str, str] = field(default_factory=dict)
     # A macOS notification banner when a main session finishes -- for
-    # eyes that were on another screen when the lights swept. Off by
-    # default; sub-agents never post.
-    completion_notification_enabled: bool = False
+    # eyes that were on another screen when the lights swept. ON by
+    # default (the point of a finish signal is not needing to opt in);
+    # sub-agents never post.
+    completion_notification_enabled: bool = True
     # Webhook bridge: which MOMENT events (beyond stage-3 escalation,
     # which always fires when the URL is set) also POST to the webhook.
     # Valid keys: completion, quota_sunrise, quota_threshold, weather,
@@ -1487,7 +1488,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             else {}
         ),
         completion_notification_enabled=_bool_setting(
-            data.get("completion_notification_enabled"), False
+            data.get("completion_notification_enabled"), True
         ),
         webhook_events=tuple(
             key

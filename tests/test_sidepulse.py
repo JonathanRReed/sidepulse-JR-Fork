@@ -9719,6 +9719,69 @@ class BacklogBehaviorTests(unittest.TestCase):
         )
 
 
+class CompletionThroughSnapshotTests(unittest.TestCase):
+    """THE missed-celebration regression: the collector demotes every
+    inactive status to stale the moment ANY session is active, so a
+    finishing session vanished from snapshot.statuses on the very tick
+    it completed. These tests walk the REAL snapshot path -- the unit
+    tests that fed statuses straight into track_completions could
+    never catch it."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.posted: list = []
+        self.controller.post_completion_notification = self.posted.append
+
+    def _ingest(self, session_id: str, event: str, **raw) -> None:
+        from sidepulse.models import HookEvent
+
+        self.controller.monitor.ingest_record(
+            HookEvent(
+                provider="claude",
+                logged_at=datetime.now(timezone.utc),
+                event_name=event,
+                raw={"hook_event_name": event, **raw},
+                session_id=session_id,
+            )
+        )
+
+    def test_finishing_while_another_session_works_still_celebrates(self) -> None:
+        self._ingest("busy", "UserPromptSubmit", prompt="keep going")
+        self._ingest("hero", "UserPromptSubmit", prompt="finish this")
+        self.controller.refresh_(None)
+        self._ingest("hero", "Stop", last_assistant_message="All done.")
+        # The premise that caused the bug: with 'busy' still active, the
+        # completed session is demoted to stale on this very snapshot.
+        snapshot = self.controller.monitor.snapshot()
+        self.assertIn(
+            "claude:session:hero",
+            [s.agent_id for s in snapshot.stale_statuses],
+        )
+        self.assertNotIn(
+            "claude:session:hero",
+            [s.agent_id for s in snapshot.statuses],
+        )
+        self.controller.refresh_(None)
+        self.assertGreater(
+            getattr(self.controller, "completion_sweep_until", 0.0),
+            time.monotonic(),
+            "sweep must fire even though another session is active",
+        )
+        self.assertEqual(len(self.posted), 1)
+        self.assertEqual(self.posted[0].agent_id, "claude:session:hero")
+
+    def test_unseen_badge_and_menu_row_survive_active_sessions(self) -> None:
+        self._ingest("busy", "UserPromptSubmit", prompt="keep going")
+        self._ingest("hero", "UserPromptSubmit", prompt="finish this")
+        self.controller.refresh_(None)
+        self._ingest("hero", "Stop", last_assistant_message="All done.")
+        snapshot = self.controller.monitor.snapshot()
+        unseen = self.status_bar.unseen_completions(snapshot, self.controller)
+        self.assertIn("claude:session:hero", [s.agent_id for s in unseen])
+        rows = self.status_bar.recent_statuses(snapshot)
+        self.assertIn("claude:session:hero", [s.agent_id for s in rows])
+
+
 class MenuQualityOfLifeTests(unittest.TestCase):
     """Worker rollup, device-health rows, completion banners."""
 
@@ -9792,9 +9855,7 @@ class MenuQualityOfLifeTests(unittest.TestCase):
     def test_completion_banner_fires_on_fresh_main_transition_only(self) -> None:
         posted: list = []
         self.controller.post_completion_notification = posted.append
-        self.controller.settings = (
-            self.controller.settings.with_completion_notification_enabled(True)
-        )
+        self.assertTrue(self.controller.settings.completion_notification_enabled)
         working = _status("codex", AgentMode.WORKING)
         done = _status("codex", AgentMode.COMPLETED)
         self.controller.track_completions((working,))
@@ -9803,10 +9864,87 @@ class MenuQualityOfLifeTests(unittest.TestCase):
         self.assertEqual(len(posted), 1)
         self.assertEqual(posted[0].agent_id, done.agent_id)
 
+    def test_summary_line_and_provider_headers(self) -> None:
+        now = datetime.now(timezone.utc)
+
+        def _main(provider, session):
+            return AgentStatus(
+                provider=provider,
+                agent_id=f"{provider}:session:{session}",
+                display_name=f"{provider} {session}",
+                mode=AgentMode.WORKING,
+                updated_at=now,
+                event_name="PreToolUse",
+                session_id=session,
+            )
+
+        statuses = [
+            _main("claude", "one"),
+            _main("claude", "two"),
+            _main("codex", "three"),
+            self._worker("one", "w1"),
+            self._worker("one", "w2"),
+        ]
+        menu = self.status_bar.build_menu(
+            self._snapshot(statuses), self.status_bar.STATE_WORKING, self.controller
+        )
+        titles = [
+            menu.itemAtIndex_(index).title() for index in range(menu.numberOfItems())
+        ]
+        self.assertTrue(
+            any("3 sessions" in title and "2 workers" in title for title in titles),
+            titles,
+        )
+        self.assertIn("Claude", titles)
+        self.assertIn("Codex", titles)
+        # Claude block renders before Codex, once each.
+        self.assertEqual(titles.count("Claude"), 1)
+        self.assertLess(titles.index("Claude"), titles.index("Codex"))
+
+    def test_banner_click_jumps_to_the_session(self) -> None:
+        opened: list = []
+        self.controller.open_session = lambda status, action, remember: opened.append(
+            status.agent_id
+        )
+        status = _status("claude", AgentMode.COMPLETED)
+        self.controller.last_snapshot = SimpleNamespace(
+            statuses=(status,),
+            stale_statuses=(),
+            collected_at=datetime.now(timezone.utc),
+        )
+        fake = SimpleNamespace(userInfo=lambda: {"agent_id": status.agent_id})
+        self.controller.userNotificationCenter_didActivateNotification_(None, fake)
+        self.assertEqual(opened, [status.agent_id])
+
+    def test_escalation_banner_rides_the_chime_latch(self) -> None:
+        delivered: list = []
+        ask = _status("codex", AgentMode.WAITING_FOR_INPUT)
+        self.controller.last_snapshot = SimpleNamespace(
+            statuses=(ask,),
+            stale_statuses=(),
+            collected_at=datetime.now(timezone.utc),
+        )
+        self.controller.settings = self.controller.settings.with_escalation_tier(
+            "chime"
+        )
+        self.controller.ask_blocked_since = time.monotonic() - 500.0
+        with patch(
+            "sidepulse.status_bar.deliver_macos_notification",
+            side_effect=lambda title, body, user_info=None: delivered.append(title),
+        ):
+            self.controller.apply_escalation(allow_refresh=False)
+            # Latched: a second pass never re-posts.
+            self.controller.apply_escalation(allow_refresh=False)
+        self.assertEqual(delivered, ["Agent needs you"])
+
     def test_completion_banner_respects_toggle_and_quiet(self) -> None:
         delivered: list = []
         status = _status("claude", AgentMode.COMPLETED)
-        # Disabled: short-circuits before AppKit is ever imported.
+        # Explicitly disabled: short-circuits before AppKit is imported
+        # (the feature now defaults ON).
+        self.controller.settings = (
+            self.controller.settings.with_completion_notification_enabled(False)
+        )
         self.controller.post_completion_notification(status)
         self.controller.settings = (
             self.controller.settings.with_completion_notification_enabled(True)
@@ -9814,14 +9952,18 @@ class MenuQualityOfLifeTests(unittest.TestCase):
         self.controller.quiet_until_monotonic = time.monotonic() + 60.0
         with patch(
             "sidepulse.status_bar.deliver_macos_notification",
-            side_effect=lambda title, body: delivered.append((title, body)),
+            side_effect=lambda title, body, user_info=None: delivered.append(
+                (title, body)
+            ),
         ):
             self.controller.post_completion_notification(status)
         self.assertEqual(delivered, [])
         self.controller.quiet_until_monotonic = 0.0
         with patch(
             "sidepulse.status_bar.deliver_macos_notification",
-            side_effect=lambda title, body: delivered.append((title, body)),
+            side_effect=lambda title, body, user_info=None: delivered.append(
+                (title, body)
+            ),
         ):
             self.controller.post_completion_notification(status)
         self.assertEqual(len(delivered), 1)

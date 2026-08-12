@@ -99,6 +99,7 @@ from .battery import (
 from .collector import (
     CLAUDE_TRANSCRIPT_PROVIDER,
     CODEX_TRANSCRIPT_PROVIDER,
+    COMPLETED_VISIBLE_SECONDS,
     AgentMonitor,
     LiveAgentMonitor,
     SourceSpec,
@@ -592,6 +593,12 @@ class StatusBarController(NSObject):
         return self
 
     def applicationDidFinishLaunching_(self, _notification):
+        try:
+            from AppKit import NSUserNotificationCenter
+
+            NSUserNotificationCenter.defaultUserNotificationCenter().setDelegate_(self)
+        except Exception:
+            pass
         NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
         log_status_bar("launching status item")
         self.start_event_server()
@@ -1010,7 +1017,14 @@ class StatusBarController(NSObject):
         self.observe_connected_devices()
         self.track_ask_blocked(snapshot.statuses)
         self.track_working(snapshot.statuses)
-        self.track_completions(snapshot.statuses)
+        # Completions need the FULL timeline: the collector demotes every
+        # inactive status to stale_statuses the moment ANY session is
+        # active, so a finishing session vanished from .statuses on the
+        # very tick it completed -- the sweep/banner could only ever
+        # fire for the LAST session alive (the missed-celebration bug,
+        # reproduced live with an injected session). The transition
+        # detector's own freshness gate keeps replays silent.
+        self.track_completions((*snapshot.statuses, *snapshot.stale_statuses))
         self.maybe_refresh_usage_summary()
         # A cleared session stays cleared until it comes back to LIFE --
         # removing only reactivated ids (rather than intersecting with
@@ -2934,6 +2948,7 @@ class StatusBarController(NSObject):
         ]
         if not finished:
             return
+        log_status_bar(f"completion sweep: {finished[-1][:60]}")
         ordered_ids = sorted(current_modes)
         identity = (
             colors_module.identity_colors_for_agents(
@@ -3275,6 +3290,24 @@ class StatusBarController(NSObject):
                         sound.play()
                 except Exception:
                     pass
+            if self.active_focus_policy() != "silent":
+                snapshot = getattr(self, "last_snapshot", None)
+                asks = ask_statuses(snapshot) if snapshot is not None else []
+                oldest = asks[0] if asks else None
+                try:
+                    deliver_macos_notification(
+                        "Agent needs you",
+                        (
+                            f"{oldest.provider.title()}: {oldest.display_name[:100]}"
+                            if oldest is not None
+                            else "A session has been blocked on you for minutes."
+                        ),
+                        user_info=(
+                            {"agent_id": oldest.agent_id} if oldest is not None else None
+                        ),
+                    )
+                except Exception as exc:
+                    log_status_bar(f"escalation notification failed: {exc}")
             self.fire_escalation_webhook(stage)
 
         if changed and allow_refresh:
@@ -3382,10 +3415,31 @@ class StatusBarController(NSObject):
             return
         try:
             deliver_macos_notification(
-                f"{status.provider.title()} finished", status.display_name[:120]
+                f"{status.provider.title()} finished",
+                status.display_name[:120],
+                user_info={"agent_id": status.agent_id},
             )
         except Exception as exc:
             log_status_bar(f"completion notification failed: {exc}")
+
+    def userNotificationCenter_shouldPresentNotification_(self, _center, _notification):
+        # Present even while an app of ours is frontmost -- the whole
+        # point is eyes-on-another-screen.
+        return True
+
+    def userNotificationCenter_didActivateNotification_(self, _center, notification):
+        """Clicking a banner jumps to the session that posted it."""
+        info = notification.userInfo() or {}
+        agent_id = str(info.get("agent_id", ""))
+        if not agent_id:
+            return
+        snapshot = getattr(self, "last_snapshot", None)
+        if snapshot is None:
+            return
+        pool = (*snapshot.statuses, *getattr(snapshot, "stale_statuses", ()))
+        status = next((s for s in pool if s.agent_id == agent_id), None)
+        if status is not None:
+            self.open_session(status, None, remember=False)
 
     def webhook_event_enabled(self, key: str) -> bool:
         """Moment events are opt-in per key; stage-3 escalation always
@@ -7155,6 +7209,20 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     # The Ask Inbox: WHO needs you, pinned first -- the reason the menu
     # got opened. Rows are the same one-click session jumps as below.
     asks = ask_statuses(snapshot)
+    summary_mains = recent_statuses(snapshot)
+    summary_workers = sum(
+        len(children) for children in active_subagents_by_parent(snapshot).values()
+    )
+    if summary_mains:
+        session_word = "session" if len(summary_mains) == 1 else "sessions"
+        summary_bits = [f"{len(summary_mains)} {session_word}"]
+        if summary_workers:
+            worker_word = "worker" if summary_workers == 1 else "workers"
+            summary_bits.append(f"{summary_workers} {worker_word}")
+        if asks:
+            summary_bits.append(f"{len(asks)} needs you")
+        menu.addItem_(disabled_menu_item(" \u00b7 ".join(summary_bits)))
+        menu.addItem_(NSMenuItem.separatorItem())
     if asks:
         menu.addItem_(disabled_menu_item(f"Needs You ({len(asks)})"))
         ask_identity: dict[str, str] = {}
@@ -7230,9 +7298,30 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
             unseen.agent_id for unseen in unseen_completions(snapshot, target)
         }
         working_since = getattr(target, "working_since_by_agent", {})
+        # With SEVERAL providers live, small provider headers keep the
+        # 2-Claude-plus-Codex reality scannable; a single provider
+        # renders exactly as before.
+        providers_live = []
+        for status in statuses:
+            if status.provider not in providers_live:
+                providers_live.append(status.provider)
+        show_provider_headers = len(providers_live) > 1
+        if show_provider_headers:
+            # Stable regroup: provider blocks in first-appearance order,
+            # priority order preserved inside each block.
+            statuses = [
+                status
+                for provider in providers_live
+                for status in statuses
+                if status.provider == provider
+            ]
+        last_provider_header = None
         for status in statuses:
             if status.mode == AgentMode.COMPLETED and status.agent_id in cleared_ids:
                 continue
+            if show_provider_headers and status.provider != last_provider_header:
+                last_provider_header = status.provider
+                menu.addItem_(disabled_menu_item(status.provider.title()))
             dot_color = None
             if getattr(target, "settings", None) is not None:
                 dot_color = target.settings.colors.session_color(status.agent_id)
@@ -8626,15 +8715,21 @@ def status_bar_device_sort_key(candidate: DeviceCandidate) -> tuple[int, str]:
     return (len(STATUS_BAR_DEVICE_PRIORITY), candidate.root.name.lower())
 
 
-def deliver_macos_notification(title: str, body: str) -> None:
+def deliver_macos_notification(
+    title: str, body: str, user_info: dict | None = None
+) -> None:
     """One banner through Notification Center. A plain module function
     so tests can patch the seam -- ObjC class selectors can't be
-    mock-patched (the un-patch delattr fails on the ObjC class)."""
+    mock-patched (the un-patch delattr fails on the ObjC class).
+    ``user_info`` rides along so clicking the banner can jump to the
+    session that posted it."""
     from AppKit import NSUserNotification, NSUserNotificationCenter
 
     notification = NSUserNotification.alloc().init()
     notification.setTitle_(title)
     notification.setInformativeText_(body)
+    if user_info:
+        notification.setUserInfo_(user_info)
     NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(
         notification
     )
@@ -9046,8 +9141,17 @@ def unseen_completions(snapshot, target) -> list[AgentStatus]:
     opened_at = getattr(target, "menu_last_opened_at", None)
     cleared = getattr(target, "cleared_session_ids", set())
     unseen = []
-    for status in snapshot.statuses:
+    # Both lists: with any session active the collector demotes every
+    # completed one to stale_statuses instantly, which starved this of
+    # exactly the completions it exists to surface. The visible-window
+    # bound keeps ancient history from badging forever.
+    candidates = (*snapshot.statuses, *getattr(snapshot, "stale_statuses", ()))
+    for status in candidates:
         if status.is_subagent or status.mode != AgentMode.COMPLETED:
+            continue
+        if (
+            snapshot.collected_at - status.updated_at
+        ).total_seconds() > COMPLETED_VISIBLE_SECONDS:
             continue
         if status.agent_id in cleared:
             continue
@@ -9061,6 +9165,19 @@ def recent_statuses(snapshot) -> list[AgentStatus]:
     """Main sessions only -- sub-agents render indented under their
     parent (active_subagents_by_parent), not as top-level rows."""
     statuses = [status for status in snapshot.statuses if not status.is_subagent]
+    # Freshly finished sessions stay visible (with their "new" tag)
+    # even while other sessions keep working -- the collector demotes
+    # them to stale the moment anything is active.
+    seen_ids = {status.agent_id for status in statuses}
+    for status in getattr(snapshot, "stale_statuses", ()):
+        if (
+            not status.is_subagent
+            and status.agent_id not in seen_ids
+            and status.mode == AgentMode.COMPLETED
+            and (snapshot.collected_at - status.updated_at).total_seconds()
+            <= COMPLETED_VISIBLE_SECONDS
+        ):
+            statuses.append(status)
     if not statuses:
         statuses = [
             status for status in snapshot.stale_statuses if not status.is_subagent

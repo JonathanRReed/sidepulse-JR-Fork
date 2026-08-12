@@ -155,6 +155,23 @@ Decisions locked 2026-08-11 (grilling session with Jonathan):
 - **Jonathan's Focus modes** (for per-Focus rules): Do Not Disturb, Work,
   Sleep, School (custom), Personal (custom).
 
+## CELEBRATION PASS (2026-08-12 pm) -- the last big cleanup
+
+- THE missed-celebration bug: the collector demotes every inactive
+  status to stale the moment ANY session is active, so a finishing
+  session vanished from snapshot.statuses on the very tick it
+  completed -- sweep, banner, unseen-done badge and even the finished
+  menu row were all starved whenever anything else was working (i.e.
+  always, on a two-Claude-plus-Codex machine). Reproduced live with
+  injected sessions, fixed at all four seams, guarded by regression
+  tests that walk the REAL snapshot path.
+- macOS banners: session-finished (default ON, click jumps to the
+  session) and stage-3 needs-you (rides the chime latch, honors the
+  silent Focus policy). Menu: summary line, provider headers when
+  several are live, worker rollup submenus, device write errors
+  surfaced as rows.
+- Also this pass: the ENOSPC freeze (8.3 scratch + in-place fallback).
+
 ## FINAL PASS (2026-08-12) -- promise ledger cleared
 
 - Main thread is now I/O-silent: SD-card keepalive pokes and /Volumes
