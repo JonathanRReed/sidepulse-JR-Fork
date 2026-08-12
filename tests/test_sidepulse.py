@@ -8969,6 +8969,52 @@ class WeatherAlertTests(unittest.TestCase):
             self.assertIn("repeat", program)
 
 
+class MenuTeachingTests(unittest.TestCase):
+    """The dropdown teaches: empty state says what happens next, and a
+    daily tip advertises a feature (clicking it opens the right pane)."""
+
+    def _menu(self):
+        from sidepulse import status_bar
+        from sidepulse.settings import AgentMonitorSettings
+
+        snapshot = SimpleNamespace(
+            statuses=[],
+            stale_statuses=[],
+            collected_at=datetime.now(timezone.utc),
+        )
+        target = SimpleNamespace(
+            settings=AgentMonitorSettings(),
+            closed_lid_awake=SimpleNamespace(last_error=None),
+            status_bar_devices=list,
+        )
+        return status_bar.build_menu(snapshot, status_bar.STATE_IDLE, target)
+
+    def test_empty_state_teaches_the_next_step(self) -> None:
+        menu = self._menu()
+        titles = [
+            menu.itemAtIndex_(index).title() for index in range(menu.numberOfItems())
+        ]
+        self.assertIn("No agents yet", titles)
+        self.assertTrue(any("Start Claude Code" in title for title in titles))
+
+    def test_menu_carries_a_daily_tip(self) -> None:
+        menu = self._menu()
+        tips = [
+            menu.itemAtIndex_(index)
+            for index in range(menu.numberOfItems())
+            if menu.itemAtIndex_(index).title().startswith("Tip: ")
+        ]
+        self.assertEqual(len(tips), 1)
+
+    def test_every_tip_pane_key_is_a_real_pane(self) -> None:
+        from sidepulse import status_bar
+
+        pane_keys = {key for key, _label in status_bar.SETTINGS_SIDEBAR_ITEMS}
+        for _text, pane in status_bar.DAILY_TIPS:
+            if pane is not None:
+                self.assertIn(pane, pane_keys)
+
+
 class StudioDisplayAndTrancheCTests(unittest.TestCase):
     """The review's not-fully-real list: Studio as a persistent display
     choice, weather location override UI, hotplug pane rebuild."""

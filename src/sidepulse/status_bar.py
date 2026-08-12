@@ -1586,6 +1586,14 @@ class StatusBarController(NSObject):
         self.set_settings_message("Notification colors saved.")
 
     @objc.IBAction
+    def openTipPane_(self, sender):
+        """A daily-tip row that lands you on the exact pane it teased."""
+        pane = str(sender.representedObject() or "")
+        self.show_settings_window()
+        if pane:
+            self.select_settings_pane(pane)
+
+    @objc.IBAction
     def openSettings_(self, _sender):
         self.show_settings_window()
 
@@ -5014,6 +5022,33 @@ class StatusBarController(NSObject):
         return [MOUNT_ROOT / name / KEEPALIVE_FILE_NAME for name in STATUS_BAR_KEEPALIVE_VOLUME_NAMES]
 
 
+# One per day, keyed to the calendar: each teaches a feature people
+# don't find on their own. (text, settings pane key or None).
+DAILY_TIPS: tuple[tuple[str, str | None], ...] = (
+    ("Each agent gets its own color when several run at once", "color_studio"),
+    ("Give a session a permanent color from its row's Identity Color menu", None),
+    ("The Screen Bar hugs your notch -- style it under Screen Bar", "colors_screen_bar"),
+    ("Timer fills your lights as working time passes -- try it below", None),
+    ("Write your own light animation in the Studio", "lid_animations"),
+    ("Whites looking off? Calibrate each device under Devices", "devices"),
+    ("Day, Night, and Travel calibration profiles live under Profiles", None),
+    ("Ignored asks can escalate: light, menu bar, chime, takeover", "led_behavior"),
+    ("Severe-weather warnings can flash your lights", "led_behavior"),
+    ("Calendar events and Reminders can glow before they're due", "led_behavior"),
+    ("Every signal card in Signals has a Test button -- try one", "led_behavior"),
+    ("A macOS Focus can dim or silence your lights automatically", "power"),
+    ("A device can show Agent status, Battery, Timer, or your Studio program", "devices"),
+    ("Claude, OpenAI, Codex, and Gemini brand colors are one click away", "color_studio"),
+    ("Celebrate when finished sweeps green the moment an agent completes", "color_studio"),
+)
+
+
+def daily_tip() -> tuple[str, str | None]:
+    # Local calendar day: the tip changes overnight, like a calendar page.
+    day = datetime.now().timetuple().tm_yday
+    return DAILY_TIPS[day % len(DAILY_TIPS)]
+
+
 def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> NSMenu:
     """The status-item dropdown. Glanceability rules: sessions first
     (the thing you opened the menu to check), no self-titled header (you
@@ -5049,7 +5084,12 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
 
     statuses = recent_statuses(snapshot)
     if not statuses:
-        menu.addItem_(disabled_menu_item("No recent sessions"))
+        # The empty state teaches instead of dead-ending: a brand-new
+        # user's first open should say what will happen next.
+        menu.addItem_(disabled_menu_item("No agents yet"))
+        menu.addItem_(
+            disabled_menu_item("Start Claude Code or Codex -- sessions appear here")
+        )
     else:
         # "Color = agent": with several sessions, each row leads with
         # its identity dot -- the same hue the LEDs and Screen Bar use
@@ -5178,6 +5218,20 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     )
     settings.setTarget_(target)
     menu.addItem_(settings)
+
+    menu.addItem_(NSMenuItem.separatorItem())
+    tip_text, tip_pane = daily_tip()
+    if tip_pane:
+        tip_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"Tip: {tip_text}",
+            "openTipPane:",
+            "",
+        )
+        tip_item.setTarget_(target)
+        tip_item.setRepresentedObject_(tip_pane)
+        menu.addItem_(tip_item)
+    else:
+        menu.addItem_(disabled_menu_item(f"Tip: {tip_text}"))
 
     quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         "Quit",

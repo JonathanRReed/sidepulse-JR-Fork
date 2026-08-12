@@ -155,6 +155,34 @@ Decisions locked 2026-08-11 (grilling session with Jonathan):
 - **Jonathan's Focus modes** (for per-Focus rules): Do Not Disturb, Work,
   Sleep, School (custom), Personal (custom).
 
+## FINISH WAVE (2026-08-11, evening) -- review-driven hardening + normie polish
+
+Adversarial code-quality review (risks / speedups / maintainability /
+not-fully-real) executed in four tranches, then the discovery wave:
+
+- **Safety**: test isolation harness (tests once wrote to the REAL
+  device), unique settings scratch (truncation race), weather-thread
+  strand fix, precedence-claim logging, timer invalidation, dead
+  include_stale removed (ruff caught identical if/else branches), ruff
+  gate pinned in pyproject.
+- **Performance**: latest.json pruned (24h) + debounced (1s) + written
+  outside the lock; battery ioreg cached 5s; discovery 1/s; menu icons
+  memoized; transcript rglob 45s; Screen Bar redraw change-gated (was
+  ~28k bridged fills/sec for static frames).
+- **Fully real**: Studio is a persistent per-device Display choice with
+  REAL firmware-grammar validation (sdled.wasm parse, line/column
+  errors); weather lat/lon override UI; takeover tier now includes the
+  chime; calibration Apply reports matched-device counts honestly;
+  Devices pane rebuilds on hotplug.
+- **Maintainability**: sync_leds_now ten-branch chain -> one
+  signal_display_entries() table; select_popup_item(); dead
+  alcove_compatibility_mode deleted; CI (macos pytest+ruff);
+  docs/ARCHITECTURE.md (domain map + paid-for-in-blood invariants).
+- **Discovery/whimsy**: Color Studio merged into Settings (pinned live
+  preview, 900x640); dropdown teaches -- empty state says what happens
+  next, and a daily Tip row advertises a hidden feature and jumps to
+  its exact pane when clicked.
+
 ## Phase 0 — Prove & land the in-flight work
 
 The wing-bracket riser + the 4-layer scroll-pane gap fix are implemented and
