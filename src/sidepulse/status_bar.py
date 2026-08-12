@@ -316,6 +316,12 @@ STATUS_BAR_DEVICE_POLL_SECONDS = 2.0
 # one trailing refresh. Direct refresh_(None) calls stay synchronous.
 EVENT_REFRESH_FLOOR_SECONDS = 0.25
 MIN_ESCALATION_VISIBLE_BRIGHTNESS = 12
+# Display kinds that are MOMENTS demanding attention -- they render at
+# the device's configured brightness, not the auto/idle/Focus-dimmed
+# ambient level ("the flashing light is very dim even though its
+# brightness should be 100%"). An explicit per-Focus "Turn off" (scale
+# exactly 0) still silences them.
+SIGNAL_DISPLAY_KINDS = frozenset()
 # A completion may only ring/sweep while this fresh; older ones repaint
 # without celebrating (T3's TERMINAL_NOTIFICATION_FRESHNESS).
 COMPLETION_NOTIFY_FRESHNESS_SECONDS = 120.0
@@ -983,7 +989,9 @@ class StatusBarController(NSObject):
                     since_epoch=midnight.timestamp(),
                     codex_root=Path.home() / ".codex" / "sessions",
                 )
-                line = usage_stats.usage_summary_line(totals)
+                line = usage_stats.usage_summary_line(
+                    totals, self.settings.usage_display_mode
+                )
                 codex_parts = []
                 if totals.codex_sessions:
                     codex_parts.append(
@@ -996,9 +1004,10 @@ class StatusBarController(NSObject):
                 percents = {}
                 primary = (limits or {}).get("primary") or {}
                 if primary.get("used_percent") is not None:
-                    codex_parts.append(
-                        f"weekly limit {primary['used_percent']:.0f}% used"
-                    )
+                    if self.settings.codex_percent_enabled:
+                        codex_parts.append(
+                            f"weekly limit {primary['used_percent']:.0f}% used"
+                        )
                     percents["Codex weekly"] = float(primary["used_percent"])
                 codex_line = " \u00b7 ".join(codex_parts) if codex_parts else None
                 graph_days = self.settings.usage_graph_days
@@ -2081,6 +2090,28 @@ class StatusBarController(NSObject):
             "Resting glow off." if fraction <= 0.004 else f"Resting glow: {round(fraction * 100)}%."
         )
         self.refresh_(None)
+
+    @objc.IBAction
+    def setUsageDisplayMode_(self, sender):
+        item = sender.selectedItem()
+        if item is None:
+            return
+        try:
+            self.settings = self.settings.with_usage_display_mode(
+                str(item.representedObject())
+            )
+        except ValueError:
+            return
+        save_settings(self.settings)
+        self._usage_refreshed_at = 0.0
+        self.maybe_refresh_usage_summary()
+
+    @objc.IBAction
+    def toggleCodexPercent_(self, sender):
+        self.settings = self.settings.with_codex_percent_enabled(checkbox_is_on(sender))
+        save_settings(self.settings)
+        self._usage_refreshed_at = 0.0
+        self.maybe_refresh_usage_summary()
 
     @objc.IBAction
     def setUsageGraphRange_(self, sender):
@@ -4788,6 +4819,19 @@ class StatusBarController(NSObject):
         controller.resting_glow = device.resting_glow
         return controller
 
+    def effective_signal_brightness_for_device(self, device: StatusBarDevice) -> int:
+        """Signal moments cut through ambient dimming: the user's
+        configured brightness, boosted by escalation, dimmed by nothing
+        -- except an explicit per-Focus "Turn off" rule, which wins."""
+        if self.settings.focus_sync_enabled and self.focus_sync_scale_factor() <= 0.0:
+            return 0
+        boost = (
+            signals_module.ESCALATION_RAMP_BRIGHTNESS_BOOST
+            if self.current_escalation_stage() >= 1
+            else 1.0
+        )
+        return normalize_brightness(max(device.brightness * boost, 1))
+
     def effective_brightness_for_device(self, device: StatusBarDevice) -> int:
         """The brightness to actually use for this write right now: the
         manually configured value, unless auto-brightness is on for this
@@ -5288,6 +5332,14 @@ class StatusBarController(NSObject):
         # any of them.
         brightness = self.effective_brightness_for_device(device)
         display = self.active_led_display_kind_for_device(device, battery_snapshot)
+        if display not in (
+            LED_DISPLAY_AGENT,
+            LED_DISPLAY_BATTERY,
+            LED_DISPLAY_TIMER,
+            LED_DISPLAY_STUDIO,
+            LED_DISPLAY_QUOTA_RUNWAY,
+        ):
+            brightness = self.effective_signal_brightness_for_device(device)
 
         def _set_virtual(program: str) -> None:
             # The Screen Bar honors ITS calibration exactly like a
@@ -5788,7 +5840,19 @@ class StatusBarController(NSObject):
             if entry is not None:
                 factory, led_state, label_factory = entry
                 controller = self.agent_controller_for_device(device)
-                program = factory(controller.brightness, device_led_count)
+                # Ambient displays (timer/studio/runway) follow dimming;
+                # true SIGNALS flash at configured brightness.
+                ambient_kinds = (
+                    LED_DISPLAY_TIMER,
+                    LED_DISPLAY_STUDIO,
+                    LED_DISPLAY_QUOTA_RUNWAY,
+                )
+                render_brightness = (
+                    controller.brightness
+                    if device_display_kind in ambient_kinds
+                    else self.effective_signal_brightness_for_device(device)
+                )
+                program = factory(render_brightness, device_led_count)
                 label = label_factory(device, battery_snapshot)
             if program is not None:
                 result = controller.sync_program(program, led_state)
@@ -7208,6 +7272,14 @@ def _build_profile_pane(target: StatusBarController):
     fields["usage_graph_range_popup"] = range_popup
     range_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     range_row.addArrangedSubview_(range_popup)
+    mode_popup = native_ui.make_popup_button(target, "setUsageDisplayMode:")
+    for mode_label, mode_key in (("Tokens first", "tokens"), ("Cost first", "cost")):
+        mode_popup.addItemWithTitle_(mode_label)
+        item = mode_popup.lastItem()
+        item.setRepresentedObject_(mode_key)
+        if mode_key == target.settings.usage_display_mode:
+            mode_popup.selectItem_(item)
+    range_row.addArrangedSubview_(mode_popup)
     range_row.addArrangedSubview_(native_ui.make_hspacer())
     today_inner.addArrangedSubview_(range_row)
     legend = native_ui.make_label(
@@ -7235,6 +7307,14 @@ def _build_profile_pane(target: StatusBarController):
     )
     plan_switch.setState_(1 if target.settings.claude_plan_limits_enabled else 0)
     today_inner.addArrangedSubview_(plan_row)
+    codex_pct_row, codex_pct_switch = native_ui.make_switch_row(
+        "Show Codex weekly percent",
+        target,
+        "toggleCodexPercent:",
+        help_text="The weekly-limit percent on the Codex line.",
+    )
+    codex_pct_switch.setState_(1 if target.settings.codex_percent_enabled else 0)
+    today_inner.addArrangedSubview_(codex_pct_row)
     today_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "Costs use Anthropic list rates; cached reads bill at a tenth "

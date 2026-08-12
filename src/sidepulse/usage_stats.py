@@ -397,18 +397,40 @@ def scan_usage(
     return totals
 
 
-def usage_summary_line(totals: UsageTotals) -> str | None:
-    """"Claude today: 14 sessions · $6.20 · saved $18.40" -- None when
-    there is nothing to say (an empty line would be clutter)."""
-    count = len(totals.sessions)
-    if count == 0:
+def _compact_tokens(count: int) -> str:
+    if count >= 1_000_000_000:
+        return f"{count / 1_000_000_000:.1f}B"
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.0f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.0f}K"
+    return str(count)
+
+
+def usage_summary_line(totals: UsageTotals, mode: str = "tokens") -> str | None:
+    """Tokens-first (cost approximated in parens, the CodexBar
+    presentation) or cost-first -- None when there is nothing to say."""
+    count = len(totals.sessions) - len(totals.codex_sessions)
+    if count <= 0:
         return None
     plural = "session" if count == 1 else "sessions"
     parts = [f"{count} {plural}"]
-    if totals.cost_usd >= 0.005:
-        parts.append(f"${totals.cost_usd:.2f}")
-    if totals.cache_savings_usd >= 0.005:
-        parts.append(f"saved ${totals.cache_savings_usd:.2f} with caching")
+    claude_tokens = (
+        totals.input_tokens + totals.cached_input_tokens + totals.output_tokens
+    )
+    if mode == "cost":
+        if totals.cost_usd >= 0.005:
+            parts.append(f"${totals.cost_usd:.2f}")
+        if totals.cache_savings_usd >= 0.005:
+            parts.append(f"saved ${totals.cache_savings_usd:.2f} with caching")
+    else:
+        if claude_tokens:
+            approx = (
+                f" (~${totals.cost_usd:,.0f})" if totals.cost_usd >= 0.5 else ""
+            )
+            parts.append(f"{_compact_tokens(claude_tokens)} tokens{approx}")
+        if totals.cache_savings_usd >= 0.5:
+            parts.append(f"saved ~${totals.cache_savings_usd:,.0f} with caching")
     return "Claude today: " + " · ".join(parts)
 
 

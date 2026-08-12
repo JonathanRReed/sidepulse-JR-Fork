@@ -707,13 +707,28 @@ class _HoverRowView(NSView):
             )
         )
 
+    def _row_is_selected(self) -> bool:
+        view = self.superview()
+        while view is not None:
+            if hasattr(view, "isSelected"):
+                try:
+                    return bool(view.isSelected())
+                except Exception:
+                    return False
+            view = view.superview()
+        return False
+
     def mouseEntered_(self, _event):
+        # Never paint hover over the system selection pill -- the two
+        # stacked highlights read as a rendering bug, not a state.
+        if self._row_is_selected():
+            return
         self.setWantsLayer_(True)
         layer = self.layer()
         if layer is not None:
             layer.setCornerRadius_(6.0)
             layer.setBackgroundColor_(
-                NSColor.controlColor().colorWithAlphaComponent_(0.35).CGColor()
+                NSColor.controlColor().colorWithAlphaComponent_(0.22).CGColor()
             )
 
     def mouseExited_(self, _event):

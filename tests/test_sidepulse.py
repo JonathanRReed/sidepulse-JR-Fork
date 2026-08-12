@@ -9716,12 +9716,17 @@ class UsageStatsTests(unittest.TestCase):
         self.assertIsNone(usage_stats.usage_summary_line(empty))
         totals = usage_stats.UsageTotals()
         totals.sessions.add("s1")
+        totals.input_tokens = 2_000_000
         totals.cost_usd = 1.5
         totals.cache_savings_usd = 4.0
-        line = usage_stats.usage_summary_line(totals)
-        self.assertIn("1 session", line)
-        self.assertIn("$1.50", line)
-        self.assertIn("saved $4.00", line)
+        cost_line = usage_stats.usage_summary_line(totals, "cost")
+        self.assertIn("1 session", cost_line)
+        self.assertIn("$1.50", cost_line)
+        self.assertIn("saved $4.00", cost_line)
+        token_line = usage_stats.usage_summary_line(totals, "tokens")
+        self.assertIn("2M tokens", token_line)
+        self.assertIn("(~$2)", token_line)
+        self.assertIn("saved ~$4", token_line)
 
 
 class T3AdoptionTests(unittest.TestCase):

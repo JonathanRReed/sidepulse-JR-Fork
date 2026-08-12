@@ -309,6 +309,10 @@ class AgentMonitorSettings:
     claude_plan_limits_enabled: bool = False
     quota_alerts_enabled: bool = False
     usage_graph_days: int = 7
+    # "tokens" leads with token counts (cost approximated in parens,
+    # the CodexBar presentation); "cost" leads with dollars.
+    usage_display_mode: str = "tokens"
+    codex_percent_enabled: bool = True
     # Sub-agent asks can't be answered (their parent handles them), so
     # by default only MAIN sessions may ring the Ask signal.
     subagent_asks_alert: bool = False
@@ -698,6 +702,14 @@ class AgentMonitorSettings:
     def with_subagent_asks_alert(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, subagent_asks_alert=bool(enabled))
 
+    def with_usage_display_mode(self, mode: str) -> AgentMonitorSettings:
+        if mode not in ("tokens", "cost"):
+            raise ValueError("usage display mode is tokens or cost")
+        return replace(self, usage_display_mode=mode)
+
+    def with_codex_percent_enabled(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, codex_percent_enabled=bool(enabled))
+
     def with_usage_graph_days(self, days: int) -> AgentMonitorSettings:
         if int(days) not in (7, 30, 90, 365):
             raise ValueError("graph range is 7, 30, 90 or 365 days")
@@ -1021,6 +1033,8 @@ class AgentMonitorSettings:
             "claude_plan_limits_enabled": self.claude_plan_limits_enabled,
             "quota_alerts_enabled": self.quota_alerts_enabled,
             "usage_graph_days": self.usage_graph_days,
+            "usage_display_mode": self.usage_display_mode,
+            "codex_percent_enabled": self.codex_percent_enabled,
             "subagent_asks_alert": self.subagent_asks_alert,
             "quota_alert_thresholds": list(self.quota_alert_thresholds),
             "dismissed_tips": list(self.dismissed_tips),
@@ -1265,6 +1279,12 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         quota_alerts_enabled=_bool_setting(data.get("quota_alerts_enabled"), False),
         subagent_asks_alert=_bool_setting(data.get("subagent_asks_alert"), False),
+        usage_display_mode=(
+            data.get("usage_display_mode")
+            if data.get("usage_display_mode") in ("tokens", "cost")
+            else "tokens"
+        ),
+        codex_percent_enabled=_bool_setting(data.get("codex_percent_enabled"), True),
         usage_graph_days=(
             int(data.get("usage_graph_days"))
             if data.get("usage_graph_days") in (7, 30, 90, 365)
