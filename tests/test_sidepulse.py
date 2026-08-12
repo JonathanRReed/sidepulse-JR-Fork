@@ -9528,6 +9528,51 @@ class ContextLidAnimationTests(unittest.TestCase):
         )
 
 
+class ResilienceHardeningTests(unittest.TestCase):
+    """Backlog #6/#7/#19: corruption keeps its evidence, device writes
+    are atomic, and the INIT.LED burn fails closed."""
+
+    def test_corrupt_settings_are_preserved_not_destroyed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text("{ this is not json", encoding="utf-8")
+            loaded = load_settings(path)
+            self.assertEqual(loaded, AgentMonitorSettings())
+            backup = path.with_name("settings.json.corrupt")
+            self.assertTrue(backup.exists())
+            self.assertEqual(backup.read_text(), "{ this is not json")
+            self.assertFalse(path.exists())
+            # A second corruption never clobbers the FIRST capture.
+            path.write_text("[]", encoding="utf-8")
+            load_settings(path)
+            self.assertEqual(backup.read_text(), "{ this is not json")
+            self.assertFalse(path.exists())
+
+    def test_led_write_leaves_no_scratch_and_lands_content(self) -> None:
+        from sidepulse.device_writer import write_led_program
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = write_led_program(
+                "1:#FF0000; 500ms", device_path=Path(tmp), file_name="LEDS.LED"
+            )
+            self.assertEqual(target.read_text(encoding="utf-8"), "1:#FF0000; 500ms")
+            leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "LEDS.LED"]
+            self.assertEqual(leftovers, [])
+
+    def test_burn_validation_fails_closed_when_parser_is_gone(self) -> None:
+        isolate_controller(self)
+        with patch(
+            "sidepulse.led_wasm.SdLedWasmController",
+            side_effect=RuntimeError("no JavaScriptCore"),
+        ):
+            self.assertIsNone(self.controller.validate_studio_program("1:#FF0000; 1s"))
+            strict = self.controller.validate_studio_program(
+                "1:#FF0000; 1s", strict=True
+            )
+        self.assertIsNotNone(strict)
+        self.assertIn("unverified", strict)
+
+
 class AlcoveFollowTests(unittest.TestCase):
     """The bracket follows Alcove's alpha-measured capsule width --
     widen instantly, narrow patiently, never balloon."""

@@ -656,25 +656,6 @@ def wrap_in_scroll_pane(stack: NSStackView, *, padding: float = 20.0) -> NSScrol
     return scroll
 
 
-def stretch_to_stack_width(stack: NSStackView, view) -> None:
-    """Forces `view` (already added via stack.addArrangedSubview_(view))
-    to fill the vertical stack's own width exactly, instead of relying on
-    NSStackView's own cross-axis sizing. That default is normally fine
-    (every Settings pane's cards pick it up for free), but once a card's
-    content includes a fixed-width custom area -- e.g. a swatch-grid row
-    built on make_fixed_area -- the cross-axis size can come out
-    genuinely ambiguous rather than merely "an unexpected but determined"
-    width, and the window collapses to a sliver. This pins it explicitly
-    so there's nothing left for Auto Layout to guess.
-    """
-    NSLayoutConstraint.activateConstraints_(
-        [
-            view.leadingAnchor().constraintEqualToAnchor_(stack.leadingAnchor()),
-            view.trailingAnchor().constraintEqualToAnchor_(stack.trailingAnchor()),
-        ]
-    )
-
-
 def make_fixed_area(width: float, height: float) -> NSView:
     """A plain NSView sized by Auto Layout constraints (not an intrinsic
     content size) so it can sit as one arranged subview in a stack --

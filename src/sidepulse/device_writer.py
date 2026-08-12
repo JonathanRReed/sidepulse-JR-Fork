@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,7 +43,22 @@ def write_led_program(
         return target
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(program, encoding="utf-8")
+    # Scratch-then-rename: an eject or cable pull mid-write must never
+    # leave a torn program for the firmware to play (a program the
+    # firmware can't parse strobes the device red, and a torn INIT.LED
+    # replays at every boot). Same discipline settings.save_settings
+    # documents; FAT rename shrinks the failure window from the whole
+    # payload to a metadata blink.
+    scratch = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        scratch.write_text(program, encoding="utf-8")
+        os.replace(scratch, target)
+    except BaseException:
+        try:
+            scratch.unlink()
+        except OSError:
+            pass
+        raise
     return target
 
 

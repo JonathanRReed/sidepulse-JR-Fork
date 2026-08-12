@@ -1249,6 +1249,24 @@ def _focus_dim_rules(raw: object) -> dict[str, float]:
     return rules
 
 
+def _preserve_corrupt_settings(target: Path) -> None:
+    """A parse failure must never silently cost the user their
+    calibration profiles, studio library, and colors: returning
+    defaults means the very next auto-save (device remembering runs on
+    every LED sync) overwrites the evidence. Move the corrupt file
+    aside so it stays recoverable by hand; one backup, not a litter of
+    them -- repeated startups against the same corruption keep the
+    FIRST capture."""
+    try:
+        backup = target.with_name(target.name + ".corrupt")
+        if backup.exists():
+            target.unlink(missing_ok=True)
+            return
+        os.replace(target, backup)
+    except OSError:
+        pass
+
+
 def load_settings(path: Path | None = None) -> AgentMonitorSettings:
     target = (path or default_settings_path()).expanduser()
     if not target.exists():
@@ -1257,9 +1275,11 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
     try:
         data = json.loads(target.read_text())
     except Exception:
+        _preserve_corrupt_settings(target)
         return AgentMonitorSettings()
 
     if not isinstance(data, dict):
+        _preserve_corrupt_settings(target)
         return AgentMonitorSettings()
 
     transcript = data.get("transcript_monitoring")

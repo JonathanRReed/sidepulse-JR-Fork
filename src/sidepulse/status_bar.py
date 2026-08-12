@@ -1806,7 +1806,7 @@ class StatusBarController(NSObject):
         except Exception as exc:
             self.set_settings_message(f"Power-up look invalid: {exc}")
             return
-        dsl_error = self.validate_studio_program(normalized)
+        dsl_error = self.validate_studio_program(normalized, strict=True)
         if dsl_error:
             self.set_settings_message(f"Power-up look invalid: {dsl_error}.")
             return
@@ -4721,7 +4721,25 @@ class StatusBarController(NSObject):
         self.refresh_settings_window()
         self.refresh_(None)
 
-    def set_device_display(self, device_id: str | None, display: str) -> None:
+    def _mutate_device_setting(
+        self,
+        device_id: str | None,
+        mutate,
+        describe,
+        error_label: str,
+        *,
+        resync: str = "snapshot",
+    ) -> None:
+        """The shared skeleton of every per-device settings mutation
+        (five near-identical ~35-line methods had already started to
+        diverge): find the device for its display name/path, apply the
+        mutator with rollback on failure, reset that device's LED
+        controllers, toast, refresh the pane, re-sync. ``mutate(device)
+        -> AgentMonitorSettings``; ``describe(device_label) -> str``
+        runs AFTER the mutation so it may read the new settings.
+        resync: "snapshot" replays the last snapshot; "refresh" runs a
+        full refresh_ pass; "calibration" re-lights the mid-flight
+        calibration test color instead of resuming live status."""
         if not device_id:
             return
         device = next(
@@ -4733,19 +4751,36 @@ class StatusBarController(NSObject):
             None,
         )
         try:
-            self.settings = self.settings.with_device_display(
-                str(device_id),
-                display,
-                name=device.name if device else None,
-                path=str(device.root) if device else None,
-            )
+            self.settings = mutate(device)
             save_settings(self.settings)
         except Exception as exc:
-            self.set_settings_message(f"Could not save device display: {exc}")
+            self.set_settings_message(f"Could not save {error_label}: {exc}")
             self.settings = load_settings()
             return
-
         self.reset_led_controllers_for_device(str(device_id))
+        self.set_settings_message(describe(device.name if device else str(device_id)))
+        self.refresh_settings_window()
+        if resync == "refresh":
+            self.refresh_(None)
+            return
+        if (
+            resync == "calibration"
+            and self.calibration_test is not None
+            and self.calibration_test[0] == str(device_id)
+        ):
+            # Mid-calibration: re-light the test color through the new
+            # gains instead of resuming live status under the user's
+            # hands -- live status returns when the popover closes.
+            self._send_calibration_test()
+            return
+        if self.last_snapshot is not None:
+            self.sync_leds(
+                self.last_snapshot.aggregate.mode,
+                self.last_battery_snapshot,
+                self.active_led_display_kind(self.last_battery_snapshot),
+            )
+
+    def set_device_display(self, device_id: str | None, display: str) -> None:
         label = {
             LED_DISPLAY_AGENT: "Agent Status",
             LED_DISPLAY_BATTERY: "Battery Level",
@@ -4753,157 +4788,75 @@ class StatusBarController(NSObject):
             LED_DISPLAY_STUDIO: "Studio Program",
             LED_DISPLAY_QUOTA_RUNWAY: "Quota Runway",
         }.get(display, display)
-        self.set_settings_message(f"{device.name if device else device_id}: {label}.")
-        self.refresh_settings_window()
-        self.refresh_(None)
+        self._mutate_device_setting(
+            device_id,
+            lambda device: self.settings.with_device_display(
+                str(device_id),
+                display,
+                name=device.name if device else None,
+                path=str(device.root) if device else None,
+            ),
+            lambda name: f"{name}: {label}.",
+            "device display",
+            resync="refresh",
+        )
 
     def set_device_brightness(self, device_id: str | None, brightness: float) -> None:
-        if not device_id:
-            return
-        device = next(
-            (
-                entry
-                for entry in self.status_bar_devices(remember=False)
-                if entry.device_id == str(device_id)
-            ),
-            None,
-        )
         value = normalize_brightness(brightness)
-        try:
-            self.settings = self.settings.with_device_brightness(
+        self._mutate_device_setting(
+            device_id,
+            lambda device: self.settings.with_device_brightness(
                 str(device_id),
                 value,
                 name=device.name if device else None,
                 path=str(device.root) if device else None,
-            )
-            save_settings(self.settings)
-        except Exception as exc:
-            self.set_settings_message(f"Could not save brightness: {exc}")
-            self.settings = load_settings()
-            return
-
-        self.reset_led_controllers_for_device(str(device_id))
-        self.set_settings_message(
-            f"{device.name if device else device_id}: brightness {brightness_percent(value)}%."
+            ),
+            lambda name: f"{name}: brightness {brightness_percent(value)}%.",
+            "brightness",
         )
-        self.refresh_settings_window()
-        if self.last_snapshot is not None:
-            self.sync_leds(
-                self.last_snapshot.aggregate.mode,
-                self.last_battery_snapshot,
-                self.active_led_display_kind(self.last_battery_snapshot),
-            )
 
     def set_device_auto_brightness(self, device_id: str | None, enabled: bool) -> None:
-        if not device_id:
-            return
-        device = next(
-            (
-                entry
-                for entry in self.status_bar_devices(remember=False)
-                if entry.device_id == str(device_id)
-            ),
-            None,
-        )
-        try:
-            self.settings = self.settings.with_device_auto_brightness(
+        self._mutate_device_setting(
+            device_id,
+            lambda device: self.settings.with_device_auto_brightness(
                 str(device_id),
                 enabled,
                 name=device.name if device else None,
                 path=str(device.root) if device else None,
-            )
-            save_settings(self.settings)
-        except Exception as exc:
-            self.set_settings_message(f"Could not save auto-brightness: {exc}")
-            self.settings = load_settings()
-            return
-
-        self.reset_led_controllers_for_device(str(device_id))
-        label = "on" if enabled else "off"
-        self.set_settings_message(
-            f"{device.name if device else device_id}: auto-brightness {label}."
+            ),
+            lambda name: f"{name}: auto-brightness {'on' if enabled else 'off'}.",
+            "auto-brightness",
         )
-        self.refresh_settings_window()
-        if self.last_snapshot is not None:
-            self.sync_leds(
-                self.last_snapshot.aggregate.mode,
-                self.last_battery_snapshot,
-                self.active_led_display_kind(self.last_battery_snapshot),
-            )
 
     def set_device_channel_gain(self, device_id: str | None, channel: str, value: float) -> None:
-        if not device_id:
-            return
-        device = next(
-            (
-                entry
-                for entry in self.status_bar_devices(remember=False)
-                if entry.device_id == str(device_id)
-            ),
-            None,
-        )
-        try:
-            self.settings = self.settings.with_device_channel_gain(
+        def describe(name: str) -> str:
+            red, green, blue = self.settings.channel_gains_for_device(str(device_id))
+            return (
+                f"{name}: calibration R{round(red * 100)}% "
+                f"G{round(green * 100)}% B{round(blue * 100)}%."
+            )
+
+        self._mutate_device_setting(
+            device_id,
+            lambda device: self.settings.with_device_channel_gain(
                 str(device_id),
                 channel,
                 value,
                 name=device.name if device else None,
                 path=str(device.root) if device else None,
-            )
-            save_settings(self.settings)
-        except Exception as exc:
-            self.set_settings_message(f"Could not save color calibration: {exc}")
-            self.settings = load_settings()
-            return
-
-        self.reset_led_controllers_for_device(str(device_id))
-        gain = self.settings.channel_gains_for_device(str(device_id))
-        red, green, blue = gain
-        self.set_settings_message(
-            f"{device.name if device else device_id}: calibration R{round(red * 100)}% "
-            f"G{round(green * 100)}% B{round(blue * 100)}%."
+            ),
+            describe,
+            "color calibration",
+            resync="calibration",
         )
-        self.refresh_settings_window()
-        if self.calibration_test is not None and self.calibration_test[0] == str(device_id):
-            # Mid-calibration: re-light the test color through the new
-            # gains instead of resuming live status under the user's
-            # hands -- live status returns when the popover closes.
-            self._send_calibration_test()
-        elif self.last_snapshot is not None:
-            self.sync_leds(
-                self.last_snapshot.aggregate.mode,
-                self.last_battery_snapshot,
-                self.active_led_display_kind(self.last_battery_snapshot),
-            )
 
     def set_device_channel_gains_reset(self, device_id: str | None) -> None:
-        if not device_id:
-            return
-        device = next(
-            (
-                entry
-                for entry in self.status_bar_devices(remember=False)
-                if entry.device_id == str(device_id)
-            ),
-            None,
+        self._mutate_device_setting(
+            device_id,
+            lambda _device: self.settings.with_device_channel_gains_reset(str(device_id)),
+            lambda name: f"{name}: calibration reset.",
+            "color calibration",
         )
-        try:
-            self.settings = self.settings.with_device_channel_gains_reset(str(device_id))
-            save_settings(self.settings)
-        except Exception as exc:
-            self.set_settings_message(f"Could not reset color calibration: {exc}")
-            self.settings = load_settings()
-            return
-
-        self.reset_led_controllers_for_device(str(device_id))
-        self.set_settings_message(f"{device.name if device else device_id}: calibration reset.")
-        self.refresh_settings_window()
-        if self.last_snapshot is not None:
-            self.sync_leds(
-                self.last_snapshot.aggregate.mode,
-                self.last_battery_snapshot,
-                self.active_led_display_kind(self.last_battery_snapshot),
-            )
 
     def set_virtual_status_device(self, enabled: bool) -> None:
         if not SCREEN_BAR_FEATURE_ENABLED:
@@ -5932,17 +5885,26 @@ class StatusBarController(NSObject):
                     "refresh:", None, False
                 )
 
-    def validate_studio_program(self, program: str) -> str | None:
+    def validate_studio_program(
+        self, program: str, *, strict: bool = False
+    ) -> str | None:
         """Real firmware-grammar validation via the same sdled.wasm the
         Screen Bar runs -- validate_led_text only checks size limits,
         and a program the FIRMWARE can't parse makes the device strobe
-        red. Returns an error message, or None when the program parses
-        (or when the parser is unavailable; size checks still apply)."""
+        red. Returns an error message, or None when the program parses.
+        Parser unavailable: None for preview/save (graceful), but with
+        strict=True an ERROR -- the INIT.LED burn replays at every
+        hardware boot and must never fail open on a broken parser."""
         try:
             from .led_wasm import SdLedWasmController
 
             result = SdLedWasmController(led_count=8).parse(program, 0)
         except Exception:
+            if strict:
+                return (
+                    "firmware parser unavailable -- refusing to burn an "
+                    "unverified program"
+                )
             return None
         if result.ok:
             return None

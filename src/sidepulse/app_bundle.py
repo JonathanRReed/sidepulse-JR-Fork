@@ -84,10 +84,6 @@ def default_app_bundle_path(home: Path | None = None) -> Path:
     return base / "Applications" / APP_BUNDLE_NAME
 
 
-def bundle_executable_path(bundle_path: Path | None = None) -> Path:
-    return (bundle_path or default_app_bundle_path()) / "Contents" / "MacOS" / APP_EXECUTABLE_NAME
-
-
 def running_inside_bundle() -> bool:
     return f"{APP_BUNDLE_NAME}/Contents/MacOS/" in (sys.executable or "")
 
