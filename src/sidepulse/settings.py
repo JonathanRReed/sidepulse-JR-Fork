@@ -151,6 +151,10 @@ class DeviceDisplaySetting:
     # Per-device blend-mode override (None = the global Colors-window
     # choice) -- the Pro can run Spatial Split while the Dot relays.
     blend_mode: str | None = None
+    # Story #16: pin this device to one provider ("claude"/"codex");
+    # None = aggregate. A pinned device shows only its provider's
+    # sessions and rests dark when none are live.
+    provider_pin: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -164,6 +168,7 @@ class DeviceDisplaySetting:
             "green_gain": self.green_gain,
             "blue_gain": self.blue_gain,
             "blend_mode": self.blend_mode,
+            "provider_pin": self.provider_pin,
         }
 
     def channel_gains(self) -> tuple[float, float, float]:
@@ -304,6 +309,9 @@ class AgentMonitorSettings:
     # the moving signal shows (the relay dot ticking round, the timer
     # filling). 0.25 preserves the pre-dial behavior.
     screen_bar_min_glow: float = 0.25
+    # Story #14: wing tips as standing micro-gauges (quota ember left,
+    # unseen-done green right). Screen-Bar-only luxury; off by default.
+    screen_bar_gauges_enabled: bool = False
     # Opt-in: reading the Claude Code keychain item triggers a one-time
     # macOS prompt, so this must never default on.
     claude_plan_limits_enabled: bool = False
@@ -318,6 +326,9 @@ class AgentMonitorSettings:
     studio_library: tuple[tuple[str, str], ...] = ()
     night_warmth_enabled: bool = False
     focus_signal_policy: dict[str, str] = field(default_factory=dict)
+    # Story #10: timebox preset -> (start Shortcut, end Shortcut). Keys
+    # are the preset minutes as strings ("25"); either name may be "".
+    timebox_shortcuts: dict[str, tuple[str, str]] = field(default_factory=dict)
     # Sub-agent asks can't be answered (their parent handles them), so
     # by default only MAIN sessions may ring the Ask signal.
     subagent_asks_alert: bool = False
@@ -710,6 +721,26 @@ class AgentMonitorSettings:
     def with_night_warmth_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, night_warmth_enabled=bool(enabled))
 
+    def timebox_shortcut_pair(self, preset_key: str) -> tuple[str, str]:
+        pair = self.timebox_shortcuts.get(preset_key)
+        if not pair:
+            return ("", "")
+        return (str(pair[0]), str(pair[1]))
+
+    def with_timebox_shortcut(
+        self, preset_key: str, on_name: str, off_name: str
+    ) -> AgentMonitorSettings:
+        """Both names empty removes the mapping -- unmapped presets
+        behave exactly as before the handshake existed."""
+        mapping = dict(self.timebox_shortcuts)
+        on_clean = str(on_name).strip()
+        off_clean = str(off_name).strip()
+        if not on_clean and not off_clean:
+            mapping.pop(str(preset_key), None)
+        else:
+            mapping[str(preset_key)] = (on_clean, off_clean)
+        return replace(self, timebox_shortcuts=mapping)
+
     def with_focus_signal_policy(self, identifier: str, policy: str) -> AgentMonitorSettings:
         if policy not in ("all", "asks_only", "silent"):
             raise ValueError(f"unknown focus signal policy: {policy}")
@@ -775,6 +806,9 @@ class AgentMonitorSettings:
     def with_claude_plan_limits_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, claude_plan_limits_enabled=bool(enabled))
 
+    def with_screen_bar_gauges_enabled(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, screen_bar_gauges_enabled=bool(enabled))
+
     def with_screen_bar_min_glow(self, fraction: float) -> AgentMonitorSettings:
         return replace(
             self, screen_bar_min_glow=max(0.0, min(1.0, float(fraction)))
@@ -831,6 +865,26 @@ class AgentMonitorSettings:
             if device.device_id == device_id:
                 return device.blend_mode
         return None
+
+    def device_provider_pin(self, device_id: str) -> str | None:
+        for device in self.devices:
+            if device.device_id == device_id:
+                return device.provider_pin
+        return None
+
+    def with_device_provider_pin(
+        self, device_id: str, provider: str | None
+    ) -> AgentMonitorSettings:
+        """provider=None restores the aggregate view."""
+        if provider is not None and provider not in ("claude", "codex"):
+            raise ValueError(f"Unknown provider pin: {provider}")
+        devices = tuple(
+            replace(device, provider_pin=provider)
+            if device.device_id == device_id
+            else device
+            for device in self.devices
+        )
+        return replace(self, devices=devices)
 
     def with_device_blend_mode(self, device_id: str, mode: str | None) -> AgentMonitorSettings:
         """mode=None restores the global Colors-window blend choice."""
@@ -1072,6 +1126,7 @@ class AgentMonitorSettings:
             "tips_enabled": self.tips_enabled,
             "menu_bar_label_enabled": self.menu_bar_label_enabled,
             "screen_bar_min_glow": self.screen_bar_min_glow,
+            "screen_bar_gauges_enabled": self.screen_bar_gauges_enabled,
             "claude_plan_limits_enabled": self.claude_plan_limits_enabled,
             "quota_alerts_enabled": self.quota_alerts_enabled,
             "usage_graph_days": self.usage_graph_days,
@@ -1081,6 +1136,9 @@ class AgentMonitorSettings:
             "studio_library": [list(item) for item in self.studio_library],
             "night_warmth_enabled": self.night_warmth_enabled,
             "focus_signal_policy": dict(self.focus_signal_policy),
+            "timebox_shortcuts": {
+                key: list(pair) for key, pair in self.timebox_shortcuts.items()
+            },
             "subagent_asks_alert": self.subagent_asks_alert,
             "quota_alert_thresholds": list(self.quota_alert_thresholds),
             "dismissed_tips": list(self.dismissed_tips),
@@ -1320,6 +1378,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         tips_enabled=_bool_setting(data.get("tips_enabled"), True),
         menu_bar_label_enabled=_bool_setting(data.get("menu_bar_label_enabled"), False),
         screen_bar_min_glow=_fraction_setting(data.get("screen_bar_min_glow"), 0.25),
+        screen_bar_gauges_enabled=_bool_setting(data.get("screen_bar_gauges_enabled"), False),
         claude_plan_limits_enabled=_bool_setting(
             data.get("claude_plan_limits_enabled"), False
         ),
@@ -1340,6 +1399,15 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
                 if str(value) in ("asks_only", "silent")
             }
             if isinstance(data.get("focus_signal_policy"), dict)
+            else {}
+        ),
+        timebox_shortcuts=(
+            {
+                str(key): (str(pair[0]), str(pair[1]))
+                for key, pair in data.get("timebox_shortcuts").items()
+                if isinstance(pair, (list, tuple)) and len(pair) == 2
+            }
+            if isinstance(data.get("timebox_shortcuts"), dict)
             else {}
         ),
         studio_library=tuple(
@@ -1485,6 +1553,11 @@ def _device_display_settings(value: object, default_display: str) -> tuple[Devic
                 green_gain=normalize_channel_gain(item.get("green_gain")),
                 blue_gain=normalize_channel_gain(item.get("blue_gain")),
                 blend_mode=_device_blend_mode_setting(item.get("blend_mode")),
+                provider_pin=(
+                    item.get("provider_pin")
+                    if item.get("provider_pin") in ("claude", "codex")
+                    else None
+                ),
                 resting_glow=_fraction_setting(item.get("resting_glow"), 0.0),
             )
         )

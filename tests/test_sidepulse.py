@@ -9516,6 +9516,202 @@ class ContextLidAnimationTests(unittest.TestCase):
         )
 
 
+class TimeboxHandshakeTests(unittest.TestCase):
+    """Story #10: presets run a Shortcut at start and another exactly
+    once at end -- whether the drain hit zero or Stop came first."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.fired: list[str] = []
+        self.controller.run_shortcut_named = self.fired.append
+
+    class _Sender:
+        def __init__(self, minutes) -> None:
+            self._minutes = minutes
+
+        def representedObject(self):
+            return self._minutes
+
+    def test_mapping_round_trips_and_removes(self) -> None:
+        settings = AgentMonitorSettings().with_timebox_shortcut("25", "Work On", "Work Off")
+        self.assertEqual(settings.timebox_shortcut_pair("25"), ("Work On", "Work Off"))
+        self.assertEqual(settings.timebox_shortcut_pair("45"), ("", ""))
+        self.assertEqual(
+            settings.with_timebox_shortcut("25", " ", "").timebox_shortcuts, {}
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(settings, path)
+            self.assertEqual(
+                load_settings(path).timebox_shortcut_pair("25"), ("Work On", "Work Off")
+            )
+
+    def test_mapped_preset_fires_on_then_off_exactly_once(self) -> None:
+        self.controller.settings = self.controller.settings.with_timebox_shortcut(
+            "25", "Focus On", "Focus Off"
+        )
+        self.controller.startTimebox_(self._Sender(25))
+        self.assertEqual(self.fired, ["Focus On"])
+        self.controller.stopTimebox_(None)
+        self.assertEqual(self.fired, ["Focus On", "Focus Off"])
+        # Stop again (or the zero-crossing racing Stop): pop-once holds.
+        self.controller.stopTimebox_(None)
+        self.assertEqual(self.fired, ["Focus On", "Focus Off"])
+
+    def test_off_only_mapping_still_fires_at_end(self) -> None:
+        self.controller.settings = self.controller.settings.with_timebox_shortcut(
+            "45", "", "Wind Down"
+        )
+        self.controller.startTimebox_(self._Sender(45))
+        self.assertEqual(self.fired, [])
+        self.controller.fire_timebox_off_shortcut()
+        self.controller.fire_timebox_off_shortcut()
+        self.assertEqual(self.fired, ["Wind Down"])
+
+    def test_unmapped_preset_behaves_exactly_as_today(self) -> None:
+        self.controller.startTimebox_(self._Sender(15))
+        self.controller.stopTimebox_(None)
+        self.assertEqual(self.fired, [])
+
+
+class ProjectHueFamilyTests(unittest.TestCase):
+    """Story #13: one hue family per project, lightness within it."""
+
+    def test_groups_off_is_byte_identical(self) -> None:
+        ids = ["c:session:1", "c:session:2", "x:session:3"]
+        plain = colors_module.identity_colors_for_agents(ids)
+        self.assertEqual(
+            colors_module.identity_colors_for_agents(ids, groups=None), plain
+        )
+        self.assertEqual(
+            colors_module.identity_colors_for_agents(ids, groups={}), plain
+        )
+
+    def test_family_steps_lightness_and_spares_singletons(self) -> None:
+        ids = ["c:session:1", "c:session:2", "x:session:3", "y:session:9"]
+        groups = {
+            "c:session:1": "repoA",
+            "c:session:2": "repoA",
+            "x:session:3": "repoA",
+            "y:session:9": "repoB",
+        }
+        grouped = colors_module.identity_colors_for_agents(ids, groups=groups)
+        plain = colors_module.identity_colors_for_agents(ids)
+        family = [grouped[agent_id] for agent_id in ids[:3]]
+        self.assertEqual(len(set(family)), 3)
+        # A lone session in its "group" keeps the classic slot exactly.
+        self.assertEqual(grouped["y:session:9"], plain["y:session:9"])
+        # Pure function of the ID SET, caller order irrelevant.
+        self.assertEqual(
+            colors_module.identity_colors_for_agents(list(reversed(ids)), groups=groups),
+            grouped,
+        )
+
+    def test_identity_groups_respect_toggle_and_origin(self) -> None:
+        on = ColorSettings.defaults().with_color_by_project(True)
+        off = ColorSettings.defaults()
+        with_origin = AgentStatus(
+            provider="claude",
+            agent_id="claude:session:1",
+            display_name="Claude",
+            mode=AgentMode.WORKING,
+            updated_at=datetime.now(timezone.utc),
+            event_name="Test",
+            origin="repoA",
+        )
+        without_origin = _status("codex", AgentMode.WORKING)
+        statuses = (with_origin, without_origin)
+        self.assertIsNone(colors_module.identity_groups_for_statuses(statuses, off))
+        self.assertEqual(
+            colors_module.identity_groups_for_statuses(statuses, on),
+            {"claude:session:1": "repoA"},
+        )
+
+    def test_color_by_project_round_trips(self) -> None:
+        configured = ColorSettings.defaults().with_color_by_project(True)
+        self.assertTrue(ColorSettings.from_dict(configured.to_dict()).color_by_project)
+        self.assertFalse(ColorSettings.defaults().color_by_project)
+
+
+class WingTipGaugeTests(unittest.TestCase):
+    """Story #14: the wing tips as standing micro-gauges."""
+
+    def test_setter_clamps_and_change_gates(self) -> None:
+        from sidepulse import virtual_device
+
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(
+            ((0, 0), (400.0, 37.0))
+        )
+        view.set_standing_gauges(0.6, True)
+        self.assertAlmostEqual(view._gauge_left_level, 0.6)
+        self.assertTrue(view._gauge_right_on)
+        view.set_standing_gauges(2.0, False)
+        self.assertEqual(view._gauge_left_level, 1.0)
+        self.assertFalse(view._gauge_right_on)
+        view.set_standing_gauges(-3.0, False)
+        self.assertEqual(view._gauge_left_level, 0.0)
+
+    def test_setting_defaults_off_and_round_trips(self) -> None:
+        self.assertFalse(AgentMonitorSettings().screen_bar_gauges_enabled)
+        configured = AgentMonitorSettings().with_screen_bar_gauges_enabled(True)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(configured, path)
+            self.assertTrue(load_settings(path).screen_bar_gauges_enabled)
+
+
+class ProviderPinTests(unittest.TestCase):
+    """Story #16: a pinned device is one provider's channel -- and asks
+    are never partitioned."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def _settings_with_device(self):
+        return AgentMonitorSettings(
+            devices=(
+                DeviceDisplaySetting(
+                    device_id="Dot", name="SidePulse Dot", path="/Volumes/Dot"
+                ),
+            )
+        )
+
+    def test_pin_round_trips_and_validates(self) -> None:
+        settings = self._settings_with_device().with_device_provider_pin("Dot", "codex")
+        self.assertEqual(settings.device_provider_pin("Dot"), "codex")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings(settings, path)
+            self.assertEqual(load_settings(path).device_provider_pin("Dot"), "codex")
+        self.assertIsNone(
+            settings.with_device_provider_pin("Dot", None).device_provider_pin("Dot")
+        )
+        with self.assertRaises(ValueError):
+            settings.with_device_provider_pin("Dot", "gemini")
+
+    def test_ask_still_escalates_on_a_pinned_device(self) -> None:
+        """The regression the spec demands: an ask from the OTHER
+        provider still takes over a pinned device, because escalation
+        claims resolve in the display ladder before the agent display
+        (and its pin filter) is ever consulted."""
+        device = self.status_bar.StatusBarDevice(
+            device_id="Dot",
+            name="SidePulse Dot",
+            root=Path("/Volumes/Dot"),
+            target=Path("/Volumes/Dot/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        self.controller.settings = self._settings_with_device().with_device_provider_pin(
+            "Dot", "codex"
+        ).with_escalation_tier("takeover")
+        self.controller.ask_blocked_since = time.monotonic() - 400.0
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_ESCALATION,
+        )
+
+
 class NightWarmthTests(unittest.TestCase):
     """Story #8: 19:00-07:00 warmth composes with calibration gains."""
 

@@ -376,7 +376,10 @@ IDENTITY_PALETTE: tuple[str, ...] = (
 )
 
 
-def identity_colors_for_agents(agent_ids: list[str]) -> dict[str, str]:
+def identity_colors_for_agents(
+    agent_ids: list[str],
+    groups: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Deterministic palette assignment: each id hashes to a preferred
     slot and probes forward past slots already taken this round, so the
     same set of sessions always maps to the same colors, and two
@@ -387,10 +390,51 @@ def identity_colors_for_agents(agent_ids: list[str]) -> dict[str, str]:
     ordered lists, and collision probing is order-dependent -- without
     the sort, two hash-colliding sessions swapped hues whenever their
     urgency order flipped, and the dropdown dot could disagree with
-    the LEDs. Sorted, the result is a pure function of the ID SET."""
-    taken: set[int] = set()
+    the LEDs. Sorted, the result is a pure function of the ID SET.
+
+    Story #13 (project hue families): ``groups`` maps agent_id -> a
+    project key (the session's origin). A key claimed by TWO OR MORE
+    ids becomes a hue family -- one hue per project, members told apart
+    by perceptually even OKLCH lightness steps -- so the bar answers
+    "which project needs me?", not "which harness?". Singletons and
+    ungrouped ids keep the classic per-session slots, and groups=None
+    is byte-identical to the pre-#13 behavior."""
+    ids = sorted(set(agent_ids))
     assignment: dict[str, str] = {}
-    for agent_id in sorted(set(agent_ids)):
+    family_member_ids: set[str] = set()
+    if groups:
+        members_by_group: dict[str, list[str]] = {}
+        for agent_id in ids:
+            group_key = groups.get(agent_id)
+            if group_key:
+                members_by_group.setdefault(str(group_key), []).append(agent_id)
+        taken_buckets: set[int] = set()
+        bucket_count = 10  # 36-degree hue neighborhoods
+        for group_key in sorted(
+            key for key, members in members_by_group.items() if len(members) >= 2
+        ):
+            members = members_by_group[group_key]
+            start = (
+                int(hashlib.md5(group_key.encode("utf-8")).hexdigest(), 16)
+                % bucket_count
+            )
+            bucket = start
+            for offset in range(bucket_count):
+                candidate = (start + offset) % bucket_count
+                if candidate not in taken_buckets:
+                    bucket = candidate
+                    break
+            taken_buckets.add(bucket)
+            hue = bucket * (360.0 / bucket_count)
+            span = len(members) - 1
+            for index, agent_id in enumerate(members):
+                lightness = 0.80 - (0.22 * index / span if span else 0.0)
+                assignment[agent_id] = oklch_hex(lightness, 0.15, hue)
+                family_member_ids.add(agent_id)
+    taken: set[int] = set()
+    for agent_id in ids:
+        if agent_id in family_member_ids:
+            continue
         start = int(hashlib.md5(agent_id.encode("utf-8")).hexdigest(), 16) % len(IDENTITY_PALETTE)
         slot = start
         for offset in range(len(IDENTITY_PALETTE)):
@@ -401,6 +445,20 @@ def identity_colors_for_agents(agent_ids: list[str]) -> dict[str, str]:
         taken.add(slot)
         assignment[agent_id] = IDENTITY_PALETTE[slot]
     return assignment
+
+
+def identity_groups_for_statuses(statuses, colors) -> dict[str, str] | None:
+    """The groups argument for identity_colors_for_agents, from live
+    statuses: origin (the per-session project detection) keys the
+    family. None whenever the toggle is off, so every call site remains
+    byte-identical with Color by Project disabled."""
+    if not getattr(colors, "color_by_project", False):
+        return None
+    return {
+        status.agent_id: status.origin
+        for status in statuses
+        if getattr(status, "origin", None)
+    }
 
 
 def _default_fade_floor() -> dict[str, float]:
@@ -456,6 +514,9 @@ class ColorSettings:
     # with other agents' active animations and can't safely host a
     # one-shot effect without replaying it every loop.
     done_celebration_enabled: bool = DEFAULT_DONE_CELEBRATION_ENABLED
+    # Story #13: color sessions by PROJECT (origin) -- one hue family
+    # per repo, lightness steps within it. Off = classic per-session.
+    color_by_project: bool = False
 
     @classmethod
     def defaults(cls) -> ColorSettings:
@@ -602,6 +663,9 @@ class ColorSettings:
     def with_done_celebration_enabled(self, enabled: bool) -> ColorSettings:
         return replace(self, done_celebration_enabled=bool(enabled))
 
+    def with_color_by_project(self, enabled: bool) -> ColorSettings:
+        return replace(self, color_by_project=bool(enabled))
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "mode_colors": dict(self.mode_colors),
@@ -615,6 +679,7 @@ class ColorSettings:
             "speed_overrides": dict(self.speed_overrides),
             "round_robin_urgency_alert": self.round_robin_urgency_alert,
             "done_celebration_enabled": self.done_celebration_enabled,
+            "color_by_project": self.color_by_project,
         }
 
     @classmethod
@@ -695,6 +760,9 @@ class ColorSettings:
             bool(raw_celebration) if isinstance(raw_celebration, bool) else DEFAULT_DONE_CELEBRATION_ENABLED
         )
 
+        raw_by_project = data.get("color_by_project")
+        color_by_project = bool(raw_by_project) if isinstance(raw_by_project, bool) else False
+
         return cls(
             mode_colors=mode_colors,
             agent_colors=agent_colors,
@@ -707,6 +775,7 @@ class ColorSettings:
             speed_overrides=speed_overrides,
             round_robin_urgency_alert=round_robin_urgency_alert,
             done_celebration_enabled=done_celebration_enabled,
+            color_by_project=color_by_project,
         )
 
 
@@ -874,7 +943,10 @@ def _active_agents(statuses: tuple[AgentStatus, ...], colors: ColorSettings) -> 
     # to tell apart; a lone session keeps its provider's brand color.
     identity: dict[str, str] = {}
     if len(ordered) > 1:
-        identity = identity_colors_for_agents([status.agent_id for status in ordered])
+        identity = identity_colors_for_agents(
+            [status.agent_id for status in ordered],
+            groups=identity_groups_for_statuses(ordered, colors),
+        )
     agents: list[_ActiveAgent] = []
     for status in ordered:
         override = colors.session_color(status.agent_id)

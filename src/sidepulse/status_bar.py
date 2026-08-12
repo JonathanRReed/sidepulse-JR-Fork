@@ -330,6 +330,9 @@ COMPLETION_NOTIFY_FRESHNESS_SECONDS = 120.0
 # when the toggle is on. Red full, green -13%, blue -30% -- warm enough
 # to notice, subtle enough that status colors stay unambiguous.
 NIGHT_WARMTH_GAINS = (1.0, 0.87, 0.70)
+# Story #10: the timebox presets offered in the dropdown -- also the
+# rows of the Focus-handshake card, so the two stay in lockstep.
+TIMEBOX_PRESET_MINUTES = (15, 25, 45, 60)
 # ioreg is a subprocess fork on the main thread and refresh_ runs on
 # every hook event; power-state changes may lag by up to this TTL.
 BATTERY_SNAPSHOT_CACHE_SECONDS = 5.0
@@ -671,6 +674,8 @@ class StatusBarController(NSObject):
             self.timebox_total_seconds = 0.0
             # Overtime ember: hold a deepening glow until Stop.
             self.timebox_overtime_since = time.monotonic()
+            # Story #10: the drain ending gives the Focus back.
+            self.fire_timebox_off_shortcut()
             try:
                 from AppKit import NSSound
 
@@ -1334,6 +1339,23 @@ class StatusBarController(NSObject):
         self.refresh_(None)
 
     @objc.IBAction
+    def applyTimeboxShortcuts_(self, _sender):
+        settings = self.settings
+        for preset_minutes in TIMEBOX_PRESET_MINUTES:
+            on_field = self.settings_fields.get(f"timebox_on_field:{preset_minutes}")
+            off_field = self.settings_fields.get(f"timebox_off_field:{preset_minutes}")
+            if on_field is None or off_field is None:
+                continue
+            settings = settings.with_timebox_shortcut(
+                str(preset_minutes),
+                str(on_field.stringValue()),
+                str(off_field.stringValue()),
+            )
+        self.settings = settings
+        save_settings(self.settings)
+        self.set_settings_message("Timebox Focus handshake saved.")
+
+    @objc.IBAction
     def setFocusSignalPolicy_(self, sender):
         identifier = str(sender.identifier() or "")
         if not identifier:
@@ -1909,6 +1931,19 @@ class StatusBarController(NSObject):
         save_settings(self.settings)
         self.refresh_(None)
         self.set_settings_message(f"Display: {item.title()}.")
+
+    @objc.IBAction
+    def setDeviceProviderPin_(self, sender):
+        device_id = str(sender.identifier() or "")
+        if not device_id:
+            return
+        item = sender.selectedItem()
+        pin = str(item.representedObject() or "") if item is not None else ""
+        self.settings = self.settings.with_device_provider_pin(device_id, pin or None)
+        save_settings(self.settings)
+        label = item.title() if item is not None else "All sessions"
+        self.set_settings_message(f"Device sessions: {label.lower()}.")
+        self.refresh_(None)
 
     @objc.IBAction
     def setDeviceBlendMode_(self, sender):
@@ -2771,7 +2806,12 @@ class StatusBarController(NSObject):
             return
         ordered_ids = sorted(current_modes)
         identity = (
-            colors_module.identity_colors_for_agents(ordered_ids)
+            colors_module.identity_colors_for_agents(
+                ordered_ids,
+                groups=colors_module.identity_groups_for_statuses(
+                    tuple(statuses_by_id.values()), self.settings.colors
+                ),
+            )
             if len(ordered_ids) > 1
             else {}
         )
@@ -2953,19 +2993,58 @@ class StatusBarController(NSObject):
             return 1.0
         return min(1.0, (time.monotonic() - self.working_since) / expected_seconds)
 
+    def run_shortcut_named(self, name: str) -> None:
+        """`shortcuts run <name>` on a daemon thread (story #10) -- the
+        CLI can block on the one-time per-shortcut permission toast, so
+        it must never ride the main thread. Failures log quietly and
+        never retry."""
+
+        def _run() -> None:
+            try:
+                result = subprocess.run(
+                    ["shortcuts", "run", name],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if result.returncode != 0:
+                    log_status_bar(f"shortcut '{name}' exited {result.returncode}")
+            except Exception as exc:
+                log_status_bar(f"shortcut '{name}' failed: {exc}")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def fire_timebox_off_shortcut(self) -> None:
+        """Pop-and-fire: the end-of-timebox Shortcut runs exactly once
+        whether the drain hit zero or the user pressed Stop first."""
+        name = getattr(self, "_timebox_off_shortcut", None)
+        self._timebox_off_shortcut = None
+        if name:
+            self.run_shortcut_named(name)
+
     @objc.IBAction
     def startTimebox_(self, sender):
         minutes = float(sender.representedObject() or 25)
         self.timebox_total_seconds = minutes * 60.0
         self.timebox_ends_at = time.monotonic() + self.timebox_total_seconds
+        # Story #10 (Focus handshake): a mapped preset flips its Focus
+        # on now and off when the drain ends -- one click, whole ritual.
+        on_name, off_name = self.settings.timebox_shortcut_pair(str(int(minutes)))
+        self._timebox_off_shortcut = off_name or None
+        if on_name:
+            self.run_shortcut_named(on_name)
         self.refresh_(None)
-        self.set_settings_message(f"Timebox: {minutes:g} minutes on the bar.")
+        message = f"Timebox: {minutes:g} minutes on the bar."
+        if on_name:
+            message += f" Running \u201c{on_name}\u201d."
+        self.set_settings_message(message)
 
     @objc.IBAction
     def stopTimebox_(self, _sender):
         self.timebox_overtime_since = None
         self.timebox_ends_at = None
         self.timebox_total_seconds = 0.0
+        self.fire_timebox_off_shortcut()
         self.refresh_(None)
         self.set_settings_message("Timebox stopped.")
 
@@ -3807,6 +3886,11 @@ class StatusBarController(NSObject):
         self._commit_colors_and_refresh(colors)
 
     @objc.IBAction
+    def toggleColorByProject_(self, sender):
+        colors = self.settings.colors.with_color_by_project(checkbox_is_on(sender))
+        self._commit_colors_and_refresh(colors)
+
+    @objc.IBAction
     def toggleDoneCelebration_(self, sender):
         enabled = checkbox_is_on(sender)
         self.settings = self.settings.with_completion_sweep_enabled(enabled)
@@ -3945,6 +4029,14 @@ class StatusBarController(NSObject):
         if gap_slider is not None:
             gap_slider.setDoubleValue_(float(auto_gap))
         self.set_settings_message("Bar size back to Automatic.")
+
+    @objc.IBAction
+    def toggleScreenBarGauges_(self, sender):
+        self.settings = self.settings.with_screen_bar_gauges_enabled(
+            checkbox_is_on(sender)
+        )
+        save_settings(self.settings)
+        self.refresh_(None)
 
     @objc.IBAction
     def toggleScreenBarWrapsMenuBar_(self, sender):
@@ -4208,6 +4300,10 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("screen_bar_wraps_menu_bar"),
             self.settings.virtual_status_device_wraps_menu_bar,
         )
+        set_checkbox_state(
+            self.settings_buttons.get("screen_bar_gauges"),
+            self.settings.screen_bar_gauges_enabled,
+        )
         self.refresh_screen_bar_preview()
         closed_lid_policy_popup = self.settings_fields.get("closed_lid_awake_policy_popup")
         if closed_lid_policy_popup is not None:
@@ -4423,6 +4519,14 @@ class StatusBarController(NSObject):
                 item = blend_popup.itemAtIndex_(index)
                 if str(item.representedObject() or "") == wanted:
                     blend_popup.selectItem_(item)
+                    break
+        pin_popup = controls.get("pin_popup")
+        if pin_popup is not None:
+            wanted_pin = self.settings.device_provider_pin(device_id) or ""
+            for index in range(pin_popup.numberOfItems()):
+                item = pin_popup.itemAtIndex_(index)
+                if str(item.representedObject() or "") == wanted_pin:
+                    pin_popup.selectItem_(item)
                     break
 
     def set_brightness_preview_dots(self, dots, brightness) -> None:
@@ -5595,6 +5699,22 @@ class StatusBarController(NSObject):
         )
         self.virtual_status_device.set_bracket_style(self.settings.screen_bar_bracket_style)
         self.virtual_status_device.set_min_glow(self.settings.screen_bar_min_glow)
+        # Story #14: the wing tips as standing micro-gauges -- the left
+        # tip's quota ember tracks the worst window (fades in past 50%),
+        # the right tip holds unseen-done green until the menu opens.
+        if self.settings.screen_bar_gauges_enabled:
+            percents = getattr(self, "quota_last_percents", None) or {}
+            worst = max(percents.values(), default=0.0)
+            left_level = max(0.0, min(1.0, (float(worst) - 50.0) / 50.0))
+            snapshot = getattr(self, "last_snapshot", None)
+            right_on = (
+                bool(unseen_completions(snapshot, self))
+                if snapshot is not None
+                else False
+            )
+            self.virtual_status_device.set_standing_gauges(left_level, right_on)
+        else:
+            self.virtual_status_device.set_standing_gauges(0.0, False)
         # Click-to-answer: while an ask is live, the glowing bar itself
         # is the fastest route to the asking session -- click it and the
         # oldest unanswered ask's terminal comes forward. With no ask,
@@ -6155,8 +6275,24 @@ class StatusBarController(NSObject):
                 override = self.settings.device_blend_mode(device.device_id)
                 if override:
                     colors_for_render = colors_for_render.with_blend_mode(override)
+                # Story #16: a pinned device renders only its provider's
+                # sessions and rests dark (IDLE_READY) when none are
+                # live. Asks are NEVER partitioned -- escalation claims
+                # were resolved in the display ladder above, before the
+                # agent display was chosen for this device.
+                statuses_for_device = statuses
+                fallback_for_device = mode
+                pin = self.settings.device_provider_pin(device.device_id)
+                if pin:
+                    statuses_for_device = tuple(
+                        status for status in statuses if status.provider == pin
+                    )
+                    if not statuses_for_device:
+                        fallback_for_device = AgentMode.IDLE_READY
                 result = self.agent_controller_for_device(device).sync_snapshot(
-                    statuses, colors_for_render, fallback_mode=mode
+                    statuses_for_device,
+                    colors_for_render,
+                    fallback_mode=fallback_for_device,
                 )
                 label = f"{device.name} {result.label}"
                 if result.error:
@@ -6704,8 +6840,10 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         menu.addItem_(disabled_menu_item(f"Needs You ({len(asks)})"))
         ask_identity: dict[str, str] = {}
         if len(asks) > 1:
+            menu_colors = getattr(getattr(target, "settings", None), "colors", None)
             ask_identity = colors_module.identity_colors_for_agents(
-                [status.agent_id for status in asks]
+                [status.agent_id for status in asks],
+                groups=colors_module.identity_groups_for_statuses(asks, menu_colors),
             )
         for status in asks:
             dot = None
@@ -6737,8 +6875,10 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         # for that session -- so the mapping is learnable at a glance.
         identity: dict[str, str] = {}
         if len(statuses) > 1:
+            menu_colors = getattr(getattr(target, "settings", None), "colors", None)
             identity = colors_module.identity_colors_for_agents(
-                [status.agent_id for status in statuses]
+                [status.agent_id for status in statuses],
+                groups=colors_module.identity_groups_for_statuses(statuses, menu_colors),
             )
         subagent_groups = active_subagents_by_parent(snapshot)
         cleared_ids = getattr(target, "cleared_session_ids", set())
@@ -6838,7 +6978,7 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     timebox_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Timer", None, "")
     timebox_menu = NSMenu.alloc().init()
     timebox_menu.setAutoenablesItems_(False)
-    for minutes in (15, 25, 45, 60):
+    for minutes in TIMEBOX_PRESET_MINUTES:
         start_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             f"Start {minutes} Minutes", "startTimebox:", ""
         )
@@ -7830,6 +7970,33 @@ def _build_devices_pane(target: StatusBarController):
                 blend_popup.selectItem_(item)
         inner.addArrangedSubview_(native_ui.make_row("Blend Mode", blend_popup))
 
+        # Story #16: pin this device to one provider -- "the Dot is
+        # Codex's" -- while other devices keep the aggregate.
+        pin_popup = native_ui.make_popup_button(target, "setDeviceProviderPin:")
+        pin_popup.setIdentifier_(device.device_id)
+        current_pin = target.settings.device_provider_pin(device.device_id)
+        for label, pin_key in (
+            ("All sessions", ""),
+            ("Claude only", "claude"),
+            ("Codex only", "codex"),
+        ):
+            pin_popup.addItemWithTitle_(label)
+            item = pin_popup.lastItem()
+            item.setRepresentedObject_(pin_key)
+            if (pin_key or None) == current_pin:
+                pin_popup.selectItem_(item)
+        inner.addArrangedSubview_(
+            native_ui.make_row(
+                "Sessions",
+                pin_popup,
+                help_text=(
+                    "A pinned device shows only that provider's sessions "
+                    "and rests dark when none are live. Asks still light "
+                    "every device -- blocked-on-you is never filtered."
+                ),
+            )
+        )
+
         stack.addArrangedSubview_(outer)
         device_controls[device.device_id] = {
             "brightness_slider": brightness_slider,
@@ -7840,6 +8007,7 @@ def _build_devices_pane(target: StatusBarController):
             "auto_brightness_row_checkbox": auto_checkbox_row,
             "display_popup": display_popup,
             "blend_popup": blend_popup,
+            "pin_popup": pin_popup,
         }
     return native_ui.wrap_in_scroll_pane(stack), device_controls
 
@@ -7974,6 +8142,20 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
             ),
         )
     )
+    native_ui.add_separator(glow_inner)
+    gauges_row, gauges_switch = native_ui.make_switch_row(
+        "Wing-tip gauges",
+        target,
+        "toggleScreenBarGauges:",
+        help_text=(
+            "The outermost sliver of each wing becomes a standing "
+            "micro-gauge: left holds a faint amber ember as your worst "
+            "quota window fills past 50%, right glows green while "
+            "finished sessions wait unseen -- and goes out the moment "
+            "you open the menu. Survives every animation."
+        ),
+    )
+    glow_inner.addArrangedSubview_(gauges_row)
     stack.addArrangedSubview_(glow_outer)
     outer, inner = native_ui.make_card()
 
@@ -8068,7 +8250,10 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         "screen_bar_gap_slider": gap_slider,
         "bracket_style_popup": bracket_popup,
     }
-    buttons = {"screen_bar_wraps_menu_bar": wraps_switch}
+    buttons = {
+        "screen_bar_wraps_menu_bar": wraps_switch,
+        "screen_bar_gauges": gauges_switch,
+    }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
@@ -8421,6 +8606,46 @@ def _build_focus_pane(target: StatusBarController):
     warmth_inner.addArrangedSubview_(warmth_row)
     buttons["night_warmth_enabled"] = warmth_switch
     stack.addArrangedSubview_(warmth_outer)
+
+    # Story #10: timebox presets can run a named Shortcut when they
+    # start and another when they end -- Focus on with the drain, Focus
+    # off when it finishes.
+    handshake_outer, handshake_inner = native_ui.make_card("Timebox Focus Handshake")
+    handshake_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Each Timer preset can run a Shortcut when it starts and "
+            "another when it ends or you press Stop -- name a Shortcut "
+            "that turns a Focus on, and its partner that turns it off. "
+            "macOS asks permission once per Shortcut the first time it "
+            "runs.",
+            secondary=True,
+            size=12.0,
+            max_width=560.0,
+        )
+    )
+    for preset_index, preset_minutes in enumerate(TIMEBOX_PRESET_MINUTES):
+        pair = target.settings.timebox_shortcut_pair(str(preset_minutes))
+        on_field = native_ui.make_field(
+            pair[0], target=target, action="applyTimeboxShortcuts:"
+        )
+        on_field.setPlaceholderString_("Shortcut at start")
+        native_ui.constrain_width(on_field, 150.0)
+        off_field = native_ui.make_field(
+            pair[1], target=target, action="applyTimeboxShortcuts:"
+        )
+        off_field.setPlaceholderString_("Shortcut at end")
+        native_ui.constrain_width(off_field, 150.0)
+        pair_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
+        pair_cluster.addArrangedSubview_(on_field)
+        pair_cluster.addArrangedSubview_(off_field)
+        handshake_inner.addArrangedSubview_(
+            native_ui.make_row(f"{preset_minutes} minutes", pair_cluster)
+        )
+        if preset_index < len(TIMEBOX_PRESET_MINUTES) - 1:
+            native_ui.add_separator(handshake_inner)
+        fields[f"timebox_on_field:{preset_minutes}"] = on_field
+        fields[f"timebox_off_field:{preset_minutes}"] = off_field
+    stack.addArrangedSubview_(handshake_outer)
 
     # Per-Focus rules: each configured Focus gets its own dim choice.
     # When the Focus database can't be read (no Full Disk Access), say so
@@ -9437,6 +9662,17 @@ def _build_color_studio_pane(target: StatusBarController) -> NSView:
         help_text="A brief twinkle plays before settling into the Done color.",
     )
     behavior_inner.addArrangedSubview_(done_row)
+    project_row, color_by_project_checkbox = native_ui.make_switch_row(
+        "Color by project",
+        target,
+        "toggleColorByProject:",
+        help_text=(
+            "Sessions in the same repo share one hue family -- providers "
+            "are told apart by lightness within it. Off: every session "
+            "gets its own hue."
+        ),
+    )
+    behavior_inner.addArrangedSubview_(project_row)
     native_ui.add_separator(behavior_inner)
 
     speed_field = native_ui.make_field("", target=target, action="applyCycleSpeed:")
@@ -9695,6 +9931,7 @@ def _build_color_studio_pane(target: StatusBarController) -> NSView:
         "blend_description": blend_description,
         "urgency_alert_checkbox": urgency_alert_checkbox,
         "done_celebration_checkbox": done_celebration_checkbox,
+        "color_by_project_checkbox": color_by_project_checkbox,
         "speed_field": speed_field,
         "round_robin_use_global": round_robin_use_global,
         "round_robin_speed_field": round_robin_speed_field,
@@ -9725,6 +9962,9 @@ def refresh_blend_and_speed_fields(target: StatusBarController) -> None:
     checkbox = fields.get("urgency_alert_checkbox")
     if checkbox is not None:
         set_checkbox_state(checkbox, colors.round_robin_urgency_alert)
+    by_project_checkbox = fields.get("color_by_project_checkbox")
+    if by_project_checkbox is not None:
+        set_checkbox_state(by_project_checkbox, colors.color_by_project)
     celebration_checkbox = fields.get("done_celebration_checkbox")
     if celebration_checkbox is not None:
         set_checkbox_state(celebration_checkbox, colors.done_celebration_enabled)

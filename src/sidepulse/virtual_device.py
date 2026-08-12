@@ -828,6 +828,10 @@ class VirtualLedView(NSView):
                 ((0.0, 0.0), (width, 0.45)),
                 (1.0, 1.0, 1.0, 0.055 * rim),
             )
+        # Only meaningful with wings: the tips must sit OUTSIDE the
+        # housing, or the gauge would paint over the notch body.
+        if wing_offset > 0.0:
+            self._draw_standing_gauges(cg_context, height)
 
     def _bracket_colors(self, colors):
         """The colors the Alcove bracket paints. "spatial" mirrors the
@@ -859,6 +863,58 @@ class VirtualLedView(NSView):
 
     def setBracketStyle_(self, style):
         self.bracket_style = str(style or "auto")
+
+    def set_standing_gauges(self, left_level, right_on):
+        """Story #14: the outermost columns as persistent micro-gauges.
+        left_level (0-1) is the quota ember's intensity; right_on holds
+        the unseen-done green. Change-gated like every other input."""
+        left_clamped = max(0.0, min(1.0, float(left_level)))
+        right_flag = bool(right_on)
+        if (
+            getattr(self, "_gauge_left_level", 0.0) == left_clamped
+            and getattr(self, "_gauge_right_on", False) == right_flag
+        ):
+            return
+        self._gauge_left_level = left_clamped
+        self._gauge_right_on = right_flag
+        self.setNeedsDisplay_(True)
+
+    def _draw_standing_gauges(self, cg_context, height):
+        """The overlay pass: painted LAST so standing state survives
+        whatever animation owns the center of the bar. Peripheral
+        vision gets its own pixels -- a 4pt amber ember at the left tip
+        (brightness tracks the worst quota window) and the unseen-done
+        green at the right tip."""
+        left_level = getattr(self, "_gauge_left_level", 0.0)
+        right_on = getattr(self, "_gauge_right_on", False)
+        if left_level <= 0.0 and not right_on:
+            return
+        width = self.bounds().size.width
+        tip_width = 4.0
+        glow_height = min(LED_GLOW_HEIGHT, max(0.0, height - LED_BAND_HEIGHT))
+        if left_level > 0.0:
+            alpha = 0.30 + 0.62 * left_level
+            fill_rect_with_cg(
+                cg_context,
+                ((0.0, 0.0), (tip_width, LED_BAND_HEIGHT)),
+                (1.0, 0.62, 0.18, alpha),
+            )
+            fill_rect_with_cg(
+                cg_context,
+                ((0.0, LED_BAND_HEIGHT), (tip_width, glow_height * 0.4)),
+                (1.0, 0.62, 0.18, alpha * 0.22),
+            )
+        if right_on:
+            fill_rect_with_cg(
+                cg_context,
+                ((width - tip_width, 0.0), (tip_width, LED_BAND_HEIGHT)),
+                (0.16, 0.95, 0.45, 0.85),
+            )
+            fill_rect_with_cg(
+                cg_context,
+                ((width - tip_width, LED_BAND_HEIGHT), (tip_width, glow_height * 0.4)),
+                (0.16, 0.95, 0.45, 0.20),
+            )
 
     def setMinGlow_(self, fraction):
         self.min_glow = max(0.0, min(1.0, float(fraction)))
@@ -956,6 +1012,7 @@ class VirtualLedView(NSView):
             cg_context, right_edge_color, width - WING_RISER_WIDTH, width, height,
             outer_on_left=False,
         )
+        self._draw_standing_gauges(cg_context, height)
         NSGraphicsContext.restoreGraphicsState()
 
     def _fill_glow_row(self, cg_context, colors, led_width, notch_width, glow_height, _height, *, x_start, x_end, wing_offset, wing_taper_floor=0.0):
@@ -1124,6 +1181,10 @@ class VirtualStatusDevice(NSObject):
     def set_min_glow(self, fraction: float) -> None:
         if self.view is not None:
             self.view.setMinGlow_(fraction)
+
+    def set_standing_gauges(self, left_level: float, right_on: bool) -> None:
+        if self.view is not None:
+            self.view.set_standing_gauges(left_level, right_on)
 
     def set_bracket_style(self, style: str) -> None:
         if self.view is not None:
