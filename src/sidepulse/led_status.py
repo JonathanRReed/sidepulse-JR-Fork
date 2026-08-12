@@ -477,7 +477,10 @@ def timer_fill_program(
     for index in range(led_count):
         amount = max(0.0, min(1.0, filled - index))
         if amount <= 0.0:
-            segments.append(f"{index}:off")
+            # "#000000", never "off": the firmware's indexed-segment
+            # parser rejects `N:off` (bad-index) and a failed parse
+            # renders the solid-red error state.
+            segments.append(f"{index}:#000000")
         else:
             scaled = "#" + "".join(
                 f"{round(channel * amount):02X}" for channel in (red, green, blue)

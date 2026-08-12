@@ -762,11 +762,23 @@ class AgentMonitorSettings:
 
     def signal_style(self, key: str):
         """The effective SignalStyle for a signal: the user's override
-        merged over the built-in default."""
-        from .signals import DEFAULT_SIGNAL_STYLES, SignalStyle
+        merged over the built-in default. Continuous signals never get
+        a one-shot pattern -- it would flash once and leave the bar
+        dark for the rest of a multi-hour condition."""
+        from .signals import (
+            CONTINUOUS_SIGNALS,
+            DEFAULT_SIGNAL_STYLES,
+            ONE_SHOT_PATTERNS,
+            PATTERN_BREATHE,
+            SignalStyle,
+        )
+        from dataclasses import replace as _replace
 
         fallback = DEFAULT_SIGNAL_STYLES[key]
-        return SignalStyle.from_dict(self.signal_styles.get(key), fallback)
+        style = SignalStyle.from_dict(self.signal_styles.get(key), fallback)
+        if key in CONTINUOUS_SIGNALS and style.pattern in ONE_SHOT_PATTERNS:
+            style = _replace(style, pattern=PATTERN_BREATHE)
+        return style
 
     def with_signal_style(self, key: str, style) -> "AgentMonitorSettings":
         from .signals import DEFAULT_SIGNAL_STYLES
@@ -1167,15 +1179,22 @@ def _device_display_settings(value: object, default_display: str) -> tuple[Devic
                 red_gain=normalize_channel_gain(item.get("red_gain")),
                 green_gain=normalize_channel_gain(item.get("green_gain")),
                 blue_gain=normalize_channel_gain(item.get("blue_gain")),
-                blend_mode=(
-                    item.get("blend_mode")
-                    if isinstance(item.get("blend_mode"), str) and item.get("blend_mode")
-                    else None
-                ),
+                blend_mode=_device_blend_mode_setting(item.get("blend_mode")),
             )
         )
         seen.add(device_id)
     return tuple(devices)
+
+
+def _device_blend_mode_setting(raw: object) -> str | None:
+    """Only real blend modes survive the load -- an unknown string here
+    used to reach ColorSettings.with_blend_mode at render time and
+    raise inside every refresh cycle."""
+    from .colors import BLEND_MODE_CHOICES
+
+    if isinstance(raw, str) and raw in BLEND_MODE_CHOICES:
+        return raw
+    return None
 
 
 def _session_open_preferences(value: object) -> dict[str, str]:

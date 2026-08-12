@@ -552,6 +552,10 @@ class StatusBarController(NSObject):
             None,
             True,
         )
+        # NSTimer's FIRST fire is one full interval out -- an active
+        # Tornado Warning must not stay dark for 10 minutes after launch.
+        if self.settings.weather_alerts_enabled:
+            self.pollWeather_(None)
         self.show_setup_window_if_needed()
         if SCREEN_BAR_FEATURE_ENABLED and self.settings.virtual_status_device_enabled:
             self.virtual_status_device.show()
@@ -1221,6 +1225,21 @@ class StatusBarController(NSObject):
                 "Reminders access is denied — enable SidePulse under "
                 "Privacy & Security → Reminders."
             )
+
+    @objc.IBAction
+    def applyTimerMinutes_(self, sender):
+        try:
+            minutes = float(str(sender.stringValue()).strip())
+        except ValueError:
+            sender.setStringValue_(f"{self.settings.timer_expected_minutes:g}")
+            return
+        self.settings = self.settings.with_timer_expected_minutes(minutes)
+        save_settings(self.settings)
+        sender.setStringValue_(f"{self.settings.timer_expected_minutes:g}")
+        self.refresh_(None)
+        self.set_settings_message(
+            f"Timer fill completes after {self.settings.timer_expected_minutes:g} minutes."
+        )
 
     @objc.IBAction
     def setDeviceDisplay_(self, sender):
@@ -2785,6 +2804,16 @@ class StatusBarController(NSObject):
         # reflect changes made outside their own handlers.
         for signal_key in signals_module.DEFAULT_SIGNAL_STYLES:
             self.refresh_signal_card(signal_key)
+        bracket_popup = self.settings_fields.get("bracket_style_popup")
+        if bracket_popup is not None:
+            for index in range(bracket_popup.numberOfItems()):
+                item = bracket_popup.itemAtIndex_(index)
+                if str(item.representedObject() or "") == self.settings.screen_bar_bracket_style:
+                    bracket_popup.selectItem_(item)
+                    break
+        timer_field = getattr(self, "timer_minutes_field", None)
+        if timer_field is not None:
+            set_field_value(timer_field, f"{self.settings.timer_expected_minutes:g}")
         tier_popup = self.settings_fields.get("escalation_tier_popup")
         if tier_popup is not None:
             for index in range(tier_popup.numberOfItems()):
@@ -2861,6 +2890,24 @@ class StatusBarController(NSObject):
             slider = controls.get(key)
             if slider is not None:
                 slider.setDoubleValue_(gain * 100.0)
+        # The Display and Blend popups must reflect changes made from
+        # the menu-bar device submenu, like every other control here.
+        display_popup = controls.get("display_popup")
+        if display_popup is not None:
+            wanted = self.settings.display_for_device(device_id)
+            for index in range(display_popup.numberOfItems()):
+                item = display_popup.itemAtIndex_(index)
+                if str(item.representedObject() or "") == wanted:
+                    display_popup.selectItem_(item)
+                    break
+        blend_popup = controls.get("blend_popup")
+        if blend_popup is not None:
+            wanted = self.settings.device_blend_mode(device_id) or ""
+            for index in range(blend_popup.numberOfItems()):
+                item = blend_popup.itemAtIndex_(index)
+                if str(item.representedObject() or "") == wanted:
+                    blend_popup.selectItem_(item)
+                    break
 
     def set_brightness_preview_dots(self, dots, brightness) -> None:
         """A plain white dot strip, one per LED, showing at a glance how
@@ -4405,6 +4452,10 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     # saved in two clicks from here.
     profiles_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Profiles", None, "")
     profiles_menu = NSMenu.alloc().init()
+    # Manual enablement: with the default autoenablesItems, AppKit
+    # re-enables every targeted item and "Apply" for an empty slot
+    # becomes a clickable lie.
+    profiles_menu.setAutoenablesItems_(False)
     saved_profiles = getattr(target, "settings", None)
     saved = saved_profiles.calibration_profiles if saved_profiles is not None else {}
     for slot in CALIBRATION_PROFILE_SLOTS:
@@ -4888,6 +4939,30 @@ def _build_devices_pane(target: StatusBarController):
         outer, inner = native_ui.make_card("Devices")
         inner.addArrangedSubview_(native_ui.make_label("No devices connected yet.", secondary=True))
         stack.addArrangedSubview_(outer)
+    if devices:
+        # One global timer length for the Working-timer display.
+        timer_outer, timer_inner = native_ui.make_card("Working Timer")
+        timer_field = native_ui.make_field(
+            f"{target.settings.timer_expected_minutes:g}",
+            target=target,
+            action="applyTimerMinutes:",
+        )
+        native_ui.constrain_width(timer_field, 52.0)
+        timer_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
+        timer_controls.addArrangedSubview_(timer_field)
+        timer_controls.addArrangedSubview_(native_ui.make_label("minutes expected", secondary=True))
+        timer_inner.addArrangedSubview_(
+            native_ui.make_row(
+                "Fill completes after",
+                timer_controls,
+                help_text=(
+                    "Devices set to Working timer fill light up as the "
+                    "oldest working agent's elapsed time crosses this."
+                ),
+            )
+        )
+        stack.addArrangedSubview_(timer_outer)
+        target.timer_minutes_field = timer_field
     for device in devices:
         outer, inner = native_ui.make_card(device.name)
 
@@ -5389,7 +5464,17 @@ def make_signal_style_card(target: StatusBarController, key: str, title: str, *,
     preview_color = _signal_preview_color(target, key)
     thumbs: dict[str, object] = {}
     thumb_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
-    for pattern in signals_module.SIGNAL_PATTERNS:
+    # Continuous signals don't offer one-shot patterns: three flashes
+    # then hours of darkness isn't a style, it's a bug.
+    offered_patterns = tuple(
+        pattern
+        for pattern in signals_module.SIGNAL_PATTERNS
+        if not (
+            key in signals_module.CONTINUOUS_SIGNALS
+            and pattern in signals_module.ONE_SHOT_PATTERNS
+        )
+    )
+    for pattern in offered_patterns:
         thumb = _mini_led_view(*SIGNAL_THUMB_SIZE)
         thumb.setToolTip_(pattern.replace("-", " ").title())
         preview_style = signals_module.SignalStyle(

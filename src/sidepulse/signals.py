@@ -41,6 +41,12 @@ SIGNAL_PATTERNS = (
 )
 # Patterns that play once and end (the rest loop with `repeat`).
 ONE_SHOT_PATTERNS = (PATTERN_BLINK, PATTERN_DOUBLE_BLINK)
+# Signals whose claim HOLDS while a condition lasts (vs. moment
+# signals that fire and expire). A one-shot pattern on one of these
+# would flash three times and leave the bar dark for the rest of a
+# multi-hour condition -- settings.signal_style falls such choices
+# back to breathe, and the style cards don't offer them.
+CONTINUOUS_SIGNALS = ("low_battery", "calendar", "weather")
 
 MIN_SPEED_SECONDS = 0.1
 MAX_SPEED_SECONDS = 10.0

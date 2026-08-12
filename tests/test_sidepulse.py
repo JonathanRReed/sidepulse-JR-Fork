@@ -8477,7 +8477,12 @@ class SignalStyleCardTests(unittest.TestCase):
         for key, _title, show_color in self.status_bar.SIGNAL_STYLE_CARDS:
             thumbs = self.controller.settings_fields.get(f"signal_thumbs:{key}")
             self.assertIsInstance(thumbs, dict, key)
-            self.assertEqual(set(thumbs), set(signals.SIGNAL_PATTERNS), key)
+            expected = set(signals.SIGNAL_PATTERNS)
+            if key in signals.CONTINUOUS_SIGNALS:
+                # One-shot patterns would flash once then leave the bar
+                # dark for the rest of a held condition -- not offered.
+                expected -= set(signals.ONE_SHOT_PATTERNS)
+            self.assertEqual(set(thumbs), expected, key)
             self.assertIsNotNone(self.controller.settings_fields.get(f"signal_preview:{key}"))
             self.assertIsNotNone(self.controller.settings_fields.get(f"signal_speed:{key}"))
             self.assertIsNotNone(self.controller.settings_fields.get(f"signal_intensity:{key}"))
@@ -8740,12 +8745,15 @@ class DeferredRoadmapTests(unittest.TestCase):
         from sidepulse.device_writer import MAX_LED_BYTES, MAX_LED_LINES
         from sidepulse.led_status import timer_fill_program
 
+        # "#000000", never ":off" -- the firmware's indexed parser
+        # rejects `N:off` and a parse failure renders solid error-red.
         empty = timer_fill_program(0.0, led_count=8)
-        self.assertEqual(empty.count(":off"), 8)
+        self.assertEqual(empty.count(":#000000"), 8)
+        self.assertNotIn(":off", empty)
         half = timer_fill_program(0.5, led_count=8)
-        self.assertEqual(half.count(":off"), 4)
+        self.assertEqual(half.count(":#000000"), 4)
         full = timer_fill_program(1.0, led_count=8, color="#00E5FF")
-        self.assertEqual(full.count(":off"), 0)
+        self.assertEqual(full.count(":#000000"), 0)
         self.assertIn("#00E5FF", full)
         self.assertNotIn("repeat", full)
         for led_count in (2, 8):
