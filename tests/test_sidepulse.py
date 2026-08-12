@@ -9713,6 +9713,28 @@ class BacklogBehaviorTests(unittest.TestCase):
         )
 
 
+class SingleInstanceProbeTests(unittest.TestCase):
+    """Backlog #15: the second instance bows out instead of stealing
+    the socket."""
+
+    def test_probe_distinguishes_live_stale_and_absent(self) -> None:
+        from sidepulse.ipc import HookEventServer, another_instance_alive
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sock = Path(tmp) / "events.sock"
+            self.assertFalse(another_instance_alive(sock))
+            server = HookEventServer(lambda p, line: None, socket_path=sock)
+            server.start()
+            try:
+                self.assertTrue(another_instance_alive(sock))
+            finally:
+                server.stop()
+            self.assertFalse(another_instance_alive(sock))
+            # A stale non-socket file reads as dead, not alive.
+            sock.write_text("stale")
+            self.assertFalse(another_instance_alive(sock))
+
+
 class ResilienceHardeningTests(unittest.TestCase):
     """Backlog #6/#7/#19: corruption keeps its evidence, device writes
     are atomic, and the INIT.LED burn fails closed."""

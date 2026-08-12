@@ -80,3 +80,9 @@ ignore = [
     "RUF046",  # int(len(...)) casts kept for PyObjC bridge clarity
     "RUF059",  # unpacked-but-unused tuple parts document payload shape
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# settings_window.py runs against status_bar's namespace, installed at
+# runtime (see its module docstring) -- undefined-name analysis cannot
+# see injected globals.
+"src/sidepulse/settings_window.py" = ["F821"]

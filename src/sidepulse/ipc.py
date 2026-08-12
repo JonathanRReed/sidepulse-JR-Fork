@@ -48,6 +48,29 @@ def send_hook_event(
         client.close()
 
 
+def another_instance_alive(
+    socket_path: Path | None = None, timeout: float = 0.3
+) -> bool:
+    """True when a LIVE server owns the hook socket. A stale socket
+    file (crashed instance) refuses the connection and reads as dead --
+    HookEventServer.start() unlinks and rebinds over it exactly as
+    before. This is the single-instance probe: a second SidePulse used
+    to steal the socket, and quitting it unlinked the path and
+    permanently deafened the survivor."""
+    target = (socket_path or default_event_socket_path()).expanduser()
+    if not target.exists():
+        return False
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(timeout)
+    try:
+        probe.connect(str(target))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
 class HookEventServer:
     def __init__(
         self,
