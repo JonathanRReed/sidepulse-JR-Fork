@@ -9171,6 +9171,63 @@ class ClaudeQuotaTests(unittest.TestCase):
         self.assertEqual(windows_from_payload("nope"), [])
 
 
+class SubagentAskAggregateTests(unittest.TestCase):
+    """A worker's unanswerable question must not blink the lights."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def _snapshot(self, *statuses):
+        from types import SimpleNamespace as NS
+
+        from sidepulse.collector import aggregate_status
+
+        return NS(
+            statuses=list(statuses),
+            stale_statuses=(),
+            aggregate=aggregate_status(tuple(statuses), ()),
+        )
+
+    def _status(self, agent_id, mode, event="PermissionRequest"):
+        return AgentStatus(
+            provider="claude",
+            agent_id=agent_id,
+            display_name=agent_id,
+            mode=mode,
+            updated_at=datetime.now(timezone.utc),
+            event_name=event,
+            session_id="s1",
+        )
+
+    def test_subagent_ask_downgrades_to_main_aggregate(self) -> None:
+        snapshot = self._snapshot(
+            self._status("claude:agent:w1", AgentMode.WAITING_FOR_INPUT),
+            self._status("claude:session:s1", AgentMode.WORKING, event="PostToolUse"),
+        )
+        self.assertEqual(snapshot.aggregate.mode, AgentMode.WAITING_FOR_INPUT)
+        self.assertEqual(
+            self.controller.display_aggregate_mode(snapshot), AgentMode.WORKING
+        )
+
+    def test_main_ask_still_rings_and_option_restores_old_behavior(self) -> None:
+        main_ask = self._snapshot(
+            self._status("claude:session:s1", AgentMode.WAITING_FOR_INPUT)
+        )
+        self.assertEqual(
+            self.controller.display_aggregate_mode(main_ask),
+            AgentMode.WAITING_FOR_INPUT,
+        )
+        sub_only = self._snapshot(
+            self._status("claude:agent:w1", AgentMode.BLOCKED_ERROR)
+        )
+        self.controller.settings = self.controller.settings.with_subagent_asks_alert(
+            True
+        )
+        self.assertEqual(
+            self.controller.display_aggregate_mode(sub_only), AgentMode.BLOCKED_ERROR
+        )
+
+
 class UsageGraphRangeTests(unittest.TestCase):
     def test_range_validation_and_round_trip(self) -> None:
         from sidepulse.settings import AgentMonitorSettings, load_settings, save_settings

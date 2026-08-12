@@ -107,6 +107,7 @@ from .collector import (
     AgentMonitor,
     LiveAgentMonitor,
     SourceSpec,
+    aggregate_status,
     default_sources,
     read_recent_lines,
 )
@@ -868,7 +869,8 @@ class StatusBarController(NSObject):
 
         self.last_snapshot = snapshot
         battery_snapshot = self.read_battery_snapshot()
-        state = state_for_mode(snapshot.aggregate.mode)
+        display_mode = self.display_aggregate_mode(snapshot)
+        state = state_for_mode(display_mode)
         self.observe_connected_devices()
         self.track_ask_blocked(snapshot.statuses)
         self.track_working(snapshot.statuses)
@@ -893,7 +895,7 @@ class StatusBarController(NSObject):
         )
         self.sync_keep_awake(snapshot.aggregate.mode)
         self.sync_leds(
-            snapshot.aggregate.mode,
+            display_mode,
             battery_snapshot,
             self.active_led_display_kind(battery_snapshot),
             snapshot.statuses,
@@ -1948,6 +1950,12 @@ class StatusBarController(NSObject):
         # Rescan now -- the warm cache makes a year-range rebuild cheap.
         self._usage_refreshed_at = 0.0
         self.maybe_refresh_usage_summary()
+
+    @objc.IBAction
+    def toggleSubagentAsksAlert_(self, sender):
+        self.settings = self.settings.with_subagent_asks_alert(checkbox_is_on(sender))
+        save_settings(self.settings)
+        self.refresh_(None)
 
     @objc.IBAction
     def toggleQuotaAlerts_(self, sender):
@@ -3791,6 +3799,10 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("quota_alerts_enabled"),
             self.settings.quota_alerts_enabled,
         )
+        set_checkbox_state(
+            self.settings_buttons.get("subagent_asks_alert"),
+            self.settings.subagent_asks_alert,
+        )
         # Signals cards: re-render each from saved state, and sync the
         # escalation controls -- like every other control here, they must
         # reflect changes made outside their own handlers.
@@ -5564,6 +5576,27 @@ class StatusBarController(NSObject):
             f"lid_state={'closed' if closed else 'open'} animation={kind}"
         )
         self.play_lid_animation(kind)
+
+    def display_aggregate_mode(self, snapshot) -> AgentMode:
+        """The mode the lights and icon actually show. A SUB-agent ask
+        can't be answered (its parent handles it), so by default only
+        MAIN sessions may pull the aggregate into Ask/Blocked -- the
+        blinking light was firing for workers nobody could reply to.
+        settings.subagent_asks_alert restores the old behavior."""
+        mode = snapshot.aggregate.mode
+        if self.settings.subagent_asks_alert:
+            return mode
+        ask_modes = (AgentMode.WAITING_FOR_INPUT, AgentMode.BLOCKED_ERROR)
+        if mode not in ask_modes:
+            return mode
+        mains = tuple(
+            status for status in snapshot.statuses if not status.is_subagent
+        )
+        if any(status.mode in ask_modes for status in mains):
+            return mode
+        if not mains:
+            return AgentMode.IDLE_READY
+        return aggregate_status(mains, snapshot.stale_statuses).mode
 
     def agents_active_now(self) -> bool:
         """Any MAIN session actually working at this instant -- the lid
@@ -7694,6 +7727,18 @@ def _build_led_behavior_pane(target: StatusBarController):
     quota_controls.addArrangedSubview_(native_ui.make_label("% used", secondary=True))
     cal_inner.addArrangedSubview_(native_ui.make_row("Thresholds", quota_controls))
     fields["quota_thresholds_field"] = quota_field
+    native_ui.add_separator(cal_inner)
+    subask_row, subask_switch = native_ui.make_switch_row(
+        "Sub-agent asks ring the Ask signal",
+        target,
+        "toggleSubagentAsksAlert:",
+        help_text=(
+            "Workers often end with question-shaped text nobody can "
+            "answer -- off (default) means only MAIN sessions turn the "
+            "lights amber."
+        ),
+    )
+    cal_inner.addArrangedSubview_(subask_row)
     lat_field = native_ui.make_field(
         ""
         if target.settings.weather_latitude is None
@@ -7777,6 +7822,7 @@ def _build_led_behavior_pane(target: StatusBarController):
         "reminder_alerts_enabled": rem_switch,
         "weather_alerts_enabled": weather_switch,
         "quota_alerts_enabled": quota_switch,
+        "subagent_asks_alert": subask_switch,
     }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
