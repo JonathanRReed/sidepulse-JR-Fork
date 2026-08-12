@@ -133,6 +133,7 @@ from .led_status import (
     brightness_percent,
     led_count_for_target,
     normalize_brightness,
+    program_for_display_state,
     normalized_device_name,
     style_to_program,
     timer_fill_program,
@@ -2329,6 +2330,36 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def animateColorsPreviewTick_(self, _sender):
         self.animate_colors_preview_once()
+        # The unified animation thumbnails animate on the same tick.
+        for thumbs in getattr(self, "colors_animation_thumbs", {}).values():
+            for thumb in thumbs.values():
+                if not thumb.isHiddenOrHasHiddenAncestor():
+                    thumb.setNeedsDisplay_(True)
+
+    @objc.IBAction
+    def selectModeAnimationThumb_(self, recognizer):
+        view = recognizer.view()
+        key = getattr(view, "mode_anim_key", None)
+        style = getattr(view, "mode_anim_style", None)
+        if not key or not style:
+            return
+        try:
+            self.settings = self.settings.with_colors(
+                self.settings.colors.with_mode_animation(key, style)
+            )
+        except ValueError:
+            return
+        save_settings(self.settings)
+        thumbs = getattr(self, "colors_animation_thumbs", {}).get(key)
+        if thumbs:
+            _apply_thumb_selection(thumbs, style)
+        self.refresh_colors_preview()
+        if self.color_preview_enabled:
+            self.push_colors_preview_to_device()
+        self.refresh_(None)
+        self.set_settings_message(
+            f"{key.title()}: {ANIMATION_STYLE_DISPLAY_LABELS.get(style, style)} animation."
+        )
 
     def animate_colors_preview_once(self) -> None:
         if self.colors_window is None or not self.colors_window.isVisible():
@@ -5791,6 +5822,28 @@ def _solid_swatch_image(hex_color: str, size: float = SWATCH_BUTTON_SIZE):
     return image
 
 
+def _mode_animation_thumb_program(target: StatusBarController, mode_key: str, style: str) -> str:
+    """One mode-animation choice rendered live in that mode's own color
+    -- the Colors window speaks the Signals pane's visual language."""
+    spec = {
+        "idle": (LedDisplayState.IDLE, "idle_color"),
+        "working": (LedDisplayState.WORKING, "working_color"),
+        "ask": (LedDisplayState.ASK, "ask_color"),
+        "done": (LedDisplayState.DONE, "done_color"),
+    }.get(mode_key)
+    if spec is None:
+        return "#FFFFFF"
+    state, color_kwarg = spec
+    kwargs = {color_kwarg: target.settings.colors.mode_color(mode_key)}
+    style_kwarg = colors_module._MODE_KEY_TO_STYLE_KWARG.get(mode_key)
+    if style_kwarg:
+        kwargs[style_kwarg] = style
+    try:
+        return program_for_display_state(state, led_count=8, **kwargs)
+    except (TypeError, ValueError):
+        return target.settings.colors.mode_color(mode_key)
+
+
 def make_signal_color_row(target: StatusBarController, key: str, current_color: str):
     """Brand + palette swatches and a Custom… button (classic
     NSColorPanel). No NSColorWell anywhere -- see BRAND_SWATCHES."""
@@ -6677,11 +6730,30 @@ def build_colors_window(target: StatusBarController) -> NSWindow:
 
     anim_outer, anim_inner = native_ui.make_card("Animation Style")
     animation_popups: dict[str, object] = {}
-    for key in ANIMATION_MODE_KEYS:
-        popup = make_animation_style_popup(target, key)
-        select_animation_style(popup, target.settings.colors.animation_style(key))
-        animation_popups[key] = popup
-        anim_inner.addArrangedSubview_(native_ui.make_row(MODE_COLOR_DISPLAY_LABELS[key], popup))
+    animation_thumbs: dict[str, dict[str, object]] = {}
+    for index, key in enumerate(ANIMATION_MODE_KEYS):
+        thumb_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+        thumbs: dict[str, object] = {}
+        for style in ANIMATION_STYLE_CHOICES:
+            thumb = _mini_led_view(*SIGNAL_THUMB_SIZE)
+            thumb.setToolTip_(ANIMATION_STYLE_DISPLAY_LABELS.get(style, style.title()))
+            thumb.setProgram_(_mode_animation_thumb_program(target, key, style))
+            thumb.mode_anim_key = key
+            thumb.mode_anim_style = style
+            recognizer = NSClickGestureRecognizer.alloc().initWithTarget_action_(
+                target, "selectModeAnimationThumb:"
+            )
+            thumb.addGestureRecognizer_(recognizer)
+            thumbs[style] = thumb
+            thumb_row.addArrangedSubview_(thumb)
+        _apply_thumb_selection(thumbs, target.settings.colors.animation_style(key))
+        animation_thumbs[key] = thumbs
+        anim_inner.addArrangedSubview_(
+            native_ui.make_row(MODE_COLOR_DISPLAY_LABELS[key], thumb_row)
+        )
+        if index < len(ANIMATION_MODE_KEYS) - 1:
+            native_ui.add_separator(anim_inner)
+    target.colors_animation_thumbs = animation_thumbs
     scroll_stack.addArrangedSubview_(anim_outer)
 
     fade_outer, fade_inner = native_ui.make_card("Fade Intensity")
