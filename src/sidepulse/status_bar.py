@@ -298,6 +298,11 @@ STATUS_BAR_REFRESH_SECONDS = 15.0
 BRIGHTNESS_WATCH_SECONDS = 3.0
 BRIGHTNESS_WATCH_MIN_DELTA = 3
 STATUS_BAR_DEVICE_POLL_SECONDS = 2.0
+# ioreg is a subprocess fork on the main thread and refresh_ runs on
+# every hook event; power-state changes may lag by up to this TTL.
+BATTERY_SNAPSHOT_CACHE_SECONDS = 5.0
+# One /Volumes scan per second instead of 4-6 per refresh.
+DEVICE_DISCOVERY_CACHE_SECONDS = 1.0
 SCREEN_BAR_FEATURE_ENABLED = True
 STATUS_BAR_MAX_LINES_PER_SOURCE = 500
 STATUS_BAR_STARTUP_REPLAY_LINES = 200
@@ -1864,6 +1869,10 @@ class StatusBarController(NSObject):
             active_timer = getattr(self, name, None)
             if active_timer is not None:
                 active_timer.invalidate()
+        monitor = getattr(self, "monitor", None)
+        if monitor is not None and hasattr(monitor, "write_latest_state"):
+            # The per-event path is debounced; flush the tail on quit.
+            monitor.write_latest_state()
         self.stop_event_server()
         self.closed_lid_awake.release()
         self.keep_awake.release()
@@ -2178,6 +2187,15 @@ class StatusBarController(NSObject):
         if monitor is None:
             return
         try:
+            signature = monitor.input_signature()
+        except Exception:
+            signature = None
+        if signature is not None and signature == getattr(
+            self, "transcript_fallback_signature", None
+        ):
+            # Nothing on disk changed -- skip the full sort-and-replay.
+            return
+        try:
             records = sorted(monitor.iter_records(), key=lambda record: record.logged_at)
         except Exception as exc:
             log_status_bar(f"transcript fallback error: {exc}")
@@ -2191,11 +2209,13 @@ class StatusBarController(NSObject):
             if newest is None or record.logged_at > newest:
                 newest = record.logged_at
         self.transcript_watermark = newest
+        self.transcript_fallback_signature = signature
 
     def reload_monitor(self) -> None:
         self.monitor = self.build_monitor()
         self.transcript_monitor = self.build_transcript_monitor()
         self.transcript_watermark = None
+        self.transcript_fallback_signature = None
 
     def start_event_server(self) -> None:
         self.stop_event_server()
@@ -3745,6 +3765,15 @@ class StatusBarController(NSObject):
         self.refresh_(None)
 
     def read_battery_snapshot(self) -> BatterySnapshot | None:
+        cached = getattr(self, "_battery_snapshot_cache", None)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < BATTERY_SNAPSHOT_CACHE_SECONDS:
+            return cached[1]
+        snapshot = self._read_battery_snapshot_uncached()
+        self._battery_snapshot_cache = (now, snapshot)
+        return snapshot
+
+    def _read_battery_snapshot_uncached(self) -> BatterySnapshot | None:
         try:
             snapshot = read_battery_snapshot(
                 full_charge_watts=self.settings.battery_full_charge_watts,
@@ -3888,13 +3917,30 @@ class StatusBarController(NSObject):
         # "dim a little" one.
         return min(self.settings.focus_dim_fraction(identifier) for identifier in active)
 
-    def status_bar_devices(self, *, remember: bool = True) -> list[StatusBarDevice]:
-        entries_by_id: dict[str, StatusBarDevice] = {}
+    def discover_device_candidates(self):
+        """discover_devices() with a short TTL. Keyed by the function
+        object itself so tests that patch sidepulse.status_bar.
+        discover_devices never see a stale cache from a previous patch."""
+        discover = discover_devices
+        cached = getattr(self, "_device_discovery_cache", None)
+        now = time.monotonic()
+        if (
+            cached is not None
+            and cached[0] is discover
+            and now - cached[1] < DEVICE_DISCOVERY_CACHE_SECONDS
+        ):
+            return cached[2]
         try:
-            candidates = discover_devices()
+            candidates = discover()
         except Exception as exc:
             log_status_bar(f"device discovery error: {exc}")
             candidates = []
+        self._device_discovery_cache = (discover, now, candidates)
+        return candidates
+
+    def status_bar_devices(self, *, remember: bool = True) -> list[StatusBarDevice]:
+        entries_by_id: dict[str, StatusBarDevice] = {}
+        candidates = self.discover_device_candidates()
 
         for candidate in candidates:
             device_id = device_id_for_root(candidate.root)
@@ -7963,12 +8009,22 @@ def grok_badge_icon():
     return image
 
 
+_app_icon_cache: dict[str, object] = {}
+
+
 def app_icon(path: str):
+    # NSWorkspace icon lookups ran once per session row on EVERY menu
+    # rebuild (every hook event). Icons are static; cache positives
+    # forever, re-probe missing paths (the app may get installed later).
+    cached = _app_icon_cache.get(path)
+    if cached is not None:
+        return cached
     if not Path(path).exists():
         return None
     image = NSWorkspace.sharedWorkspace().iconForFile_(path)
     if image is not None:
         image.setSize_((18, 18))
+        _app_icon_cache[path] = image
     return image
 
 

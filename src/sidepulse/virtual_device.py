@@ -1161,8 +1161,22 @@ class VirtualStatusDevice(NSObject):
 
     @objc.IBAction
     def redraw_(self, _sender):
-        if self.view is not None:
-            self.view.setNeedsDisplay_(True)
+        view = self.view
+        if view is not None:
+            # Only mark dirty when this frame would actually look
+            # different: a STATIC program (idle solid, all-off) used to
+            # re-run the full 4-layer glow -- ~28k bridged fill calls
+            # per second -- at 60fps for identical pixels.
+            try:
+                painted = tuple(
+                    tuple(int(round(channel * 1024.0)) for channel in color)
+                    for color in view._colors_for_draw()
+                )
+            except Exception:
+                painted = None
+            if painted is None or painted != getattr(self, "_last_marked_colors", None):
+                self._last_marked_colors = painted
+                view.setNeedsDisplay_(True)
         # Alcove's overlay resizes as live activities come and go; track
         # it by re-running the (cheap, churn-guarded) reposition about
         # every two seconds rather than only on screen changes.

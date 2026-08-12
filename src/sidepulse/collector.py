@@ -6,7 +6,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,15 @@ CODEX_TRANSCRIPT_MAX_FILES = 12
 CODEX_TRANSCRIPT_MAX_LINES = 500
 CLAUDE_TRANSCRIPT_MAX_FILES = 24
 CLAUDE_TRANSCRIPT_MAX_LINES = 500
-TRANSCRIPT_FILE_LIST_CACHE_SECONDS = 5.0
+# 45s: the rglob behind this walked 2,445 files on a real install, on the
+# main thread, at the top of every refresh. New transcript FILES appear
+# rarely; new LINES in known files are caught by per-file signatures.
+TRANSCRIPT_FILE_LIST_CACHE_SECONDS = 45.0
+# Keep at most a day of finished sessions: latest.json accumulated every
+# session ever seen (118 statuses / 367KB on a real install) and was
+# re-serialized on every hook event.
+STATUS_RETENTION_SECONDS = 24 * 3600.0
+LATEST_STATE_WRITE_INTERVAL_SECONDS = 1.0
 CLAUDE_TRANSCRIPT_MTIME_HEARTBEAT_SKEW_SECONDS = 30.0
 CODEX_SESSION_INDEX_MAX_LINES = 5000
 COMPLETED_VISIBLE_SECONDS = 20 * 60.0
@@ -225,6 +233,13 @@ class AgentMonitor:
         self._latest_statuses_by_key = dict(statuses_by_key)
         return statuses_by_key
 
+    def input_signature(self) -> tuple[Any, ...]:
+        """Cheap change-detection handle for callers that feed this
+        monitor's records elsewhere (the status bar's transcript
+        fallback): if this hasn't changed, iter_records() won't yield
+        anything new."""
+        return self._input_signature()
+
     def _input_signature(self) -> tuple[Any, ...]:
         parts: list[Any] = []
         for source in self.sources:
@@ -407,6 +422,9 @@ class LiveAgentMonitor:
         self.metadata_by_session: dict[str, StatusMetadata] = {}
         self.metadata_by_status: dict[str, StatusMetadata] = {}
         self.pending_permissions_by_key: dict[str, set[str]] = {}
+        self._latest_state_dirty = False
+        self._latest_state_written_at = 0.0
+        self._latest_state_write_lock = threading.Lock()
         self.load_latest_state()
 
     def ingest_record(self, record: HookEvent) -> None:
@@ -429,7 +447,34 @@ class LiveAgentMonitor:
             ):
                 return
             self.statuses_by_key[status.agent_id] = status
-            self.write_latest_state()
+            self._prune_expired(datetime.now(timezone.utc))
+            self._latest_state_dirty = True
+        self.maybe_write_latest_state()
+
+    def _prune_expired(self, now: datetime) -> None:
+        """Drop statuses (and their metadata) too old to matter even to
+        the dropdown's recent-sessions fallback. Callers hold self.lock."""
+        horizon = now - timedelta(seconds=STATUS_RETENTION_SECONDS)
+        expired = [
+            key
+            for key, status in self.statuses_by_key.items()
+            if status.updated_at < horizon
+        ]
+        if not expired:
+            return
+        for key in expired:
+            del self.statuses_by_key[key]
+            self.metadata_by_status.pop(key, None)
+            self.pending_permissions_by_key.pop(key, None)
+        live_keys = set(self.statuses_by_key)
+        session_keys = {
+            f"{status.provider}:session:{status.session_id}"
+            for status in self.statuses_by_key.values()
+            if status.session_id
+        }
+        for session_key in list(self.metadata_by_session):
+            if session_key not in session_keys and session_key not in live_keys:
+                del self.metadata_by_session[session_key]
 
     def snapshot(self) -> MonitorSnapshot:
         now = datetime.now(timezone.utc)
@@ -464,22 +509,44 @@ class LiveAgentMonitor:
         self.statuses_by_key.update(loaded)
 
     def write_latest_state(self) -> None:
+        """Unconditional flush -- the shutdown path and tests."""
+        self._write_latest_state(force=True)
+
+    def maybe_write_latest_state(self) -> None:
+        """Debounced flush -- the per-event path. Serialization used to
+        run on every hook event while HOLDING the monitor lock (367KB /
+        ~10ms per event on a real install, with the main thread's
+        snapshot() contending on that same lock)."""
+        self._write_latest_state(force=False)
+
+    def _write_latest_state(self, *, force: bool) -> None:
         if self.latest_state_path is None:
             return
-        now = datetime.now(timezone.utc)
-        payload = {
-            "updated_at": now.isoformat(),
-            "statuses": [
-                status.to_dict(now) for status in self.statuses_by_key.values()
-            ],
-        }
-        try:
-            self.latest_state_path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = self.latest_state_path.with_suffix(".json.tmp")
-            temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-            temp_path.replace(self.latest_state_path)
-        except OSError:
-            pass
+        with self._latest_state_write_lock:
+            now_monotonic = time.monotonic()
+            if not force:
+                if not self._latest_state_dirty:
+                    return
+                if (
+                    now_monotonic - self._latest_state_written_at
+                    < LATEST_STATE_WRITE_INTERVAL_SECONDS
+                ):
+                    return
+            now = datetime.now(timezone.utc)
+            with self.lock:
+                statuses = [
+                    status.to_dict(now) for status in self.statuses_by_key.values()
+                ]
+                self._latest_state_dirty = False
+            self._latest_state_written_at = now_monotonic
+            payload = {"updated_at": now.isoformat(), "statuses": statuses}
+            try:
+                self.latest_state_path.parent.mkdir(parents=True, exist_ok=True)
+                temp_path = self.latest_state_path.with_suffix(".json.tmp")
+                temp_path.write_text(json.dumps(payload, sort_keys=True) + "\n")
+                temp_path.replace(self.latest_state_path)
+            except OSError:
+                pass
 
 
 def default_sources(settings: AgentMonitorSettings | None = None) -> tuple[SourceSpec, ...]:

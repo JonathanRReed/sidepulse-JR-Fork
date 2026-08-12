@@ -12,7 +12,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sidepulse import cli as cli_module
 from sidepulse import collector as collector_module
@@ -8236,6 +8236,12 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         # applicationDidFinishLaunching_), which a Settings-window action
         # invoked in a headless/test context hits directly.
         self.assertIsNone(self.controller.status_item)
+        # This test is about refresh_ itself, not device writes: leave
+        # the LED worker and keepalive process unspawned, or their
+        # daemon-thread writes race the tempdir teardown (a real flake).
+        self.controller.leds_enabled = False
+        self.controller.keep_awake = MagicMock()
+        self.controller.closed_lid_awake = MagicMock()
         self.controller.refresh_(None)  # must not raise
 
 
