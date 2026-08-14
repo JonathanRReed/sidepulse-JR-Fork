@@ -908,6 +908,21 @@ _PROVIDER_SOURCE_REGISTRATIONS = (
             ),
         ),
     ),
+    # `oauth`, not `local`: this instance is the remote subscription endpoint
+    # read with Claude Code's own credential, and the instance id is what
+    # keeps its retry state separate from claude/transcripts/local.
+    ProviderSourceRegistration(
+        ProviderIdentifier("claude"),
+        AdapterIdentifier("quota"),
+        SourceInstanceIdentifier("oauth"),
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("remote_quota_windows"),
+                (SchemaVersion(1, 0),),
+            ),
+        ),
+    ),
     ProviderSourceRegistration(
         ProviderIdentifier("devin"),
         AdapterIdentifier("hooks"),

@@ -107,9 +107,11 @@ from sidepulse.led_status import (
     ANIMATION_STYLE_SOLID,
     AgentLedController,
     LedDisplayState,
+    apply_strip_transfer_to_hex,
     display_state_for_mode,
     led_count_for_target,
     program_for_display_state,
+    strip_drive_code,
     write_mode_to_leds,
 )
 from sidepulse.lid_sleep import (
@@ -1727,8 +1729,12 @@ for (const event of [
                     None, edge_color, 214.0, 220.0, 37.0, outer_on_left=False
                 )
 
-        self.assertEqual(builder_calls, 16)
-        self.assertEqual(Gradient.allocations, 32)
+        # 9, not the 16 this asserted while the draw path raised every
+        # channel to LED_GAMMA: that curve stretched the low end of the sweep
+        # across more of the 32 quantisation buckets. Fewer builds for the
+        # same sweep is better reuse, which is what the test is guarding.
+        self.assertEqual(builder_calls, 9)
+        self.assertEqual(Gradient.allocations, 18)
         self.assertLess(Gradient.allocations, frames * 2)
 
     def test_compact_mode_keeps_the_same_frame_as_normal_mode(self) -> None:
@@ -4004,23 +4010,35 @@ for (const event of [
 
             self.assertEqual(result.state, LedDisplayState.WORKING)
             self.assertEqual(result.target, device / "LEDS.LED")
+            # Nominal sRGB goes in, the strip's own linear PWM bytes come
+            # out -- see led_status.strip_drive_code. The DSL around them is
+            # untouched, which is the part this test is really about.
+            cyan = apply_strip_transfer_to_hex("#00E5FF", (1.0, 1.0, 1.0))
             self.assertEqual(
                 (device / "LEDS.LED").read_text(),
                 "off 91ms cosine\n"
-                "0:#00E5FF 760ms pulse 0ms; 1:#00E5FF 760ms pulse 260ms\n"
+                f"0:{cyan} 760ms pulse 0ms; 1:{cyan} 760ms pulse 260ms\n"
                 "repeat",
             )
 
             write_mode_to_leds(AgentMode.IDLE_READY, device_path=device)
 
+            idle = apply_strip_transfer_to_hex("#020204", (1.0, 1.0, 1.0))
             self.assertEqual(
                 (device / "LEDS.LED").read_text(),
-                "off 160ms cosine\n#020204 6s pulse\nrepeat",
+                f"off 160ms cosine\n{idle} 6s pulse\nrepeat",
             )
 
             write_mode_to_leds(AgentMode.COMPLETED, device_path=device, brightness=64)
 
-            self.assertEqual((device / "LEDS.LED").read_text(), "brightness 64\n#00FF66")
+            # brightness is decoded too: the firmware scales the DRIVE bytes,
+            # so on this surface it is a scale on light, and 64 of 255 encoded
+            # is 13 of 255 linear.
+            done = apply_strip_transfer_to_hex("#00FF66", (1.0, 1.0, 1.0))
+            self.assertEqual(
+                (device / "LEDS.LED").read_text(),
+                f"brightness {strip_drive_code(64)}\n{done}",
+            )
 
     def test_led_count_uses_product_name(self) -> None:
         self.assertEqual(led_count_for_target(Path("/Volumes/SidePulseDot/LEDS.LED")), 2)
@@ -4036,9 +4054,10 @@ for (const event of [
             lines = (device / "LEDS.LED").read_text().splitlines()
             self.assertEqual(len(lines), 3)
             self.assertEqual(lines[0], "off 91ms cosine")
-            self.assertIn("0:#00E5FF 760ms pulse 0ms", lines[1])
-            self.assertIn("5:#00E5FF 760ms pulse 475ms", lines[1])
-            self.assertIn("7:#00E5FF 760ms pulse 665ms", lines[1])
+            cyan = apply_strip_transfer_to_hex("#00E5FF", (1.0, 1.0, 1.0))
+            self.assertIn(f"0:{cyan} 760ms pulse 0ms", lines[1])
+            self.assertIn(f"5:{cyan} 760ms pulse 475ms", lines[1])
+            self.assertIn(f"7:{cyan} 760ms pulse 665ms", lines[1])
             self.assertEqual(lines[-1], "repeat")
 
     def test_agent_led_controller_skips_unchanged_state(self) -> None:
@@ -4054,7 +4073,8 @@ for (const event of [
             self.assertTrue(first.changed)
             self.assertFalse(second.changed)
             self.assertTrue(third.changed)
-            self.assertIn("#FF3A00 1.6s pulse", (device / "LEDS.LED").read_text())
+            ask = apply_strip_transfer_to_hex("#FF3A00", (1.0, 1.0, 1.0))
+            self.assertIn(f"{ask} 1.6s pulse", (device / "LEDS.LED").read_text())
 
     def test_battery_parser_uses_adapter_watts_and_raw_capacity(self) -> None:
         payload = plistlib.dumps(
@@ -12427,7 +12447,11 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             SourceHealthKind,
         )
 
-        source = self._source(provider_id)
+        # Scoped from the controller's own refresh key: the coordinator
+        # rejects a snapshot whose lanes sit outside it, so a fixture that
+        # invented its own pool would only ever exercise the reject path.
+        refresh_key = self._refresh_key(provider_id)
+        source = refresh_key.source
         health = CapacitySourceHealth(
             source,
             SourceHealthKind.HEALTHY,
@@ -12441,7 +12465,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             QuotaLaneKey(
                 source,
                 "all",
-                "plan",
+                refresh_key.pool,
                 None,
                 "session",
                 QuotaEffect.ALL_WORKLOADS,
@@ -12460,7 +12484,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             ResetFact(ResetState.UNKNOWN, None, 300.0, observed_at),
             observed_at,
             health,
-            None,
+            refresh_key.account_discriminator,
         )
 
     def _reset_result(
@@ -12512,8 +12536,17 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             codex_copy,
         )
 
-    def test_settings_capacity_copy_requires_a_supported_source(self) -> None:
-        pane, _fields = self.status_bar._build_profile_pane(self.controller)
+    def test_settings_capacity_copy_offers_the_opt_in_and_starts_off(self) -> None:
+        """The pane said "Not supported" and offered no way to change that.
+
+        The consumer policy declares lanes now, so the honest control is the
+        opt-in itself -- and until this row existed, `toggleClaudePlanLimits_`
+        was an action no user could reach.
+        """
+        self.controller.settings = (
+            self.controller.settings.with_claude_plan_limits_enabled(False)
+        )
+        pane, fields = self.status_bar._build_profile_pane(self.controller)
 
         def descendants(view):
             for child in view.subviews():
@@ -12528,18 +12561,28 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             if tooltip:
                 rendered.append(str(tooltip))
 
-        capacity_copy = [
-            text for text in rendered if "consumer plan capacity" in text.lower()
-        ]
-        self.assertTrue(capacity_copy)
-        self.assertTrue(
+        self.assertIn("Show Claude plan limits", rendered)
+        self.assertFalse(
             any("not supported" in text.lower() for text in rendered),
             rendered,
         )
         self.assertTrue(
-            any("lifecycle and local transcript activity still work" in text.lower() for text in rendered),
+            any(
+                "never reads browser sessions or private provider endpoints"
+                in text.lower()
+                for text in rendered
+            ),
             rendered,
         )
+        # Declaring the lanes does not turn the read on, and the switch shows
+        # the setting rather than a default of its own.
+        self.assertEqual(fields["profile_plan_limits_switch"].state(), 0)
+        self.assertFalse(AgentMonitorSettings().claude_plan_limits_enabled)
+        self.controller.settings = (
+            self.controller.settings.with_claude_plan_limits_enabled(True)
+        )
+        _pane, on_fields = self.status_bar._build_profile_pane(self.controller)
+        self.assertEqual(on_fields["profile_plan_limits_switch"].state(), 1)
 
     def test_controller_initializes_bounded_capacity_timer_state(self) -> None:
         self.assertIsNone(self.controller._capacity_reset_timer)
@@ -12562,11 +12605,20 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             {row.key.source for row in source_states},
             {self._source("codex"), self._source("claude")},
         )
-        self.assertTrue(
-            all(row.key.pool == "plan" for row in source_states)
+        # The refresh scope is the pool the capacity policy declares, not a
+        # literal. The coordinator rejects any snapshot whose lanes fall
+        # outside its key's scope, so a hardcoded "plan" would have thrown
+        # away every reading the moment a producer emitted a real lane.
+        self.assertEqual(
+            {row.key.source.provider_id: row.key.pool for row in source_states},
+            {"codex": "codex-chatgpt-plan", "claude": "claude-consumer-plan"},
         )
-        self.assertTrue(
-            all(row.key.account_discriminator is None for row in source_states)
+        self.assertEqual(
+            {
+                row.key.source.provider_id: row.key.account_discriminator
+                for row in source_states
+            },
+            {"codex": None, "claude": "claude-consumer"},
         )
         self.assertTrue(
             all(row.status is RefreshStatusKind.IDLE for row in source_states)
@@ -12592,6 +12644,10 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             (
                 self._transcript_source("codex"),
                 self._transcript_source("claude"),
+                # Claude plan limits are on in this fixture, so its capacity
+                # source is stale-and-due like any other. Enqueued only --
+                # opening the menu must never run the fetch inline.
+                self._source("claude"),
             ),
             reason="menu-open",
         )
@@ -12827,6 +12883,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             (
                 self._transcript_source("codex"),
                 self._transcript_source("claude"),
+                self._source("claude"),
             )
         )
 
@@ -12844,6 +12901,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             (
                 self._transcript_source("codex"),
                 self._transcript_source("claude"),
+                self._source("claude"),
             ),
             reason="menu-open",
         )
@@ -12861,7 +12919,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         self.assertEqual(thread_type.call_count, 1)
         thread_type.return_value.start.assert_called_once_with()
         self.assertTrue(self.controller._usage_provider_states["codex"].in_flight)
-        self.assertFalse(self.controller._usage_provider_states["claude"].in_flight)
+        self.assertTrue(self.controller._usage_provider_states["claude"].in_flight)
         self.assertTrue(
             self.controller._usage_transcript_states[
                 self._transcript_source("codex")
@@ -13176,11 +13234,12 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             SourceHealthKind,
         )
 
-        source = self._source("codex")
+        refresh_key = self._refresh_key("codex")
+        source = refresh_key.source
         lane_key = QuotaLaneKey(
             source,
             "all",
-            "plan",
+            refresh_key.pool,
             None,
             "session",
             QuotaEffect.ALL_WORKLOADS,
@@ -14273,7 +14332,10 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             observed,
             [
                 (
-                    (self._source("codex"),),
+                    # Both providers share this boundary, so both are asked in
+                    # one grouped request -- the point of the test is that the
+                    # attempt keys are recorded BEFORE the request goes out.
+                    (self._source("codex"), self._source("claude")),
                     "reset-boundary",
                     ("codex|primary|998", "claude|primary|998"),
                 )
@@ -21926,6 +21988,7 @@ class LatestFeatureSettingsCompositionTests(unittest.TestCase):
         for expected in (
             "ChatGPT and Codex",
             "OpenAI API",
+            "Claude consumer plan",
             "Claude Team and Enterprise",
             "Gemini Code Assist",
             "Google Antigravity",
@@ -21933,6 +21996,11 @@ class LatestFeatureSettingsCompositionTests(unittest.TestCase):
             "GitHub Copilot",
             "OpenCode",
             "Available locally",
+            # An observable source can still require consent, and the copy has
+            # to say so -- "Available locally" about a read that presents the
+            # user's subscription credential would be true and misleading.
+            "Available after opt-in",
+            "Weekly Opus",
             "Permission required",
             "Check provider",
             "Uses model provider",

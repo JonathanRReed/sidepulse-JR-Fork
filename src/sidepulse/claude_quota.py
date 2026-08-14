@@ -4,6 +4,11 @@
 schema's growth is absorbed (the flat `five_hour`/`seven_day` keys, the
 per-model sub-caps, and the newer `limits[]` array with scoped weekly limits).
 
+`capacity_evidence_from_windows` is the second half of that boundary: it maps
+those labelled windows onto lanes the capacity policy already declared, and
+drops anything it cannot name. Together they mean a schema change can add a
+window without inventing a lane, and can never widen what reaches a consumer.
+
 `fetch_windows` performs the actual read against the same OAuth usage endpoint
 Claude Code itself uses, presenting Claude Code's own credential. It does not
 discover that credential: obtaining one requires user consent and belongs to
@@ -20,7 +25,20 @@ import json
 import math
 from dataclasses import dataclass
 
-from .capacity_types import CapacitySourceHealth, SourceHealthKind, SourceKey
+from .capacity_sources import (
+    EvidenceMetricKind,
+    SupportedCapacityEvidence,
+    SupportedLaneEvidence,
+)
+from .capacity_types import (
+    CapacitySourceHealth,
+    ObservationState,
+    QuotaEffect,
+    ResetState,
+    SourceHealthKind,
+    SourceKey,
+)
+from .reset_policy import parse_reset_epoch
 
 MAX_CLAUDE_WINDOWS = 32
 CLAUDE_REMOTE_QUOTA_UNSUPPORTED = "claude_remote_quota_unsupported"
@@ -49,6 +67,27 @@ _PRODUCT_MODEL_LABELS = {
     "sonnet": "Sonnet",
     "fable": "Fable",
 }
+# The only translation from a provider label to a declared lane identity.
+# A window whose label is not in here is dropped rather than force-fitted:
+# "Fable only" or a brand-new window must not silently land in the weekly
+# lane and be read as the weekly ceiling.
+CLAUDE_LANE_IDENTITIES = {
+    "5-hour": ("five-hour", None, QuotaEffect.ALL_WORKLOADS),
+    "weekly": ("weekly", None, QuotaEffect.ALL_WORKLOADS),
+    "Opus only": ("weekly", "opus", QuotaEffect.MODEL),
+    "Sonnet only": ("weekly", "sonnet", QuotaEffect.MODEL),
+}
+# One machine holds one Claude Code credential at a time, so this scopes reset
+# continuity to "the subscription currently signed in". It is deliberately NOT
+# an account identifier and nothing derived from the token ever reaches it --
+# switching accounts fails closed (the old cycle disputes) rather than
+# carrying one account's reset boundary onto another's.
+CLAUDE_ACCOUNT_SCOPE = "claude-consumer"
+# The one authentication mode the `anthropic-consumer` policy declares. It
+# rides along on every observation so an account binding can be exact about
+# which credential produced the reading; `test_claude_capacity_plane` pins it
+# against the policy so the two cannot drift apart.
+CLAUDE_AUTH_MODE = "consumer"
 
 
 class ClaudeQuotaUnavailableError(RuntimeError):
@@ -363,6 +402,106 @@ def windows_from_payload(payload: object) -> list[dict]:
         if add("Daily Routines", payload.get(key), 7 * 24 * 60):
             break
     return windows
+
+
+def _lane_evidence(
+    descriptor,
+    window: object,
+    *,
+    observed_at: float,
+) -> SupportedLaneEvidence | None:
+    """Map one labelled window onto one already-declared lane, or nothing."""
+    if not isinstance(window, dict):
+        return None
+    identity = CLAUDE_LANE_IDENTITIES.get(window.get("label"))
+    if identity is None:
+        return None
+    window_id, model, effect = identity
+    lane = next(
+        (
+            candidate
+            for candidate in descriptor.lanes
+            if candidate.key.window == window_id
+            and candidate.key.model == model
+            and candidate.key.effect is effect
+        ),
+        None,
+    )
+    if lane is None:
+        return None
+
+    utilization = window.get("utilization")
+    if (
+        isinstance(utilization, bool)
+        or not isinstance(utilization, (int, float))
+        or not math.isfinite(float(utilization))
+    ):
+        return None
+
+    # `parse_reset_epoch` is the one place that accepts both the ISO string
+    # and the epoch/millisecond forms this endpoint has used, and it returns
+    # None for anything that is not a credible future boundary. A window with
+    # no such boundary stays honestly reset-less: UNKNOWN carries no epoch, so
+    # nothing downstream can render a countdown we did not observe.
+    reset_epoch = parse_reset_epoch(window.get("resets_at"), now=observed_at)
+    minutes = window.get("window_minutes")
+    return SupportedLaneEvidence(
+        key=lane.key,
+        metric_kind=EvidenceMetricKind.PERCENT_USED,
+        # `windows_from_payload` already bounds this; bounding again keeps one
+        # out-of-range window from raising and taking the whole batch --
+        # including the sub-cap the owner needs -- down with it.
+        percent=max(0.0, min(100.0, float(utilization))),
+        state=ObservationState.OBSERVED,
+        reset_state=(
+            ResetState.FUTURE if reset_epoch is not None else ResetState.UNKNOWN
+        ),
+        reset_epoch=reset_epoch,
+        window_minutes=(
+            float(minutes)
+            if not isinstance(minutes, bool)
+            and isinstance(minutes, (int, float))
+            and math.isfinite(float(minutes))
+            and float(minutes) > 0.0
+            else None
+        ),
+    )
+
+
+def capacity_evidence_from_windows(
+    descriptor,
+    windows,
+    *,
+    observed_at: float,
+) -> SupportedCapacityEvidence:
+    """Project fetched windows onto the declared lanes of one exact source.
+
+    The descriptor owns lane identity; this only decides which declared lane
+    each provider label refers to. Utilization is percent USED here and stays
+    used-first all the way into `SupportedLaneEvidence` -- the single
+    conversion to remaining belongs to `capacity_sources`, so there is exactly
+    one place that can invert it wrongly.
+    """
+    if descriptor.source != CLAUDE_QUOTA_SOURCE:
+        raise ValueError("claude capacity descriptor mismatch")
+    matched: dict[object, SupportedLaneEvidence] = {}
+    for window in windows or ():
+        evidence = _lane_evidence(descriptor, window, observed_at=observed_at)
+        if evidence is not None:
+            matched.setdefault(evidence.key, evidence)
+    # Declaration order, not response order: the payload has moved windows
+    # around between schema versions, and the ledger's reading order is a
+    # product decision (shortest window first, then the sub-caps).
+    return SupportedCapacityEvidence(
+        source=CLAUDE_QUOTA_SOURCE,
+        health_kind=SourceHealthKind.HEALTHY,
+        lanes=tuple(
+            matched[lane.key] for lane in descriptor.lanes if lane.key in matched
+        ),
+        account_discriminator=CLAUDE_ACCOUNT_SCOPE,
+        has_last_known_good=False,
+        auth_mode=CLAUDE_AUTH_MODE,
+    )
 
 
 def summary_line(windows: list[dict]) -> str | None:

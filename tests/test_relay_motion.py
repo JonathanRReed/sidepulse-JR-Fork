@@ -17,7 +17,11 @@ from sidepulse.colors import (
     relay_step_ms,
 )
 from sidepulse.device_writer import MAX_LED_BYTES, MAX_LED_LINES
-from sidepulse.led_status import AgentLedController, LedDisplayState
+from sidepulse.led_status import (
+    AgentLedController,
+    LedDisplayState,
+    apply_strip_transfer_to_program,
+)
 from sidepulse.models import AgentMode, AgentStatus
 from sidepulse.presentation_policy import (
     GlanceInputs,
@@ -405,7 +409,11 @@ def test_physical_relay_does_not_rewrite_when_only_canonical_phase_advances(
 
     assert first.changed
     assert not second.changed
-    assert writes == [early.dsl]
+    # One write, and it is the first program -- in the strip's own drive bytes,
+    # since the surface transfer runs at this boundary. The subject here is the
+    # dedupe, not the encoding: what matters is that the second call added
+    # nothing.
+    assert writes == [apply_strip_transfer_to_program(early.dsl)]
 
 
 def test_semantic_relay_is_callback_count_independent_and_wraps_exactly() -> None:

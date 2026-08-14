@@ -82,6 +82,13 @@ def test_static_registry_has_literal_deterministic_source_and_capability_order()
             ("transcript_usage",),
         ),
         (
+            "claude",
+            "quota",
+            "oauth",
+            ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+            ("remote_quota_windows",),
+        ),
+        (
             "devin",
             "hooks",
             "global",
@@ -155,7 +162,7 @@ def test_negotiated_rows_use_unique_canonical_source_keys_one_per_capability() -
     keys = tuple(row.source_key for row in rows)
 
     assert all(type(key) is SourceKey for key in keys)
-    assert len(keys) == len(set(keys)) == 16
+    assert len(keys) == len(set(keys)) == 17
     assert tuple(_row_identity(row) for row in rows[:4]) == (
         ("codex", "hooks", "global", "live_agent_events"),
         ("codex", "hooks", "global", "actionable_requests"),
@@ -187,6 +194,10 @@ def test_capacity_source_registrations_are_exact_and_separate_from_hook_ownershi
         for registration in registrations
     ) == (
         ("codex", "quota", "local"),
+        # Claude's is a separate source instance, not a second row on the
+        # transcripts one: a shared instance would share retry state, and an
+        # OAuth 401 loop would take local transcript usage down with it.
+        ("claude", "quota", "oauth"),
     )
     assert all(
         tuple(capability.value for capability, _versions in registration.capability_versions)

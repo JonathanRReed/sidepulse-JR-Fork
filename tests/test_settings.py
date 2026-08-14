@@ -15,6 +15,7 @@ from sidepulse.capacity_calibration import (
 )
 from sidepulse.capacity_types import ForecastReleaseState, QuotaHorizon
 from sidepulse.settings import (
+    CLAUDE_PLAN_LIMITS_CONSENT_VERSION,
     LED_DISPLAY_AGENT,
     LED_DISPLAY_QUOTA_RUNWAY,
     AgentMonitorSettings,
@@ -284,7 +285,20 @@ def test_malformed_or_partial_release_authority_fails_closed(tmp_path: Path) -> 
 def test_settings_migration_disables_legacy_quota_authority_and_runway(
     tmp_path: Path,
 ) -> None:
-    """Old quota preferences load safely but cannot remain active authority."""
+    """Old quota preferences load safely but cannot remain active authority.
+
+    `claude_plan_limits_enabled` is back in this set, and for a sharper
+    reason than the others. 0.2.1 shipped a build that PERSISTED this key
+    while its own code documented the flag as inert, so a stored `true` may
+    never have been a decision about anything. Honouring it on upgrade starts
+    reading the user's Keychain and presenting an OAuth token to
+    api.anthropic.com on the 5-minute worker, from a value they were never
+    asked for. It needs fresh consent, stamped by this build.
+
+    The rest still cannot load -- nothing consumes an authorised threshold
+    crossing, so alerts, thresholds, the runway LED and the quota webhooks
+    are still stripped on the way in and on the way out.
+    """
     target = tmp_path / "settings.json"
     target.write_text(
         json.dumps(
@@ -313,6 +327,7 @@ def test_settings_migration_disables_legacy_quota_authority_and_runway(
     restored = load_settings(target)
 
     assert restored.claude_plan_limits_enabled is False
+    assert restored.claude_plan_limits_consent_version == 0
     assert restored.quota_alerts_enabled is False
     assert restored.quota_alert_thresholds == (90.0, 95.0)
     assert restored.led_display == LED_DISPLAY_AGENT
@@ -322,7 +337,8 @@ def test_settings_migration_disables_legacy_quota_authority_and_runway(
     save_settings(restored, target)
     migrated = json.loads(target.read_text())
     assert migrated["settings_schema_version"] == 1
-    assert "claude_plan_limits_enabled" not in migrated
+    assert migrated["claude_plan_limits_enabled"] is False
+    assert migrated["claude_plan_limits_consent_version"] == 0
     assert "quota_alerts_enabled" not in migrated
     assert "quota_alert_thresholds" not in migrated
     assert migrated["led_display"] == LED_DISPLAY_AGENT
@@ -333,7 +349,16 @@ def test_settings_migration_disables_legacy_quota_authority_and_runway(
 def test_settings_migration_programmatic_legacy_quota_controls_fail_closed(
     tmp_path: Path,
 ) -> None:
-    """No old mutator or direct legacy value can re-enable a capacity effect."""
+    """No old mutator or direct legacy value can re-enable a capacity effect.
+
+    The Claude opt-in is the one mutator that honours its argument now: it
+    grants a READ, not an effect. It is still not reachable from a forged
+    dataclass, because the value alone is not consent -- only a stamp this
+    build wrote is, and `replace()` cannot forge one it does not set.
+    Everything below still grants an EFFECT -- a blink, an LED program, an
+    outbound webhook -- and none of those has an authority-fed producer, so
+    they stay unreachable from both the mutators and a hand-forged dataclass.
+    """
     settings = (
         AgentMonitorSettings()
         .with_claude_plan_limits_enabled(True)
@@ -347,7 +372,7 @@ def test_settings_migration_programmatic_legacy_quota_controls_fail_closed(
         )
     )
 
-    assert settings.claude_plan_limits_enabled is False
+    assert settings.claude_plan_limits_enabled is True
     assert settings.quota_alerts_enabled is False
     assert settings.quota_alert_thresholds == (90.0, 95.0)
     assert settings.led_display == LED_DISPLAY_AGENT
@@ -377,9 +402,73 @@ def test_settings_migration_programmatic_legacy_quota_controls_fail_closed(
     )
 
     payload = json.loads(target.read_text())
-    assert "claude_plan_limits_enabled" not in payload
+    assert payload["claude_plan_limits_enabled"] is True
     assert "quota_alerts_enabled" not in payload
     assert "quota_alert_thresholds" not in payload
     assert payload["led_display"] == LED_DISPLAY_AGENT
     assert payload["devices"][0]["led_display"] == LED_DISPLAY_AGENT
     assert payload["webhook_events"] == ["completion"]
+
+
+def test_a_forged_claude_opt_in_carries_no_consent_across_a_reload(
+    tmp_path: Path,
+) -> None:
+    """The value is not the consent; the stamp is, and `replace` has none.
+
+    This is the shape a settings file written by an older build is in: the
+    flag says true and nothing says the user was ever asked. It writes itself
+    out honestly and fails closed on the way back in, so no relaunch turns it
+    into a Keychain read and a call to api.anthropic.com.
+    """
+    target = tmp_path / "settings.json"
+    forged = replace(AgentMonitorSettings(), claude_plan_limits_enabled=True)
+    save_settings(forged, target)
+
+    payload = json.loads(target.read_text())
+    assert payload["claude_plan_limits_enabled"] is True
+    assert payload["claude_plan_limits_consent_version"] == 0
+    assert load_settings(target).claude_plan_limits_enabled is False
+
+
+def test_a_real_claude_opt_in_survives_a_save_and_reload(tmp_path: Path) -> None:
+    """Requiring a stamp must not also break the opt-in the user did give."""
+    target = tmp_path / "settings.json"
+    save_settings(AgentMonitorSettings().with_claude_plan_limits_enabled(True), target)
+
+    payload = json.loads(target.read_text())
+    assert payload["claude_plan_limits_enabled"] is True
+    assert payload["claude_plan_limits_consent_version"] == (
+        CLAUDE_PLAN_LIMITS_CONSENT_VERSION
+    )
+    assert load_settings(target).claude_plan_limits_enabled is True
+
+    # And turning it back off clears the stamp, so re-enabling it later is a
+    # fresh decision rather than a leftover one.
+    save_settings(load_settings(target).with_claude_plan_limits_enabled(False), target)
+    cleared = json.loads(target.read_text())
+    assert cleared["claude_plan_limits_enabled"] is False
+    assert cleared["claude_plan_limits_consent_version"] == 0
+
+
+def test_a_stamp_from_another_consent_generation_is_not_consent(
+    tmp_path: Path,
+) -> None:
+    """The stamp is a generation, not a checkbox: only this build's counts."""
+    target = tmp_path / "settings.json"
+    for stamp in (
+        CLAUDE_PLAN_LIMITS_CONSENT_VERSION - 1,
+        CLAUDE_PLAN_LIMITS_CONSENT_VERSION + 1,
+        # JSON `true` equals 1 numerically, which would pass a bare `==`.
+        True,
+        "1",
+        None,
+    ):
+        target.write_text(
+            json.dumps(
+                {
+                    "claude_plan_limits_enabled": True,
+                    "claude_plan_limits_consent_version": stamp,
+                }
+            )
+        )
+        assert load_settings(target).claude_plan_limits_enabled is False, stamp

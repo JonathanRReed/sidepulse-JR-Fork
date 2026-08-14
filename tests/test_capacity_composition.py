@@ -339,6 +339,10 @@ def test_two_provider_story_never_invents_binding_refresh_or_forecast_truth() ->
             source_instances=("local", "experimental-remote"),
             selected_model=None,
             selected_feature=None,
+            source_scopes=(
+                ("codex", "local"),
+                ("claude", "experimental-remote"),
+            ),
         ),
         NOW,
         allow_unbound_legacy=True,
@@ -406,7 +410,14 @@ def test_two_provider_story_never_invents_binding_refresh_or_forecast_truth() ->
     assert len(snapshot.lanes) == 6
     assert len(projection.binding_lanes) == 2
     assert len(card.rows) == 2
-    assert {row.provider for row in card.rows} == {"Codex"}
+    # Codex's long window has a DISPUTED reset and no epoch, so it no longer
+    # headlines anything -- a compact row carries a countdown, and there is no
+    # boundary here to count down to. The second slot goes to Claude's stale
+    # long window instead, which at least happened.
+    assert {row.provider for row in card.rows} == {"Codex", "Claude"}
+    assert all(
+        row.reset_credible for row in projection.binding_lanes
+    )
     assert len(detail_rows) == 6
     assert sum(row.binds for row in detail_rows) == 2
     assert any(row.reset_text == "Reset disputed" for row in detail_rows)

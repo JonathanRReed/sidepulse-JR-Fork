@@ -231,14 +231,19 @@ def _lane(
     semantic_name: str,
     *,
     scope: str = "all",
+    model: str | None = None,
     horizon: QuotaHorizon = QuotaHorizon.OTHER,
     effect: QuotaEffect = QuotaEffect.ALL_WORKLOADS,
     bindable: bool = False,
 ) -> CapacitySemanticLane:
+    # `model` exists only so a provider with per-model sub-caps (Claude's
+    # weekly Opus and Sonnet ceilings) can be declared here rather than
+    # invented at runtime. QuotaLaneKey rejects the two ways that could go
+    # wrong -- a MODEL lane without a model, or a model on any other effect.
     return CapacitySemanticLane(
         pool_id=pool_id,
         opaque_scope=scope,
-        model=None,
+        model=model,
         window=window,
         effect=effect,
         semantic_name=semantic_name,
@@ -300,15 +305,55 @@ _PROVIDER_CAPACITY_POLICIES = (
         CapacityPolicyState.DETAIL_ONLY,
         _source("openai", "usage-api", "organization"),
     ),
+    # A consumer Claude subscription publishes several ceilings at once, and
+    # the per-model weekly sub-caps are the ones that actually stop work. They
+    # are declared as separate MODEL lanes rather than folded into the weekly
+    # window: a weekly-Opus reading says nothing about a Sonnet session, and
+    # the authority layer can only refuse a lane it can tell apart.
+    # OFFICIAL_API, not OFFICIAL_LOCAL: this is read from Anthropic's own
+    # endpoint with the user's subscription credential, so it is opt-in.
     ProviderCapacityPolicy(
         "anthropic-consumer",
         "claude",
-        CapacityEvidenceClass.UNSUPPORTED,
+        CapacityEvidenceClass.OFFICIAL_API,
         ("consumer",),
-        (),
-        False,
-        CapacityPolicyState.UNSUPPORTED,
-        None,
+        (
+            _lane(
+                "claude-consumer-plan",
+                "five-hour",
+                "5-hour",
+                horizon=QuotaHorizon.SHORT,
+                bindable=True,
+            ),
+            _lane(
+                "claude-consumer-plan",
+                "weekly",
+                "Weekly",
+                horizon=QuotaHorizon.LONG,
+                bindable=True,
+            ),
+            _lane(
+                "claude-consumer-plan",
+                "weekly",
+                "Weekly Opus",
+                model="opus",
+                horizon=QuotaHorizon.LONG,
+                effect=QuotaEffect.MODEL,
+                bindable=True,
+            ),
+            _lane(
+                "claude-consumer-plan",
+                "weekly",
+                "Weekly Sonnet",
+                model="sonnet",
+                horizon=QuotaHorizon.LONG,
+                effect=QuotaEffect.MODEL,
+                bindable=True,
+            ),
+        ),
+        True,
+        CapacityPolicyState.OBSERVABLE,
+        _source("claude", "quota", "oauth"),
     ),
     ProviderCapacityPolicy(
         "anthropic-team-enterprise",

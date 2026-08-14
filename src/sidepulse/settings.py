@@ -37,6 +37,14 @@ LED_DISPLAY_CHOICES = (
     LED_DISPLAY_QUOTA_RUNWAY,
 )
 SETTINGS_SCHEMA_VERSION = 1
+# The consent generation the Claude plan-limits opt-in was granted under.
+# 0.2.1 shipped a build that PERSISTED `claude_plan_limits_enabled` while the
+# code documented the flag as inert, so a `true` sitting in a settings file
+# today may never have been a decision to present a Keychain credential to
+# api.anthropic.com. Only a value stamped with this generation is consent;
+# anything older is re-asked. Bump this whenever what the opt-in permits
+# changes.
+CLAUDE_PLAN_LIMITS_CONSENT_VERSION = 1
 CALIBRATION_PROFILE_SLOTS = ("Day", "Night", "Travel")
 BRACKET_STYLE_CHOICES = ("auto", "spatial", "identity")
 
@@ -332,9 +340,15 @@ class AgentMonitorSettings:
     # expanded live activity never outgrows the bracket. On by default;
     # manual wing lengths always win over it.
     screen_bar_follow_alcove: bool = True
-    # Legacy quota controls remain load-compatible for one migration wave,
-    # but they cannot authorize a private source or an outbound effect.
+    # Off by default and opt-in by policy: reading consumer Claude limits
+    # means presenting the user's own subscription credential.
     claude_plan_limits_enabled: bool = False
+    # Which consent generation the flag above was granted under. Zero means
+    # "no consent this build recognises" -- the state a settings file written
+    # by an older build is in, and the state a hand-forged dataclass is in.
+    claude_plan_limits_consent_version: int = 0
+    # Still legacy and still inert: threshold alerts are an outbound effect
+    # and have no authority-fed producer yet.
     quota_alerts_enabled: bool = False
     # Capacity retention is a separate, explicit consent boundary. Existing
     # transcript and broad usage settings never enable either history stream.
@@ -879,16 +893,23 @@ class AgentMonitorSettings:
         return replace(self, quota_alert_thresholds=DEFAULT_QUOTA_THRESHOLDS)
 
     def with_claude_plan_limits_enabled(self, enabled: bool) -> AgentMonitorSettings:
-        # Still fails closed, and deliberately. The credential read, the OAuth
-        # fetch and the window parsing are all built and tested now, but a
-        # capacity reading may only reach a consumer through the authority
-        # layer (capacity_authority.select_binding_lanes), which refuses
-        # stale, model-inapplicable and unknown-source evidence. Claude has no
-        # declared capacity lanes in provider_contracts yet, so there is
-        # nothing for that layer to authorise. Declaring them is what opens
-        # this switch honestly. See tests/test_capacity_consumer_authority.py.
-        del enabled
-        return replace(self, claude_plan_limits_enabled=False)
+        # Honours its argument now that the consumer policy declares real
+        # lanes and claude/quota/oauth negotiates them, so there is something
+        # for capacity_authority.select_binding_lanes to authorise. It stays
+        # OFF by default: the policy is opt_in_required, and the opt-in is the
+        # user's consent to present their subscription credential at all.
+        #
+        # Only this mutator stamps consent, and only a stamp from THIS
+        # generation survives `load_settings`. That is what stops a `true`
+        # written by a build where the flag did nothing from turning into a
+        # credentialed network read on first launch after upgrading.
+        return replace(
+            self,
+            claude_plan_limits_enabled=bool(enabled),
+            claude_plan_limits_consent_version=(
+                CLAUDE_PLAN_LIMITS_CONSENT_VERSION if enabled else 0
+            ),
+        )
 
     def with_link_screen_bar_to_hardware(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, link_screen_bar_to_hardware=bool(enabled))
@@ -1234,6 +1255,13 @@ class AgentMonitorSettings:
             "link_screen_bar_to_hardware": self.link_screen_bar_to_hardware,
             "screen_bar_gauges_enabled": self.screen_bar_gauges_enabled,
             "screen_bar_follow_alcove": self.screen_bar_follow_alcove,
+            "claude_plan_limits_enabled": self.claude_plan_limits_enabled,
+            "claude_plan_limits_consent_version": (
+                self.claude_plan_limits_consent_version
+                if type(self.claude_plan_limits_consent_version) is int
+                and self.claude_plan_limits_enabled
+                else 0
+            ),
             "capacity_history_enabled": self.capacity_history_enabled,
             "capacity_history_retention_days": (
                 self.capacity_history_retention_days
@@ -1526,7 +1554,20 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         screen_bar_gauges_enabled=_bool_setting(data.get("screen_bar_gauges_enabled"), False),
         screen_bar_follow_alcove=_bool_setting(data.get("screen_bar_follow_alcove"), True),
-        claude_plan_limits_enabled=False,
+        # A stored `true` is honoured only when it carries this build's
+        # consent stamp. 0.2.1 persisted this key from a build whose own
+        # comments called the flag inert, so on those machines the value is
+        # not a decision to hand a Keychain credential to api.anthropic.com on
+        # a 5-minute timer -- and an upgrade must not read it as one. Absent
+        # or older stamp: off, and the user is asked again.
+        claude_plan_limits_enabled=_claude_plan_limits_consented(data),
+        claude_plan_limits_consent_version=(
+            CLAUDE_PLAN_LIMITS_CONSENT_VERSION
+            if _claude_plan_limits_consented(data)
+            else 0
+        ),
+        # Not loaded: nothing consumes an authorised threshold crossing yet,
+        # so a stored True would be a promise the app cannot keep.
         quota_alerts_enabled=False,
         capacity_history_enabled=_bool_setting(
             data.get("capacity_history_enabled"), False
@@ -1661,6 +1702,21 @@ def _bool_setting(value: object, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     return default
+
+
+def _claude_plan_limits_consented(data: dict) -> bool:
+    """Whether a persisted opt-in is consent THIS build may act on.
+
+    `type(...) is int` on purpose: JSON `true` compares equal to 1, so an
+    `is int` test is the difference between requiring a real stamp and letting
+    any truthy leftover pass for one.
+    """
+    stamp = data.get("claude_plan_limits_consent_version")
+    return (
+        _bool_setting(data.get("claude_plan_limits_enabled"), False)
+        and type(stamp) is int
+        and stamp == CLAUDE_PLAN_LIMITS_CONSENT_VERSION
+    )
 
 
 def normalize_idle_dim_after_minutes(

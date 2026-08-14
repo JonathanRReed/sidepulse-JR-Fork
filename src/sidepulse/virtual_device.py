@@ -47,6 +47,7 @@ from .render_policy import (
     RenderDriverKind,
     alcove_bracket_corner_radius,
     choose_render_schedule,
+    presentation_hold_seconds,
     rounded_silhouette,
     runtime_render_environment,
 )
@@ -148,9 +149,26 @@ WING_RISER_SOLID_FRACTION = 0.45
 LED_BLEND_RADIUS_LEDS = 1.5
 BLEND_COLUMN_WIDTH = 2.0
 LED_GLOW_HEIGHT = 11.0
-LED_CORE_BOOST = 1.22
-LED_HOTLINE_BOOST = 1.46
-LED_GAMMA = 0.86
+# The notch's bloom, as per-layer LEVEL only -- a fraction of the LED's own
+# colour, never a multiplier above it. Two things used to live here and both
+# had to go, for the same reason:
+#
+#   LED_GAMMA = 0.86 raised every channel to a power before scaling, so the
+#   Screen Bar emitted light proportional to (code/255)**1.89 while the strip
+#   emitted (code/255)**1.0 -- and it lifted small channels more than large
+#   ones, which is a hue shift dressed up as a tone map.
+#
+#   LED_CORE_BOOST = 1.22 / LED_HOTLINE_BOOST = 1.46 then multiplied PAST full
+#   scale and clipped. On #FF3A00 red was already at full so it clipped while
+#   green took its whole 22%, and the ask colour arrived on screen as #FF5700 --
+#   orange. That is not bloom, it is a hue error: the boost was buying "hotter
+#   than the colour" the only way an already-maxed channel can, by desaturating
+#   towards white. A level above 1.0 cannot exist on this surface, so these are
+#   1.0 and the halo comes from the layers that surround the core instead --
+#   the 0.82 and 0.64 glow rects above the band, which are true fractions and
+#   are preserved exactly.
+LED_CORE_BOOST = 1.0
+LED_HOTLINE_BOOST = 1.0
 # Native gradient allocation is much more expensive than selecting a nearby
 # cached color. Five bits per channel bounds nearest-bucket error to roughly
 # four 8-bit channel steps on this soft peripheral glow while allowing a
@@ -167,6 +185,14 @@ TARGET_SAMPLE_INTERVAL_VIEW_CONTRACT = 1.0 / FRAME_RATE
 FRAME_INTERVAL = 1.0 / FRAME_RATE
 REPOSITION_INTERVAL_SECONDS = 2.0
 SAMPLER_CLOSE_TIMEOUT_SECONDS = 0.25
+
+# How long an uncommitted Studio preview may own the Screen Bar before the
+# live render takes it back on its own. Hover exit is what normally ends a
+# preview; this is the backstop for the cases where no exit event ever
+# arrives (the window closed under the pointer, the pane was torn down
+# mid-hover). Checked against the live sync path, which is the only clock
+# this class can rely on already ticking.
+PREVIEW_HOLD_MAX_SECONDS = 20.0
 _OFF_COLORS = ((0.0, 0.0, 0.0, 0.0),) * LED_COUNT
 
 
@@ -542,13 +568,14 @@ def _legibility_boost(color, floor: float):
     red, green, blue, alpha = color
     if floor <= 0.0 or alpha <= 0.0005 or alpha >= floor:
         return color
+    # Shared scale, capped at the brightest channel, for the same reason
+    # tone_mapped_led_color uses one: clamping each channel on its own turns
+    # "make this more visible" into "make this a different colour".
+    peak = max(red, green, blue)
     factor = floor / alpha
-    return (
-        min(1.0, red * factor),
-        min(1.0, green * factor),
-        min(1.0, blue * factor),
-        floor,
-    )
+    if peak > 0.0:
+        factor = min(factor, 1.0 / peak)
+    return (red * factor, green * factor, blue * factor, floor)
 
 
 def notch_bar_path(rect):
@@ -688,17 +715,31 @@ def tone_mapped_led_color(
     boost: float = 1.0,
     alpha_scale: float = 1.0,
 ) -> tuple[float, float, float, float]:
-    def channel(value: float) -> float:
-        if value <= 0.0:
-            return 0.0
-        return min(1.0, (value ** LED_GAMMA) * boost)
+    """The Screen Bar's last step: one glow layer's colour, ready for CG.
 
-    return (
-        channel(red),
-        channel(green),
-        channel(blue),
-        min(1.0, max(0.0, alpha * alpha_scale)),
-    )
+    This is the surface half of the reconciliation in led_status: the strip
+    translates a nominal sRGB code into its own linear PWM units, and this
+    surface -- which is already sRGB, drawn straight into an sRGB-ish context
+    -- translates it by doing nothing to it. Identity is the correct transfer
+    here, and getting to identity is the whole change: the components handed to
+    CGContextSetRGBFillColor are now the nominal code, so both surfaces emit
+    the same fraction of their own full output for the same hex, and a 50%
+    fade is the same 50% breath on both.
+
+    ``boost`` survives because it is genuinely aesthetic: a uniform lift of one
+    layer is a level, and levels are free -- "same RELATIVE light" is a
+    statement about the shape of the curve, not its overall gain. What did not
+    survive is anything per-channel. See LED_CORE_BOOST's comment.
+    """
+    faded = min(1.0, max(0.0, alpha * alpha_scale))
+    # One scale, shared by all three channels, and never above 1.0. Shared is
+    # what keeps the hue: scaling channels independently and clipping each on
+    # its own moves the colour. Bounded is what keeps the LEVEL comparable
+    # with the strip: a scale that clips for saturated colours and not for
+    # unsaturated ones is a curve, not a level, and a curve on one surface and
+    # not the other is the bug this whole change is about.
+    scale = min(1.0, max(0.0, boost))
+    return (red * scale, green * scale, blue * scale, faded)
 
 
 def fill_rect_with_color(rect, color) -> None:
@@ -1770,6 +1811,11 @@ class VirtualStatusDevice(NSObject):
             self._last_safe_colors = None
             self._static_fallback_colors = _OFF_COLORS
             self._last_marked_colors = None
+            # When the last callback was actually turned into a frame. See
+            # redraw_'s cadence gate -- deliberately the last PRESENTED time
+            # and never an accumulated schedule, so a dropped tick cannot
+            # cascade into a run of catch-up frames.
+            self._last_presented_at = None
             self._frame_fallback_relevant = False
             self._alcove_relevant = False
             self._pointer_interaction_relevant = False
@@ -1777,6 +1823,10 @@ class VirtualStatusDevice(NSObject):
             self._program_identity = None
             self._enabled = True
             self._terminating = False
+            # Uncommitted Studio preview: the last program the LIVE path
+            # asked for, and the hold that is currently painting over it.
+            self._live_program_call = None
+            self._preview_hold = None
         return self
 
     @staticmethod
@@ -1798,6 +1848,9 @@ class VirtualStatusDevice(NSObject):
         self._previous_target_timestamp = None
         self._last_safe_colors = None
         self._last_marked_colors = None
+        # A new program presents on the very next callback, whatever the
+        # cadence gate would otherwise have said.
+        self._last_presented_at = None
         command = self._sampler_command
         if command is not None:
             command = self._command_with_generation(
@@ -2078,7 +2131,16 @@ class VirtualStatusDevice(NSObject):
             gentle_motion=gentle,
             refresh_hz=self._panel_refresh_hz(),
         )
+        previous = getattr(self, "_render_schedule", None)
         self._render_schedule = schedule
+        # A cadence change presents on the next callback rather than waiting
+        # out an interval measured against the old rate. This has to happen
+        # HERE and not in _apply_render_schedule: every thermal and low-power
+        # transition that keeps the same driver (serious -> critical, timer to
+        # timer) returns "already installed" and never reaches that function,
+        # which is every cadence change the app actually makes at runtime.
+        if previous is None or previous.cadence != schedule.cadence:
+            self._last_presented_at = None
         cadence = schedule.cadence
         if self.view is not None:
             self.view.setRenderFps_(cadence.sample_fps)
@@ -2177,12 +2239,26 @@ class VirtualStatusDevice(NSObject):
     def _apply_render_schedule(self, schedule) -> None:
         """Transition atomically to the schedule's single frame driver."""
         self._invalidate_frame_driver()
+        # A cadence change presents on the next callback rather than waiting
+        # out an interval measured against the old rate.
+        self._last_presented_at = None
         if schedule.driver is RenderDriverKind.PAUSED:
             self._publish_presentation_schedule()
             return
         if schedule.driver is RenderDriverKind.DISPLAY_LINK and self._install_display_link():
             self._publish_presentation_schedule()
             return
+        # KNOWN HOLE, left open deliberately. _animation_active is False for
+        # STATIC, so no frame-fallback intent is published and the first frame
+        # after motion stops is sampled, published, and never presented -- the
+        # notch keeps the last animated pixels until something else dirties it.
+        # Gating on `schedule.cadence.fps > 0.0` instead would reinstate the
+        # cadence's 4 fps static watcher and close it, EXCEPT that the
+        # fallback timer's interval is a hardcoded 60 Hz in
+        # presentation_scheduler.py: the app would then wake 60 times a second
+        # to render nothing, which is worse than the hole. Closing this
+        # properly means carrying the schedule's interval into
+        # PresentationSchedulerInputs first.
         self._frame_fallback_relevant = bool(self._animation_active)
         self._frame_interval_current = (
             schedule.cadence.interval if self._frame_fallback_relevant else None
@@ -2434,7 +2510,60 @@ class VirtualStatusDevice(NSObject):
         self._animation_active = False
         self._refresh_render_cadence(False, force=True)
 
-    def set_program(
+    # --- Uncommitted preview ------------------------------------------
+    #
+    # The Colour/Animation Studio shows you a candidate colour on the real
+    # Screen Bar while the pointer is on a swatch, and takes it back when
+    # the pointer leaves. That revert has to be structural, not a promise:
+    # a preview that leaks is a setting the user never chose, on the most
+    # visible surface the app owns. So a hold OWNS the surface -- live
+    # updates arriving underneath it are remembered, not drawn -- and
+    # releasing replays whichever live program is current, so the bar
+    # lands on the truth rather than on a stale frame from before the
+    # hover.
+
+    def preview_is_held(self) -> bool:
+        return self._preview_hold is not None
+
+    def hold_preview_program(self, program: str, **kwargs) -> None:
+        """Paint an uncommitted candidate over the live render."""
+        if self._preview_hold is None:
+            self._preview_hold = {
+                "baseline": self._live_program_call,
+                "pending": None,
+            }
+        self._preview_hold["expires_at"] = time.monotonic() + PREVIEW_HOLD_MAX_SECONDS
+        self._apply_program(program, **kwargs)
+
+    def release_preview_program(self) -> bool:
+        """Give the surface back. Returns whether a hold was actually
+        released, so a caller can tell "reverted" from "nothing to do"."""
+        hold, self._preview_hold = self._preview_hold, None
+        if hold is None:
+            return False
+        restore = hold["pending"] or hold["baseline"]
+        if restore is None:
+            return True
+        program, kwargs = restore
+        self._live_program_call = (program, dict(kwargs))
+        self._apply_program(program, **kwargs)
+        return True
+
+    def set_program(self, program: str, **kwargs):
+        """The live render path. While a preview holds the surface this
+        records what the bar WOULD be showing without presenting it, so
+        releasing the hold reverts to now rather than to then."""
+        hold = self._preview_hold
+        if hold is not None:
+            if time.monotonic() < hold.get("expires_at", 0.0):
+                hold["pending"] = (str(program), dict(kwargs))
+                return None
+            # Backstop: a hold nobody released has outlived its welcome.
+            self.release_preview_program()
+        self._live_program_call = (str(program), dict(kwargs))
+        return self._apply_program(program, **kwargs)
+
+    def _apply_program(
         self,
         program: str,
         *,
@@ -2735,6 +2864,51 @@ class VirtualStatusDevice(NSObject):
         self.view = VirtualLedView.alloc().initWithFrame_(((0, 0), (WINDOW_WIDTH, WINDOW_HEIGHT)))
         self.window.setContentView_(self.view)
 
+    def _due_for_presentation(self, callback_timestamp: float) -> bool:
+        """Whether this callback is allowed to become a frame.
+
+        The cadence policy already computes a real framerate -- 30 fps for the
+        slow breathe that is the app's resting state, 15 under thermal
+        pressure, 4 when nothing is moving -- and every driver then threw it
+        away: the display link asks the panel for its maximum (60-120 Hz) and
+        the fallback timer is a hardcoded 60 Hz. Half of those callbacks
+        produced a byte-identical frame that the colour dedupe below discarded
+        *after* paying for the whole sample-interpolate-clamp-quantise
+        pipeline, and the ones that did differ were finer than the sampler
+        could even produce (60 new samples/s feeding 120 callbacks/s).
+
+        Phase-free on purpose: the comparison is against the last callback
+        actually PRESENTED, never against an accumulated schedule, so one late
+        or dropped tick can never cascade into a burst of catch-up frames.
+
+        The headroom is half a DRIVER period, not a fixed percentage of the
+        cadence -- see render_policy.presentation_hold_seconds for why a fixed
+        percentage turned main-thread jitter into dropped frames one for one
+        whenever the cadence matched the driver rate.
+
+        Asking does not consume anything. The stamp is a separate act
+        (_mark_presented) because a callback can reach the pipeline and still
+        have nothing to show: if the sampler has not published this
+        generation's first pair yet, the frame that gets presented is the OFF
+        fallback, and spending the interval on it locked the real first frame
+        of the cue out for a whole cadence period. A dark blink at the head of
+        every announcer cue went from one driver tick to up to 67 ms under
+        thermal pressure. Only a frame carrying real sampler output is allowed
+        to start the clock.
+        """
+        schedule = getattr(self, "_render_schedule", None)
+        if schedule is None:
+            return True
+        hold = presentation_hold_seconds(schedule)
+        if hold is None:
+            return True
+        last = getattr(self, "_last_presented_at", None)
+        return last is None or callback_timestamp - last >= hold
+
+    def _mark_presented(self, callback_timestamp: float) -> None:
+        """Start the cadence interval, from the frame that actually showed."""
+        self._last_presented_at = callback_timestamp
+
     @objc.IBAction
     def redraw_(self, sender):
         if (
@@ -2748,6 +2922,16 @@ class VirtualStatusDevice(NSObject):
         if view is None:
             return
         callback_timestamp = time.monotonic()
+        if not self._due_for_presentation(callback_timestamp):
+            return
+        # Peek before the pipeline runs: two attribute loads, and it is the
+        # only way to tell a real frame from the fallback afterwards --
+        # display_colors_for_tick returns colours either way.
+        carries_sampler_output = (
+            self._sample_buffer.read(self._presentation_generation) is not None
+        )
+        if carries_sampler_output:
+            self._mark_presented(callback_timestamp)
         target_timestamp = presentation_time(
             sender,
             callback_timestamp=callback_timestamp,

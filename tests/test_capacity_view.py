@@ -188,9 +188,17 @@ def _snapshot(*lanes: QuotaLaneObservation) -> CapacitySnapshot:
 def _projection(*lanes: QuotaLaneObservation) -> CapacityProjection:
     providers = tuple(dict.fromkeys(lane.key.source.provider_id for lane in lanes))
     instances = tuple(dict.fromkeys(lane.key.source.source_instance_id for lane in lanes))
+    # The scope is the exact source of every lane, not every provider crossed
+    # with every instance -- the cross product admits sources no build has.
+    scopes = tuple(
+        dict.fromkeys(
+            (lane.key.source.provider_id, lane.key.source.source_instance_id)
+            for lane in lanes
+        )
+    )
     return select_binding_lanes(
         _snapshot(*lanes),
-        ExecutionContext(providers, instances, "gpt-5", None),
+        ExecutionContext(providers, instances, "gpt-5", None, scopes),
         NOW,
         allow_unbound_legacy=True,
     )
@@ -313,7 +321,10 @@ def test_card_preserves_provider_window_remaining_reset_and_stale_marker() -> No
         horizon=QuotaHorizon.LONG,
         remaining=82.0,
         value_state=ObservationState.LAST_KNOWN_GOOD,
-        health_kind=SourceHealthKind.TIMED_OUT,
+        # STALE, not TIMED_OUT. "Old but real" is the state this row exists to
+        # render; a source that could not be read at all is a different claim
+        # and no longer headlines the card at all (see below).
+        health_kind=SourceHealthKind.STALE,
         health_observed_at=NOW - 7_200.0,
         last_attempt_at=NOW - 60.0,
     )
@@ -333,6 +344,50 @@ def test_card_preserves_provider_window_remaining_reset_and_stale_marker() -> No
     assert card.rows[1].stale is True
     assert card.rows[1].freshness_text == "Updated 2h ago, stale"
     assert "used" not in _all_text(card).lower()
+
+
+@pytest.mark.parametrize(
+    "health_kind",
+    (
+        SourceHealthKind.FAILED,
+        SourceHealthKind.TIMED_OUT,
+        SourceHealthKind.ACCESS_DENIED,
+        SourceHealthKind.SIGN_IN_REQUIRED,
+    ),
+)
+def test_a_source_that_could_not_be_read_never_headlines_the_card(
+    health_kind: SourceHealthKind,
+) -> None:
+    """A retained reading is a memory, and a memory does not get to speak.
+
+    `_value_refusal` forgives an unreachable source that still holds a
+    last-known-good number so the ledger can keep showing it. That
+    forgiveness used to make the lane bindable too, so a source that had just
+    answered ACCESS_DENIED headlined the card exactly like a live one.
+    """
+    unreachable = _lane(
+        provider_id="claude",
+        source_instance_id="remote:primary",
+        window="weekly",
+        semantic_name="Weekly window",
+        horizon=QuotaHorizon.LONG,
+        remaining=82.0,
+        value_state=ObservationState.LAST_KNOWN_GOOD,
+        health_kind=health_kind,
+        health_observed_at=NOW - 7_200.0,
+        last_attempt_at=NOW - 60.0,
+    )
+
+    projection = _projection(unreachable, _lane(remaining=25.0))
+    card = build_capacity_card(projection, NOW)
+
+    assert [row.provider for row in card.rows] == ["Codex"]
+    # It is still carried for detail, with the reason attached.
+    withheld = next(
+        row for row in projection.detail_lanes if row.lane.key == unreachable.key
+    )
+    assert withheld.bindable is False
+    assert withheld.refusal_code == f"source_{health_kind.value}"
 
 
 def test_card_has_distinct_no_source_null_partial_and_unavailable_status() -> None:
@@ -440,6 +495,10 @@ def test_detail_groups_every_lane_by_provider_and_applicability() -> None:
             source_instances=("local:primary", "remote:primary"),
             selected_model=None,
             selected_feature=None,
+            source_scopes=(
+                ("codex", "local:primary"),
+                ("claude", "remote:primary"),
+            ),
         ),
         NOW,
         allow_unbound_legacy=True,

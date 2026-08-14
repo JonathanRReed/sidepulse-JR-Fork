@@ -92,6 +92,34 @@ def _observation(
     )
 
 
+# The exact refusal each adversary must earn. Naming the CODE, not just
+# "something was refused", is what stops this from passing vacuously: two of
+# these cases used to be excluded from the only assertion that touched the
+# gate, because including them would have failed.
+_EXPECTED_REFUSAL = {
+    "stale_last_known_good": "source_failed",
+    "model_inapplicable": "model_mismatch",
+    "unknown_source": "source_out_of_context",
+    "missing_reset": "reset_not_credible",
+    "partial_observation": "usage_partial",
+    # The one legitimate reading. It binds, and that is the point: a gate that
+    # refused everything would prove nothing about the five above.
+    "withheld_forecast_authority": None,
+}
+# Whether the lane may still be SHOWN. A refused BINDING is not the same as a
+# hidden row: a stale number and a window with no reset are true things that
+# happened, while an inapplicable, foreign or partial reading has no honest
+# number to render at all.
+_EXPECTED_PRESENTABLE = {
+    "stale_last_known_good": True,
+    "model_inapplicable": False,
+    "unknown_source": False,
+    "missing_reset": True,
+    "partial_observation": False,
+    "withheld_forecast_authority": True,
+}
+
+
 def _canonical_case(case_name: str) -> tuple[CapacitySnapshot | None, ExecutionContext]:
     context = ExecutionContext(("codex",), ("local",), "gpt-5", None)
     if case_name == "raw_percent":
@@ -173,8 +201,12 @@ def test_unauthoritative_capacity_cannot_reach_any_consumer(
         projection = select_binding_lanes(
             snapshot, context, NOW, allow_unbound_legacy=True
         )
-        if case_name in {"model_inapplicable", "unknown_source", "partial_observation"}:
-            assert projection.binding_lanes == ()
+        (authority,) = projection.detail_lanes
+        expected = _EXPECTED_REFUSAL[case_name]
+
+        assert authority.refusal_code == expected
+        assert authority.presentable is _EXPECTED_PRESENTABLE[case_name]
+        assert projection.binding_lanes == (() if expected else (authority,))
 
     assert ForecastReleaseAuthority.withheld().permitted_claim_classes == ()
     target.settings = replace(

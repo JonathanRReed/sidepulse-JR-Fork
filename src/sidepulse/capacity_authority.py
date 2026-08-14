@@ -37,11 +37,31 @@ _DIRECT_HEALTH_KINDS = {
     SourceHealthKind.REFRESHING,
     SourceHealthKind.COOLDOWN,
 }
+# Health kinds that mean the source could not be read at all. STALE is
+# deliberately not one of them: it is the honest "old but real" state the card
+# renders with its stale marker, and a reading that is merely old is still a
+# reading. These are the states where there IS no current reading, and a
+# retained last-known-good is a memory rather than an observation.
+_UNREACHABLE_HEALTH_KINDS = {
+    SourceHealthKind.SIGN_IN_REQUIRED,
+    SourceHealthKind.ACCESS_DENIED,
+    SourceHealthKind.TIMED_OUT,
+    SourceHealthKind.UNSUPPORTED,
+    SourceHealthKind.PARTIAL,
+    SourceHealthKind.FAILED,
+}
 
 
 @dataclass(frozen=True, slots=True)
 class LaneAuthority:
-    """One canonical lane plus its context-specific authority decision."""
+    """One canonical lane plus its context-specific authority decision.
+
+    Two decisions, not one. ``bindable`` is permission to ACT on a reading --
+    an alert, an LED, a forecast -- and requires a live source and a reset we
+    can still believe. ``presentable`` is permission to SHOW the number in the
+    ledger, which survives a stale-but-last-known-good source and a window
+    with no reset, because both of those still render honestly.
+    """
 
     lane: QuotaLaneObservation
     applicability: LaneApplicability
@@ -49,11 +69,17 @@ class LaneAuthority:
     reset_credible: bool
     freshness: ObservationState
     refusal_code: str | None
+    presentation_refusal: str | None = None
 
     @property
     def provider_name(self) -> str:
         """Return the bounded provider identity retained for display projection."""
         return self.lane.key.source.provider_id
+
+    @property
+    def presentable(self) -> bool:
+        """Whether this lane's number may be shown to the user at all."""
+        return self.presentation_refusal is None
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,10 +105,11 @@ def _validated_now(now: float) -> float:
 
 def _source_in_context(lane: QuotaLaneObservation, context: ExecutionContext) -> bool:
     source = lane.key.source
-    return (
-        source.provider_id in context.provider_ids
-        and source.source_instance_id in context.source_instances
-    )
+    # One exact pair, never two independent memberships. The independent form
+    # accepted every provider crossed with every source instance, so adding a
+    # second registered source silently widened what every OTHER provider
+    # could speak for.
+    return (source.provider_id, source.source_instance_id) in context.source_scopes
 
 
 def _applicability_decision(
@@ -131,6 +158,21 @@ def _effective_freshness(lane: QuotaLaneObservation) -> ObservationState:
     if health.kind not in _DIRECT_HEALTH_KINDS and health.has_last_known_good:
         return ObservationState.LAST_KNOWN_GOOD
     return state
+
+
+def _freshness_refusal(lane: QuotaLaneObservation) -> str | None:
+    """Refuse BINDING on evidence a dead source can no longer stand behind.
+
+    `_value_refusal` forgives an unreachable source that still holds a
+    last-known-good reading, and for DISPLAY that is right: the card keeps
+    showing the number, marked stale. It made the lane BINDABLE too, so a
+    source that had answered FAILED or ACCESS_DENIED still spoke with the
+    authority of a live one. The forgiveness stops here.
+    """
+    kind = lane.source_health.kind
+    if kind in _UNREACHABLE_HEALTH_KINDS:
+        return f"source_{kind.value}"
+    return None
 
 
 def _value_refusal(lane: QuotaLaneObservation) -> str | None:
@@ -191,23 +233,39 @@ def evaluate_lane_authority(
     binding: CapacityAccountBinding | None = None,
     allow_unbound_legacy: bool = False,
 ) -> LaneAuthority:
-    """Evaluate whether one already-normalized lane may bind right now."""
+    """Evaluate whether one already-normalized lane may bind or be shown."""
     reference = _validated_now(now)
     applicability, refusal = _applicability_decision(lane, context)
-    if refusal is None:
-        refusal = _binding_refusal(
-            lane,
-            binding,
-            required=not allow_unbound_legacy,
-            now=reference,
-        ) or _value_refusal(lane)
-
     reset = lane.reset
     reset_credible = bool(
         reset.state is ResetState.FUTURE
         and reset.reset_epoch is not None
         and reset.reset_epoch > reference
     )
+
+    # Evidence-level only: what makes the NUMBER untrustworthy. A missing,
+    # partial or unavailable reading has nothing honest to render.
+    inapplicable = applicability is LaneApplicability.INAPPLICABLE
+    value_refusal = None if inapplicable else _value_refusal(lane)
+    # AMBIGUOUS is deliberately still presentable: a weekly-Opus ceiling with
+    # no known running model is a true reading the ledger should list, it just
+    # may never bind. Only INAPPLICABLE hides a lane on identity alone.
+    presentation_refusal = (refusal if inapplicable else None) or value_refusal
+    if refusal is None:
+        # Binding is strictly narrower. `reset_credible` was computed and then
+        # never consulted, which is how a window with no reset at all -- and a
+        # source that had already FAILED -- stayed bindable.
+        refusal = (
+            _binding_refusal(
+                lane,
+                binding,
+                required=not allow_unbound_legacy,
+                now=reference,
+            )
+            or value_refusal
+            or _freshness_refusal(lane)
+            or (None if reset_credible else "reset_not_credible")
+        )
     return LaneAuthority(
         lane=lane,
         applicability=applicability,
@@ -215,6 +273,7 @@ def evaluate_lane_authority(
         reset_credible=reset_credible,
         freshness=_effective_freshness(lane),
         refusal_code=refusal,
+        presentation_refusal=presentation_refusal,
     )
 
 

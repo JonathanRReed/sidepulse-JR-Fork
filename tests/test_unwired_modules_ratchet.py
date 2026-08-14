@@ -23,8 +23,7 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "sidepulse"
 
 # module -> why it is not reachable yet
 KNOWN_UNWIRED = {
-    "capacity_view": "presentation for the capacity plane; needs declared Claude lanes",
-    "capacity_sources": "adapter registry for the capacity plane",
+    "capacity_view": "card/detail presentation; the menu ledger still renders its own rows",
     "capacity_history_store": "Wave 4 persisted usage history",
     "provider_runtime": "Wave 4 per-provider runtime",
     "delivery_ledger_store": "notification delivery ledger",

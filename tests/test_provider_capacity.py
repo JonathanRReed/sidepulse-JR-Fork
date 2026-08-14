@@ -68,12 +68,12 @@ def test_literal_policy_table_keeps_exact_provider_account_pools_separate() -> N
         (
             "anthropic-consumer",
             "claude",
-            CapacityEvidenceClass.UNSUPPORTED,
+            CapacityEvidenceClass.OFFICIAL_API,
             ("consumer",),
-            (),
-            False,
-            CapacityPolicyState.UNSUPPORTED,
-            None,
+            ("claude-consumer-plan",),
+            True,
+            CapacityPolicyState.OBSERVABLE,
+            SourceKey("claude", "quota", "oauth", "remote_quota_windows"),
         ),
         (
             "anthropic-team-enterprise",
@@ -175,20 +175,25 @@ def test_semantic_lanes_are_literal_bounded_and_immutable() -> None:
     codex = policies[0]
     claude = policies[2]
 
-    assert tuple(
-        (
-            lane.pool_id,
-            lane.opaque_scope,
-            lane.window,
-            lane.effect,
-            lane.semantic_name,
-            lane.bindable,
+    def identities(policy):
+        return tuple(
+            (
+                lane.pool_id,
+                lane.opaque_scope,
+                lane.model,
+                lane.window,
+                lane.effect,
+                lane.semantic_name,
+                lane.bindable,
+            )
+            for lane in policy.lanes
         )
-        for lane in codex.lanes
-    ) == (
+
+    assert identities(codex) == (
         (
             "codex-chatgpt-plan",
             "all",
+            None,
             "five-hour",
             QuotaEffect.ALL_WORKLOADS,
             "5-hour window",
@@ -197,13 +202,56 @@ def test_semantic_lanes_are_literal_bounded_and_immutable() -> None:
         (
             "codex-chatgpt-plan",
             "all",
+            None,
             "weekly",
             QuotaEffect.ALL_WORKLOADS,
             "Weekly window",
             True,
         ),
     )
-    assert claude.lanes == ()
+    # The two weekly sub-caps share a pool and a window with the weekly
+    # ceiling and differ only by model. Folding them together, or deriving
+    # them from whatever `claude_quota.fetch_windows` happened to return,
+    # would give the authority layer nothing to tell apart -- and an Opus
+    # ceiling would then speak for a Sonnet session.
+    assert identities(claude) == (
+        (
+            "claude-consumer-plan",
+            "all",
+            None,
+            "five-hour",
+            QuotaEffect.ALL_WORKLOADS,
+            "5-hour",
+            True,
+        ),
+        (
+            "claude-consumer-plan",
+            "all",
+            None,
+            "weekly",
+            QuotaEffect.ALL_WORKLOADS,
+            "Weekly",
+            True,
+        ),
+        (
+            "claude-consumer-plan",
+            "all",
+            "opus",
+            "weekly",
+            QuotaEffect.MODEL,
+            "Weekly Opus",
+            True,
+        ),
+        (
+            "claude-consumer-plan",
+            "all",
+            "sonnet",
+            "weekly",
+            QuotaEffect.MODEL,
+            "Weekly Sonnet",
+            True,
+        ),
+    )
     assert all(type(policy.auth_modes) is tuple for policy in policies)
     assert all(type(policy.lanes) is tuple for policy in policies)
     with pytest.raises(FrozenInstanceError):
@@ -222,8 +270,12 @@ def test_exact_provider_and_auth_mode_select_one_policy_without_pool_inheritance
 
     assert codex is not None and codex.pool_ids == ("codex-chatgpt-plan",)
     assert openai is not None and openai.pool_ids == ("openai-api-organization",)
-    assert consumer is not None and consumer.pool_ids == ()
-    assert consumer.state is CapacityPolicyState.UNSUPPORTED
+    assert consumer is not None and consumer.pool_ids == ("claude-consumer-plan",)
+    assert consumer.state is CapacityPolicyState.OBSERVABLE
+    # The consumer subscription pool and the seat pools stay separate even
+    # though both answer to "claude": a Max plan must never inherit Team seat
+    # capacity, or the reverse.
+    assert consumer.pool_ids != team.pool_ids
     assert team is not None and team.pool_ids == (
         "claude-team-seat",
         "claude-enterprise-seat",
@@ -245,7 +297,10 @@ def test_each_actual_policy_source_negotiates_exactly_one_registered_capability(
     negotiated = negotiate_provider_capacity_policies(available)
 
     actual = tuple(row for row in negotiated if row.negotiated_source is not None)
-    assert len(actual) == 1
+    assert tuple(row.policy.profile_id for row in actual) == (
+        "openai-codex-consumer",
+        "anthropic-consumer",
+    )
     assert all(row.negotiated_source is not None for row in actual)
     assert all(row.descriptor is not None for row in actual)
     assert all(

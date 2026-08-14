@@ -105,6 +105,9 @@ def _card(now: float = NOW):
             ("local:primary", "remote:primary"),
             None,
             None,
+            # The two sources this fixture actually has, as pairs. The flat
+            # form matched their cross product too.
+            (("codex", "local:primary"), ("claude", "remote:primary")),
         ),
         now,
         allow_unbound_legacy=True,

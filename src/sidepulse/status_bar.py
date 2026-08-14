@@ -123,6 +123,7 @@ from .battery import (
     program_for_battery,
     read_battery_snapshot,
 )
+from .capacity_authority import select_binding_lanes
 from .capacity_refresh import (
     CapacityRefreshCoordinator,
     RefreshCause,
@@ -132,9 +133,11 @@ from .capacity_refresh import (
     RefreshSourceKey,
     RefreshSourceRegistration,
 )
+from .capacity_sources import normalize_supported_quota_evidence
 from .capacity_types import (
     CapacitySnapshot,
     CapacitySourceHealth,
+    ExecutionContext,
     QuotaLaneObservation,
     SourceHealthKind,
     SourceKey,
@@ -339,6 +342,7 @@ from .presentation_scheduler import (
     plan_presentation_schedule,
 )
 from .private_export import write_private_export
+from .provider_capacity import negotiate_provider_capacity_policies
 from .provider_contracts import ProviderIdentifier
 from .provider_facts import NextActor, RequestKey, SourceFreshness, WorkKey
 from .providers import (
@@ -470,6 +474,152 @@ def _capacity_source_keys_by_provider():
 CAPACITY_SOURCE_KEYS_BY_PROVIDER = _capacity_source_keys_by_provider()
 
 
+def _capacity_descriptors_by_source():
+    """Bind each negotiated capacity source to the lanes its policy declares.
+
+    Resolved once, at import: negotiation is pure, and a worker that had to
+    re-derive it per refresh could disagree with the policy table midway
+    through a run. A source with no descriptor never negotiated, and its
+    producer must stay silent rather than invent lanes.
+    """
+    return {
+        row.policy.source: row.descriptor
+        for row in negotiate_provider_capacity_policies(negotiated_provider_sources())
+        if row.descriptor is not None
+    }
+
+
+CAPACITY_DESCRIPTORS_BY_SOURCE = _capacity_descriptors_by_source()
+# The refresh scope and the producer's account scope have to be the same
+# string. `CapacityRefreshCoordinator._validate_snapshot` rejects a snapshot
+# whose lanes sit outside the key's (source, pool, account, auth_mode) scope,
+# so a discriminator invented in one place and not the other loses every
+# reading as "cross-scope" -- silently, because the commit just fails.
+CAPACITY_ACCOUNT_SCOPES_BY_SOURCE = {
+    claude_quota.CLAUDE_QUOTA_SOURCE: claude_quota.CLAUDE_ACCOUNT_SCOPE,
+}
+
+
+def _capacity_auth_modes_by_source():
+    """Bind each negotiated source to the one auth mode its policy declares.
+
+    A policy that lists several modes cannot be pinned without knowing which
+    credential is in play, so it stays None rather than picking one. Deriving
+    this from the policy table is the point: the refresh key's scope and the
+    producer's `auth_mode` have to be the same string or every reading is
+    thrown away as cross-scope.
+    """
+    return {
+        row.policy.source: row.policy.auth_modes[0]
+        for row in negotiate_provider_capacity_policies(negotiated_provider_sources())
+        if row.descriptor is not None and len(row.policy.auth_modes) == 1
+    }
+
+
+CAPACITY_AUTH_MODES_BY_SOURCE = _capacity_auth_modes_by_source()
+
+
+def _capacity_refresh_pool(source_key: SourceKey) -> str:
+    """Return the one declared account pool this source refreshes.
+
+    Was the literal "plan" for every provider, which matches no declared pool
+    at all -- harmless only because no producer had ever emitted a lane. A
+    source declaring several pools needs several refresh keys, so it keeps
+    the old literal rather than picking one of them silently.
+    """
+    descriptor = CAPACITY_DESCRIPTORS_BY_SOURCE.get(source_key)
+    pools = (
+        tuple(dict.fromkeys(lane.key.pool for lane in descriptor.lanes))
+        if descriptor is not None
+        else ()
+    )
+    return pools[0] if len(pools) == 1 else "plan"
+
+
+def capacity_execution_context() -> ExecutionContext:
+    """Bound the authority layer to the sources this build actually registered.
+
+    The scopes are PAIRS, one per registered source. Handing the context two
+    flat lists let it match their cross product, so registering a second
+    source (claude/quota/oauth) also taught it to accept claude/*/local and
+    codex/*/oauth -- sources nothing here negotiated.
+
+    `selected_model` stays None because nothing here knows which model the
+    user is on. That is not a gap to paper over: it makes every per-model
+    sub-cap AMBIGUOUS rather than APPLICABLE, so a weekly-Opus reading can be
+    listed in the ledger but can never be treated as binding on a Sonnet run.
+    """
+    sources = tuple(sorted(CAPACITY_SOURCE_KEYS_BY_PROVIDER.values()))
+    return ExecutionContext(
+        provider_ids=tuple(sorted({source.provider_id for source in sources})),
+        source_instances=tuple(sorted({source.source_instance_id for source in sources})),
+        selected_model=None,
+        selected_feature=None,
+        source_scopes=tuple(
+            (source.provider_id, source.source_instance_id) for source in sources
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class AuthorisedCapacity:
+    """The lanes a context may show, plus why anything else is missing.
+
+    Withheld lanes are carried rather than dropped so the surface the owner is
+    already looking at can say a reading exists and could not be trusted,
+    instead of a row quietly disappearing.
+    """
+
+    lanes: tuple[QuotaLaneObservation, ...]
+    withheld: tuple[tuple[str, str], ...]
+
+    def __iter__(self):
+        return iter(self.lanes)
+
+    def __len__(self) -> int:
+        return len(self.lanes)
+
+    def __contains__(self, value) -> bool:
+        return value in self.lanes
+
+
+def authorised_capacity_lanes(snapshot, *, now: float) -> AuthorisedCapacity:
+    """Return the lanes of one snapshot that this context may present at all.
+
+    `limit=0` is not a workaround: no `CapacityAccountBinding` exists for any
+    source yet, so asking for zero binding rows is the honest statement that
+    this build makes no binding claim. Display never needed one -- a binding
+    gates EFFECTS (an alert, an LED, a forecast), and the ledger is not an
+    effect -- which is why the filter below is `presentable`, not `bindable`.
+
+    `presentable` enforces the whole evidence-level refusal, not just
+    applicability. A PARTIAL batch, a null reading and a source that answered
+    ACCESS_DENIED each computed a refusal that was then discarded, so all
+    three would have rendered as an ordinary percentage.
+    """
+    projection = select_binding_lanes(snapshot, capacity_execution_context(), now, 0)
+    decisions = {
+        authority.lane.key: authority for authority in projection.detail_lanes
+    }
+    # Filter, never reorder: the projection sorts by lane key, but reading
+    # order is the producer's declaration order.
+    lanes = tuple(
+        lane
+        for lane in snapshot.lanes
+        if lane.key in decisions and decisions[lane.key].presentable
+    )
+    withheld = tuple(
+        (
+            lane.semantic_name,
+            (decisions[lane.key].presentation_refusal if lane.key in decisions else None)
+            or "unauthorised",
+        )
+        for lane in snapshot.lanes
+        if lane.key not in decisions or not decisions[lane.key].presentable
+    )
+    return AuthorisedCapacity(lanes=lanes, withheld=withheld)
+
+
 def _transcript_source_keys_by_provider():
     rows = tuple(
         row.source_key
@@ -492,6 +642,11 @@ CAPACITY_REFRESH_FAILURE_COPY = {
     RefreshFailureKind.ACCESS_DENIED: "Capacity access denied",
     RefreshFailureKind.SOURCE_UNAVAILABLE: "Capacity source unavailable",
 }
+# What the card says when the fetch worked and the authority layer kept
+# nothing. The alternative -- falling through to the raw window list -- is the
+# exact bug this copy exists to make impossible: a never-authorised percentage
+# rendered as if it were the ceiling that stops work.
+CAPACITY_UNAUTHORISED_COPY = "Capacity reading unavailable"
 
 
 @dataclass(frozen=True)
@@ -1440,14 +1595,11 @@ class StatusBarController(NSObject):
         self._studio_validation_cache = None
         self._timebox_off_shortcut = None
         self._trailing_refresh_timer = None
+        self._capacity_source_generations = {}
         self._usage_provider_states = {
             provider_id: ProviderRefreshState(
                 source_key=source_key,
-                enabled=(
-                    bool(self.settings.codex_percent_enabled)
-                    if provider_id == "codex"
-                    else provider_id != "claude"
-                ),
+                enabled=self._capacity_row_enabled(provider_id),
             )
             for provider_id, source_key in CAPACITY_SOURCE_KEYS_BY_PROVIDER.items()
         }
@@ -1458,8 +1610,9 @@ class StatusBarController(NSObject):
         self._capacity_refresh_keys_by_provider = {
             provider_id: RefreshSourceKey(
                 source=source_key,
-                pool="plan",
-                account_discriminator=None,
+                pool=_capacity_refresh_pool(source_key),
+                account_discriminator=CAPACITY_ACCOUNT_SCOPES_BY_SOURCE.get(source_key),
+                auth_mode=CAPACITY_AUTH_MODES_BY_SOURCE.get(source_key),
             )
             for provider_id, source_key in CAPACITY_SOURCE_KEYS_BY_PROVIDER.items()
         }
@@ -1473,6 +1626,7 @@ class StatusBarController(NSObject):
         self._usage_menu_header = None
         self._usage_menu_labels = {}
         self._usage_menu_secondary_labels = {}
+        self._usage_menu_window_labels = {}
         self._capacity_reset_timer = None
         self._capacity_reset_plan = ResetBoundaryPlan(None, (), ())
         self._capacity_reset_retry_deadline: float | None = None
@@ -2172,14 +2326,9 @@ class StatusBarController(NSObject):
         now = time.monotonic()
         states = getattr(self, "_usage_provider_states", {})
         for provider_id, state in tuple(states.items()):
-            enabled = (
-                bool(self.settings.codex_percent_enabled)
-                if provider_id == "codex"
-                else provider_id != "claude"
-            )
             states[provider_id] = dataclass_replace(
                 state,
-                enabled=enabled,
+                enabled=self._capacity_row_enabled(provider_id),
                 visible=True,
             )
         transcript_states = getattr(self, "_usage_transcript_states", {})
@@ -2481,6 +2630,19 @@ class StatusBarController(NSObject):
         if provider_id == "claude":
             return bool(self.settings.claude_plan_limits_enabled)
         return True
+
+    def _capacity_row_enabled(self, provider_id: str) -> bool:
+        """Whether this provider's capacity row is one the user asked to see.
+
+        Codex's percentages are a display preference on an always-available
+        local read; Claude's are an opt-in to reading a credential at all.
+        Both end up here so the scheduler never carries a provider name of
+        its own -- the previous `provider_id != "claude"` was the reason the
+        opt-in did nothing even after the other three switches opened.
+        """
+        if provider_id == "codex":
+            return bool(self.settings.codex_percent_enabled)
+        return self._capacity_source_enabled(provider_id)
 
     def claude_access_token(self) -> str | None:
         """Claude Code's own OAuth token, cached for this process.
@@ -2992,6 +3154,56 @@ class StatusBarController(NSObject):
             }
         return None
 
+    def _capacity_source_generation(self, provider_id: str) -> int:
+        """Return the current lifetime generation for one capacity source.
+
+        It advances only when the account behind the source may have changed
+        -- today, when the user toggles the source off and on. Advancing it on
+        every poll would break reset continuity; never advancing it would let
+        one account's reset boundary vouch for another's.
+        """
+        generations = getattr(self, "_capacity_source_generations", None)
+        if generations is None:
+            generations = {}
+            self._capacity_source_generations = generations
+        return int(generations.get(provider_id, 0))
+
+    def _advance_capacity_source_generation(self, provider_id: str) -> None:
+        """Retire every reset boundary attributed to the previous account."""
+        self._capacity_source_generations = {
+            **(getattr(self, "_capacity_source_generations", None) or {}),
+            provider_id: self._capacity_source_generation(provider_id) + 1,
+        }
+
+    def _claude_capacity_observations(
+        self,
+        source_key: SourceKey,
+        windows,
+    ) -> tuple[QuotaLaneObservation, ...]:
+        """Turn fetched Claude windows into observations the contract stamped.
+
+        Never constructed ad hoc: the descriptor owns each lane's semantic
+        name, horizon and identity, so a window this build did not declare
+        raises rather than arriving under a borrowed lane's name.
+        """
+        descriptor = CAPACITY_DESCRIPTORS_BY_SOURCE.get(source_key)
+        if descriptor is None or not windows:
+            return ()
+        observed_at = time.time()
+        evidence = claude_quota.capacity_evidence_from_windows(
+            descriptor,
+            windows,
+            observed_at=observed_at,
+        )
+        if not evidence.lanes:
+            return ()
+        normalized = normalize_supported_quota_evidence(
+            descriptor,
+            evidence,
+            observed_at=observed_at,
+        )
+        return normalized.snapshot.lanes
+
     def _usage_refresh_source_worker(
         self,
         source_key: SourceKey,
@@ -3030,6 +3242,7 @@ class StatusBarController(NSObject):
 
         elif provider_id == "claude":
             windows = []
+            observations = ()
             if self.settings.claude_plan_limits_enabled:
                 try:
                     token = self.claude_access_token()
@@ -3038,6 +3251,10 @@ class StatusBarController(NSObject):
                             claude_quota.CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN
                         )
                     windows = claude_quota.fetch_windows(access_token=token)
+                    observations = self._claude_capacity_observations(
+                        source_key,
+                        windows,
+                    )
                 except claude_quota.ClaudeQuotaUnavailableError as error:
                     # The reason code is product-owned and content-free, so it
                     # is safe to say out loud -- and saying WHY is the whole
@@ -3050,7 +3267,17 @@ class StatusBarController(NSObject):
             result = {
                 "provider_id": "claude",
                 "title": "Claude",
-                "windows": windows,
+                # No "windows" key on purpose. The fetched list exists only
+                # long enough to be mapped onto declared lanes; shipping it to
+                # the main thread as well gave the display something raw to
+                # fall back to the moment the authority pass kept nothing.
+                "capacity_observations": observations,
+                # Deliberately the SOURCE generation, not the refresh
+                # generation: reset continuity scopes a reset boundary to one
+                # uninterrupted run of this source, so a value that changed on
+                # every poll would leave every boundary permanently
+                # unconfirmed and no countdown would ever be shown.
+                "source_generation": self._capacity_source_generation("claude"),
             }
         else:
             failure = RefreshFailureKind.SOURCE_UNAVAILABLE
@@ -3160,6 +3387,7 @@ class StatusBarController(NSObject):
             refresh_key = self._capacity_refresh_keys_by_provider.get(provider_id)
             if refresh_key is None or refresh_key.source != source_key:
                 continue
+            authorised = None
             if failure is None:
                 observations = result.get("capacity_observations") or ()
                 if not (
@@ -3185,6 +3413,10 @@ class StatusBarController(NSObject):
                         lanes=observations,
                         source_health=(health,),
                     )
+                    # The whole snapshot is retained; only the lanes this
+                    # execution context can speak for are published. Display
+                    # is downstream of authority, never straight off the wire.
+                    authorised = authorised_capacity_lanes(snapshot, now=reset_now)
                     try:
                         commit = self._capacity_refresh_coordinator.register_success(
                             refresh_key,
@@ -3218,9 +3450,15 @@ class StatusBarController(NSObject):
             row = self._project_capacity_refresh_state(refresh_key, now=now)
             state = self._usage_provider_states[provider_id]
             old_model = models.get(provider_id)
+            # A result that carries capacity observations is contract-built,
+            # and its numbers may only come from the authorised projection.
+            # The legacy window list stays reachable exactly for the sources
+            # that have no producer yet, and never as a fallback for one that
+            # does -- an authority veto must not be the trigger for a bypass.
+            contract_built = isinstance(result, dict) and "capacity_observations" in result
             if failure is not None:
                 error_text = CAPACITY_REFRESH_FAILURE_COPY[failure]
-                if isinstance(result, dict):
+                if isinstance(result, dict) and not contract_built:
                     result_windows = result.get("windows") or ()
                     if not result_windows and old_model is not None:
                         result_windows = usage_window_payloads(old_model)
@@ -3271,8 +3509,42 @@ class StatusBarController(NSObject):
                         error_text=error_text,
                     )
             elif isinstance(result, dict):
-                result_windows = result.get("windows") or ()
-                capacity_observations = tuple(result.get("capacity_observations") or ())
+                notice = None
+                last_success_at = row.last_success_at
+                if contract_built:
+                    # The authorised projection is the ONLY source of numbers
+                    # here. `authorised` is a tuple-like, so an empty one used
+                    # to read as "no authority pass ran" and promoted the raw
+                    # window list; there is now no raw list to promote and no
+                    # branch that would reach for one.
+                    result_windows = ()
+                    capacity_observations = (
+                        authorised.lanes if authorised is not None else ()
+                    )
+                    withheld = authorised.withheld if authorised is not None else ()
+                    if withheld:
+                        log_status_bar(
+                            "capacity lanes withheld: "
+                            + ", ".join(f"{name}={reason}" for name, reason in withheld)
+                        )
+                    if not capacity_observations:
+                        # Either every window fell outside the declared lanes
+                        # or the authority layer kept none of them. To the
+                        # owner both mean the same thing, and saying it is the
+                        # only honest option left.
+                        notice = CAPACITY_UNAUTHORISED_COPY
+                        # A refresh that authorised nothing is not a success
+                        # the card may lean on, or it would read "No usage
+                        # yet" over a fresh timestamp.
+                        last_success_at = None
+                    elif withheld:
+                        notice = (
+                            f"{len(withheld)} window"
+                            f"{'' if len(withheld) == 1 else 's'} unavailable"
+                        )
+                else:
+                    result_windows = result.get("windows") or ()
+                    capacity_observations = ()
                 reset_decisions = {}
                 source_generation = result.get("source_generation")
                 for observation in capacity_observations:
@@ -3290,9 +3562,15 @@ class StatusBarController(NSObject):
                     provider_id,
                     str(result.get("title") or provider_id.title()),
                     result_windows,
-                    last_success_at=row.last_success_at,
+                    last_success_at=last_success_at,
                     now=now,
                     reset_now=reset_now,
+                    # A batch we could not fully authorise is not a fully
+                    # fresh batch, and `build_provider_usage_view` marks any
+                    # model carrying error copy stale. That is the intended
+                    # trade: no countdown beats a countdown on a reading whose
+                    # neighbours were refused.
+                    error_text=notice,
                     summary_text=(
                         result.get("summary_text")
                         if result.get("summary_text") is not None
@@ -3384,29 +3662,19 @@ class StatusBarController(NSObject):
         secondary_labels = (
             getattr(self, "_usage_menu_secondary_labels", {}) or {}
         )
-        models = getattr(self, "_usage_provider_models", {}) or {}
-        states = getattr(self, "_usage_provider_states", {}) or {}
         now = time.monotonic() if monotonic_now is None else float(monotonic_now)
         reset_now = time.time() if epoch_now is None else float(epoch_now)
-        for provider_id in ("codex", "claude"):
+        for provider_id in USAGE_MENU_PROVIDERS:
             label = labels.get(provider_id)
             secondary_label = secondary_labels.get(provider_id)
             if label is None and secondary_label is None:
                 continue
-            model = models.get(provider_id)
-            state = states.get(provider_id)
-            if model is None:
-                model = build_provider_usage_view(
-                    provider_id,
-                    provider_id.title(),
-                    (),
-                    now=now,
-                    reset_now=reset_now,
-                    refreshing=bool(state and state.in_flight),
-                    error_text=getattr(state, "error_text", None),
-                )
-            elif state is not None and model.refreshing != state.in_flight:
-                model = dataclass_replace(model, refreshing=state.in_flight)
+            model = usage_menu_model(
+                self,
+                provider_id,
+                now=now,
+                reset_now=reset_now,
+            )
             primary, secondary = capacity_menu_lines(
                 model,
                 monotonic_now=now,
@@ -3416,6 +3684,7 @@ class StatusBarController(NSObject):
                 label.setStringValue_(primary)
             if secondary_label is not None:
                 secondary_label.setStringValue_(secondary)
+        _apply_usage_menu_window_rows(self, now=now, reset_now=reset_now)
 
     def trim_oversized_state_logs(self) -> int:
         """Bound every state log at launch, not just the ones being written.
@@ -4771,6 +5040,10 @@ class StatusBarController(NSObject):
         # for the toggle to mean anything before the next relaunch.
         self.rebuild_capacity_refresh_coordinator()
         self._claude_credential = None
+        # Turning the source off and on is the one moment a different account
+        # can appear behind it, so the previous run's reset boundaries stop
+        # vouching for the new one here.
+        self._advance_capacity_source_generation("claude")
         # Refresh immediately so the line appears without the 5-min wait.
         self.invalidate_usage_providers(("claude",))
         self.maybe_refresh_usage_summary()
@@ -12688,6 +12961,46 @@ def _capacity_age_text(model: ProviderUsageViewModel, *, monotonic_now: float) -
     return f"updated {max(1, int(age // (24 * 3_600.0)))}d ago"
 
 
+_GENERIC_WINDOW_LABELS = frozenset(
+    {"", "primary", "secondary", "five_hour", "seven_day", "limit"}
+)
+
+
+def _capacity_window_line(window, *, epoch_now: float) -> str:
+    """Render one window as its own honest ledger row.
+
+    Rows past the first are named by their semantic label, not their
+    duration: Claude's weekly window and its weekly Opus and Sonnet sub-caps
+    are all "7d", and three identical rows would hide the one sub-cap that
+    actually stops work.
+    """
+    label = window.label.strip()
+    head = window.duration_text if label.lower() in _GENERIC_WINDOW_LABELS else label
+    remaining = window.percent_remaining
+    text = f"{head} {remaining:.0f}% left" if remaining is not None else head
+    reset = window.reset_text(epoch_now)
+    return f"{text} · resets {reset}" if reset else text
+
+
+def capacity_window_lines(
+    model: ProviderUsageViewModel,
+    *,
+    epoch_now: float,
+) -> tuple[str, ...]:
+    """Return one line per window the provider reports beyond the first.
+
+    The first window is already carried by `capacity_menu_lines`; every
+    remaining one gets a row here so a provider that publishes several
+    ceilings at once has all of them visible, not just the soonest.
+    """
+    if model.missing:
+        return ()
+    return tuple(
+        _capacity_window_line(window, epoch_now=epoch_now)
+        for window in model.windows[1:]
+    )
+
+
 def capacity_menu_lines(
     model: ProviderUsageViewModel,
     *,
@@ -12728,59 +13041,141 @@ def capacity_menu_lines(
     return primary, " · ".join(secondary_parts)
 
 
-def _configure_usage_menu_label(field, *, size: float, secondary: bool) -> None:
+def _configure_usage_menu_label(
+    field,
+    *,
+    size: float,
+    secondary: bool,
+    bold: bool | None = None,
+) -> None:
     field.setBezeled_(False)
     field.setDrawsBackground_(False)
     field.setEditable_(False)
     field.setSelectable_(False)
+    emphasise = (not secondary) if bold is None else bold
     field.setFont_(
-        NSFont.systemFontOfSize_(size)
-        if secondary
-        else NSFont.boldSystemFontOfSize_(size)
+        NSFont.boldSystemFontOfSize_(size)
+        if emphasise
+        else NSFont.systemFontOfSize_(size)
     )
     if secondary:
         field.setTextColor_(NSColor.secondaryLabelColor())
 
 
+USAGE_MENU_PROVIDERS = ("codex", "claude")
+USAGE_MENU_WIDTH = 292
+USAGE_MENU_INSET = 14
+USAGE_MENU_FIELD_WIDTH = 264
+USAGE_MENU_PRIMARY_HEIGHT = 18
+USAGE_MENU_SECONDARY_HEIGHT = 16
+USAGE_MENU_HEADER_HEIGHT = 17
+USAGE_MENU_LINE_GAP = 1
+USAGE_MENU_PROVIDER_GAP = 4
+USAGE_MENU_HEADER_GAP = 5
+USAGE_MENU_TOP_PADDING = 6
+USAGE_MENU_BOTTOM_PADDING = 8
+# One provider can publish several ceilings; the card grows for them, but not
+# without limit -- a menu taller than the screen is worse than a truncated one.
+MAX_USAGE_MENU_WINDOW_ROWS = 6
+
+
+def usage_menu_layout(window_rows) -> tuple[int, int, dict]:
+    """Lay the Capacity card out bottom-up for however many rows it needs.
+
+    The geometry used to be literal, which silently capped every provider at
+    one window. It is derived now so a provider that reports four ceilings
+    gets four rows instead of losing three of them.
+    """
+    y = USAGE_MENU_BOTTOM_PADDING
+    blocks: dict[str, tuple[int, int, tuple[int, ...]]] = {}
+    for provider_id in reversed(USAGE_MENU_PROVIDERS):
+        extras: list[int] = []
+        for _ in range(int(window_rows.get(provider_id, 0))):
+            extras.append(y)
+            y += USAGE_MENU_SECONDARY_HEIGHT + USAGE_MENU_LINE_GAP
+        secondary_y = y
+        y += USAGE_MENU_SECONDARY_HEIGHT + USAGE_MENU_LINE_GAP
+        primary_y = y
+        y += USAGE_MENU_PRIMARY_HEIGHT + USAGE_MENU_PROVIDER_GAP
+        blocks[provider_id] = (primary_y, secondary_y, tuple(reversed(extras)))
+    header_y = y - USAGE_MENU_PROVIDER_GAP + USAGE_MENU_HEADER_GAP
+    height = header_y + USAGE_MENU_HEADER_HEIGHT + USAGE_MENU_TOP_PADDING
+    return height, header_y, blocks
+
+
+def usage_menu_model(target, provider_id: str, *, now: float, reset_now: float):
+    """Resolve the one model a Capacity row should render right now."""
+    models = getattr(target, "_usage_provider_models", {}) or {}
+    states = getattr(target, "_usage_provider_states", {}) or {}
+    model = models.get(provider_id)
+    state = states.get(provider_id)
+    if model is None:
+        return build_provider_usage_view(
+            provider_id,
+            provider_id.title(),
+            (),
+            now=now,
+            reset_now=reset_now,
+            refreshing=bool(state and state.in_flight),
+            error_text=getattr(state, "error_text", None),
+        )
+    if state is not None and model.refreshing != state.in_flight:
+        return dataclass_replace(model, refreshing=state.in_flight)
+    return model
+
+
+def _usage_menu_window_rows(target, *, now: float, reset_now: float) -> dict:
+    return {
+        provider_id: min(
+            MAX_USAGE_MENU_WINDOW_ROWS,
+            len(
+                capacity_window_lines(
+                    usage_menu_model(
+                        target,
+                        provider_id,
+                        now=now,
+                        reset_now=reset_now,
+                    ),
+                    epoch_now=reset_now,
+                )
+            ),
+        )
+        for provider_id in USAGE_MENU_PROVIDERS
+    }
+
+
 def build_usage_menu_item(target) -> NSMenuItem:
     """Host stable Capacity labels so publications never rebuild the menu."""
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("", None, "")
-    view = NSView.alloc().initWithFrame_(((0, 0), (292, 110)))
-    header = NSTextField.alloc().initWithFrame_(((14, 87), (264, 17)))
+    now = time.monotonic()
+    reset_now = time.time()
+    window_rows = _usage_menu_window_rows(target, now=now, reset_now=reset_now)
+    height, header_y, blocks = usage_menu_layout(window_rows)
+    view = NSView.alloc().initWithFrame_(((0, 0), (USAGE_MENU_WIDTH, height)))
+    header = NSTextField.alloc().initWithFrame_(
+        ((USAGE_MENU_INSET, header_y), (USAGE_MENU_FIELD_WIDTH, USAGE_MENU_HEADER_HEIGHT))
+    )
     _configure_usage_menu_label(header, size=11.0, secondary=False)
     header.setStringValue_("Capacity")
     view.addSubview_(header)
 
     labels = {}
     secondary_labels = {}
-    models = getattr(target, "_usage_provider_models", {}) or {}
-    states = getattr(target, "_usage_provider_states", {}) or {}
-    now = time.monotonic()
-    reset_now = time.time()
-    for provider_id, primary_y, secondary_y in (
-        ("codex", 64, 47),
-        ("claude", 25, 8),
-    ):
-        field = NSTextField.alloc().initWithFrame_(((14, primary_y), (264, 18)))
+    window_labels = {}
+    for provider_id in USAGE_MENU_PROVIDERS:
+        primary_y, secondary_y, extra_ys = blocks[provider_id]
+        field = NSTextField.alloc().initWithFrame_(
+            ((USAGE_MENU_INSET, primary_y), (USAGE_MENU_FIELD_WIDTH, USAGE_MENU_PRIMARY_HEIGHT))
+        )
         _configure_usage_menu_label(field, size=11.0, secondary=False)
         secondary_field = NSTextField.alloc().initWithFrame_(
-            ((14, secondary_y), (264, 16))
+            (
+                (USAGE_MENU_INSET, secondary_y),
+                (USAGE_MENU_FIELD_WIDTH, USAGE_MENU_SECONDARY_HEIGHT),
+            )
         )
         _configure_usage_menu_label(secondary_field, size=10.0, secondary=True)
-        model = models.get(provider_id)
-        state = states.get(provider_id)
-        if model is None:
-            model = build_provider_usage_view(
-                provider_id,
-                provider_id.title(),
-                (),
-                now=now,
-                reset_now=reset_now,
-                refreshing=bool(state and state.in_flight),
-                error_text=getattr(state, "error_text", None),
-            )
-        elif state is not None and model.refreshing != state.in_flight:
-            model = dataclass_replace(model, refreshing=state.in_flight)
+        model = usage_menu_model(target, provider_id, now=now, reset_now=reset_now)
         primary, secondary = capacity_menu_lines(
             model,
             monotonic_now=now,
@@ -12792,13 +13187,60 @@ def build_usage_menu_item(target) -> NSMenuItem:
         view.addSubview_(secondary_field)
         labels[provider_id] = field
         secondary_labels[provider_id] = secondary_field
+
+        # Every remaining window gets its own row. They read as body text, not
+        # as status: a weekly Opus ceiling is a number the owner acts on.
+        rows = []
+        for extra_y in extra_ys:
+            window_field = NSTextField.alloc().initWithFrame_(
+                (
+                    (USAGE_MENU_INSET, extra_y),
+                    (USAGE_MENU_FIELD_WIDTH, USAGE_MENU_SECONDARY_HEIGHT),
+                )
+            )
+            _configure_usage_menu_label(
+                window_field,
+                size=11.0,
+                secondary=False,
+                bold=False,
+            )
+            view.addSubview_(window_field)
+            rows.append(window_field)
+        window_labels[provider_id] = tuple(rows)
     item.setView_(view)
     target._usage_menu_item = item
     target._usage_menu_view = view
     target._usage_menu_header = header
     target._usage_menu_labels = labels
     target._usage_menu_secondary_labels = secondary_labels
+    target._usage_menu_window_labels = window_labels
+    _apply_usage_menu_window_rows(target, now=now, reset_now=reset_now)
     return item
+
+
+def _apply_usage_menu_window_rows(target, *, now: float, reset_now: float) -> None:
+    """Fill the per-window rows, and never silently drop one that overflows."""
+    window_labels = getattr(target, "_usage_menu_window_labels", {}) or {}
+    outgrew = False
+    for provider_id, fields in window_labels.items():
+        model = usage_menu_model(target, provider_id, now=now, reset_now=reset_now)
+        lines = capacity_window_lines(model, epoch_now=reset_now)
+        # Compared against what a rebuild could actually give us, not against
+        # the raw count -- a provider past the row cap would otherwise ask for
+        # a rebuild on every single refresh and never stop.
+        if len(fields) < min(len(lines), MAX_USAGE_MENU_WINDOW_ROWS):
+            outgrew = True
+        if fields and len(lines) > len(fields):
+            # The card cannot gain rows while it is on screen, so the tail is
+            # folded into the last one rather than vanishing.
+            lines = (
+                *lines[: len(fields) - 1],
+                " · ".join(lines[len(fields) - 1 :]),
+            )
+        for index, field in enumerate(fields):
+            field.setStringValue_(lines[index] if index < len(lines) else "")
+    if outgrew:
+        target._menu_signature = None
 
 
 def session_row_suffix(

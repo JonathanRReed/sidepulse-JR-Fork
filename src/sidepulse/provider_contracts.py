@@ -336,8 +336,16 @@ class CapacitySourceDescriptor:
         observed_at: float,
         source_health: CapacitySourceHealth,
         account_discriminator: str | None,
+        auth_mode: str | None = None,
     ) -> QuotaLaneObservation:
-        """Stamp one declared lane with its static semantics and horizon."""
+        """Stamp one declared lane with its static semantics and horizon.
+
+        ``auth_mode`` travels with the observation because an account binding
+        is only exact when it names the authentication mode the reading came
+        through. Without it every contract-built observation was refused
+        ``auth_mode_binding_mismatch``, which made binding structurally
+        impossible and left `limit=0` doing the work of a contract.
+        """
         lane = next((candidate for candidate in self.lanes if candidate.key == key), None)
         if lane is None:
             raise ContractValidationError("capacity lane is not declared")
@@ -350,6 +358,7 @@ class CapacitySourceDescriptor:
             observed_at=observed_at,
             source_health=source_health,
             account_discriminator=account_discriminator,
+            auth_mode=auth_mode,
         )
 
 _DOCUMENT_FIELDS = frozenset(

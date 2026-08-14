@@ -416,10 +416,21 @@ class CapacitySnapshot:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionContext:
+    """The exact sources this execution may speak for.
+
+    ``source_scopes`` is the authoritative field: one ``(provider_id,
+    source_instance_id)`` pair per source actually registered. The two flat
+    tuples remain for display and validation, but membership in them is NOT a
+    scope -- testing them independently accepts the cross product, so a build
+    registering ``claude/…/oauth`` and ``codex/…/local`` also accepted
+    ``claude/…/local`` and ``codex/…/oauth``, neither of which exists.
+    """
+
     provider_ids: tuple[str, ...]
     source_instances: tuple[str, ...]
     selected_model: str | None
     selected_feature: str | None
+    source_scopes: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not (
@@ -438,6 +449,40 @@ class ExecutionContext:
             and len(self.source_instances) == len(set(self.source_instances))
         ):
             raise CapacityValidationError("invalid execution context")
+
+        if not (
+            type(self.source_scopes) is tuple
+            and len(self.source_scopes) <= MAX_EXECUTION_CONTEXT_MEMBERS
+            and len(self.source_scopes) == len(set(self.source_scopes))
+            and all(
+                type(scope) is tuple
+                and len(scope) == 2
+                and _valid_identifier(scope[0])
+                and _valid_identifier(scope[1], opaque=True)
+                and scope[0] in self.provider_ids
+                and scope[1] in self.source_instances
+                for scope in self.source_scopes
+            )
+        ):
+            raise CapacityValidationError("invalid execution context")
+        if self.source_scopes:
+            return
+
+        # No explicit pairs. While one dimension holds at most one member the
+        # cross product IS the pair list, so deriving it invents nothing. Past
+        # that it is a genuine cross product, which is not a scope -- fail
+        # closed and make the caller name the sources it actually registered.
+        if len(self.provider_ids) > 1 and len(self.source_instances) > 1:
+            raise CapacityValidationError("ambiguous execution context source scope")
+        object.__setattr__(
+            self,
+            "source_scopes",
+            tuple(
+                (provider_id, source_instance)
+                for provider_id in self.provider_ids
+                for source_instance in self.source_instances
+            ),
+        )
 
 
 __all__ = [

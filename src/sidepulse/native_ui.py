@@ -55,17 +55,20 @@ try:
         NSLayoutConstraintOrientationHorizontal,
         NSLayoutConstraintOrientationVertical,
         NSLayoutPriorityDefaultHigh,
+        NSLineBreakByTruncatingTail,
         NSPopUpButton,
         NSScrollerStyleOverlay,
         NSScrollView,
         NSSlider,
         NSStackView,
+        NSSegmentedControl,
         NSStackViewDistributionFill,
         NSSwitch,
         NSTableColumn,
         NSTableView,
         NSTableViewSelectionHighlightStyleSourceList,
         NSTableViewStylePlain,
+        NSTextAlignmentCenter,
         NSTextField,
         NSTrackingActiveInKeyWindow,
         NSTrackingArea,
@@ -716,6 +719,89 @@ class _HoverRowView(NSView):
         layer = self.layer()
         if layer is not None:
             layer.setBackgroundColor_(None)
+
+
+class SwatchButton(NSButton):
+    """A colour swatch that reports the pointer.
+
+    The Studio previews a colour on the real Screen Bar while you hover it
+    and takes it back when you leave, so a swatch has to be able to say
+    "the pointer is on me" -- a plain NSButton only ever says "I was
+    clicked", by which point the choice has already been made. Assign
+    Python callables to ``hover_enter``/``hover_exit``; both receive the
+    button, and both are optional.
+
+    ActiveInKeyWindow, like _HoverRowView: hover ends for free when the
+    window stops being key, which is one of the ways a preview would
+    otherwise be left holding a surface with nobody watching.
+    """
+
+    def updateTrackingAreas(self):
+        for area in list(self.trackingAreas()):
+            self.removeTrackingArea_(area)
+        self.addTrackingArea_(
+            NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                self.bounds(),
+                NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow,
+                self,
+                None,
+            )
+        )
+
+    @objc.python_method
+    def _fire(self, name):
+        handler = getattr(self, name, None)
+        if callable(handler):
+            handler(self)
+
+    def mouseEntered_(self, _event):
+        self._fire("hover_enter")
+
+    def mouseExited_(self, _event):
+        self._fire("hover_exit")
+
+
+def make_swatch_button(
+    hex_color: str,
+    *,
+    size: float,
+    target,
+    selector: str,
+    represented: dict,
+    color_for_hex,
+) -> SwatchButton:
+    """One round colour chip. ``color_for_hex`` converts a hex string to an
+    NSColor -- passed in rather than imported so this module keeps its "only
+    builds views" contract and stays free of the colour model."""
+    button = SwatchButton.alloc().initWithFrame_(((0, 0), (size, size)))
+    button.setTitle_("")
+    button.setBordered_(False)
+    button.setTarget_(target)
+    button.setAction_(selector)
+    button.setRepresentedObject_(dict(represented))
+    button.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    constrain_width(button, size)
+    constrain_height(button, size)
+    try:
+        button.setWantsLayer_(True)
+        layer = button.layer()
+        layer.setBackgroundColor_(color_for_hex(hex_color).CGColor())
+        layer.setCornerRadius_(size / 2.0)
+        layer.setBorderWidth_(0.0)
+    except Exception:
+        pass
+    return button
+
+
+def make_caption(text: str) -> NSTextField:
+    """The word under a swatch. Small, secondary, centered -- and never
+    optional: an unnamed colour square is a guess, not a choice."""
+    label = NSTextField.labelWithString_(text)
+    label.setFont_(NSFont.systemFontOfSize_(9.0))
+    label.setTextColor_(NSColor.secondaryLabelColor())
+    label.setAlignment_(NSTextAlignmentCenter)
+    label.setLineBreakMode_(NSLineBreakByTruncatingTail)
+    return label
 
 
 def sidebar_cell_view(label_text: str, symbol: str | None = None) -> NSView:

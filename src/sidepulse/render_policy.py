@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -7,6 +8,7 @@ from enum import Enum
 from typing import Generic, TypeVar
 
 from sidepulse.accessibility_display import AccessibilityDisplayPreferences
+from sidepulse.presentation_scheduler import FRAME_FALLBACK_INTERVAL_SECONDS
 
 ACTIVE_RENDER_FPS = 60.0
 STATIC_WATCH_FPS = 4.0
@@ -15,6 +17,16 @@ STATIC_WATCH_FPS = 4.0
 # never stopped, because "is anything animating" was true whenever any
 # agent existed.
 GENTLE_MOTION_FPS = 30.0
+# How fast each driver actually calls back. A cadence the driver cannot
+# produce is not a cadence, it is a wish: asking a 60 Hz timer for 40 fps got
+# 30, deterministically, at zero jitter -- and the policy went on reporting 40.
+# The timer's rate is the shared runtime scheduler's frame-fallback interval,
+# imported rather than restated so the two cannot drift apart. The display
+# link's is what _install_display_link negotiates: the panel, floored at 60 and
+# capped at 120.
+TIMER_DRIVER_FPS = 1.0 / FRAME_FALLBACK_INTERVAL_SECONDS
+DISPLAY_LINK_MIN_FPS = 60.0
+DISPLAY_LINK_MAX_FPS = 120.0
 
 
 def refresh_divisor_fps(refresh_hz: float | None, target_fps: float) -> float:
@@ -25,6 +37,14 @@ def refresh_divisor_fps(refresh_hz: float | None, target_fps: float) -> float:
     what a slower cadence is for. 20 fps asked of a 120 Hz panel becomes
     exactly every sixth frame; asked of a 90 Hz panel it becomes 18
     (every fifth) rather than a cadence that slips a frame forever.
+
+    DELIBERATELY UNWIRED. This is the right answer for a driver that is
+    genuinely vsync-locked to the panel, and neither driver here is one -- see
+    the comment in ``choose_render_schedule`` for why composing it with
+    ``deliverable_fps`` cost a third of the framerate on every panel that is
+    not a whole multiple of 60. Kept because the reasoning above is sound and a
+    future vsync-locked driver would want it; not called, and
+    ``tests/test_panel_refresh_delivered_fps.py`` fails if it is called again.
     """
     if not refresh_hz or refresh_hz <= 0.0 or target_fps <= 0.0:
         return target_fps
@@ -93,6 +113,70 @@ class RenderSchedule:
     driver: RenderDriverKind
     cadence: RenderCadence
     next_visual_change_at: float | None = None
+    # How fast the chosen driver will actually call back. Carried on the
+    # schedule because the gate that turns callbacks into frames has to know
+    # both numbers to be safe against jitter -- see presentation_hold_seconds.
+    # 0.0 means "not stated", which the gate treats as the old fixed tolerance.
+    driver_fps: float = 0.0
+
+
+def driver_callback_fps(
+    driver: RenderDriverKind, refresh_hz: float | None
+) -> float:
+    """The rate the chosen driver will really fire at."""
+    if driver is RenderDriverKind.TIMER:
+        return TIMER_DRIVER_FPS
+    if driver is RenderDriverKind.DISPLAY_LINK:
+        panel = float(refresh_hz) if refresh_hz else DISPLAY_LINK_MIN_FPS
+        return min(max(DISPLAY_LINK_MIN_FPS, panel), DISPLAY_LINK_MAX_FPS)
+    return 0.0
+
+
+def deliverable_fps(driver_fps: float, target_fps: float) -> float:
+    """The fastest rate at or below ``target_fps`` this driver can produce.
+
+    A driver that fires N times a second can only deliver N/1, N/2, N/3...
+    Anything else is delivered as the next one DOWN -- never up, because these
+    targets are thermal and low-power ceilings and overshooting one is the
+    failure the ceiling exists to prevent. Rounding down here is what makes the
+    policy's number and the screen's number the same number.
+    """
+    if driver_fps <= 0.0 or target_fps <= 0.0:
+        return target_fps
+    if target_fps >= driver_fps:
+        return driver_fps
+    divisor = math.ceil(driver_fps / target_fps - 1e-9)
+    return driver_fps / max(1, divisor)
+
+
+def presentation_hold_seconds(schedule: RenderSchedule) -> float | None:
+    """How long after a presented frame the next callback must be refused.
+
+    The naive threshold is the cadence interval itself, and it fails the moment
+    the cadence equals the driver rate: the stamp is taken from the JITTERED
+    callback time, so one late callback makes the next measurement come up
+    short and it is dropped -- 60 fps asked of a 60 Hz driver measured 50.2 fps
+    under 4 ms of main-thread jitter, and the gate can never recover lost time,
+    only lose more. Irregular drops are judder, which is the exact failure a
+    steadier cadence exists to prevent.
+
+    Half a DRIVER period of headroom fixes it, because the question the gate is
+    really asking is "will there be another callback before the interval is
+    up?". At 1:1 the answer is never, so nothing is dropped; at 2:1 a callback
+    has to arrive more than half a period early to be miscounted, which is 8.3
+    ms of jitter at 60 Hz rather than 1.7 ms.
+    """
+    interval = schedule.cadence.interval
+    if interval is None:
+        return None
+    driver_fps = getattr(schedule, "driver_fps", 0.0) or 0.0
+    if driver_fps <= 0.0:
+        # Nobody said what the driver is (hand-built schedules, tests). Keep
+        # the old fixed tolerance rather than inventing a period.
+        return interval * 0.9
+    period = 1.0 / driver_fps
+    ticks = max(1, math.ceil(interval / period - 1e-9))
+    return (ticks - 0.5) * period
 
 
 def choose_render_cadence(
@@ -110,8 +194,12 @@ def choose_render_cadence(
     cost. Static output keeps only a low-frequency change watcher, and a
     hidden or sleeping surface does no paint or WASM work at all.
 
-    Whatever the chosen rate, it is snapped to an integer divisor of
-    ``refresh_hz`` so every frame lands on a real vsync boundary.
+    This returns the CEILING the environment allows, in whole fps. It is not
+    snapped to anything and ``refresh_hz`` is accepted but ignored -- which rate
+    is reachable depends on the driver, not the panel, and that decision belongs
+    to ``choose_render_schedule`` where the driver is known. (The docstring used
+    to claim a snap to an integer divisor of ``refresh_hz``; no such snap has
+    ever happened in this function.)
     """
     if not environment.visible or environment.display_asleep:
         return RenderCadence(fps=0.0, sample_fps=0.0)
@@ -168,17 +256,35 @@ def choose_render_schedule(
         driver = RenderDriverKind.DISPLAY_LINK
     else:
         driver = RenderDriverKind.TIMER
-    if driver is RenderDriverKind.TIMER:
-        # A timer has to hit vsync on its own, so its rate must be a
-        # whole fraction of the panel or the motion visibly slips. A
-        # display link is already locked to the display and negotiates
-        # its own frame range, so snapping there would only fight it.
-        snapped = refresh_divisor_fps(refresh_hz, cadence.fps)
+    driver_fps = driver_callback_fps(driver, refresh_hz)
+    # ONE quantiser, and it is the driver's. The gate downstream presents one
+    # driver callback in every n, so the only rates that physically exist are
+    # driver_fps/n. A second quantiser in FRONT of this one can only move the
+    # target off that lattice, where this one then has to round it further
+    # DOWN -- composing quantisers is lossless only when one lattice contains
+    # the other, and {panel/m} sits inside {driver/n} exactly when the panel is
+    # a whole multiple of the driver.
+    #
+    # A panel snap used to sit here (refresh_divisor_fps). For the 60 Hz
+    # fallback timer that made it a no-op on 60/120/240 Hz -- precisely the
+    # panels the earlier tests covered -- and a loss everywhere else: a 144 Hz
+    # display turned a 30 fps breathe into 28.8, which this call then floored to
+    # 20. A third of the delivered framerate, spent to correct a 4% misreport.
+    #
+    # It could not have bought vsync alignment on either path anyway. The
+    # fallback timer free-runs at TIMER_DRIVER_FPS and is not locked to the
+    # panel at all, so subsampling it by an integer changes how OFTEN it beats
+    # against a 144 Hz panel, never WHETHER it beats. And the display link IS
+    # the panel -- driver_callback_fps returns exactly what _install_display_link
+    # negotiates -- so quantising to that driver already quantises to the panel.
+    snapped = deliverable_fps(driver_fps, cadence.fps)
+    if snapped != cadence.fps:
         cadence = RenderCadence(fps=snapped, sample_fps=snapped)
     return RenderSchedule(
         driver=driver,
         cadence=cadence,
         next_visual_change_at=next_visual_change_at,
+        driver_fps=driver_fps,
     )
 
 

@@ -98,12 +98,150 @@ def scale_hex_brightness(hex_color: str, fraction: float) -> str:
     return f"#{round(red * fraction):02X}{round(green * fraction):02X}{round(blue * fraction):02X}"
 
 
+# --- What a palette hex MEANS ----------------------------------------------
+# Every hex in this app -- the mode colours, the identity palette, the signal
+# styles, the swatch in the Colors window -- is a gamma-encoded sRGB code.
+# That is not a convention we chose; it is what NSColorWell hands back and what
+# colors.oklch_hex writes out. So the *meaning* of "#00E5FF" is fixed: it is
+# the light an sRGB display emits for that code, and nothing else.
+#
+# The bug this pair of functions exists to close is that the two surfaces did
+# not agree on that. The same code produced two different amounts of light:
+#
+#   LED strip   light proportional to (code/255)**1.0   (linear PWM)
+#   Screen Bar  light proportional to (code/255)**1.89  (a per-channel tone
+#                                                        map, then the panel)
+#
+# so idle emitted 12.9x more light on the strip than on screen relative to
+# full, #FF3A00 read red on one and orange on the other, and a "50% fade" was
+# a 50% breath on the strip and a 21% breath on screen. These two functions are
+# the only place the app crosses between code and light. They are the exact IEC
+# 61966-2-1 piecewise curve, not the 2.2 power approximation -- the
+# approximation is off by enough in the shadows to move a drive code, and drive
+# codes are what the owner calibrated against.
+
+
+def srgb_to_linear(value: float) -> float:
+    """Gamma-encoded sRGB (0.0-1.0) -> relative linear light (0.0-1.0)."""
+    value = float(value)
+    if value <= 0.04045:
+        return value / 12.92
+    return ((value + 0.055) / 1.055) ** 2.4
+
+
+def linear_to_srgb(value: float) -> float:
+    """Relative linear light (0.0-1.0) -> gamma-encoded sRGB (0.0-1.0)."""
+    value = max(0.0, min(1.0, float(value)))
+    if value <= 0.0031308:
+        return value * 12.92
+    return 1.055 * (value ** (1 / 2.4)) - 0.055
+
+
+# --- The strip's own transfer, and the one number to correct ---------------
+# ASSUMPTION, NOT MEASUREMENT. LEDS_FORMAT.md documents the brightness command
+# as "Brightness scales the RGB values" and never mentions gamma anywhere in
+# the DSL spec, which is the signature of a controller that PWMs the byte
+# directly: light proportional to (code/255)**1.0. The owner's own calibration
+# datum agrees -- codes (255, 97, 255) look neutral white on his strip, which
+# under linear PWM means a green die about 2.6x more efficient than red/blue
+# (ordinary for a cheap RGB LED) and under an sRGB-decoding firmware would mean
+# 8.4x (implausible for any real emitter).
+#
+# One physical test settles it: drive #808080 and hold the strip beside a
+# #808080 screen patch. If the strip is much brighter than the patch, PWM is
+# linear and 1.0 is right. If they match, the firmware decodes sRGB itself and
+# this becomes 2.4 -- at which point every transform below collapses to
+# identity on its own, with no other edit anywhere.
+STRIP_CODE_TO_LIGHT_EXPONENT = 1.0
+# 8-bit linear PWM cannot represent an sRGB shadow: nominal #020204 is 0.06% of
+# full light, which rounds to drive code 0. "Lit" is a state the user reads off
+# this surface, so a lit LED never goes dark -- it bottoms out one code above
+# off. The cost is that the strip's dimmest ember stays a few times brighter
+# than the screen's; the alternative is idle silently going black on hardware.
+STRIP_MIN_LIT_DRIVE = 1
+
 MIN_CHANNEL_GAIN = 0.3
 MAX_CHANNEL_GAIN = 1.5
 DEFAULT_CHANNEL_GAIN = 1.0
 NEUTRAL_CHANNEL_GAINS = (DEFAULT_CHANNEL_GAIN, DEFAULT_CHANNEL_GAIN, DEFAULT_CHANNEL_GAIN)
 
 _HEX_COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}")
+_BRIGHTNESS_RE = re.compile(r"(?i)\bbrightness[ \t]+(\d{1,3})\b")
+
+
+def strip_drive_code(code: int, gain: float = 1.0) -> int:
+    """One nominal sRGB code -> the byte that makes the strip emit that light.
+
+    This is the whole reconciliation in four lines. Decode the code to the
+    light it means, apply the channel's calibration gain to that LIGHT (which
+    is what a white balance is a statement about), then encode for the strip's
+    own transfer rather than the screen's.
+
+    The gain arithmetic is deliberately unchanged from what the owner tuned
+    against: under linear PWM the drive byte *is* the light, so ``light *
+    gain`` and the old ``code * gain`` are the same multiply, and at the
+    calibration reference (white, every channel at full) this still writes the
+    exact byte he matched by eye -- 255 * 1.0 * 0.380417 = 97. What is new is
+    that the ratio now holds at *every* level instead of only at full scale:
+    drive_green/drive_red is exactly the gain all the way down the fade, which
+    is the promise a white balance actually makes.
+    """
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return 0
+    code = max(0, min(255, code))
+    if code <= 0:
+        return 0
+    light = srgb_to_linear(code / 255.0) * max(0.0, float(gain))
+    if light <= 0.0:
+        return 0
+    drive = 255.0 * (light ** (1.0 / STRIP_CODE_TO_LIGHT_EXPONENT))
+    return max(STRIP_MIN_LIT_DRIVE, min(255, round(drive)))
+
+
+def apply_strip_transfer_to_hex(hex_color: str, gains: tuple[float, float, float]) -> str:
+    """``strip_drive_code`` over one hex literal."""
+    cleaned = hex_color.lstrip("#")
+    try:
+        channels = (
+            int(cleaned[0:2], 16),
+            int(cleaned[2:4], 16),
+            int(cleaned[4:6], 16),
+        )
+    except (ValueError, IndexError):
+        return hex_color
+    red, green, blue = (
+        strip_drive_code(value, gain) for value, gain in zip(channels, gains)
+    )
+    return f"#{red:02X}{green:02X}{blue:02X}"
+
+
+def apply_strip_transfer_to_program(
+    program: str, gains: tuple[float, float, float] = NEUTRAL_CHANNEL_GAINS
+) -> str:
+    """The strip's last step: nominal sRGB program text -> drive bytes.
+
+    Applied once, at the write boundary, on the finished program -- deliberately
+    the same shape and the same place as the channel gain it replaces, so
+    everything upstream (fade floors and ceilings, resting glow, idle dimming,
+    night warmth, relay phase) keeps operating on nominal colours that mean
+    what the Colors window says they mean.
+
+    The ``brightness`` command is rewritten too, and it has to be: the firmware
+    multiplies the drive bytes by ``N/255``, so on this surface brightness is a
+    scale on LIGHT, while the Screen Bar's engine multiplies the encoded code.
+    Decoding N as well is what makes "half brightness" the same amount of dim
+    on both surfaces instead of 50% on one and 21% on the other. (sRGB is very
+    nearly a power law, so decoding the colour and the scalar separately gives
+    the same product as decoding once at the end, to within a rounding step.)
+    """
+    program = _HEX_COLOR_RE.sub(
+        lambda match: apply_strip_transfer_to_hex(match.group(0), gains), program
+    )
+    return _BRIGHTNESS_RE.sub(
+        lambda match: f"brightness {strip_drive_code(int(match.group(1)))}", program
+    )
 
 
 def normalize_channel_gain(value: float | None) -> float:
@@ -123,6 +261,18 @@ def apply_channel_gain_to_hex(hex_color: str, gains: tuple[float, float, float])
     LED's own die imbalance (commonly an over-bright green die) so a color
     reads perceptually closer to its intended hue on that hardware, without
     changing the "true" hex value shown anywhere in the UI.
+
+    A plain multiply on the code, exactly as the owner tuned it. Under the
+    strip's linear PWM the drive byte IS the light, so this multiply already
+    lands in the right domain and the stored 0.38 is a correct linear-light
+    white balance -- see strip_drive_code, which keeps this same arithmetic and
+    only fixes what the code means before it gets here.
+
+    Kept encoded-domain and unchanged on purpose. This function is still the
+    Screen Bar's and the battery reminder's write boundary (status_bar.py and
+    battery.py call it directly), and a surface that has no die imbalance to
+    correct must not have this applied at all -- see the Screen Bar note in
+    strip_drive_code's module comment.
     """
     cleaned = hex_color.lstrip("#")
     try:
@@ -485,7 +635,7 @@ def write_mode_to_leds(
         led_count=led_count_for_target(target),
         brightness=brightness,
     )
-    program = apply_channel_gain_to_program(program, channel_gains)
+    program = apply_strip_transfer_to_program(program, channel_gains)
     written_target = write_led_program(
         program,
         device_path=target,
@@ -769,6 +919,19 @@ class AgentLedController:
         self.last_target = None
         self.last_attempt_monotonic = 0.0
 
+    def _for_strip(self, program: str) -> str:
+        """The strip's last step, in the one place every write goes through.
+
+        Resting glow, then the surface transfer (which carries the channel
+        gain with it -- see strip_drive_code). Deliberately the very end of the
+        pipeline: everything before this point is nominal sRGB, the same
+        numbers the Colors window shows and the same numbers the Screen Bar
+        receives, so the two surfaces differ only in the final translation into
+        their own units rather than diverging somewhere upstream.
+        """
+        program = apply_resting_glow_to_program(program, getattr(self, "resting_glow", 0.0))
+        return apply_strip_transfer_to_program(program, self.channel_gains)
+
     def sync_mode(self, mode: AgentMode) -> LedStatusWrite:
         state = display_state_for_mode(mode)
         brightness = normalize_brightness(self.brightness)
@@ -856,10 +1019,7 @@ class AgentLedController:
         # Same post-processing as the live program: calibration gains and
         # resting glow change what reaches the device, so they must be
         # able to invalidate the identity too.
-        identity = apply_resting_glow_to_program(
-            identity, getattr(self, "resting_glow", 0.0)
-        )
-        return apply_channel_gain_to_program(identity, self.channel_gains)
+        return self._for_strip(identity)
 
     def sync_snapshot(
         self,
@@ -896,8 +1056,7 @@ class AgentLedController:
         # written -- a gain change alone (with statuses/colors unchanged)
         # still produces a different string here and correctly triggers a
         # rewrite, with no separate "did gains change" tracking needed.
-        program = apply_resting_glow_to_program(program, getattr(self, "resting_glow", 0.0))
-        program = apply_channel_gain_to_program(program, self.channel_gains)
+        program = self._for_strip(program)
         # Dedupe on the INPUTS, never the rendered text. Relay bakes a
         # wall-clock phase into the program, so a text compare differs on
         # essentially every call -- the 60s reassert window never engaged
@@ -940,8 +1099,7 @@ class AgentLedController:
             brightness=normalize_brightness(self.brightness),
             relay_elapsed_seconds=relay_elapsed_seconds,
         )
-        program = apply_resting_glow_to_program(program, getattr(self, "resting_glow", 0.0))
-        program = apply_channel_gain_to_program(program, self.channel_gains)
+        program = self._for_strip(program)
         identity = self._phase_free_identity(
             lambda phase: program_for_projection(
                 projection,
@@ -969,8 +1127,7 @@ class AgentLedController:
         """Writes a pre-rendered program through the same gain/dedup/retry
         path sync_snapshot uses -- for displays that aren't derived from
         agent statuses at all (e.g. the low-battery reminder)."""
-        program = apply_resting_glow_to_program(program, getattr(self, "resting_glow", 0.0))
-        program = apply_channel_gain_to_program(program, self.channel_gains)
+        program = self._for_strip(program)
         return self._write_deduped_program(
             state,
             program,

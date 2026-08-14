@@ -59,6 +59,10 @@ class SupportedCapacityEvidence:
     lanes: tuple[SupportedLaneEvidence, ...]
     account_discriminator: str | None
     has_last_known_good: bool
+    # The authentication mode the reading actually came through. An account
+    # binding is only exact when it names one, so an adapter that knows it
+    # says so here rather than leaving the contract unable to express it.
+    auth_mode: str | None = None
 
     def __post_init__(self) -> None:
         if not (
@@ -68,6 +72,7 @@ class SupportedCapacityEvidence:
             and all(isinstance(lane, SupportedLaneEvidence) for lane in self.lanes)
             and len(self.lanes) <= MAX_LANES_PER_OBSERVATION
             and type(self.has_last_known_good) is bool
+            and (self.auth_mode is None or isinstance(self.auth_mode, str))
         ):
             raise ValueError("invalid supported capacity evidence")
 
@@ -159,6 +164,7 @@ def normalize_supported_quota_evidence(
                 observed_at=observed_at,
                 source_health=health,
                 account_discriminator=evidence.account_discriminator,
+                auth_mode=evidence.auth_mode,
             )
         except ContractValidationError as exc:
             raise ValueError("capacity lane evidence is not declared") from exc

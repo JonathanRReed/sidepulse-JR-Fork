@@ -1505,9 +1505,12 @@ def test_screen_bar_wake_and_show_install_only_one_driver(monkeypatch) -> None:
         (RenderEnvironment(), True, True, RenderDriverKind.DISPLAY_LINK, 60.0, 60.0),
         (RenderEnvironment(), True, False, RenderDriverKind.TIMER, 60.0, 60.0),
         (RenderEnvironment(low_power=True), True, True, RenderDriverKind.TIMER, 30.0, 30.0),
-        (RenderEnvironment(thermal="fair"), True, True, RenderDriverKind.TIMER, 45.0, 45.0),
+        # 30, not the 45 the cap allows: the 60 Hz fallback timer can only
+        # deliver 60/n, and naming a rate it cannot produce is what made a
+        # "40 fps" policy arrive as 30 with the policy still reporting 40.
+        (RenderEnvironment(thermal="fair"), True, True, RenderDriverKind.TIMER, 30.0, 30.0),
         (RenderEnvironment(thermal="serious"), True, True, RenderDriverKind.TIMER, 15.0, 15.0),
-        (RenderEnvironment(thermal="critical"), True, True, RenderDriverKind.TIMER, 8.0, 8.0),
+        (RenderEnvironment(thermal="critical"), True, True, RenderDriverKind.TIMER, 7.5, 7.5),
         (RenderEnvironment(), False, True, RenderDriverKind.TIMER, 4.0, 4.0),
         (RenderEnvironment(low_power=True), False, True, RenderDriverKind.TIMER, 1.0, 1.0),
     ],
@@ -1520,7 +1523,12 @@ def test_render_schedule_selects_driver_without_changing_cadence(
     fps: float,
     sample_fps: float,
 ) -> None:
-    """Catches a driver choice that bypasses the established cadence caps."""
+    """Catches a driver choice that bypasses the established cadence caps.
+
+    The cadence is now also rounded DOWN to something the chosen driver can
+    actually produce, never up -- these are thermal and low-power ceilings and
+    overshooting one is the failure the ceiling exists to prevent.
+    """
     schedule = choose_render_schedule(
         environment,
         animation_active,

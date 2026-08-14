@@ -38,10 +38,12 @@ from .led_status import (
     display_state_for_mode,
     display_state_for_projection,
     failure_signal_program,
+    linear_to_srgb,
     normalize_brightness,
     program_for_display_state,
     scale_hex_brightness,
     settle_duration_ms,
+    srgb_to_linear,
 )
 from .models import MODE_PRIORITY, AgentMode, AgentStatus
 from .providers import PROVIDER_SPECS
@@ -110,6 +112,136 @@ _MODE_KEY_TO_STYLE_KWARG: dict[str, str] = {
 }
 
 
+# --- Loudness and motion: the light language's two channels ----------------
+#
+# LOUDNESS. How loud a state reads is its rendered peak's relative luminance,
+# and that had been an accident of hue rather than a decision. Red-orange is
+# intrinsically the dimmest saturated colour there is (the red primary carries
+# 21% of the luminance, cyan 85%), so putting Ask on the same "gentle" fade
+# ceiling as Working made the one state that means "a human is needed" the
+# QUIETEST lit thing on the strip -- 2.5x dimmer than an agent quietly working,
+# 13x dimmer than one that had finished. The gentleness ceiling exists to keep
+# ambient breathing from being harsh; urgency is not ambient, so it does not
+# get the ambient ceiling.
+#
+# Measured (relative luminance of the rendered peak, default settings):
+#   before   done 0.725  >  working 0.136  >  ask 0.055  >  idle 0.0003
+#   after    done 0.725  >  ask     0.243  >  working 0.136  >  idle 0.0003
+#
+# Done deliberately stays where it is. Equalising its luminance against Ask is
+# the obvious next move and it is a trap: red and green are the pair a
+# red/green colourblind viewer can ONLY separate by lightness, and simulating
+# it (Vienot/Brettel/Mollon + CIEDE2000) shows dimming Done to match Ask
+# collapses their protanopic separation from dE 39 to dE 6 -- i.e. it would buy
+# a tidier luminance ladder by making "finished" and "blocked" the same light
+# for 1 man in 12. Done stays bright and stays STILL; Ask is what moves.
+URGENT_STATES: frozenset[LedDisplayState] = frozenset(
+    {LedDisplayState.ASK, LedDisplayState.FAILED}
+)
+
+# MOTION. Hue was carrying the whole state distinction on its own: in the
+# default blend mode idle, working and ask rendered as the same pulse, at the
+# same period, between the same floor and ceiling, differing only in colour --
+# and an Ask is signalled to a deuteranope by about dE 8, which is not a
+# signal. Each state now owns a rhythm as well, built from the same DSL
+# primitives (pulse / none / delay) rather than any new device capability:
+#
+#   breathe  one slow swell per cycle, every LED in unison   (idle)
+#   chase    the same swell, staggered into a traveling wave (working)
+#   beat     one short sharp swell, then dark for the rest   (ask)
+#   blink    hard-edged square, no easing at all             (failed)
+#   steady   holds, does not move                            (done)
+MOTION_BREATHE = "breathe"
+MOTION_CHASE = "chase"
+MOTION_BEAT = "beat"
+MOTION_BLINK = "blink"
+MOTION_STEADY = "steady"
+
+# The four rhythms a PERSON is offered (beat is reserved for urgency and
+# is never a choice -- see agent_motion). "Automatic" is the default and
+# means "whatever the state says", i.e. today's behaviour exactly.
+PROVIDER_ANIMATION_AUTO = "auto"
+PROVIDER_ANIMATION_CHOICES: tuple[str, ...] = (
+    PROVIDER_ANIMATION_AUTO,
+    MOTION_BREATHE,
+    MOTION_CHASE,
+    MOTION_STEADY,
+    MOTION_BLINK,
+)
+PROVIDER_ANIMATION_LABELS: dict[str, str] = {
+    PROVIDER_ANIMATION_AUTO: "Automatic",
+    MOTION_BREATHE: "Breathe",
+    MOTION_CHASE: "Chase",
+    MOTION_STEADY: "Steady",
+    MOTION_BLINK: "Blink",
+}
+PROVIDER_ANIMATION_DESCRIPTIONS: dict[str, str] = {
+    PROVIDER_ANIMATION_AUTO: "Follows the state: breathe when idle, chase while working.",
+    MOTION_BREATHE: "One slow swell, every LED together.",
+    MOTION_CHASE: "The same swell, staggered into a travelling wave.",
+    MOTION_STEADY: "Holds its colour. Never moves.",
+    MOTION_BLINK: "Hard-edged on/off, no easing.",
+}
+
+STATE_MOTION: dict[LedDisplayState, str] = {
+    LedDisplayState.IDLE: MOTION_BREATHE,
+    LedDisplayState.WORKING: MOTION_CHASE,
+    LedDisplayState.ASK: MOTION_BEAT,
+    LedDisplayState.DONE: MOTION_STEADY,
+    LedDisplayState.FAILED: MOTION_BLINK,
+}
+
+# "Nothing above 2Hz." A beat is a third of a cycle and a blink is a hard
+# square, so at the fastest cycle speed the user can dial (300ms) either would
+# strobe -- 10Hz and 3.3Hz. Below this cycle length both degrade to the gentler
+# motion they are built from rather than becoming a hazard.
+MIN_FLASH_CYCLE_MS = 500
+# A beat is a third of the cycle, but never so short it reads as a strobe on a
+# slow cycle either -- floored, then capped at the cycle it lives inside.
+MIN_BEAT_MS = 480
+
+
+def relative_luminance(hex_color: str) -> float:
+    """Y of an sRGB hex, 0.0-1.0 -- how much LIGHT a colour actually is.
+
+    The one number that says whether two states read as equally loud, and the
+    reason a saturated red at half brightness disappears next to a cyan at the
+    same half brightness: they share a fraction, not a luminance.
+    """
+    cleaned = normalize_hex(hex_color, "#000000").lstrip("#")
+    red, green, blue = (
+        srgb_to_linear(int(cleaned[index : index + 2], 16) / 255.0)
+        for index in (0, 2, 4)
+    )
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def luminance_matched_hex(hex_color: str, target_luminance: float) -> str:
+    """Scale a colour in LINEAR light until its luminance hits ``target``.
+
+    A uniform scale of the three linear channels leaves their ratios -- and
+    therefore the hue and the saturation -- exactly where they were, unlike
+    scale_hex_brightness, which multiplies the gamma-encoded bytes. Requests
+    the colour cannot reach clamp at its own full-gamut maximum rather than
+    clipping a channel and sliding the hue somewhere else.
+    """
+    cleaned = normalize_hex(hex_color, "#000000").lstrip("#")
+    linear = [
+        srgb_to_linear(int(cleaned[index : index + 2], 16) / 255.0)
+        for index in (0, 2, 4)
+    ]
+    luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    if luminance <= 0.0 or target_luminance <= 0.0:
+        return "#000000"
+    scale = target_luminance / luminance
+    brightest = max(linear)
+    if brightest * scale > 1.0:
+        scale = 1.0 / brightest
+    return "#" + "".join(
+        f"{round(linear_to_srgb(channel * scale) * 255.0):02X}" for channel in linear
+    )
+
+
 # --- Curated palette ---------------------------------------------------
 
 # Apple's own system semantic colors (systemRed/Orange/Yellow/Green/Blue/
@@ -147,6 +279,19 @@ CURATED_PALETTE: tuple[str, ...] = (
     "#FF9500",  # systemOrange
     "#FF2D55",  # systemPink
     "#8E8E93",  # systemGray (last resort / overflow slot)
+)
+
+# Index-aligned with CURATED_PALETTE. A colour square with no name is not a
+# choice, it is a guess -- every swatch this app draws gets a word.
+CURATED_PALETTE_NAMES: tuple[str, ...] = (
+    "Red",
+    "Blue",
+    "Green",
+    "Purple",
+    "Yellow",
+    "Orange",
+    "Pink",
+    "Gray",
 )
 
 
@@ -396,6 +541,20 @@ IDENTITY_PALETTE: tuple[str, ...] = (
     "#E6E6E6",  # silver
 )
 
+# Index-aligned with IDENTITY_PALETTE. Distinct words from
+# CURATED_PALETTE_NAMES wherever the hues are close, so a name always
+# identifies exactly one swatch.
+IDENTITY_PALETTE_NAMES: tuple[str, ...] = (
+    "Azure",
+    "Rose",
+    "Sun",
+    "Amber",
+    "Lime",
+    "Teal",
+    "Magenta",
+    "Silver",
+)
+
 
 def identity_colors_for_agents(
     agent_ids: list[str],
@@ -567,6 +726,11 @@ class ColorSettings:
     fade_floor: dict[str, float] = field(default_factory=_default_fade_floor)
     fade_ceiling: dict[str, float] = field(default_factory=_default_fade_ceiling)
     mode_animation: dict[str, str] = field(default_factory=_default_mode_animation)
+    # Per-PROVIDER animation override (provider id -> a
+    # PROVIDER_ANIMATION_CHOICES motion). Absent/"auto" means the state
+    # picks the rhythm, which is the shipped behaviour -- so an empty dict
+    # is a faithful default and no settings migration exists.
+    provider_animation: dict[str, str] = field(default_factory=dict)
     cycle_speed_seconds: float = DEFAULT_CYCLE_SPEED_SECONDS
     # Per-blend-mode overrides for the "one breath" duration -- a mode key
     # present here uses its own speed instead of the global
@@ -665,6 +829,29 @@ class ColorSettings:
         colors[provider] = normalize_hex(hex_value, fallback)
         return replace(self, agent_colors=colors)
 
+    def agent_animation(self, provider: str) -> str:
+        """The motion this provider was given, or PROVIDER_ANIMATION_AUTO.
+
+        Anything unrecognized reads as Automatic rather than raising: a
+        settings file written by a newer build must never brick the render.
+        """
+        motion = self.provider_animation.get(provider)
+        if motion not in PROVIDER_ANIMATION_CHOICES:
+            return PROVIDER_ANIMATION_AUTO
+        return motion
+
+    def with_agent_animation(self, provider: str, motion: str) -> ColorSettings:
+        """Automatic REMOVES the entry rather than storing "auto", so a
+        settings file only ever carries the choices actually made."""
+        if motion not in PROVIDER_ANIMATION_CHOICES:
+            raise ValueError(f"Unknown provider animation: {motion}")
+        animations = dict(self.provider_animation)
+        if motion == PROVIDER_ANIMATION_AUTO:
+            animations.pop(provider, None)
+        else:
+            animations[provider] = motion
+        return replace(self, provider_animation=animations)
+
     def with_blend_mode(self, mode: str) -> ColorSettings:
         if mode not in BLEND_MODE_CHOICES:
             raise ValueError(f"Unknown blend mode: {mode}")
@@ -743,6 +930,7 @@ class ColorSettings:
             "fade_floor": dict(self.fade_floor),
             "fade_ceiling": dict(self.fade_ceiling),
             "mode_animation": dict(self.mode_animation),
+            "provider_animation": dict(sorted(self.provider_animation.items())),
             "cycle_speed_seconds": self.cycle_speed_seconds,
             "speed_overrides": dict(self.speed_overrides),
             "round_robin_urgency_alert": self.round_robin_urgency_alert,
@@ -805,6 +993,21 @@ class ColorSettings:
                 if value in ANIMATION_STYLE_CHOICES:
                     mode_animation[key] = value
 
+        provider_animation: dict[str, str] = {}
+        raw_provider_animation = data.get("provider_animation")
+        if isinstance(raw_provider_animation, dict):
+            for provider, value in raw_provider_animation.items():
+                # "auto" is the absence of a choice, so it is never stored --
+                # round-tripping it back in would make an empty default and a
+                # fully-explicit "everything automatic" file compare unequal.
+                if (
+                    isinstance(provider, str)
+                    and provider
+                    and value in PROVIDER_ANIMATION_CHOICES
+                    and value != PROVIDER_ANIMATION_AUTO
+                ):
+                    provider_animation[provider] = value
+
         cycle_speed_seconds = normalize_cycle_speed(data.get("cycle_speed_seconds"))
 
         speed_overrides: dict[str, float] = {}
@@ -839,6 +1042,7 @@ class ColorSettings:
             fade_floor=fade_floor,
             fade_ceiling=fade_ceiling,
             mode_animation=mode_animation,
+            provider_animation=provider_animation,
             cycle_speed_seconds=cycle_speed_seconds,
             speed_overrides=speed_overrides,
             round_robin_urgency_alert=round_robin_urgency_alert,
@@ -993,6 +1197,38 @@ def _fade_kwargs_for_all_modes(settings: ColorSettings) -> dict[str, float | str
     return kwargs
 
 
+# The single-agent/aggregate renderer speaks in ANIMATION_STYLE_* rather
+# than the motion vocabulary; this is the bridge, so "Claude chases" means
+# the same thing whether Claude is alone on the strip or sharing it.
+PROVIDER_ANIMATION_STYLES: dict[str, str] = {
+    MOTION_BREATHE: ANIMATION_STYLE_PULSE,
+    MOTION_CHASE: ANIMATION_STYLE_ROLL,
+    MOTION_STEADY: ANIMATION_STYLE_SOLID,
+    MOTION_BLINK: ANIMATION_STYLE_BLINK,
+}
+
+
+def _provider_style_override(
+    state: LedDisplayState,
+    settings: ColorSettings,
+    provider: str | None,
+) -> str | None:
+    """The ANIMATION_STYLE_* this provider's chosen animation implies for
+    this state, or None when the state's own style stands."""
+    if provider is None:
+        return None
+    mode_key = _STATE_TO_MODE_KEY.get(state)
+    if mode_key not in ANIMATION_MODE_KEYS:
+        return None
+    # Same rule as agent_motion: urgency keeps the state vocabulary.
+    if state in URGENT_STATES:
+        return None
+    chosen = settings.agent_animation(provider)
+    if chosen == PROVIDER_ANIMATION_AUTO:
+        return None
+    return PROVIDER_ANIMATION_STYLES.get(chosen)
+
+
 def _single_agent_program(
     color: str,
     state: LedDisplayState,
@@ -1000,14 +1236,20 @@ def _single_agent_program(
     led_count: int,
     brightness: float,
     settings: ColorSettings,
+    provider: str | None = None,
 ) -> str:
+    fade_kwargs = _fade_kwargs_for_state(state, settings)
+    style = _provider_style_override(state, settings, provider)
+    if style is not None:
+        fade_kwargs = dict(fade_kwargs)
+        fade_kwargs[_MODE_KEY_TO_STYLE_KWARG[_STATE_TO_MODE_KEY[state]]] = style
     return program_for_display_state(
         state,
         led_count=led_count,
         brightness=brightness,
         done_celebrate=settings.done_celebration_enabled,
         **_color_kwargs_for_state(state, color),
-        **_fade_kwargs_for_state(state, settings),
+        **fade_kwargs,
     )
 
 
@@ -1102,6 +1344,175 @@ def _is_static_agent_state(state: LedDisplayState) -> bool:
     return state in {LedDisplayState.DONE, LedDisplayState.FAILED}
 
 
+def _speed_safe_motion(motion: str, *, cycle_ms: int) -> str:
+    """Degrade a rhythm rather than let it strobe.
+
+    The beat and the hard blink both need room: at the fastest cycle the user
+    can dial they would run at 10Hz and 3.3Hz respectively. Under
+    MIN_FLASH_CYCLE_MS each falls back to the gentler motion it is built from,
+    so "nothing above 2Hz" holds however the motion was chosen -- by the state
+    or by the person who picked it for a provider.
+    """
+    if cycle_ms >= MIN_FLASH_CYCLE_MS:
+        return motion
+    if motion == MOTION_BEAT:
+        return MOTION_BREATHE
+    if motion == MOTION_BLINK:
+        return MOTION_STEADY
+    return motion
+
+
+def state_motion(state: LedDisplayState, *, cycle_ms: int) -> str:
+    """The rhythm this state carries at a given cycle length."""
+    return _speed_safe_motion(STATE_MOTION.get(state, MOTION_BREATHE), cycle_ms=cycle_ms)
+
+
+def agent_motion(
+    state: LedDisplayState,
+    *,
+    cycle_ms: int,
+    provider: str | None = None,
+    settings: ColorSettings | None = None,
+) -> str:
+    """The rhythm ONE agent's LEDs carry -- the provider's chosen animation
+    when it has one, otherwise the state's own.
+
+    Urgency is not negotiable: ASK and FAILED keep the state vocabulary no
+    matter what the provider was set to. The per-provider choice exists so a
+    person can say "Claude breathes, Codex chases" and tell two working
+    agents apart by rhythm; it is not a switch for turning "a human is
+    needed" into something calmer.
+    """
+    if state in URGENT_STATES:
+        return state_motion(state, cycle_ms=cycle_ms)
+    chosen = PROVIDER_ANIMATION_AUTO
+    if settings is not None and provider:
+        chosen = settings.agent_animation(provider)
+    if chosen == PROVIDER_ANIMATION_AUTO:
+        return state_motion(state, cycle_ms=cycle_ms)
+    return _speed_safe_motion(chosen, cycle_ms=cycle_ms)
+
+
+def _holds_still(
+    state: LedDisplayState,
+    *,
+    cycle_ms: int,
+    provider: str | None = None,
+    settings: ColorSettings | None = None,
+) -> bool:
+    """Whether this agent owns no share of the traveling stagger.
+
+    Steady holds and hard blinks both sit on one LED and do their own thing,
+    so a strip made only of them renders identically at every phase -- which
+    is what keeps Relay's program byte-stable (and therefore un-rewritten)
+    while nothing is actually moving. A provider parked on Steady counts as
+    still for exactly the same reason its state would have.
+    """
+    return agent_motion(
+        state, cycle_ms=cycle_ms, provider=provider, settings=settings
+    ) in {MOTION_STEADY, MOTION_BLINK}
+
+
+def _peak_for_state(color: str, state: LedDisplayState, settings: ColorSettings) -> str:
+    """The colour one LED swells UP to for this state.
+
+    Ordinary states peak at the user's gentleness ceiling. Urgent ones peak at
+    full: the ceiling exists to stop ambient breathing being harsh, and an Ask
+    is not ambient. On the default palette this is the whole loudness fix --
+    ask goes from Y 0.055 (2.5x dimmer than working) to Y 0.243 (1.8x louder).
+    """
+    if state in URGENT_STATES:
+        return color
+    mode_key = _STATE_TO_MODE_KEY[state]
+    _floor, ceiling = settings.fade_range(mode_key)
+    return color if ceiling >= 1.0 else scale_hex_brightness(color, ceiling)
+
+
+def _floor_for_state(color: str, state: LedDisplayState, settings: ColorSettings) -> str:
+    """The colour one LED rests DOWN to between swells.
+
+    For an urgent state the gentleness ceiling becomes the FLOOR: a light that
+    means "a human is needed" must never go dark between beats, or the whole
+    signal is only present for the fraction of a cycle it happens to be lit.
+    So Ask now RESTS at exactly the level it used to peak at, and beats to full
+    from there -- it is lit at every instant of the cycle, not only at the top
+    of a swell an ambient breathe was already brighter than.
+    """
+    mode_key = _STATE_TO_MODE_KEY[state]
+    floor, ceiling = settings.fade_range(mode_key)
+    if state in URGENT_STATES and floor > 0.0:
+        # A floor of exactly zero is the user saying "go all the way dark".
+        # The lift raises a resting glow; it does not invent one.
+        return color if ceiling >= 1.0 else scale_hex_brightness(color, ceiling)
+    return "#000000" if floor <= 0.0 else scale_hex_brightness(color, floor)
+
+
+def _motion_segments(
+    led_index: int,
+    color: str,
+    state: LedDisplayState,
+    settings: ColorSettings,
+    *,
+    cycle_ms: int,
+    settle_ms: int,
+    delay_ms: int = 0,
+    chase_delay_ms: int = 0,
+    provider: str | None = None,
+) -> tuple[str, str]:
+    """One LED's (reset line segment, motion line segment) for this state.
+
+    Every shape is two segments on the same two lines, so the caller's program
+    keeps its exact two-line-plus-repeat structure no matter which states are
+    on screen -- LED assignment, firmware line/byte budgets and the write
+    dedup all stay where they were. Only the rhythm differs.
+
+    ``delay_ms`` is the offset this LED gets whatever it is doing (Relay's
+    baton, where the layout itself is a chase); ``chase_delay_ms`` is the
+    extra traveling-wave offset that ONLY the chase motion takes, which is
+    what separates a wave from a strip breathing in unison.
+
+    A note on the DSL: a line ends at its longest ``delay + duration``, and
+    ``pulse`` returns to the line's start colour, so a segment shorter than
+    the line simply finishes early and rests. That is what turns a short pulse
+    into a beat with dark after it, for free.
+
+    ``provider`` opts this LED into that provider's own chosen animation (see
+    agent_motion); omitted, the state picks the rhythm exactly as before.
+    """
+    motion = agent_motion(state, cycle_ms=cycle_ms, provider=provider, settings=settings)
+    peak = _peak_for_state(color, state, settings)
+    tail = f" {delay_ms}ms" if delay_ms else ""
+
+    if motion == MOTION_STEADY:
+        held = f"{led_index}:{peak} {settle_ms}ms cosine"
+        return held, held
+
+    if motion == MOTION_BLINK:
+        # Hard edges, no easing anywhere: the one shape in the vocabulary that
+        # never eases, so it cannot be mistaken for a breath even in a colour
+        # a dichromat reads the same as Done's green.
+        half = max(1, cycle_ms // 2)
+        floor_color = _floor_for_state(color, state, settings)
+        return (
+            f"{led_index}:{peak} {settle_ms}ms none",
+            f"{led_index}:{floor_color} {half}ms none {delay_ms + half}ms",
+        )
+
+    floor_segment = f"{led_index}:{_floor_for_state(color, state, settings)} {settle_ms}ms cosine"
+    if motion == MOTION_BEAT:
+        beat_ms = max(1, min(cycle_ms, max(cycle_ms // 3, MIN_BEAT_MS)))
+        # No traveling wave: every asking LED beats together. A wave says
+        # "busy", a unison beat says "stop".
+        return floor_segment, f"{led_index}:{peak} {beat_ms}ms pulse{tail}"
+    if motion == MOTION_CHASE:
+        return (
+            floor_segment,
+            f"{led_index}:{peak} {cycle_ms}ms pulse {delay_ms + chase_delay_ms}ms",
+        )
+    # Breathe: the full cycle, in unison.
+    return floor_segment, f"{led_index}:{peak} {cycle_ms}ms pulse{tail}"
+
+
 def _cycle_program(
     agents: list[_ActiveAgent],
     *,
@@ -1115,7 +1526,12 @@ def _cycle_program(
     if len(agents) == 1:
         agent = agents[0]
         return _single_agent_program(
-            agent.color, agent.state, led_count=led_count, brightness=brightness, settings=settings
+            agent.color,
+            agent.state,
+            led_count=led_count,
+            brightness=brightness,
+            settings=settings,
+            provider=agent.provider,
         )
 
     duration_ms = max(1, int(settings.effective_speed_seconds(BLEND_MODE_CYCLE) * 1000))
@@ -1129,10 +1545,9 @@ def _cycle_program(
     for agent in agents:
         color = _display_color_for_agent(agent, settings)
         if _is_static_agent_state(agent.state):
-            lines.append(f"{color} {duration_ms}ms cosine")
+            lines.append(f"{_peak_for_state(color, agent.state, settings)} {duration_ms}ms cosine")
             continue
-        _floor, ceiling = settings.fade_range(_STATE_TO_MODE_KEY[agent.state])
-        peak = color if ceiling >= 1.0 else scale_hex_brightness(color, ceiling)
+        peak = _peak_for_state(color, agent.state, settings)
         lines.append(f"{peak} {duration_ms}ms pulse")
     lines.append("repeat")
     return apply_brightness("\n".join(lines), brightness)
@@ -1154,7 +1569,12 @@ def _round_robin_program(
     if len(agents) == 1:
         agent = agents[0]
         return _single_agent_program(
-            agent.color, agent.state, led_count=led_count, brightness=brightness, settings=settings
+            agent.color,
+            agent.state,
+            led_count=led_count,
+            brightness=brightness,
+            settings=settings,
+            provider=agent.provider,
         )
 
     duration_ms = max(1, int(settings.effective_speed_seconds(BLEND_MODE_ROUND_ROBIN) * 1000))
@@ -1169,16 +1589,18 @@ def _round_robin_program(
     for index in range(led_count):
         agent = agents[index % len(agents)]
         color = _display_color_for_agent(agent, settings)
-        if _is_static_agent_state(agent.state):
-            reset_segments.append(f"{index}:{color} {settle_ms}ms cosine")
-            pulse_segments.append(f"{index}:{color} {settle_ms}ms cosine")
-            continue
-        floor, ceiling = settings.fade_range(_STATE_TO_MODE_KEY[agent.state])
-        floor_color = "#000000" if floor <= 0.0 else scale_hex_brightness(color, floor)
-        peak_color = color if ceiling >= 1.0 else scale_hex_brightness(color, ceiling)
-        delay = (index * stagger_ms) % duration_ms
-        reset_segments.append(f"{index}:{floor_color} {settle_ms}ms cosine")
-        pulse_segments.append(f"{index}:{peak_color} {duration_ms}ms pulse {delay}ms")
+        reset, pulse = _motion_segments(
+            index,
+            color,
+            agent.state,
+            settings,
+            cycle_ms=duration_ms,
+            settle_ms=settle_ms,
+            chase_delay_ms=(index * stagger_ms) % duration_ms,
+            provider=agent.provider,
+        )
+        reset_segments.append(reset)
+        pulse_segments.append(pulse)
 
     program_lines = ["; ".join(reset_segments), "; ".join(pulse_segments), "repeat"]
     return apply_brightness("\n".join(program_lines), brightness)
@@ -1204,7 +1626,12 @@ def _relay_program(
     if len(agents) == 1:
         agent = agents[0]
         return _single_agent_program(
-            agent.color, agent.state, led_count=led_count, brightness=brightness, settings=settings
+            agent.color,
+            agent.state,
+            led_count=led_count,
+            brightness=brightness,
+            settings=settings,
+            provider=agent.provider,
         )
 
     traversal_seconds = settings.effective_speed_seconds(BLEND_MODE_RELAY)
@@ -1215,7 +1642,16 @@ def _relay_program(
         led_count,
     )
     settle_ms = settle_duration_ms(step_ms)
-    all_static = all(_is_static_agent_state(agent.state) for agent in agents)
+    # "Nothing is travelling" is now a property of the MOTION, not of a fixed
+    # state list: a strip of steady holds and hard blinks renders the same at
+    # every phase, so the program stays byte-stable and the device is not
+    # rewritten for motion that does not exist.
+    all_static = all(
+        _holds_still(
+            agent.state, cycle_ms=step_ms, provider=agent.provider, settings=settings
+        )
+        for agent in agents
+    )
     led_order = (
         tuple(range(led_count))
         if all_static
@@ -1227,18 +1663,20 @@ def _relay_program(
     for turn, index in enumerate(led_order):
         agent = agents[index % len(agents)]
         color = _display_color_for_agent(agent, settings)
-        if _is_static_agent_state(agent.state):
-            reset_segments.append(f"{index}:{color} {settle_ms}ms cosine")
-            pulse_segments.append(f"{index}:{color} {settle_ms}ms cosine")
-            continue
-        floor, ceiling = settings.fade_range(_STATE_TO_MODE_KEY[agent.state])
-        floor_color = "#000000" if floor <= 0.0 else scale_hex_brightness(color, floor)
-        peak_color = color if ceiling >= 1.0 else scale_hex_brightness(color, ceiling)
         # Full stagger -- one LED's entire turn elapses before the next
         # one's delay expires, so only one LED is ever mid-flare.
-        delay = turn * step_ms
-        reset_segments.append(f"{index}:{floor_color} {settle_ms}ms cosine")
-        pulse_segments.append(f"{index}:{peak_color} {step_ms}ms pulse {delay}ms")
+        reset, pulse = _motion_segments(
+            index,
+            color,
+            agent.state,
+            settings,
+            cycle_ms=step_ms,
+            settle_ms=settle_ms,
+            delay_ms=turn * step_ms,
+            provider=agent.provider,
+        )
+        reset_segments.append(reset)
+        pulse_segments.append(pulse)
 
     program_lines = ["; ".join(reset_segments), "; ".join(pulse_segments), "repeat"]
     return apply_brightness("\n".join(program_lines), brightness)
@@ -1338,9 +1776,14 @@ def _segment_for_agent(led_index: int, agent: _ActiveAgent, settings: ColorSetti
     if _is_static_agent_state(agent.state):
         return f"{led_index}:{agent.color} {_STATIC_SETTLE_MS}ms cosine"
     mode_key = _STATE_TO_MODE_KEY[agent.state]
-    _floor, ceiling = settings.fade_range(mode_key)
-    peak_color = agent.color if ceiling >= 1.0 else scale_hex_brightness(agent.color, ceiling)
-    style = settings.animation_style(mode_key)
+    # Spatial Split already tells states apart by PERIOD (6s idle vs 1.6s ask
+    # vs 760ms working) and by block size, so it keeps the user's chosen
+    # animation style -- the only thing it was missing is that an urgent block
+    # was rendered at the ambient gentleness ceiling.
+    peak_color = _peak_for_state(agent.color, agent.state, settings)
+    style = _provider_style_override(agent.state, settings, agent.provider) or settings.animation_style(
+        mode_key
+    )
     if style == ANIMATION_STYLE_SOLID:
         settle_ms = settle_duration_ms(_SEGMENT_DURATION_MS_BY_STATE[agent.state])
         return f"{led_index}:{peak_color} {settle_ms}ms cosine"
@@ -1356,7 +1799,13 @@ def _segment_for_agent(led_index: int, agent: _ActiveAgent, settings: ColorSetti
 
 def _reset_segment_for_agent(led_index: int, agent: _ActiveAgent, settings: ColorSettings) -> str:
     mode_key = _STATE_TO_MODE_KEY[agent.state]
-    if _is_static_agent_state(agent.state) or settings.animation_style(mode_key) == ANIMATION_STYLE_SOLID:
+    style = _provider_style_override(agent.state, settings, agent.provider) or settings.animation_style(
+        mode_key
+    )
+    # Must agree with _segment_for_agent's own style choice, provider
+    # override included: a reset line that thinks the block is pulsing while
+    # the motion line holds it solid leaves the block parked at its floor.
+    if _is_static_agent_state(agent.state) or style == ANIMATION_STYLE_SOLID:
         # Not pulsing -- assign directly, no floor to settle to first.
         settle_ms = (
             _STATIC_SETTLE_MS
@@ -1445,7 +1894,12 @@ def program_for_snapshot(
     if len(agents) == 1:
         agent = agents[0]
         program = _single_agent_program(
-            agent.color, agent.state, led_count=led_count, brightness=brightness, settings=settings
+            agent.color,
+            agent.state,
+            led_count=led_count,
+            brightness=brightness,
+            settings=settings,
+            provider=agent.provider,
         )
         attention = _attention_motion_programs(
             program,
@@ -1598,6 +2052,7 @@ def program_for_projection(
             led_count=led_count,
             brightness=brightness,
             settings=settings,
+            provider=agent.provider,
         )
         attention = _attention_motion_programs(
             program,
@@ -1714,14 +2169,26 @@ def _attention_spatial_anchor_program(
         selected = set(ranked_indices)
         visible = [agent for index, agent in enumerate(visible) if index in selected]
 
-    segments: list[str] = []
+    # Two lines, not one: the anchor now RISES into place instead of snapping.
+    # The urgent block holds at full rather than at the ambient gentleness
+    # ceiling (that is the loudness fix -- an anchor that means "a human is
+    # needed" should not be dimmer than an agent quietly working), and an
+    # un-eased jump straight to full reads as a glitch rather than as the
+    # light standing up. The approach line is where every LED already was, so
+    # for calm agents the two lines are identical and nothing moves.
+    approach: list[str] = []
+    hold: list[str] = []
     led_index = 0
     for agent, block_count in _spatial_split_blocks(visible, count):
+        ambient = _ambient_level_for_agent(agent, settings)
         color = _peak_color_for_agent_with_alert(agent, settings)
         for _ in range(block_count):
-            segments.append(f"{led_index}:{color} {_STATIC_SETTLE_MS}ms cosine")
+            approach.append(f"{led_index}:{ambient} {_STATIC_SETTLE_MS}ms cosine")
+            hold.append(f"{led_index}:{color} {_STATIC_SETTLE_MS}ms cosine")
             led_index += 1
-    return apply_brightness("; ".join(segments), brightness)
+    if approach == hold:
+        return apply_brightness("; ".join(hold), brightness)
+    return apply_brightness("; ".join(approach) + "\n" + "; ".join(hold), brightness)
 
 
 def _attention_motion_programs(
@@ -1769,11 +2236,18 @@ def _with_attention_takeover(
     ).arrival_program
 
 
-def _peak_color_for_agent(agent: _ActiveAgent, settings: ColorSettings) -> str:
+def _ambient_level_for_agent(agent: _ActiveAgent, settings: ColorSettings) -> str:
+    """Where this LED already sits under the ordinary gentleness ceiling --
+    the level an urgency takeover rises FROM, with no urgency lift applied."""
+    color = _display_color_for_agent(agent, settings)
     if _is_static_agent_state(agent.state):
-        return agent.color
+        return color
     _floor, ceiling = settings.fade_range(_STATE_TO_MODE_KEY[agent.state])
-    return agent.color if ceiling >= 1.0 else scale_hex_brightness(agent.color, ceiling)
+    return color if ceiling >= 1.0 else scale_hex_brightness(color, ceiling)
+
+
+def _peak_color_for_agent(agent: _ActiveAgent, settings: ColorSettings) -> str:
+    return _peak_for_state(agent.color, agent.state, settings)
 
 
 def _peak_color_for_agent_with_alert(agent: _ActiveAgent, settings: ColorSettings) -> str:
@@ -1781,11 +2255,7 @@ def _peak_color_for_agent_with_alert(agent: _ActiveAgent, settings: ColorSetting
     alert color swap first -- used by preview_led_colors() for those two
     modes so the static preview matches what program_for_snapshot() would
     actually render."""
-    color = _display_color_for_agent(agent, settings)
-    if _is_static_agent_state(agent.state):
-        return color
-    _floor, ceiling = settings.fade_range(_STATE_TO_MODE_KEY[agent.state])
-    return color if ceiling >= 1.0 else scale_hex_brightness(color, ceiling)
+    return _peak_for_state(_display_color_for_agent(agent, settings), agent.state, settings)
 
 
 def preview_led_colors(
@@ -2167,11 +2637,432 @@ CURATED_PALETTES: dict[str, dict[str, dict[str, str]]] = {
     "Ember": derive_palette("#FF9F0A"),
 }
 
+# The four official brand colours, in one place, as (name, hex) -- the
+# single source of truth for BOTH the brand-seeded palettes below and the
+# named "Brand" swatch group every provider row leads with. They used to be
+# restated as an anonymous literal in settings_window.BRAND_SWATCHES, which
+# is how the Agent Colors card came to claim "the first four swatches are
+# the brand colours" while actually rendering systemRed/Blue/Green/Purple.
+BRAND_SEED_COLORS: tuple[tuple[str, str], ...] = (
+    ("Claude", "#D97757"),
+    ("OpenAI", "#10A37F"),
+    ("Codex", "#FF3A00"),
+    ("Gemini", "#4796E3"),
+)
+
 # Brand-seeded looks: one per provider, mix-and-match with anything --
 # apply "Claude" then hand-pick a different done color, etc.
 PROVIDER_PALETTES: dict[str, dict[str, dict[str, str]]] = {
-    "Claude": derive_palette("#D97757"),
-    "OpenAI": derive_palette("#10A37F"),
-    "Codex": derive_palette("#FF3A00"),
-    "Gemini": derive_palette("#4796E3"),
+    name: derive_palette(seed) for name, seed in BRAND_SEED_COLORS
 }
+
+
+# --- Colour / Animation Studio model ---------------------------------------
+#
+# Everything the Studio pane draws is decided HERE, in plain data, and the
+# AppKit code in settings_window.py is a renderer over it. That split exists
+# because the bug this replaced was a MODEL bug wearing a view costume: the
+# Agent Colors card told the user "the first four swatches are the brand
+# colours" while the strip it actually drew was CURATED_PALETTE, whose first
+# four are red/blue/green/purple. A sentence of body copy and a hover tooltip
+# were carrying the entire mapping between a colour square and its meaning,
+# and neither was testable. Now the mapping is a value: every swatch arrives
+# with a name, a group, and whether it is a brand colour, and a test can
+# assert all three without instantiating a single NSView.
+
+SWATCH_GROUP_BRAND = "brand"
+SWATCH_GROUP_PALETTE = "palette"
+SWATCH_GROUP_CUSTOM = "custom"
+SWATCH_GROUP_CHOICES: tuple[str, ...] = (
+    SWATCH_GROUP_BRAND,
+    SWATCH_GROUP_PALETTE,
+    SWATCH_GROUP_CUSTOM,
+)
+SWATCH_GROUP_LABELS: dict[str, str] = {
+    SWATCH_GROUP_BRAND: "Brand",
+    SWATCH_GROUP_PALETTE: "Palette",
+    SWATCH_GROUP_CUSTOM: "Custom",
+}
+SWATCH_GROUP_HINTS: dict[str, str] = {
+    SWATCH_GROUP_BRAND: "Official colours, straight from the makers.",
+    SWATCH_GROUP_PALETTE: "System hues, chosen to stay far apart from each other.",
+    SWATCH_GROUP_CUSTOM: "Anything else you pick.",
+}
+
+# The name shown when a hex belongs to no named set. Kept as a constant so
+# the "is this swatch anonymous?" test has something to compare against.
+CUSTOM_SWATCH_NAME = "Custom"
+
+_BRAND_NAME_BY_HEX: dict[str, str] = {
+    hex_value.upper(): name for name, hex_value in BRAND_SEED_COLORS
+}
+_CURATED_NAME_BY_HEX: dict[str, str] = {
+    hex_value.upper(): name
+    for hex_value, name in zip(CURATED_PALETTE, CURATED_PALETTE_NAMES)
+}
+_IDENTITY_NAME_BY_HEX: dict[str, str] = {
+    hex_value.upper(): name
+    for hex_value, name in zip(IDENTITY_PALETTE, IDENTITY_PALETTE_NAMES)
+}
+
+
+def swatch_name(hex_value: str) -> str:
+    """The human name for a colour: its brand name if it is one, then its
+    palette name, then its identity name, then "Custom".
+
+    Brand wins ties on purpose -- if a system hue ever collided with a brand
+    hex, the brand meaning is the one a person is actually choosing.
+    """
+    key = normalize_hex(hex_value, "#000000").upper()
+    return (
+        _BRAND_NAME_BY_HEX.get(key)
+        or _CURATED_NAME_BY_HEX.get(key)
+        or _IDENTITY_NAME_BY_HEX.get(key)
+        or CUSTOM_SWATCH_NAME
+    )
+
+
+def is_brand_color(hex_value: str) -> bool:
+    return normalize_hex(hex_value, "#000000").upper() in _BRAND_NAME_BY_HEX
+
+
+@dataclass(frozen=True)
+class Swatch:
+    """One pickable colour, and everything the view needs to draw it."""
+
+    name: str
+    hex: str
+    group: str
+    selected: bool = False
+    # True for the "Custom..." opener, which has no colour of its own until
+    # the picker returns one.
+    opens_picker: bool = False
+
+    @property
+    def is_brand(self) -> bool:
+        return self.group == SWATCH_GROUP_BRAND
+
+    @property
+    def is_control(self) -> bool:
+        """True when this chip is a BUTTON rather than a colour on offer.
+
+        The picker wears the row's current colour only while that colour is
+        its own; the rest of the time it must render neutral, or the row
+        shows the same colour twice and reads as a duplicate.
+        """
+        return self.opens_picker and not self.selected
+
+    @property
+    def tooltip(self) -> str:
+        if self.opens_picker:
+            if self.selected:
+                return f"{self.name} · {self.hex} — click to pick another"
+            return "Pick any colour…"
+        if self.is_brand:
+            return f"{self.name} brand colour · {self.hex}"
+        return f"{self.name} · {self.hex}"
+
+
+@dataclass(frozen=True)
+class SwatchGroup:
+    """A LABELLED run of swatches. The label is not decoration: it is the
+    only thing that tells a person the four colours in front of them are
+    brands rather than an arbitrary strip."""
+
+    key: str
+    label: str
+    hint: str
+    swatches: tuple[Swatch, ...]
+
+
+@dataclass(frozen=True)
+class ProviderColorRow:
+    """One provider's whole row: identity first, palette second."""
+
+    provider: str
+    label: str
+    current_hex: str
+    current_name: str
+    animation: str
+    animation_label: str
+    groups: tuple[SwatchGroup, ...]
+
+    @property
+    def all_swatches(self) -> tuple[Swatch, ...]:
+        return tuple(swatch for group in self.groups for swatch in group.swatches)
+
+    def group(self, key: str) -> SwatchGroup | None:
+        for group in self.groups:
+            if group.key == key:
+                return group
+        return None
+
+
+def _provider_label(provider: str) -> str:
+    for spec in PROVIDER_SPECS:
+        if spec.provider == provider:
+            return spec.label
+    return provider.title() or provider
+
+
+def brand_swatches_for_provider(provider: str, current_hex: str) -> tuple[Swatch, ...]:
+    """The named Brand group for one provider.
+
+    Leads with that provider's OWN shipped colour when it is not already one
+    of the four brand seeds and not in the system palette either (Devin's
+    navy, say) -- identity first. Named "Default", never a second swatch
+    confusingly wearing the provider's own name next to a different hex.
+    """
+    swatches: list[Swatch] = []
+    own = normalize_hex(default_agent_color(provider), CURATED_PALETTE[0])
+    known = set(_BRAND_NAME_BY_HEX) | set(_CURATED_NAME_BY_HEX)
+    if own.upper() not in known:
+        swatches.append(
+            Swatch(
+                name="Default",
+                hex=own,
+                group=SWATCH_GROUP_BRAND,
+                selected=own.upper() == current_hex.upper(),
+            )
+        )
+    for name, hex_value in BRAND_SEED_COLORS:
+        swatches.append(
+            Swatch(
+                name=name,
+                hex=hex_value,
+                group=SWATCH_GROUP_BRAND,
+                selected=hex_value.upper() == current_hex.upper(),
+            )
+        )
+    return tuple(swatches)
+
+
+def palette_swatches(current_hex: str) -> tuple[Swatch, ...]:
+    return tuple(
+        Swatch(
+            name=name,
+            hex=hex_value,
+            group=SWATCH_GROUP_PALETTE,
+            selected=hex_value.upper() == current_hex.upper(),
+        )
+        for hex_value, name in zip(CURATED_PALETTE, CURATED_PALETTE_NAMES)
+    )
+
+
+def custom_swatches(
+    current_hex: str, already_shown: tuple[str, ...] = ()
+) -> tuple[Swatch, ...]:
+    """The row's own-colour slot: ONE chip that opens the picker, wearing
+    whatever colour the row currently has and named for it.
+
+    When the current colour belongs to no named group this chip *is* the
+    selection, so it is named "Custom" and rings -- a hand-picked hex stays
+    a visible, named, re-selectable swatch instead of vanishing from the
+    row. Otherwise it is the neutral "Pick…" opener.
+
+    ``already_shown`` are hexes the earlier groups drew: a colour that is
+    already named on the row (a provider's own "Default", say) is not
+    custom, whatever the global name table says about it.
+    """
+    current = normalize_hex(current_hex, CURATED_PALETTE[0])
+    shown = {normalize_hex(value, "#000000").upper() for value in already_shown}
+    unnamed = swatch_name(current) == CUSTOM_SWATCH_NAME and current.upper() not in shown
+    return (
+        Swatch(
+            name=CUSTOM_SWATCH_NAME if unnamed else "Pick…",
+            hex=current,
+            group=SWATCH_GROUP_CUSTOM,
+            selected=unnamed,
+            opens_picker=True,
+        ),
+    )
+
+
+def provider_color_row(provider: str, colors: ColorSettings) -> ProviderColorRow:
+    current = colors.agent_color(provider)
+    animation = colors.agent_animation(provider)
+    brand = brand_swatches_for_provider(provider, current)
+    palette = palette_swatches(current)
+    custom = custom_swatches(
+        current, tuple(swatch.hex for swatch in brand + palette)
+    )
+    groups = (
+        SwatchGroup(
+            key=SWATCH_GROUP_BRAND,
+            label=SWATCH_GROUP_LABELS[SWATCH_GROUP_BRAND],
+            hint=SWATCH_GROUP_HINTS[SWATCH_GROUP_BRAND],
+            swatches=brand,
+        ),
+        SwatchGroup(
+            key=SWATCH_GROUP_PALETTE,
+            label=SWATCH_GROUP_LABELS[SWATCH_GROUP_PALETTE],
+            hint=SWATCH_GROUP_HINTS[SWATCH_GROUP_PALETTE],
+            swatches=palette,
+        ),
+        SwatchGroup(
+            key=SWATCH_GROUP_CUSTOM,
+            label=SWATCH_GROUP_LABELS[SWATCH_GROUP_CUSTOM],
+            hint=SWATCH_GROUP_HINTS[SWATCH_GROUP_CUSTOM],
+            swatches=custom,
+        ),
+    )
+    # The row's caption names the swatch that is actually ringed, so a
+    # provider sitting on its own shipped colour reads "Default", not the
+    # global fallback name for an unrecognized hex.
+    selected = next(
+        (
+            swatch.name
+            for group in groups
+            for swatch in group.swatches
+            if swatch.selected and not swatch.opens_picker
+        ),
+        None,
+    )
+    return ProviderColorRow(
+        provider=provider,
+        label=_provider_label(provider),
+        current_hex=current,
+        current_name=selected or swatch_name(current),
+        animation=animation,
+        animation_label=PROVIDER_ANIMATION_LABELS.get(animation, animation.title()),
+        groups=groups,
+    )
+
+
+def provider_preview_statuses(
+    provider: str, mode: AgentMode = AgentMode.WORKING
+) -> tuple[AgentStatus, ...]:
+    """One synthetic session for one provider.
+
+    What a person hovering Claude's swatch is asking is "what does THIS
+    colour look like", and the honest answer needs Claude alone on the strip:
+    with two or more sessions active the renderer switches to session
+    identity colours, so a provider colour change would preview as no change
+    at all. Editing a colour is the one moment the strip should be about the
+    provider rather than about the crowd.
+    """
+    return (
+        AgentStatus(
+            provider=provider,
+            agent_id=f"{provider}:studio-preview",
+            display_name=_provider_label(provider),
+            mode=mode,
+            updated_at=datetime.now(timezone.utc),
+            event_name="Studio preview",
+        ),
+    )
+
+
+def provider_color_rows(colors: ColorSettings) -> tuple[ProviderColorRow, ...]:
+    """One row per registered provider, in PROVIDER_SPECS order -- the same
+    order the renderer assigns LEDs in, so the window and the strip agree
+    about who comes first."""
+    return tuple(provider_color_row(spec.provider, colors) for spec in PROVIDER_SPECS)
+
+
+# --- Studio sections -------------------------------------------------------
+
+STUDIO_SECTION_COLORS = "colors"
+STUDIO_SECTION_ANIMATIONS = "animations"
+STUDIO_SECTION_PREVIEW = "preview"
+STUDIO_SECTION_CHOICES: tuple[str, ...] = (
+    STUDIO_SECTION_COLORS,
+    STUDIO_SECTION_ANIMATIONS,
+    STUDIO_SECTION_PREVIEW,
+)
+STUDIO_SECTION_LABELS: dict[str, str] = {
+    STUDIO_SECTION_COLORS: "Colours",
+    STUDIO_SECTION_ANIMATIONS: "Animations",
+    STUDIO_SECTION_PREVIEW: "Preview",
+}
+STUDIO_SECTION_SUBTITLES: dict[str, str] = {
+    STUDIO_SECTION_COLORS: "Which colour each agent and each state gets.",
+    STUDIO_SECTION_ANIMATIONS: "How each agent and each state moves.",
+    STUDIO_SECTION_PREVIEW: "See it before you keep it.",
+}
+DEFAULT_STUDIO_SECTION = STUDIO_SECTION_COLORS
+
+
+def normalize_studio_section(value: object) -> str:
+    return value if value in STUDIO_SECTION_CHOICES else DEFAULT_STUDIO_SECTION
+
+
+# --- Uncommitted preview ---------------------------------------------------
+
+
+@dataclass
+class StudioPreviewSession:
+    """The "try it before you keep it" rule, as a value.
+
+    Hovering a swatch must show you the light and then take it back; only a
+    click keeps it. Doing that with a saved-settings round trip is how a
+    half-finished hover ends up persisted, so the candidate lives here and
+    NOTHING writes it: ``effective`` is what to render, ``committed`` is what
+    to save, and the only way the two converge is ``commit``.
+    """
+
+    committed: ColorSettings
+    candidate: ColorSettings | None = None
+
+    @property
+    def previewing(self) -> bool:
+        return self.candidate is not None
+
+    @property
+    def effective(self) -> ColorSettings:
+        return self.candidate if self.candidate is not None else self.committed
+
+    def preview(self, colors: ColorSettings) -> ColorSettings:
+        self.candidate = colors
+        return self.candidate
+
+    def preview_agent_color(self, provider: str, hex_value: str) -> ColorSettings:
+        return self.preview(self.committed.with_agent_color(provider, hex_value))
+
+    def preview_agent_animation(self, provider: str, motion: str) -> ColorSettings:
+        return self.preview(self.committed.with_agent_animation(provider, motion))
+
+    def revert(self) -> ColorSettings:
+        """Pointer left without clicking: the candidate never existed."""
+        self.candidate = None
+        return self.committed
+
+    def commit(self, colors: ColorSettings | None = None) -> ColorSettings:
+        """Keep it. With no argument, keeps whatever is being previewed."""
+        if colors is None:
+            colors = self.effective
+        self.committed = colors
+        self.candidate = None
+        return self.committed
+
+    def rebase(self, colors: ColorSettings) -> ColorSettings:
+        """The saved settings changed somewhere else (a palette button, a
+        reset). Drop any in-flight hover rather than letting it repaint over
+        the new baseline."""
+        self.committed = colors
+        self.candidate = None
+        return self.committed
+
+
+def studio_preview_program(
+    colors: ColorSettings,
+    *,
+    statuses: tuple[AgentStatus, ...] = (),
+    scenario: str = PREVIEW_SCENARIO_LIVE,
+    led_count: int = 8,
+    brightness: float = 1.0,
+) -> str:
+    """The LED program a candidate ColorSettings would produce -- what the
+    Screen Bar shows while you hover. Live scenario with nothing running
+    falls back to the demo roster so a hover is never a blank bar."""
+    if scenario != PREVIEW_SCENARIO_LIVE:
+        statuses = preview_statuses_for_scenario(scenario)
+    elif not statuses:
+        statuses = demo_statuses_for_preview()
+    _state, program = program_for_snapshot(
+        statuses,
+        led_count=led_count,
+        colors=colors,
+        brightness=brightness,
+    )
+    return program

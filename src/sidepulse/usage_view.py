@@ -239,8 +239,11 @@ class ProviderUsageViewModel:
             parts.append("Stale")
         if self.error_text:
             parts.append(self.error_text)
-        if self.missing and not self.error_text:
-            parts = ["Loading..." if self.refreshing else "Not loaded"]
+        if self.missing:
+            # Same rule as `menu_line`: with nothing to show, the reason IS
+            # the line. Appending it after "No usage yet" read as two
+            # different explanations for one empty card.
+            parts = [self.error_text or ("Loading..." if self.refreshing else "Not loaded")]
         return " · ".join(parts)
 
 

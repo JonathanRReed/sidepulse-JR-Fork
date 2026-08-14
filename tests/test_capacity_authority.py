@@ -16,6 +16,7 @@ from sidepulse.capacity_types import (
     CapacityAccountBinding,
     CapacityEvidenceClass,
     CapacitySnapshot,
+    CapacityValidationError,
     CapacitySourceHealth,
     CapacityUnit,
     CapacityValue,
@@ -115,8 +116,9 @@ def _context(
     instances: tuple[str, ...] = ("local:primary",),
     model: str | None = "gpt-5",
     feature: str | None = None,
+    scopes: tuple[tuple[str, str], ...] = (),
 ) -> ExecutionContext:
-    return ExecutionContext(providers, instances, model, feature)
+    return ExecutionContext(providers, instances, model, feature, scopes)
 
 
 def _binding(*, pool: str = "general", account: str = "acct:primary") -> CapacityAccountBinding:
@@ -405,6 +407,9 @@ def test_second_provider_can_bind_without_losing_its_provider_identity() -> None
     context = _context(
         providers=("codex", "claude"),
         instances=("local:primary", "remote:primary"),
+        # Pairs, not a cross product: this build never registered
+        # codex/remote:primary or claude/local:primary.
+        scopes=(("codex", "local:primary"), ("claude", "remote:primary")),
     )
 
     projection = select_binding_lanes(
@@ -466,6 +471,9 @@ def test_one_horizon_fills_second_slot_only_from_another_source() -> None:
     context = _context(
         providers=("codex", "claude"),
         instances=("local:primary", "remote:primary"),
+        # Pairs, not a cross product: this build never registered
+        # codex/remote:primary or claude/local:primary.
+        scopes=(("codex", "local:primary"), ("claude", "remote:primary")),
     )
 
     codex_only = select_binding_lanes(
@@ -501,7 +509,14 @@ def test_partial_quota_evidence_stays_in_detail_and_never_binds() -> None:
     assert projection.detail_lanes[0].refusal_code == "usage_partial"
 
 
-def test_failed_source_with_last_known_good_projects_as_stale_fallback() -> None:
+def test_failed_source_with_last_known_good_shows_but_never_binds() -> None:
+    """A dead source's last good reading is a ledger row, not authority.
+
+    `_value_refusal` forgives an unhealthy source that still holds a
+    last-known-good number, which is right for DISPLAY -- the card renders it
+    marked stale. It used to make the lane BINDABLE too, so a FAILED source
+    could have driven an effect off evidence it could no longer confirm.
+    """
     lane = _lane(remaining=12.0, health_kind=SourceHealthKind.FAILED)
     lane = replace(
         lane,
@@ -510,27 +525,125 @@ def test_failed_source_with_last_known_good_projects_as_stale_fallback() -> None
 
     authority = evaluate_lane_authority(lane, _context(), NOW, allow_unbound_legacy=True)
 
-    assert authority.bindable is True
     assert authority.freshness is ObservationState.LAST_KNOWN_GOOD
-    assert authority.refusal_code is None
+    assert authority.presentable is True
+    assert authority.bindable is False
+    assert authority.refusal_code == "source_failed"
 
 
 def test_reset_credibility_uses_the_injected_clock_without_blocking_present_capacity() -> None:
+    """A reset we cannot believe blocks binding, never the present number.
+
+    `reset_credible` was computed and then never consulted by `bindable`, so a
+    window with no reset at all -- and one whose boundary had already passed
+    -- bound exactly like a live one. Both are refused now, and both are still
+    shown: the value is observed, only the boundary is missing.
+    """
     future = _lane(reset_epoch=1_100.0)
     unknown = replace(
         _lane(window="unknown-reset"),
         reset=ResetFact(ResetState.UNKNOWN, None, 300.0, NOW),
     )
 
-    assert evaluate_lane_authority(
+    credible = evaluate_lane_authority(
         future, _context(), 1_050.0, allow_unbound_legacy=True
-    ).reset_credible is True
+    )
+    assert credible.reset_credible is True
+    assert credible.bindable is True
+
     expired = evaluate_lane_authority(future, _context(), 1_100.0, allow_unbound_legacy=True)
     assert expired.reset_credible is False
-    assert expired.bindable is True
-    assert evaluate_lane_authority(
+    assert expired.bindable is False
+    assert expired.refusal_code == "reset_not_credible"
+    assert expired.presentable is True
+
+    reset_less = evaluate_lane_authority(
         unknown, _context(), NOW, allow_unbound_legacy=True
-    ).bindable is True
+    )
+    assert reset_less.bindable is False
+    assert reset_less.refusal_code == "reset_not_credible"
+    assert reset_less.presentable is True
+
+
+def test_a_dead_source_never_binds_even_with_a_perfectly_credible_reset() -> None:
+    """Isolate staleness: nothing else about this lane is refusable.
+
+    The value is observed, the reset is in the future, the account binding is
+    waived. The ONLY thing wrong is that the source answered FAILED and is
+    speaking from a retained reading -- and that alone has to be enough.
+    """
+    lane = _lane(remaining=12.0, reset_epoch=2_000.0, health_kind=SourceHealthKind.FAILED)
+    lane = replace(
+        lane,
+        source_health=replace(lane.source_health, has_last_known_good=True),
+    )
+
+    authority = evaluate_lane_authority(lane, _context(), NOW, allow_unbound_legacy=True)
+
+    assert authority.reset_credible is True
+    assert authority.presentable is True
+    assert authority.bindable is False
+    assert authority.refusal_code == "source_failed"
+
+
+def test_two_registered_sources_do_not_authorise_their_cross_product() -> None:
+    """Registering a second source must not widen what the first speaks for.
+
+    `provider_ids` and `source_instances` were two independent membership
+    tests, so a context built from codex/local plus claude/remote:primary also
+    accepted codex/remote:primary and claude/local -- pairs no build has ever
+    registered, arriving with full APPLICABLE authority.
+    """
+    context = _context(
+        providers=("codex", "claude"),
+        instances=("local:primary", "remote:primary"),
+        model=None,
+        scopes=(("codex", "local:primary"), ("claude", "remote:primary")),
+    )
+    registered = (
+        _lane(provider_id="codex", source_instance_id="local:primary"),
+        _lane(provider_id="claude", source_instance_id="remote:primary"),
+    )
+    # The two pairs the cross product invented.
+    crossed = (
+        _lane(provider_id="codex", source_instance_id="remote:primary"),
+        _lane(provider_id="claude", source_instance_id="local:primary"),
+    )
+
+    for lane in registered:
+        assert classify_applicability(lane, context) is LaneApplicability.APPLICABLE
+    for lane in crossed:
+        authority = evaluate_lane_authority(lane, context, NOW, allow_unbound_legacy=True)
+        assert authority.applicability is LaneApplicability.INAPPLICABLE
+        assert authority.refusal_code == "source_out_of_context"
+        assert authority.presentable is False
+
+
+def test_a_context_naming_several_providers_and_instances_must_say_which_pairs() -> None:
+    """The flat form cannot express two sources, so it must not pretend to."""
+    with pytest.raises(CapacityValidationError, match="ambiguous execution context"):
+        ExecutionContext(
+            ("codex", "claude"),
+            ("local:primary", "remote:primary"),
+            None,
+            None,
+        )
+
+    # One dimension with a single member is not a cross product, so the pairs
+    # are derived rather than demanded -- every single-source caller is
+    # unaffected.
+    assert ExecutionContext(("codex",), ("local:primary",), None, None).source_scopes == (
+        ("codex", "local:primary"),
+    )
+    # And a declared pair has to be one the context actually names.
+    with pytest.raises(CapacityValidationError, match="invalid execution context"):
+        ExecutionContext(
+            ("codex",),
+            ("local:primary",),
+            None,
+            None,
+            (("claude", "local:primary"),),
+        )
 
 
 def test_source_health_projection_is_stably_ordered() -> None:
