@@ -159,6 +159,23 @@ OPENCODE_PLUGIN_MARKER = "sidepulse-opencode-plugin-v1"
 _OPENCODE_PLUGIN_MAX_SOURCE_BYTES = 32 * 1024
 
 
+def _is_sidepulse_hook_invocation(parts) -> bool:
+    """Ours, in any of the three shapes we have ever registered.
+
+    Legacy installs name hook_entry.py directly; today's invoke the
+    module so the entry resolves wherever the package lives; frozen
+    builds call the bundled agent-monitor subcommand. A recognizer that
+    knew only the first shape would report "hooks not installed" for a
+    perfectly working install and re-register duplicates over it.
+    """
+    parts = list(parts)
+    if any(Path(part).name == "hook_entry.py" for part in parts):
+        return True
+    if "sidepulse.hook_entry" in parts and "-m" in parts:
+        return True
+    return "agent-monitor" in parts and "hook-log" in parts
+
+
 def _valid_opencode_hook_arguments(
     arguments: object,
 ) -> tuple[str, ...] | None:
@@ -186,6 +203,16 @@ def _valid_opencode_hook_arguments(
         and arguments[1] == package_hook_entry
         and arguments[2:5] == ["--provider", "opencode", "--log"]
     )
+    # Today's registrations invoke the module, so the entry resolves
+    # wherever the package actually lives. Both forms are ours.
+    module_shape = (
+        len(arguments) == 7
+        and Path(arguments[0]).is_absolute()
+        and executable_trusted
+        and arguments[1] == "-m"
+        and arguments[2] == "sidepulse.hook_entry"
+        and arguments[3:6] == ["--provider", "opencode", "--log"]
+    )
     frozen_shape = (
         len(arguments) == 7
         and Path(arguments[0]).is_absolute()
@@ -193,7 +220,7 @@ def _valid_opencode_hook_arguments(
         and arguments[1:3] == ["agent-monitor", "hook-log"]
         and arguments[3:6] == ["--provider", "opencode", "--log"]
     )
-    if not (python_shape or frozen_shape):
+    if not (python_shape or module_shape or frozen_shape):
         return None
     if len(arguments[-1]) > 4096 or "\x00" in arguments[-1]:
         return None
@@ -614,9 +641,7 @@ def is_sidepulse_hook_command(command: str, provider: str) -> bool:
     )
     if not has_provider:
         return False
-    return any(Path(part).name == "hook_entry.py" for part in parts) or (
-        "agent-monitor" in parts and "hook-log" in parts
-    )
+    return _is_sidepulse_hook_invocation(parts)
 
 
 def default_cursor_config_path(home: Path | None = None) -> Path:
@@ -1248,9 +1273,7 @@ def is_sidepulse_devin_command(command: str) -> bool:
     if not has_devin_provider:
         return False
 
-    return any(Path(part).name == "hook_entry.py" for part in parts) or (
-        "agent-monitor" in parts and "hook-log" in parts
-    )
+    return _is_sidepulse_hook_invocation(parts)
 
 
 def extract_log_paths_from_command(command: str) -> list[Path]:

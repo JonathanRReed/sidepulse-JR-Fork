@@ -3325,8 +3325,9 @@ class StatusBarController(NSObject):
         self.virtual_status_device.set_pointer_interaction_relevant(False)
         snapshot = getattr(self, "last_snapshot", None)
         if snapshot is not None and getattr(snapshot, "operator_state", None) is not None:
+            # build_menu projects this same state moments later; running
+            # it here too was pure duplicate work on the click path.
             self.current_operator_state = snapshot.operator_state
-            _canonical_agent_browser_projection(snapshot, self)
         # Opening the menu is a "visit": it clears the unseen-done badge
         # (mirrors T3's lastVisitedAt read/unread model).
         self.menu_last_opened_at = datetime.now(timezone.utc)
@@ -12996,6 +12997,17 @@ def _canonical_agent_browser_projection(
     if state is None:
         return None
     target.current_operator_state = state
+    # Opening the dropdown ran this entire pipeline -- canonical mailbox
+    # projection + preference application + agent-browser document build,
+    # over the WHOLE operator state -- three to four times per click, and
+    # the extra passes only overwrote each other's results. Memoize per
+    # (state, query): the state object is held strongly so its identity
+    # cannot be recycled underneath the cache, and every call still has
+    # its side effects applied by the pass that actually computed.
+    memo_key = (text, shelf, family_key, selected_work_key)
+    memo = getattr(target, "_mailbox_projection_memo", None)
+    if memo is not None and memo[0] is state and memo[1] == memo_key:
+        return memo[2]
     previous_order = {
         key: order
         for key, order in getattr(target, "mailbox_retained_order", {}).items()
@@ -13023,12 +13035,14 @@ def _canonical_agent_browser_projection(
         preferences,
         getattr(target, "local_triage_state", LocalTriageState(())),
     )
-    return project_agent_browser(
+    projected = project_agent_browser(
         documents,
         AgentBrowserQuery(text, shelf=shelf, family_key=family_key),
         generation=state.generation,
         selected_work_key=selected_work_key or family_key,
     )
+    target._mailbox_projection_memo = (state, memo_key, projected)
+    return projected
 
 
 def _request_for_work(state, work_key):

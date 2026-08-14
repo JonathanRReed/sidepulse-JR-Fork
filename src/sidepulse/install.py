@@ -1651,14 +1651,58 @@ def hook_command_arguments(
             "--log",
             target_log,
         ]
+    # Module invocation, NOT a baked absolute path into site-packages.
+    # The path form assumed a copied install: the moment the package was
+    # installed editable, moved, or symlinked, that exact file stopped
+    # existing while `import sidepulse` kept working -- so the app looked
+    # healthy while EVERY registered hook died at the next prompt, and a
+    # blocking hook takes every agent down with it. `-m` resolves the
+    # package however it is laid out, so config and install cannot
+    # disagree. verify_hook_command() below proves it before we write it.
     return [
         executable,
-        str(Path(__file__).with_name("hook_entry.py")),
+        "-m",
+        "sidepulse.hook_entry",
         "--provider",
         provider,
         "--log",
         target_log,
     ]
+
+
+def verify_hook_command(arguments: list[str]) -> str | None:
+    """Run a candidate hook command once and return an error, or None.
+
+    Registration used to write a path nobody had ever executed. This is
+    the missing gate: a hook is only worth writing into a user's agent
+    config if it actually runs, because the failure mode is not a
+    degraded feature -- it is every prompt in every session blocked.
+    """
+    import subprocess
+
+    if not arguments:
+        return "empty hook command"
+    probe = json.dumps(
+        {"hook_event_name": "SessionStart", "session_id": "sidepulse-install-probe"}
+    )
+    try:
+        result = subprocess.run(
+            arguments,
+            input=probe,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except FileNotFoundError:
+        return f"interpreter not found: {arguments[0]}"
+    except subprocess.TimeoutExpired:
+        return "hook command timed out"
+    except OSError as exc:
+        return f"hook command could not run: {exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        return f"hook command exited {result.returncode}: {detail[-1] if detail else 'no output'}"
+    return None
 
 
 def opencode_plugin_source(
@@ -2109,7 +2153,9 @@ def resolve_codex_hook_hashes(
         key = hook.get("key")
         if hook.get("sourcePath") != source_path:
             continue
-        if not isinstance(command, str) or "hook_entry.py" not in command:
+        if not isinstance(command, str) or not (
+            "hook_entry.py" in command or "sidepulse.hook_entry" in command
+        ):
             continue
         if not isinstance(current_hash, str) or not isinstance(key, str):
             continue
@@ -2206,7 +2252,12 @@ def remove_codex_hook_blocks_for_log(text: str, log_path: Path) -> str:
                     break
                 end += 1
             block = "".join(lines[index:end])
-            if target in block or "sidepulse hook-log" in block or "hook_entry.py" in block:
+            if (
+                target in block
+                or "sidepulse hook-log" in block
+                or "hook_entry.py" in block
+                or "sidepulse.hook_entry" in block
+            ):
                 index = end
                 continue
 
@@ -2275,7 +2326,9 @@ def is_sidepulse_json_hook_command(
     if _command_option(arguments, "--log") != str(log_path.expanduser()):
         return False
 
-    source_entrypoint = any(Path(argument).name == "hook_entry.py" for argument in arguments)
+    source_entrypoint = any(
+        Path(argument).name == "hook_entry.py" for argument in arguments
+    ) or ("-m" in arguments and "sidepulse.hook_entry" in arguments)
     packaged_entrypoint = (
         any(Path(argument).name == "agent-monitor" for argument in arguments)
         and "hook-log" in arguments

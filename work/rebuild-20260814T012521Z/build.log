@@ -1,0 +1,20 @@
+Requirement already satisfied: pip in ./work/rebuild-20260814T012521Z/build/venv/lib/python3.9/site-packages (21.2.4)
+Collecting pip
+  Downloading pip-26.0.1-py3-none-any.whl (1.8 MB)
+Installing collected packages: pip
+  Attempting uninstall: pip
+    Found existing installation: pip 21.2.4
+    Uninstalling pip-21.2.4:
+      Successfully uninstalled pip-21.2.4
+Successfully installed pip-26.0.1
+Processing ./.
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting pyinstaller>=6.10
+  Downloading pyinstaller-6.22.0-py3-none-macosx_10_13_universal2.whl.metadata (8.5 kB)
+INFO: pip is looking at multiple versions of sidepulse to determine which version is compatible with other requirements. This could take a while.
+ERROR: Package 'sidepulse' requires a different Python: 3.9.6 not in '>=3.10'
