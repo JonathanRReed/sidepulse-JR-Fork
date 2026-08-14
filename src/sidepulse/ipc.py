@@ -26,20 +26,52 @@ MAX_EVENT_BYTES = MAX_HINT_BYTES
 # socket and bounds the damage; the circuit breaker below bounds it
 # further. Measured baseline: median hook ~48ms total.
 HOOK_EVENT_SEND_TIMEOUT_SECONDS = 0.03
-# Events that mean "this work ENDED". These are the whole product -- a
-# missed completion is the one failure we cannot ship -- so they are
-# never suppressed by the breaker, only ever rate-limited by it.
-TERMINAL_HOOK_EVENTS = frozenset(
+# Events that mark a TURN BOUNDARY, in either direction. These are the whole
+# product -- a missed completion is the one failure we cannot ship -- so they
+# are never suppressed by the breaker, only ever rate-limited by it.
+#
+# "In either direction" is load-bearing and was the bug. The set used to hold
+# only the events that END a turn; the event that STARTS one, the prompt
+# submission, was breaker-suppressible like any heartbeat. So a tripped breaker
+# left the app still learning that agents stopped and no longer learning that
+# they started, and the ledger drifted one way only -- exactly the "not keeping
+# up with what agents are actually active" the owner reported. A breaker that
+# biases the ledger is worse than one that drops both halves.
+#
+# Repeated within-turn events (PreToolUse, PostToolUse, compaction) stay
+# suppressible: they are heartbeats, many per turn, and dropping some of them
+# costs freshness rather than truth. That is what the breaker is for.
+_TURN_START_HOOK_EVENTS = frozenset(
+    {
+        "UserPromptSubmit",
+        # Native spellings of the same boundary at other gateways. Cursor's
+        # hooks are camelCase and Antigravity's envelope predates the canonical
+        # name; the raw `hook_event_name` is what reaches this check.
+        "beforeSubmitPrompt",
+        "PreInvocation",
+        "SessionStart",
+        "sessionStart",
+    }
+)
+_TURN_END_HOOK_EVENTS = frozenset(
     {
         "Stop",
         "StopFailure",
         "SubagentStop",
         "SessionEnd",
-        "SessionStart",
         "Notification",
         "PermissionRequest",
+        "stop",
+        "stop:error",
+        "stop:aborted",
+        "subagentStop",
+        "sessionEnd",
     }
 )
+LIFECYCLE_HOOK_EVENTS = _TURN_START_HOOK_EVENTS | _TURN_END_HOOK_EVENTS
+# Retained name: the exemption is no longer terminal-only, and callers that
+# import it should see the wider set rather than the old half.
+TERMINAL_HOOK_EVENTS = LIFECYCLE_HOOK_EVENTS
 # Consecutive failures before we stop trying non-terminal sends, and how
 # long that suppression lasts before we probe again.
 HOOK_BREAKER_TRIP_AFTER = 3
@@ -436,22 +468,38 @@ class _HookSendBreaker:
         self._path = path
         self.suppressed_sends = 0
 
-    def sentinel_path(self) -> Path:
+    def sentinel_path(self, socket_path: Path | None = None) -> Path:
+        """Where the breaker for one socket lives.
+
+        The breaker's whole claim is "nobody is listening on THIS socket", so
+        the sentinel belongs beside that socket. An explicitly addressed send
+        -- another state directory, or a test's temporary one -- gets its own
+        sentinel instead of consulting and rewriting the live one, which is
+        both the correct scope and the reason a tripped breaker on the running
+        machine could fail an unrelated test.
+        """
         if self._path is not None:
             return self._path
+        if socket_path is not None:
+            return Path(socket_path).expanduser().parent / "hook-send-breaker.json"
         return default_state_dir() / "hook-send-breaker.json"
 
-    def _read(self) -> tuple[int, float]:
+    def _read(self, socket_path: Path | None = None) -> tuple[int, float]:
         try:
-            data = json.loads(self.sentinel_path().read_text())
+            data = json.loads(self.sentinel_path(socket_path).read_text())
             return int(data.get("failures", 0)), float(data.get("since", 0.0))
         except (OSError, ValueError, TypeError):
             return 0, 0.0
 
-    def should_attempt(self, event_name: str | None, now: float) -> bool:
-        if event_name in TERMINAL_HOOK_EVENTS:
+    def should_attempt(
+        self,
+        event_name: str | None,
+        now: float,
+        socket_path: Path | None = None,
+    ) -> bool:
+        if event_name in LIFECYCLE_HOOK_EVENTS:
             return True
-        failures, since = self._read()
+        failures, since = self._read(socket_path)
         if failures >= HOOK_BREAKER_TRIP_AFTER and (
             time.time() - since < HOOK_BREAKER_COOLDOWN_SECONDS
         ):
@@ -459,15 +507,21 @@ class _HookSendBreaker:
             return False
         return True
 
-    def record(self, *, delivered: bool, now: float) -> None:
-        path = self.sentinel_path()
+    def record(
+        self,
+        *,
+        delivered: bool,
+        now: float,
+        socket_path: Path | None = None,
+    ) -> None:
+        path = self.sentinel_path(socket_path)
         if delivered:
             try:
                 path.unlink()
             except OSError:
                 pass
             return
-        failures, since = self._read()
+        failures, since = self._read(socket_path)
         wall = time.time()
         if failures == 0 or wall - since >= HOOK_BREAKER_COOLDOWN_SECONDS:
             failures, since = 0, wall

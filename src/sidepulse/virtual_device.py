@@ -27,6 +27,7 @@ from Foundation import NSObject, NSRunLoop, NSRunLoopCommonModes
 from Quartz import CGContextFillRect, CGContextSetRGBFillColor
 
 from .accessibility_display import AccessibilityDisplayPreferences
+from .draw_guard import guard_draw
 from .alcove_observation import (
     AlcoveCaptureRequest,
     AlcoveObservationBuffer,
@@ -1240,6 +1241,7 @@ class VirtualLedView(NSView):
             self.state, time.monotonic() - self.started_at, self.brightness
         )
 
+    @guard_draw
     def drawRect_(self, _rect):
         if self.wings_only_mode:
             self._draw_wings_only()
@@ -2850,6 +2852,23 @@ class VirtualStatusDevice(NSObject):
         )
         if frame_changed:
             self.window.setFrame_display_(window_frame, True)
+        # Read back what AppKit actually granted, and size the view from THAT.
+        #
+        # setFrame_display_ is a request, not an assignment: AppKit clamps to
+        # screen bounds, rounds to the backing scale, and applies its own
+        # constraints to a non-activating panel. A display reconfiguration or
+        # Space change landing between compute and apply can move it too. If
+        # the view is sized from the frame we asked for while the window is at
+        # the frame we got, everything inside draws at coordinates the window
+        # is not at -- content offset, clipped at the edge, or both.
+        #
+        # Costs one property read per reposition and removes a whole class of
+        # "it looks fine on my single display" bug.
+        granted = self.window.frame()
+        window_frame = (
+            (granted.origin.x, granted.origin.y),
+            (granted.size.width, granted.size.height),
+        )
         self.window.setLevel_(
             alcove_window_level() if alcove_active else STATUS_WINDOW_LEVEL
         )

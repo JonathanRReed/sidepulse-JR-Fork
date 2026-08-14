@@ -85,6 +85,11 @@ if [ -n "$APP_SIGN_IDENTITY" ]; then
         --entitlements "$ROOT_DIR/packaging/entitlements.plist" \
         --sign "$APP_SIGN_IDENTITY" "$APP_PATH"
 else
+    echo "WARNING: no APP_SIGN_IDENTITY -- signing AD HOC." >&2
+    echo "         An ad-hoc bundle has a different code identity, so macOS" >&2
+    echo "         treats it as a DIFFERENT APP: Full Disk Access, Screen" >&2
+    echo "         Recording and Notification grants will be lost, and" >&2
+    echo "         Gatekeeper will reject it. Local testing only." >&2
     /usr/bin/codesign --force --deep --sign - "$APP_PATH"
 fi
 
@@ -92,6 +97,26 @@ fi
 # command is not evidence that every nested item or bundle attribute is valid.
 /usr/bin/xattr -cr "$APP_PATH"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+# Assert the signature we actually got is the one we asked for.
+#
+# codesign exiting 0 proves a signature exists, not that it is the right one.
+# PyInstaller ad-hoc signs the bundle itself (-s -) before this script re-signs
+# it, so a re-sign that silently no-ops leaves a VALID ad-hoc bundle that
+# verifies cleanly here and then loses every TCC grant on the user's machine.
+# A peer project shipped exactly that: a release script defaulting its identity
+# to "-", exiting 0, with the notarize step also exiting 0.
+if [ -n "$APP_SIGN_IDENTITY" ]; then
+    SIGNED_TEAM="$(/usr/bin/codesign -dv --verbose=4 "$APP_PATH" 2>&1 \
+        | /usr/bin/awk -F= '/^TeamIdentifier=/ {print $2}')"
+    if [ -z "$SIGNED_TEAM" ] || [ "$SIGNED_TEAM" = "not set" ]; then
+        echo "FATAL: asked for '$APP_SIGN_IDENTITY' but the bundle carries no" >&2
+        echo "       TeamIdentifier -- it is ad-hoc signed. Refusing to ship a" >&2
+        echo "       bundle that would silently lose the user's TCC grants." >&2
+        exit 1
+    fi
+    echo "signed by team $SIGNED_TEAM"
+fi
 
 "$VENV_DIR/bin/python" "$ROOT_DIR/packaging/verify_macos_app.py" "$APP_PATH"
 

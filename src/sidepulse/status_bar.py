@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
@@ -39,6 +40,8 @@ try:
         NSForegroundColorAttributeName,
         NSImage,
         NSLayoutConstraint,
+        NSLineBreakByTruncatingTail,
+        NSLineBreakByWordWrapping,
         NSMaxYEdge,
         NSMenu,
         NSMenuItem,
@@ -65,6 +68,7 @@ try:
     )
     from Foundation import (
         NSURL,
+        NSAttributedString,
         NSIndexSet,
         NSMutableAttributedString,
         NSObject,
@@ -86,11 +90,19 @@ from . import (
     focus_sync,
     native_ui,
     reminders_watch,
+    usage_card,
     usage_stats,
     weather_watch,
 )
+
+# `NSStringDrawingUsesLineFragmentOrigin`. PyObjC exposes the enum under
+# several spellings across framework versions; the value is stable and the
+# card's whole height depends on measuring with it, so it is named once here
+# rather than imported and silently missing.
+_NS_STRING_DRAWING_USES_LINE_FRAGMENT_ORIGIN = 1 << 0
 from . import colors as colors_module
 from . import signals as signals_module
+from .draw_guard import guard_draw
 from .accessibility_display import (
     AccessibilityDisplayPreferences,
     refresh_accessibility_display_preferences,
@@ -1942,9 +1954,11 @@ class StatusBarController(NSObject):
         self._usage_menu_item = None
         self._usage_menu_view = None
         self._usage_menu_header = None
+        self._usage_menu_fields = {}
         self._usage_menu_labels = {}
         self._usage_menu_secondary_labels = {}
         self._usage_menu_window_labels = {}
+        self._usage_menu_layout = None
         self._capacity_reset_timer = None
         self._capacity_reset_plan = ResetBoundaryPlan(None, (), ())
         self._capacity_reset_retry_deadline: float | None = None
@@ -2431,32 +2445,27 @@ class StatusBarController(NSObject):
     def screen_bar_channel_gains(self, virtual_device) -> tuple[float, float, float]:
         """The gains the Screen Bar should render with.
 
-        Channel gain corrects one physical strip's own LED die response, and
-        was applied ONLY to what gets written to hardware -- the Screen Bar
-        kept the nominal colour. The intent was that the corrected strip
-        *emits* the nominal colour, so both surfaces would look the same.
+        Its OWN gains, always. Never the strip's.
 
-        On the owner's device the correction is green x0.38, which drives
-        white as #FF61FF, yellow as #FF6100 and cyan as #0061FF. Whatever
-        the strip emits, the two surfaces visibly disagreed -- reported as
-        "the colours flashing on the hardware are not the same as the
-        colours on the screen".
+        This borrowed the hardware's gains for a while, and that was right
+        for exactly as long as the two surfaces disagreed about what an 8-bit
+        code meant. Back then the strip was driven with green x0.38 while the
+        notch drew the nominal colour, so previewing the strip's drive bytes
+        was the only way to make them agree.
 
-        Linked (the default), the Screen Bar now borrows the hardware's
-        gains, so it previews what the strip is actually driven with. That is
-        what "one light language, two places" has to mean for colour as well
-        as animation. Unlinked, it keeps its own calibration.
+        That is no longer true. The surfaces now share one statement of what
+        a palette hex means, and each translates it at the last step:
+        AgentLedController decodes to the strip's linear PWM (carrying the
+        channel gain with it), and the Screen Bar draws the nominal sRGB it
+        already was. Both emit the same light.
+
+        Borrowing on top of that applies the calibration TWICE -- once in
+        apply_strip_transfer_to_program on the way to the strip, and again
+        here on the way to the notch, which is a surface that has no green
+        die to compensate for. The result is a notch tinted magenta against a
+        correctly-white strip: the original complaint, mirrored.
         """
-        own = virtual_device.channel_gains()
-        if not self.settings.link_screen_bar_to_hardware:
-            return own
-        for device in self.settings.devices:
-            if device.device_id == VIRTUAL_DEVICE_ID:
-                continue
-            gains = device.channel_gains()
-            if gains != NEUTRAL_CHANNEL_GAINS:
-                return gains
-        return own
+        return virtual_device.channel_gains()
 
     def screen_bar_blend_override(self) -> str | None:
         """Which animation the Screen Bar should render with.
@@ -3635,13 +3644,10 @@ class StatusBarController(NSObject):
             if totals.codex_sessions:
                 count = len(totals.codex_sessions)
                 session_word = "session" if count == 1 else "sessions"
-                prefix = (
-                    "Codex today"
-                    if period_label == "Today"
-                    else f"Codex, {period_label.lower()}"
-                )
+                # No provider name: every view that renders this already owns
+                # a provider title. See `usage_summary_line`.
                 summary = (
-                    f"{prefix}: {count} {session_word} \u00b7 "
+                    f"{period_label}: {count} {session_word} \u00b7 "
                     f"{usage_stats.compact_token_count(totals.codex_tokens)} "
                     "processed tokens"
                 )
@@ -4237,33 +4243,12 @@ class StatusBarController(NSObject):
         monotonic_now: float | None = None,
         epoch_now: float | None = None,
     ) -> None:
-        labels = getattr(self, "_usage_menu_labels", {}) or {}
-        secondary_labels = (
-            getattr(self, "_usage_menu_secondary_labels", {}) or {}
-        )
         now = time.monotonic() if monotonic_now is None else float(monotonic_now)
         reset_now = time.time() if epoch_now is None else float(epoch_now)
-        for provider_id in USAGE_MENU_PROVIDERS:
-            label = labels.get(provider_id)
-            secondary_label = secondary_labels.get(provider_id)
-            if label is None and secondary_label is None:
-                continue
-            model = usage_menu_model(
-                self,
-                provider_id,
-                now=now,
-                reset_now=reset_now,
-            )
-            primary, secondary = capacity_menu_lines(
-                model,
-                monotonic_now=now,
-                epoch_now=reset_now,
-            )
-            if label is not None:
-                label.setStringValue_(primary)
-            if secondary_label is not None:
-                secondary_label.setStringValue_(secondary)
-        _apply_usage_menu_window_rows(self, now=now, reset_now=reset_now)
+        # Setting new text on frames that were measured for the old text is the
+        # whole defect in miniature, so the refresh re-measures and re-applies
+        # the geometry rather than only the strings.
+        refresh_usage_menu_card(self, now=now, reset_now=reset_now)
 
     def trim_oversized_state_logs(self) -> int:
         """Bound every state log at launch, not just the ones being written.
@@ -14769,6 +14754,11 @@ def _capacity_age_text(model: ProviderUsageViewModel, *, monotonic_now: float) -
 _GENERIC_WINDOW_LABELS = frozenset(
     {"", "primary", "secondary", "five_hour", "seven_day", "limit"}
 )
+# What a capacity rung says when it has no capacity fact. It is one string
+# because there is one rule behind it: a ceiling with no attested balance and a
+# provider with no ceiling at all are both "we do not know", and neither is
+# allowed to borrow a number from a different rung to look like it does.
+NO_CAPACITY_READING_TEXT = "no reading"
 
 
 def _capacity_window_line(window, *, epoch_now: float) -> str:
@@ -14781,8 +14771,10 @@ def _capacity_window_line(window, *, epoch_now: float) -> str:
     """
     label = window.label.strip()
     head = window.duration_text if label.lower() in _GENERIC_WINDOW_LABELS else label
+    text = f"{head} {NO_CAPACITY_READING_TEXT}"
     remaining = window.percent_remaining
-    text = f"{head} {remaining:.0f}% left" if remaining is not None else head
+    if remaining is not None:
+        text = f"{head} {remaining:.0f}% left"
     reset = window.reset_text(epoch_now)
     return f"{text} · resets {reset}" if reset else text
 
@@ -14812,17 +14804,37 @@ def capacity_menu_lines(
     monotonic_now: float,
     epoch_now: float,
 ) -> tuple[str, str]:
-    """Return concise primary capacity and secondary reset/freshness copy."""
+    """Return concise primary capacity and secondary reset/freshness copy.
+
+    The Capacity rung carries plan ceilings and nothing else. It used to fall
+    back to `model.menu_line` when a provider reported no window, and
+    `menu_line` falls back in turn to the local transcript aggregate -- so a
+    Claude account with no OAuth token, and therefore no ceiling at all, showed
+    "Claude · Claude, last 365 days: 2508 sessions" in the slot reserved for a
+    plan limit. A session count is a different fact of a different kind from a
+    different source; it belongs on the activity rung, and the doubled title
+    was the seam between the two owners showing. A provider with no reading
+    says it has no reading.
+
+    For the same reason the local scan's `partial` flag and its
+    `Local transcripts · N files` provenance are gone from here: they describe
+    the transcript scan's coverage, not the quota source's, and a disclaimer
+    that belongs to a different fact cannot qualify this one.
+    """
     if model.missing:
         return model.menu_line, ""
 
     primary_window = model.windows[0] if model.windows else None
     if primary_window is None:
-        primary = model.menu_line
+        primary = f"{model.provider_title} · {NO_CAPACITY_READING_TEXT}"
     else:
         semantic = primary_window.duration_text
         remaining = primary_window.percent_remaining
-        amount = f" {remaining:.0f}% left" if remaining is not None else ""
+        amount = (
+            f" {remaining:.0f}% left"
+            if remaining is not None
+            else f" {NO_CAPACITY_READING_TEXT}"
+        )
         primary = f"{model.provider_title} · {semantic}{amount}"
 
     secondary_parts: list[str] = []
@@ -14835,10 +14847,6 @@ def capacity_menu_lines(
         secondary_parts.append(age)
     if model.refreshing:
         secondary_parts.append("refreshing")
-    if model.partial:
-        secondary_parts.append("partial")
-    if model.source_text:
-        secondary_parts.append(model.source_text)
     if model.stale:
         secondary_parts.append("stale")
     if model.error_text:
@@ -14846,66 +14854,84 @@ def capacity_menu_lines(
     return primary, " · ".join(secondary_parts)
 
 
-def _configure_usage_menu_label(
-    field,
-    *,
-    size: float,
-    secondary: bool,
-    bold: bool | None = None,
-) -> None:
+def _usage_menu_font(style: usage_card.CardRowStyle):
+    return (
+        NSFont.boldSystemFontOfSize_(style.font_size)
+        if style.bold
+        else NSFont.systemFontOfSize_(style.font_size)
+    )
+
+
+def usage_card_text_metrics(
+    text: str,
+    style: usage_card.CardRowStyle,
+    width: float,
+) -> usage_card.TextMetrics:
+    """Measure one card row the way AppKit will actually draw it.
+
+    This is the only measurement in the card. The layout sizes each row from
+    what this returns and the renderer applies those rectangles verbatim, so
+    there is no second opinion left to disagree with the first -- which is
+    exactly how the claimed height and the drawn height drifted apart before.
+    """
+    font = _usage_menu_font(style)
+    attributes = {NSFontAttributeName: font}
+    string = NSAttributedString.alloc().initWithString_attributes_(
+        str(text) or " ",
+        attributes,
+    )
+    natural = string.size()
+    wrapped = string.boundingRectWithSize_options_(
+        (max(1.0, float(width)), 0.0),
+        _NS_STRING_DRAWING_USES_LINE_FRAGMENT_ORIGIN,
+    ).size
+    line_height = float(natural.height) or (float(style.font_size) + 3.0)
+    return usage_card.TextMetrics(
+        natural_width=float(natural.width),
+        wrapped_height=max(float(wrapped.height), line_height),
+        line_height=line_height,
+    )
+
+
+def _configure_usage_menu_label(field, style: usage_card.CardRowStyle) -> None:
+    """Make the label draw the way the layout measured it.
+
+    An NSTextField wraps by default and has no line bound, so a string wider
+    than its frame silently spilled lines past the bottom edge and AppKit
+    clipped them -- the sliver of a clipped line is what "rows overlap" looked
+    like. Bounding the line count and truncating the tail means a row that
+    outgrows even its measured box says so with an ellipsis instead.
+    """
     field.setBezeled_(False)
     field.setDrawsBackground_(False)
     field.setEditable_(False)
     field.setSelectable_(False)
-    emphasise = (not secondary) if bold is None else bold
-    field.setFont_(
-        NSFont.boldSystemFontOfSize_(size)
-        if emphasise
-        else NSFont.systemFontOfSize_(size)
+    field.setFont_(_usage_menu_font(style))
+    single = style.max_lines <= 1
+    # Word wrapping plus a line bound plus "truncate the last visible line" is
+    # the combination that wraps to exactly the number of lines the layout
+    # measured and then ellipsises, rather than clipping. Setting the break
+    # mode to truncating-tail directly would collapse the field to one line and
+    # throw away the rest, which is a different lie.
+    mode = NSLineBreakByTruncatingTail if single else NSLineBreakByWordWrapping
+    field.setUsesSingleLineMode_(single)
+    field.setMaximumNumberOfLines_(int(style.max_lines))
+    field.setLineBreakMode_(mode)
+    cell = field.cell()
+    if cell is not None:
+        cell.setWraps_(not single)
+        cell.setScrollable_(False)
+        cell.setLineBreakMode_(mode)
+        cell.setTruncatesLastVisibleLine_(True)
+    field.setTextColor_(
+        NSColor.secondaryLabelColor() if style.secondary else NSColor.labelColor()
     )
-    if secondary:
-        field.setTextColor_(NSColor.secondaryLabelColor())
 
 
 USAGE_MENU_PROVIDERS = ("codex", "claude")
-USAGE_MENU_WIDTH = 292
-USAGE_MENU_INSET = 14
-USAGE_MENU_FIELD_WIDTH = 264
-USAGE_MENU_PRIMARY_HEIGHT = 18
-USAGE_MENU_SECONDARY_HEIGHT = 16
-USAGE_MENU_HEADER_HEIGHT = 17
-USAGE_MENU_LINE_GAP = 1
-USAGE_MENU_PROVIDER_GAP = 4
-USAGE_MENU_HEADER_GAP = 5
-USAGE_MENU_TOP_PADDING = 6
-USAGE_MENU_BOTTOM_PADDING = 8
 # One provider can publish several ceilings; the card grows for them, but not
 # without limit -- a menu taller than the screen is worse than a truncated one.
 MAX_USAGE_MENU_WINDOW_ROWS = 6
-
-
-def usage_menu_layout(window_rows) -> tuple[int, int, dict]:
-    """Lay the Capacity card out bottom-up for however many rows it needs.
-
-    The geometry used to be literal, which silently capped every provider at
-    one window. It is derived now so a provider that reports four ceilings
-    gets four rows instead of losing three of them.
-    """
-    y = USAGE_MENU_BOTTOM_PADDING
-    blocks: dict[str, tuple[int, int, tuple[int, ...]]] = {}
-    for provider_id in reversed(USAGE_MENU_PROVIDERS):
-        extras: list[int] = []
-        for _ in range(int(window_rows.get(provider_id, 0))):
-            extras.append(y)
-            y += USAGE_MENU_SECONDARY_HEIGHT + USAGE_MENU_LINE_GAP
-        secondary_y = y
-        y += USAGE_MENU_SECONDARY_HEIGHT + USAGE_MENU_LINE_GAP
-        primary_y = y
-        y += USAGE_MENU_PRIMARY_HEIGHT + USAGE_MENU_PROVIDER_GAP
-        blocks[provider_id] = (primary_y, secondary_y, tuple(reversed(extras)))
-    header_y = y - USAGE_MENU_PROVIDER_GAP + USAGE_MENU_HEADER_GAP
-    height = header_y + USAGE_MENU_HEADER_HEIGHT + USAGE_MENU_TOP_PADDING
-    return height, header_y, blocks
 
 
 def usage_menu_model(target, provider_id: str, *, now: float, reset_now: float):
@@ -14929,24 +14955,55 @@ def usage_menu_model(target, provider_id: str, *, now: float, reset_now: float):
     return model
 
 
-def _usage_menu_window_rows(target, *, now: float, reset_now: float) -> dict:
-    return {
-        provider_id: min(
-            MAX_USAGE_MENU_WINDOW_ROWS,
-            len(
-                capacity_window_lines(
-                    usage_menu_model(
-                        target,
-                        provider_id,
-                        now=now,
-                        reset_now=reset_now,
-                    ),
-                    epoch_now=reset_now,
-                )
-            ),
+def usage_menu_card_rows(target, *, now: float, reset_now: float):
+    """The card's rows, in reading order, with the copy they will draw."""
+    blocks = []
+    for provider_id in USAGE_MENU_PROVIDERS:
+        model = usage_menu_model(target, provider_id, now=now, reset_now=reset_now)
+        primary, secondary = capacity_menu_lines(
+            model,
+            monotonic_now=now,
+            epoch_now=reset_now,
         )
-        for provider_id in USAGE_MENU_PROVIDERS
-    }
+        windows = capacity_window_lines(model, epoch_now=reset_now)
+        if len(windows) > MAX_USAGE_MENU_WINDOW_ROWS:
+            # Never drop a ceiling silently: the surplus folds into the last
+            # row, which the layout then sizes for the lines it really needs.
+            windows = (
+                *windows[: MAX_USAGE_MENU_WINDOW_ROWS - 1],
+                " · ".join(windows[MAX_USAGE_MENU_WINDOW_ROWS - 1 :]),
+            )
+        blocks.append((provider_id, primary, secondary, windows))
+    return usage_card.capacity_card_rows(tuple(blocks))
+
+
+def usage_menu_layout(target, *, now: float, reset_now: float) -> usage_card.CardLayout:
+    """Measure the card that would be drawn for the state `target` holds now."""
+    return usage_card.usage_card_layout(
+        usage_menu_card_rows(target, now=now, reset_now=reset_now),
+        measure=usage_card_text_metrics,
+    )
+
+
+def _apply_usage_card_layout(target, layout: usage_card.CardLayout) -> None:
+    """Push one measured layout onto the view and every label it owns."""
+    view = getattr(target, "_usage_menu_view", None)
+    if view is None:
+        return
+    view.setFrameSize_((layout.width, layout.height))
+    fields = getattr(target, "_usage_menu_fields", {}) or {}
+    for placed in layout.rows:
+        field = fields.get(placed.key)
+        if field is None:
+            continue
+        field.setFrame_(
+            (
+                (placed.rect.x, placed.rect.y),
+                (placed.rect.width, placed.rect.height),
+            )
+        )
+        field.setStringValue_(placed.text)
+    target._usage_menu_layout = layout
 
 
 def build_usage_menu_item(target) -> NSMenuItem:
@@ -14954,98 +15011,69 @@ def build_usage_menu_item(target) -> NSMenuItem:
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("", None, "")
     now = time.monotonic()
     reset_now = time.time()
-    window_rows = _usage_menu_window_rows(target, now=now, reset_now=reset_now)
-    height, header_y, blocks = usage_menu_layout(window_rows)
-    view = NSView.alloc().initWithFrame_(((0, 0), (USAGE_MENU_WIDTH, height)))
-    header = NSTextField.alloc().initWithFrame_(
-        ((USAGE_MENU_INSET, header_y), (USAGE_MENU_FIELD_WIDTH, USAGE_MENU_HEADER_HEIGHT))
-    )
-    _configure_usage_menu_label(header, size=11.0, secondary=False)
-    header.setStringValue_("Capacity")
-    view.addSubview_(header)
+    layout = usage_menu_layout(target, now=now, reset_now=reset_now)
+    view = NSView.alloc().initWithFrame_(((0, 0), (layout.width, layout.height)))
 
-    labels = {}
-    secondary_labels = {}
-    window_labels = {}
-    for provider_id in USAGE_MENU_PROVIDERS:
-        primary_y, secondary_y, extra_ys = blocks[provider_id]
+    fields: dict[str, object] = {}
+    labels: dict[str, object] = {}
+    secondary_labels: dict[str, object] = {}
+    window_labels: dict[str, list] = {
+        provider_id: [] for provider_id in USAGE_MENU_PROVIDERS
+    }
+    header = None
+    for placed in layout.rows:
         field = NSTextField.alloc().initWithFrame_(
-            ((USAGE_MENU_INSET, primary_y), (USAGE_MENU_FIELD_WIDTH, USAGE_MENU_PRIMARY_HEIGHT))
-        )
-        _configure_usage_menu_label(field, size=11.0, secondary=False)
-        secondary_field = NSTextField.alloc().initWithFrame_(
             (
-                (USAGE_MENU_INSET, secondary_y),
-                (USAGE_MENU_FIELD_WIDTH, USAGE_MENU_SECONDARY_HEIGHT),
+                (placed.rect.x, placed.rect.y),
+                (placed.rect.width, placed.rect.height),
             )
         )
-        _configure_usage_menu_label(secondary_field, size=10.0, secondary=True)
-        model = usage_menu_model(target, provider_id, now=now, reset_now=reset_now)
-        primary, secondary = capacity_menu_lines(
-            model,
-            monotonic_now=now,
-            epoch_now=reset_now,
-        )
-        field.setStringValue_(primary)
-        secondary_field.setStringValue_(secondary)
+        _configure_usage_menu_label(field, placed.style)
+        field.setStringValue_(placed.text)
         view.addSubview_(field)
-        view.addSubview_(secondary_field)
-        labels[provider_id] = field
-        secondary_labels[provider_id] = secondary_field
+        fields[placed.key] = field
+        if placed.key == "header":
+            header = field
+            continue
+        provider_id, _, suffix = placed.key.partition(":")
+        if suffix == "primary":
+            labels[provider_id] = field
+        elif suffix == "secondary":
+            secondary_labels[provider_id] = field
+        elif suffix.startswith("window:"):
+            window_labels.setdefault(provider_id, []).append(field)
 
-        # Every remaining window gets its own row. They read as body text, not
-        # as status: a weekly Opus ceiling is a number the owner acts on.
-        rows = []
-        for extra_y in extra_ys:
-            window_field = NSTextField.alloc().initWithFrame_(
-                (
-                    (USAGE_MENU_INSET, extra_y),
-                    (USAGE_MENU_FIELD_WIDTH, USAGE_MENU_SECONDARY_HEIGHT),
-                )
-            )
-            _configure_usage_menu_label(
-                window_field,
-                size=11.0,
-                secondary=False,
-                bold=False,
-            )
-            view.addSubview_(window_field)
-            rows.append(window_field)
-        window_labels[provider_id] = tuple(rows)
     item.setView_(view)
     target._usage_menu_item = item
     target._usage_menu_view = view
     target._usage_menu_header = header
+    target._usage_menu_fields = fields
     target._usage_menu_labels = labels
     target._usage_menu_secondary_labels = secondary_labels
-    target._usage_menu_window_labels = window_labels
-    _apply_usage_menu_window_rows(target, now=now, reset_now=reset_now)
+    target._usage_menu_window_labels = {
+        provider_id: tuple(rows) for provider_id, rows in window_labels.items()
+    }
+    target._usage_menu_layout = layout
     return item
 
 
-def _apply_usage_menu_window_rows(target, *, now: float, reset_now: float) -> None:
-    """Fill the per-window rows, and never silently drop one that overflows."""
-    window_labels = getattr(target, "_usage_menu_window_labels", {}) or {}
-    outgrew = False
-    for provider_id, fields in window_labels.items():
-        model = usage_menu_model(target, provider_id, now=now, reset_now=reset_now)
-        lines = capacity_window_lines(model, epoch_now=reset_now)
-        # Compared against what a rebuild could actually give us, not against
-        # the raw count -- a provider past the row cap would otherwise ask for
-        # a rebuild on every single refresh and never stop.
-        if len(fields) < min(len(lines), MAX_USAGE_MENU_WINDOW_ROWS):
-            outgrew = True
-        if fields and len(lines) > len(fields):
-            # The card cannot gain rows while it is on screen, so the tail is
-            # folded into the last one rather than vanishing.
-            lines = (
-                *lines[: len(fields) - 1],
-                " · ".join(lines[len(fields) - 1 :]),
-            )
-        for index, field in enumerate(fields):
-            field.setStringValue_(lines[index] if index < len(lines) else "")
-    if outgrew:
+def refresh_usage_menu_card(target, *, now: float, reset_now: float) -> None:
+    """Re-measure the card in place, and rebuild it when its shape changed.
+
+    Setting new text on frames measured for the old text is how a card ends up
+    claiming a height its content no longer fits, so the geometry is recomputed
+    on every refresh and applied. A row count that changed cannot be fixed in
+    place -- there is no field to put the new row in -- so that asks the menu
+    for a rebuild instead.
+    """
+    if getattr(target, "_usage_menu_view", None) is None:
+        return
+    layout = usage_menu_layout(target, now=now, reset_now=reset_now)
+    fields = getattr(target, "_usage_menu_fields", {}) or {}
+    if {placed.key for placed in layout.rows} != set(fields):
         target._menu_signature = None
+        return
+    _apply_usage_card_layout(target, layout)
 
 
 def session_row_suffix(
@@ -16786,6 +16814,17 @@ SIDEBAR_ICONS: dict[str, str] = {
 }
 
 
+def _finite_graph_value(value, fallback: float) -> float:
+    """Coerce one plotted number, or fall back. Never raise inside a draw."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return float(fallback)
+    number = float(value)
+    return number if math.isfinite(number) else float(fallback)
+
+
 class UsageGraphView(NSView):
     """One calm shared-axis chart for the selected period and metric."""
 
@@ -16804,7 +16843,14 @@ class UsageGraphView(NSView):
         return self
 
     def setModel_(self, model):
-        self.model = dict(model) if isinstance(model, dict) else {}
+        # Any mapping, not only a `dict`: this model crosses a
+        # `performSelectorOnMainThread:` boundary, and an `NSDictionary` proxy
+        # is not a `dict` subclass. Rejecting one silently drew "No activity in
+        # this range" over a year of real history.
+        try:
+            self.model = dict(model) if isinstance(model, Mapping) else {}
+        except (TypeError, ValueError):
+            self.model = {}
         self.setNeedsDisplay_(True)
 
     def setData_hourly_(self, day_bars, hourly):
@@ -16830,6 +16876,7 @@ class UsageGraphView(NSView):
     def isFlipped(self):
         return False
 
+    @guard_draw
     def drawRect_(self, _rect):
         bounds = self.bounds().size
         width, height = bounds.width, bounds.height
@@ -16845,7 +16892,7 @@ class UsageGraphView(NSView):
         plot_width = max(1.0, width - left - right)
         plot_height = max(1.0, height - bottom - top)
         metric = str(model.get("metric") or "tokens")
-        scale_max = max(1.0, float(model.get("scale_max") or 1.0))
+        scale_max = max(1.0, _finite_graph_value(model.get("scale_max"), 1.0))
         label_attrs = {
             NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
             NSFontAttributeName: NSFont.systemFontOfSize_(9.5),
@@ -16898,7 +16945,7 @@ class UsageGraphView(NSView):
                 x = left + step * index
                 y = bottom + plot_height * min(
                     1.0,
-                    max(0.0, float(raw_value)) / scale_max,
+                    max(0.0, _finite_graph_value(raw_value, 0.0)) / scale_max,
                 )
                 if index == 0:
                     line.moveToPoint_((x, y))

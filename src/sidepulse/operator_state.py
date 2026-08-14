@@ -752,6 +752,32 @@ def _codex_usage_limit_can_close_direct_work(
     )
 
 
+def _timing_lease_expired(
+    entry: _SourceTimingState,
+    clock: ClockSample,
+) -> bool:
+    """True when the reason for this source's quarantine has expired.
+
+    A timing quarantine is a statement about ONE event: the clock jumped, or a
+    fact arrived dated in the future. `uncertain_since_monotonic` is re-stamped
+    to now every time either recurs, so an entry that has carried the same
+    stamp for a full lease is an entry whose cause has demonstrably not
+    recurred for that long on a monotonic clock that never went backwards and
+    never changed boot.
+
+    Without this the quarantine had no upper bound at all: escape required a
+    run of clean batches, and a source that went quiet -- or that interleaves
+    routine partial batches, as hook sources do -- never assembled one. The
+    owner's machine sat with all three hook sources marked timing-uncertain,
+    and therefore with every lifecycle update dropped, for four days across
+    which `kern.boottime` and `time.monotonic()` agree nothing moved.
+    """
+    return (
+        clock.monotonic_seconds - entry.uncertain_since_monotonic
+        >= TIMING_UNCERTAINTY_LEASE_SECONDS
+    )
+
+
 def _recovery_eligible(
     batch: ProviderFactBatch,
     retained: ProviderWatermark | None,
@@ -892,11 +918,33 @@ def _determine_continuity(
             ),
         )
 
-    if _restored(batch):
-        source_timing[batch.source_key] = replace(
-            source_entry,
-            recovery_confirmations=0,
+    if _timing_lease_expired(source_entry, clock):
+        del source_timing[batch.source_key]
+        diagnostics["timing_quarantine_lease_expired"] = 1
+        return _continuity_decision(
+            source_timing,
+            semantic_allowed=True,
+            metadata_allowed=True,
+            clock_quarantine=False,
+            stable_confirmations=(
+                TIMING_RECOVERY_CONFIRMATIONS if not source_timing else 0
+            ),
         )
+
+    # The three branches below all decline to COUNT this batch as a recovery
+    # confirmation, and none of them clears the confirmations already earned.
+    # They used to. That conflated "this batch does not confirm recovery" with
+    # "this batch disproves it" -- and a partial batch is routine: any hook
+    # record without a request identity arrives `SourceFreshness.PARTIAL`, which
+    # `_source_loss` reads as loss. Interleaved with clean ones it reset the
+    # counter faster than the counter could climb, so `recovery_confirmations`
+    # sat at 0 forever. Evidence AGAINST continuity -- a clock jump, a
+    # future-dated fact -- re-stamps the entry at zero above, which is where
+    # that belongs. The bar is still two corroborating direct observations with
+    # no contrary evidence in between; it is no longer two in a row with no
+    # routine partial in between, which is not the same requirement and was
+    # never the intended one.
+    if _restored(batch):
         return _continuity_decision(
             source_timing,
             semantic_allowed=True,
@@ -904,10 +952,6 @@ def _determine_continuity(
             clock_quarantine=False,
         )
     if _source_loss(batch):
-        source_timing[batch.source_key] = replace(
-            source_entry,
-            recovery_confirmations=0,
-        )
         return _continuity_decision(
             source_timing,
             semantic_allowed=False,
@@ -915,10 +959,6 @@ def _determine_continuity(
             clock_quarantine=False,
         )
     if not _recovery_eligible(batch, retained_watermark):
-        source_timing[batch.source_key] = replace(
-            source_entry,
-            recovery_confirmations=0,
-        )
         return _continuity_decision(
             source_timing,
             semantic_allowed=False,

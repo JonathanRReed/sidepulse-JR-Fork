@@ -26,7 +26,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from sidepulse import claude_quota
+from sidepulse import claude_quota, usage_card
 from sidepulse.capacity_authority import select_binding_lanes
 from sidepulse.capacity_refresh import RefreshCause
 from sidepulse.capacity_sources import (
@@ -428,6 +428,22 @@ def _run_claude_refresh(target, status_bar, payload_windows):
     return published[0]
 
 
+def _one_line_measure(text, style, width):
+    """Deterministic stand-in for AppKit: every string fits on one line.
+
+    macOS line heights for the card's two sizes, so the derived geometry is
+    the real one -- the point is to pin the coordinates, not to re-measure the
+    system font.
+    """
+    del text, width
+    line_height = 14.0 if style.font_size >= 11.0 else 13.0
+    return usage_card.TextMetrics(
+        natural_width=10.0,
+        wrapped_height=line_height,
+        line_height=line_height,
+    )
+
+
 def _live_windows():
     reset = time.time() + 3_600.0
     return [
@@ -515,24 +531,47 @@ def test_every_window_reaches_the_dropdown_with_usage_and_reset(controller) -> N
     )
 
 
-def test_the_card_grows_for_extra_windows_without_moving_a_single_row(
-    controller,
-) -> None:
-    """Zero extra windows must lay out exactly as the literal geometry did."""
-    _target, status_bar = controller
+def test_the_card_grows_for_extra_windows_without_moving_a_single_row() -> None:
+    """Zero extra windows must lay out exactly as the literal geometry did.
 
-    height, header_y, blocks = status_bar.usage_menu_layout({"codex": 0, "claude": 0})
-
-    assert (height, header_y) == (110, 87)
-    assert blocks["codex"] == (64, 47, ())
-    assert blocks["claude"] == (25, 8, ())
-
-    taller, taller_header, taller_blocks = status_bar.usage_menu_layout(
-        {"codex": 0, "claude": 3}
+    The geometry is measured from the drawn text now rather than assembled
+    from per-row literals, so this pins the two things that has to preserve:
+    content that fits on one line lands on exactly the coordinates the literal
+    card used, and each extra window still costs exactly one row.
+    """
+    rows = usage_card.capacity_card_rows(
+        (
+            ("codex", "Codex · 5h 62% left", "resets in 2h", ()),
+            ("claude", "Claude · 5h 90% left", "resets in 1d 1h", ()),
+        )
     )
-    assert taller > height and taller_header > header_y
+    layout = usage_card.usage_card_layout(rows, measure=_one_line_measure)
+
+    assert (layout.height, layout.row("header").rect.y) == (110, 87)
+    assert layout.row("codex:primary").rect.y == 64
+    assert layout.row("codex:secondary").rect.y == 47
+    assert layout.row("claude:primary").rect.y == 25
+    assert layout.row("claude:secondary").rect.y == 8
+
+    taller_rows = usage_card.capacity_card_rows(
+        (
+            ("codex", "Codex · 5h 62% left", "resets in 2h", ()),
+            (
+                "claude",
+                "Claude · 5h 90% left",
+                "resets in 1d 1h",
+                ("Weekly 80% left", "Weekly Opus 12% left", "Weekly Sonnet 60% left"),
+            ),
+        )
+    )
+    taller = usage_card.usage_card_layout(taller_rows, measure=_one_line_measure)
+
+    assert taller.height > layout.height
+    assert taller.row("header").rect.y > layout.row("header").rect.y
     # Rows read downward, so the first extra window sits highest.
-    assert taller_blocks["claude"][2] == (42, 25, 8)
+    assert tuple(
+        taller.row(f"claude:window:{index}").rect.y for index in range(3)
+    ) == (42, 25, 8)
 
 
 def test_in_place_updates_never_silently_drop_a_window(controller) -> None:

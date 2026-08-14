@@ -775,6 +775,26 @@ CODEX_LANE_IDENTITIES = {
     "primary": "five-hour",
     "secondary": "weekly",
 }
+# What each declared lane's window actually IS, in minutes. The label map above
+# is a naming convention of OpenAI's that has already changed once; the window
+# length is the thing the lane means. When the payload states a length, that is
+# what binds -- a `primary` carrying a 10,080-minute window is the WEEKLY
+# ceiling under a renamed key, and filing it as `five-hour` produced a card
+# whose row said "7d" while the authority layer had it recorded as the 5-hour
+# lane. A stated length that matches no declared lane is dropped, exactly as an
+# unrecognised label is; the label map is the fallback for a payload that
+# states no length at all.
+CODEX_LANE_WINDOW_MINUTES = {
+    "five-hour": 300,
+    "weekly": 10_080,
+}
+# A window whose boundary is still a full window away and whose usage is zero
+# is not a reading of an empty allowance -- it is what Codex writes when it has
+# no attested balance to report, and the boundary slides forward with the wall
+# clock every time it writes another one. Two minutes of slack is far more than
+# a real fixed boundary needs to fall out of this band, and far less than the
+# lifetime of the placeholder, which never does.
+CODEX_FRESH_WINDOW_TOLERANCE_SECONDS = 120.0
 CODEX_QUOTA_SOURCE = SourceKey(
     provider_id="codex",
     adapter_id="quota",
@@ -789,11 +809,73 @@ CODEX_QUOTA_SOURCE = SourceKey(
 CODEX_ACCOUNT_SCOPE = "codex-chatgpt"
 
 
+def _codex_window_minutes(window: dict) -> float | None:
+    minutes = window.get("window_minutes")
+    if (
+        isinstance(minutes, bool)
+        or not isinstance(minutes, (int, float))
+        or not math.isfinite(float(minutes))
+        or float(minutes) <= 0.0
+    ):
+        return None
+    return float(minutes)
+
+
+def _codex_lane_window_id(window: dict) -> str | None:
+    """Which declared lane this payload window IS.
+
+    Two gates, and both matter. The label gate is unchanged and still decides
+    WHETHER this window may become a lane at all: only the plan's own `primary`
+    and `secondary` qualify, so a `Spark` or `Fable` allowance is dropped rather
+    than promoted to a ceiling that stops work. The length gate then decides
+    WHICH declared lane it is, because the label is a name OpenAI has already
+    moved once and the window length is what the lane means -- a `primary`
+    carrying 10,080 minutes is the weekly ceiling under a renamed key. A
+    declared label carrying a length that matches no declared lane is dropped
+    for the same reason an undeclared label is: force-fitting it is how a
+    7-day ceiling ended up filed as the 5-hour one.
+    """
+    window_id = CODEX_LANE_IDENTITIES.get(window.get("label"))
+    if window_id is None:
+        return None
+    minutes = _codex_window_minutes(window)
+    if minutes is None:
+        return window_id
+    for candidate, declared in CODEX_LANE_WINDOW_MINUTES.items():
+        if int(round(minutes)) == declared:
+            return candidate
+    return None
+
+
+def _codex_window_is_unattested(
+    window: dict,
+    *,
+    reset_epoch: float | None,
+    observed_at: float,
+    used: float,
+) -> bool:
+    """True when this window states no balance, only that it just opened.
+
+    Zero used with the whole window still ahead is not the same claim as
+    "none of this allowance has been spent". It is the shape Codex writes when
+    it has nothing to report, and rendering it as a confident percentage is the
+    Spark class of defect: a status bar inventing a number.
+    """
+    if used != 0.0 or reset_epoch is None:
+        return False
+    minutes = _codex_window_minutes(window)
+    if minutes is None:
+        return False
+    window_seconds = minutes * 60.0
+    remaining = float(reset_epoch) - float(observed_at)
+    return remaining >= window_seconds - CODEX_FRESH_WINDOW_TOLERANCE_SECONDS
+
+
 def _codex_lane_evidence(descriptor, window: object, *, observed_at: float):
     """Map one normalized Codex window onto one declared lane, or nothing."""
     if not isinstance(window, dict):
         return None
-    window_id = CODEX_LANE_IDENTITIES.get(window.get("label"))
+    window_id = _codex_lane_window_id(window)
     if window_id is None:
         return None
     lane = next(
@@ -822,22 +904,23 @@ def _codex_lane_evidence(descriptor, window: object, *, observed_at: float):
     # anything that is not a credible future boundary. A window with no such
     # boundary stays honestly reset-less rather than gaining a countdown.
     reset_epoch = parse_reset_epoch(window.get("resets_at"), now=observed_at)
-    minutes = window.get("window_minutes")
+    percent = max(0.0, min(100.0, float(used)))
+    unattested = _codex_window_is_unattested(
+        window,
+        reset_epoch=reset_epoch,
+        observed_at=observed_at,
+        used=percent,
+    )
     return SupportedLaneEvidence(
         key=lane.key,
         metric_kind=EvidenceMetricKind.PERCENT_USED,
-        percent=max(0.0, min(100.0, float(used))),
-        state=ObservationState.OBSERVED,
+        # The window and its boundary are still real facts and still carried.
+        # Only the balance is withheld, because only the balance was invented.
+        percent=None if unattested else percent,
+        state=ObservationState.NULL if unattested else ObservationState.OBSERVED,
         reset_state=(ResetState.FUTURE if reset_epoch is not None else ResetState.UNKNOWN),
         reset_epoch=reset_epoch,
-        window_minutes=(
-            float(minutes)
-            if not isinstance(minutes, bool)
-            and isinstance(minutes, (int, float))
-            and math.isfinite(float(minutes))
-            and float(minutes) > 0.0
-            else None
-        ),
+        window_minutes=_codex_window_minutes(window),
     )
 
 
@@ -1856,7 +1939,14 @@ def usage_summary_line(
     period_label: str = "Today",
 ) -> str | None:
     """Tokens-first (cost approximated in parens, the CodexBar
-    presentation) or cost-first -- None when there is nothing to say."""
+    presentation) or cost-first -- None when there is nothing to say.
+
+    The provider is deliberately NOT named here. Every view that shows this
+    line already owns a provider title and prepends it, so naming the provider
+    a second time produced "Claude · Claude, last 365 days: ..." -- one fact
+    emitted by two owners who did not know about each other. The period is the
+    only prefix this line is entitled to.
+    """
     count = len(totals.sessions) - len(totals.codex_sessions)
     if count <= 0:
         return None
@@ -1895,12 +1985,7 @@ def usage_summary_line(
             parts.append(
                 f"saved ~${totals.estimated_cache_savings_usd:,.0f} with caching (estimated)"
             )
-    prefix = (
-        "Claude today"
-        if period_label == "Today"
-        else f"Claude, {period_label.lower()}"
-    )
-    return prefix + ": " + " · ".join(parts)
+    return str(period_label) + ": " + " · ".join(parts)
 
 
 def usage_period_label(days: int) -> str:

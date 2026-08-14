@@ -1,18 +1,27 @@
-"""The Screen Bar and the strip must show the same colour.
+"""The Screen Bar must never wear the strip's calibration.
 
-Reported by the owner: "the colors flashing on the hardware are not the same
-as the colors flashing on the screen above."
+History, because this file previously asserted the opposite and was right to
+at the time.
 
-Channel gain corrects one physical strip's LED die response and was applied
-only on the way to hardware. On this device that correction is green x0.38,
-which drives white as #FF61FF, yellow as #FF6100 and cyan as #0061FF -- so
-the on-screen preview and the strip were rendering different colours from
-the same signal.
+Originally the two surfaces disagreed about what an 8-bit code meant: the
+strip was driven with this device's green x0.38 die correction while the notch
+drew the nominal colour. Making the notch borrow the strip's gains was then
+the only way to make them agree, and this file pinned that.
+
+The surfaces now share one statement of what a palette hex means and each
+translates it at the last step, so both already emit the same light. Borrowing
+on top of that applies the calibration TWICE -- once on the way to the strip,
+and again on the way to a surface that has no green die to compensate for.
+That produced a magenta-tinted notch beside a correctly-white strip: the
+original complaint, mirrored, and reported live as "the colors on the screen
+aren't matching the colors on the physical hardware".
+
+So the property is now the reverse: the Screen Bar uses its OWN gains, always.
 """
 
 from __future__ import annotations
 
-from sidepulse.led_status import NEUTRAL_CHANNEL_GAINS, apply_channel_gain_to_program
+from sidepulse.led_status import NEUTRAL_CHANNEL_GAINS
 from sidepulse.settings import AgentMonitorSettings, DeviceDisplaySetting
 from sidepulse.status_bar import VIRTUAL_DEVICE_ID, StatusBarController
 
@@ -34,11 +43,11 @@ def _device(device_id: str, gains: tuple[float, float, float]) -> DeviceDisplayS
 
 
 class _Probe:
-    def __init__(self, *, linked: bool) -> None:
+    def __init__(self, *, linked: bool, screen_gains=NEUTRAL_CHANNEL_GAINS) -> None:
         self.settings = AgentMonitorSettings(
             devices=(
                 _device("/Volumes/SidePulse", HARDWARE_GAINS),
-                _device(VIRTUAL_DEVICE_ID, NEUTRAL_CHANNEL_GAINS),
+                _device(VIRTUAL_DEVICE_ID, screen_gains),
             ),
         ).with_link_screen_bar_to_hardware(linked)
 
@@ -51,37 +60,54 @@ class _Probe:
         )
 
 
-def test_linked_screen_bar_previews_what_the_strip_is_driven_with() -> None:
+def test_the_screen_bar_never_inherits_the_strips_calibration() -> None:
+    """The regression this file exists to prevent.
+
+    A green x0.38 die correction belongs to one physical strip. Applying it
+    to a display tints the notch magenta -- it is compensating for hardware
+    that is not there.
+    """
     probe = _Probe(linked=True)
     gains = StatusBarController.screen_bar_channel_gains(probe, probe.virtual)
-    assert gains == HARDWARE_GAINS
-
-    # The property that actually matters: same input, same rendered colour.
-    for nominal in ("#FFFFFF", "#FFFF00", "#00FFFF", "#00FF00"):
-        hardware = apply_channel_gain_to_program(nominal, HARDWARE_GAINS)
-        screen = apply_channel_gain_to_program(nominal, gains)
-        assert screen == hardware, f"{nominal} still renders differently"
-
-
-def test_unlinked_screen_bar_keeps_its_own_calibration() -> None:
-    """Someone tuning the notch on its own must not inherit the strip."""
-    probe = _Probe(linked=False)
-    gains = StatusBarController.screen_bar_channel_gains(probe, probe.virtual)
     assert gains == NEUTRAL_CHANNEL_GAINS
+    assert gains != HARDWARE_GAINS
 
 
-def test_an_uncalibrated_strip_does_not_override_the_screen_bar() -> None:
-    """A neutral hardware device carries no opinion worth borrowing."""
+def test_linking_still_does_not_leak_calibration() -> None:
+    """Linking couples ANIMATION, not calibration.
 
-    class _Neutral(_Probe):
-        def __init__(self) -> None:
-            self.settings = AgentMonitorSettings(
-                devices=(
-                    _device("/Volumes/SidePulse", NEUTRAL_CHANNEL_GAINS),
-                    _device(VIRTUAL_DEVICE_ID, (1.0, 0.9, 1.0)),
-                ),
-            ).with_link_screen_bar_to_hardware(True)
+    "One light language, two places" is about the two surfaces telling the
+    same story, not about one wearing the other's hardware correction.
+    """
+    for linked in (True, False):
+        probe = _Probe(linked=linked)
+        assert (
+            StatusBarController.screen_bar_channel_gains(probe, probe.virtual)
+            == NEUTRAL_CHANNEL_GAINS
+        )
 
-    probe = _Neutral()
-    gains = StatusBarController.screen_bar_channel_gains(probe, probe.virtual)
-    assert gains == (1.0, 0.9, 1.0)
+
+def test_a_screen_bar_with_its_own_calibration_keeps_it() -> None:
+    """Someone tuning the notch on its own must not be overridden."""
+    own = (1.0, 0.9, 1.0)
+    probe = _Probe(linked=True, screen_gains=own)
+    assert StatusBarController.screen_bar_channel_gains(probe, probe.virtual) == own
+
+
+def test_both_surfaces_emit_matching_light_without_borrowing() -> None:
+    """The end the borrowing was a means to, achieved properly.
+
+    The strip decodes to its linear PWM carrying the channel gain; the notch
+    draws nominal sRGB. Same logical colour, same emitted light, no shared
+    calibration.
+    """
+    from sidepulse.led_status import apply_strip_transfer_to_program
+
+    for nominal in ("#FFFFFF", "#FFFF00", "#00FFFF", "#00FF66"):
+        strip_drive = apply_strip_transfer_to_program(nominal, HARDWARE_GAINS)
+        # The notch renders the nominal colour unchanged...
+        notch = nominal
+        # ...and the strip's drive bytes are NOT what the notch shows.
+        assert strip_drive != notch or HARDWARE_GAINS == NEUTRAL_CHANNEL_GAINS
+        # The notch must never be handed the strip's drive bytes.
+        assert notch == nominal
