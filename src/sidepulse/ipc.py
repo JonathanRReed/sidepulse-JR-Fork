@@ -511,8 +511,15 @@ class HookEventServer:
         *,
         socket_path: Path | None = None,
         peer_uid_reader: Callable[[socket.socket], int] | None = None,
+        on_legacy_hook: Callable[[str], None] | None = None,
     ) -> None:
         self.on_hint = on_hint
+        # Version skew is a REAL failure mode, not a theoretical one: a
+        # hook script lives in the user's provider config and can lag
+        # arbitrarily far behind the app. When one still speaks the
+        # pre-hint wire format we must never fail silently -- the app
+        # went deaf to every live agent event for an hour that way.
+        self.on_legacy_hook = on_legacy_hook
         self.socket_path = (socket_path or default_event_socket_path()).expanduser()
         self.peer_uid_reader = peer_uid_reader
         self.socket: socket.socket | None = None
@@ -716,16 +723,17 @@ class HookEventServer:
                 except OSError:
                     pass
                 return
-            callback = self.on_hint
-            try:
-                callback(provider, line)
-            except TypeError:
+            # A pre-hint hook. Its payload is not the authority (the
+            # registered log is), so we cannot ingest it directly -- but
+            # we can wake the app AND make the skew visible instead of
+            # dropping the event into silence.
+            notify = self.on_legacy_hook
+            if notify is not None:
                 try:
-                    connection.sendall(_RAW_EVENT_REJECT)
-                except OSError:
+                    notify(provider)
+                except Exception:
                     pass
-                return
             try:
-                connection.sendall(_RAW_EVENT_ACK)
+                connection.sendall(_RAW_EVENT_REJECT)
             except OSError:
                 pass

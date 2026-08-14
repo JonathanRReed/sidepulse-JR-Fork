@@ -1073,12 +1073,22 @@ for (const event of [
             self.assertEqual(stat.S_IMODE(csv_path.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(html_path.stat().st_mode), 0o600)
 
-    def test_hook_event_server_receives_socket_message(self) -> None:
+    def test_hook_event_server_refuses_and_reports_a_legacy_hook(self) -> None:
+        """A pre-hint hook is refused as an ingestion source, and named.
+
+        Its wire payload is not authoritative -- the registered log is --
+        so it must never be ingested as if it were. But refusing in
+        silence is how the app went deaf to every live agent event for
+        an hour: the hook kept sending, the app kept dropping, and
+        nothing anywhere said so. Refuse AND report.
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            received: list[tuple[str, dict]] = []
+            hints: list[object] = []
+            legacy: list[str] = []
             server = HookEventServer(
-                lambda provider, line: received.append((provider, line)),
+                hints.append,
                 socket_path=Path(tmp) / "events.sock",
+                on_legacy_hook=legacy.append,
             )
             try:
                 server.start()
@@ -1097,16 +1107,16 @@ for (const event of [
                 )
 
                 deadline = time.time() + 1
-                while sent and not received and time.time() < deadline:
+                while not legacy and time.time() < deadline:
                     time.sleep(0.01)
 
-                self.assertTrue(sent)
-                self.assertTrue(received)
-                self.assertEqual(received[0][0], "codex")
-                self.assertEqual(
-                    received[0][1]["event"]["hook_event_name"],
-                    "Stop",
-                )
+                # Refused: the sender is told, so it cannot believe the
+                # event landed.
+                self.assertFalse(sent)
+                # Reported: the app knows which provider is stale.
+                self.assertEqual(legacy, ["codex"])
+                # And never ingested as a hint.
+                self.assertEqual(hints, [])
             finally:
                 server.stop()
 
@@ -7487,11 +7497,39 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
             tweaked = applied.with_cycle_speed(applied.effective_speed_seconds(applied.blend_mode) + 0.3)
             self.assertEqual(colors_module.matching_preset(tweaked), colors_module.PRESET_CUSTOM)
 
-    def test_presets_disagree_with_each_other(self) -> None:
-        base = ColorSettings.defaults()
+    def test_presets_differ_in_feel_but_never_touch_layout(self) -> None:
+        """A preset owns FEEL only.
+
+        Presets used to set the blend mode as part of their package, so
+        clicking one silently destroyed the layout the user had
+        deliberately chosen -- "Everything" forced Spotlight, and their
+        explicit mode kept reverting with no warning and no undo.
+        """
+        base = ColorSettings.defaults().with_blend_mode(
+            colors_module.BLEND_MODE_SPATIAL
+        )
         applied = [colors_module.apply_preset(base, p) for p in colors_module.PRESET_CHOICES]
-        blends = [a.blend_mode for a in applied]
-        self.assertEqual(len(blends), len(set(blends)))
+        # Layout survives every preset, untouched.
+        for result in applied:
+            self.assertEqual(result.blend_mode, colors_module.BLEND_MODE_SPATIAL)
+        # ...and the presets still genuinely differ from one another.
+        feels = [colors_module._feel_projection(result) for result in applied]
+        for index, feel in enumerate(feels):
+            self.assertNotIn(feel, feels[index + 1:])
+
+    def test_preset_chip_survives_a_layout_or_color_choice(self) -> None:
+        """The chip reports FEEL, so picking a mode or recoloring an
+        agent must not falsely read as Custom."""
+        calm = colors_module.apply_preset(
+            ColorSettings.defaults(), colors_module.PRESET_CALM
+        )
+        self.assertEqual(colors_module.matching_preset(calm), colors_module.PRESET_CALM)
+        relaid = calm.with_blend_mode(colors_module.BLEND_MODE_RELAY)
+        self.assertEqual(colors_module.matching_preset(relaid), colors_module.PRESET_CALM)
+        recolored = relaid.with_agent_color("claude", "#123456")
+        self.assertEqual(
+            colors_module.matching_preset(recolored), colors_module.PRESET_CALM
+        )
 
     def test_attention_arrival_double_taps_once_then_holds_static_anchor(self) -> None:
         settings = ColorSettings.defaults()

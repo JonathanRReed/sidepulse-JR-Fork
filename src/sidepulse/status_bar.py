@@ -1330,6 +1330,7 @@ class StatusBarController(NSObject):
         self.last_closed_lid_awake_error = None
         self.last_status_read_error = None
         self.event_refresh_pending = False
+        self.legacy_hook_providers: set[str] = set()
         self.last_lid_closed = None
         self.last_lid_error = None
         self.led_animation_until_monotonic = 0.0
@@ -1940,6 +1941,30 @@ class StatusBarController(NSObject):
         if not pin:
             return projection.visible_rows
         return tuple(row for row in projection.visible_rows if row.provider == pin)
+
+    def should_render_multi_agent(
+        self,
+        resolved_glance,
+        projection: AttentionProjection | None,
+    ) -> bool:
+        """Two agents working must LOOK like two agents.
+
+        The single-color glance path renders one fleet-wide semantic as
+        one hue, which is structurally incapable of showing a crowd --
+        and it was winning unconditionally, so the multi-agent renderer
+        (and with it every blend mode) was dead code in production: a
+        Codex session and a Claude session lit the strip one color.
+
+        Only ordinary ACTIVE work hands over. Attention, failures,
+        completions, capacity and rest stay whole-strip moments -- they
+        are deliberately designed as one unmistakable signal, and a
+        crowd of colors would bury them.
+        """
+        if projection is None or len(projection.visible_rows) < 2:
+            return False
+        if resolved_glance is None:
+            return True
+        return getattr(resolved_glance, "semantic", None) is GlanceSemantic.ACTIVE
 
     def projection_for_device(
         self,
@@ -5991,7 +6016,10 @@ class StatusBarController(NSObject):
 
     def start_event_server(self) -> None:
         self.stop_event_server()
-        self.event_server = HookEventServer(self.handle_hook_event_message)
+        self.event_server = HookEventServer(
+            self.handle_hook_event_message,
+            on_legacy_hook=self.note_legacy_hook,
+        )
         try:
             socket_path = self.event_server.start()
             log_status_bar(f"event_server listening={socket_path}")
@@ -6003,6 +6031,27 @@ class StatusBarController(NSObject):
         if self.event_server is not None:
             self.event_server.stop()
             self.event_server = None
+
+    def note_legacy_hook(self, provider: str) -> None:
+        """A hook predating the refresh-hint protocol just called us.
+
+        Its wire payload is not authoritative (the registered log is),
+        so it cannot be ingested directly -- but silence is the worst
+        possible answer: an out-of-date hook once deafened the app to
+        every live agent event for an hour while it logged nothing a
+        user would ever see. Wake the monitor anyway (the log that hook
+        wrote is still read on refresh) and remember the provider so
+        the dropdown can say which hook needs reinstalling.
+        """
+        if type(provider) is not str or not provider:
+            return
+        if provider not in self.legacy_hook_providers:
+            self.legacy_hook_providers.add(provider)
+            log_status_bar(
+                f"legacy hook protocol from {provider}: reinstall its hook from Setup"
+            )
+            self._menu_signature = None
+        self.schedule_event_refresh()
 
     def handle_hook_event_message(self, hint: ProviderRefreshHint) -> None:
         """Reconcile one authenticated hint from the persisted normalized log.
@@ -7290,15 +7339,16 @@ class StatusBarController(NSObject):
             colors = self.settings.colors.with_blend_mode(payload["blend_mode"])
         except ValueError:
             return
-        self.settings = self.settings.with_colors(colors)
-        save_settings(self.settings)
         description = self.color_fields.get("blend_description")
         if description is not None:
             description.setStringValue_(BLEND_MODE_DESCRIPTIONS.get(payload["blend_mode"], ""))
             description.setToolTip_(colors_module.BLEND_MODE_TOOLTIPS.get(payload["blend_mode"], ""))
-        self.refresh_colors_preview()
-        if self.color_preview_enabled:
-            self.push_colors_preview_to_device()
+        # Route through the shared commit like every sibling control:
+        # it re-derives the preset chip. Hand-rolling the save left the
+        # chip reading a preset the settings no longer matched, so the
+        # obvious next move -- re-clicking that preset to "confirm" --
+        # silently reapplied the whole package over the mode just set.
+        self._commit_colors_and_refresh(colors)
 
     @objc.IBAction
     def applyCycleSpeed_(self, _sender):
@@ -7379,11 +7429,8 @@ class StatusBarController(NSObject):
             colors = self.settings.colors.with_mode_animation(payload["mode_key"], payload["style"])
         except ValueError:
             return
-        self.settings = self.settings.with_colors(colors)
-        save_settings(self.settings)
-        self.refresh_colors_preview()
-        if self.color_preview_enabled:
-            self.push_colors_preview_to_device()
+        # Same shared commit, same reason as setBlendMode_.
+        self._commit_colors_and_refresh(colors)
 
     @objc.IBAction
     def resetColorsToDefaults_(self, _sender):
@@ -10419,7 +10466,21 @@ class StatusBarController(NSObject):
                 if not statuses_for_device:
                     fallback_for_device = AgentMode.IDLE_READY
             controller = self.agent_controller_for_device(device)
-            if request.resolved_glance is not None:
+            device_projection = (
+                self.projection_for_device(request.projection, device)
+                if request.projection is not None
+                else None
+            )
+            if self.should_render_multi_agent(
+                request.resolved_glance, device_projection
+            ):
+                write = controller.sync_projection(
+                    device_projection,
+                    colors_for_render,
+                    active_signal=self.active_failure_signal(),
+                    relay_elapsed_seconds=request.relay_elapsed_seconds,
+                )
+            elif request.resolved_glance is not None:
                 preferences = request.accessibility_preferences
                 if type(preferences) is not AccessibilityDisplayPreferences:
                     preferences = AccessibilityDisplayPreferences(
@@ -10452,9 +10513,9 @@ class StatusBarController(NSObject):
                     display_state_for_resolved_glance(request.resolved_glance),
                     dedupe_token=continuity,
                 )
-            elif request.projection is not None:
+            elif device_projection is not None:
                 write = controller.sync_projection(
-                    self.projection_for_device(request.projection, device),
+                    device_projection,
                     colors_for_render,
                     active_signal=self.active_failure_signal(),
                     relay_elapsed_seconds=request.relay_elapsed_seconds,
@@ -13272,6 +13333,20 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         action_error = getattr(target, "operator_action_error", None)
         if type(action_error) is str and action_error:
             menu.addItem_(disabled_menu_item(action_error))
+    # An out-of-date hook cannot deliver live events. Say so where the
+    # user already looks, with the one click that fixes it -- this
+    # failure was invisible for an hour the first time it happened.
+    legacy_hooks = sorted(getattr(target, "legacy_hook_providers", ()) or ())
+    if legacy_hooks:
+        names = ", ".join(provider.title() for provider in legacy_hooks)
+        stale_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"\u26a0 {names} hooks are out of date \u2014 reinstall in Setup\u2026",
+            "openSetup:",
+            "",
+        )
+        stale_item.setTarget_(target)
+        menu.addItem_(stale_item)
+        menu.addItem_(NSMenuItem.separatorItem())
     statuses = recent_statuses(snapshot)
 
     focus_summary = (
@@ -14187,11 +14262,22 @@ def select_preview_scenario(popup, scenario: str) -> None:
     select_popup_item(popup, "scenario", scenario)
 
 
+# Motion names say what you see; the parenthetical glosses moved into
+# the descriptions where they belong. "Pulse"/"Roll" were DSL primitive
+# names leaking into the UI -- and the app already admitted the real
+# words in its own parentheses.
 ANIMATION_STYLE_DISPLAY_LABELS: dict[str, str] = {
-    "pulse": "Pulse (breathe)",
-    "roll": "Roll (chase)",
-    "solid": "Solid (no animation)",
-    "blink": "Blink (hard on/off)",
+    "pulse": "Breathe",
+    "roll": "Chase",
+    "solid": "Steady",
+    "blink": "Blink",
+}
+
+ANIMATION_STYLE_DESCRIPTIONS: dict[str, str] = {
+    "pulse": "Fades up and down, softly.",
+    "roll": "A bright point runs along the strip and starts again.",
+    "solid": "Stays lit. Never moves.",
+    "blink": "Snaps on and off. No fading.",
 }
 
 

@@ -216,3 +216,44 @@ def test_invalid_normalized_row_is_not_reinterpreted_as_legacy_authority(
     assert snapshot.operator_state is not None
     assert snapshot.operator_state.works == ()
     assert snapshot.operator_events == ()
+
+
+def test_legacy_hook_is_reported_not_silently_dropped() -> None:
+    """Version skew must never be silent.
+
+    A hook script lives in the user's provider config and can lag the
+    app by any amount. When one still speaks the pre-hint raw-event
+    wire format, its payload is not authoritative and cannot be
+    ingested -- but the app must still learn the provider is stale so
+    it can say so, instead of going quietly deaf to live events.
+    """
+    with _short_socket_root() as directory:
+        socket_path = Path(directory) / "state" / "events.sock"
+        hints: list[ProviderRefreshHint] = []
+        legacy: list[str] = []
+        server = HookEventServer(
+            hints.append,
+            socket_path=socket_path,
+            on_legacy_hook=legacy.append,
+        )
+        server.start()
+        try:
+            raw_event = json.dumps(
+                {
+                    "provider": "claude",
+                    "line": {"hook_event_name": "Stop", "session_id": "s1"},
+                }
+            ).encode("utf-8")
+            peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            peer.connect(str(socket_path))
+            peer.sendall(raw_event)
+            peer.shutdown(socket.SHUT_WR)
+            peer.close()
+            assert _wait_until(lambda: legacy == ["claude"])
+            # The stale payload is still refused as an ingestion source.
+            assert hints == []
+            # A modern hook on the same socket keeps working.
+            assert send_refresh_hint(_hint("event:valid"), socket_path=socket_path)
+            assert _wait_until(lambda: len(hints) == 1)
+        finally:
+            server.stop()

@@ -168,42 +168,61 @@ BLEND_MODE_CHOICES: tuple[str, ...] = (
 )
 DEFAULT_BLEND_MODE = BLEND_MODE_ROUND_ROBIN
 
+# Names describe what you SEE, not how it is built. The old set was
+# scheduler jargon ("Round-Robin"), a mechanism ("Color Blend"), or a
+# changelog entry ("Classic") -- a user hunting for a calm, seamless
+# light went looking for "Smooth" and could not find it. Persisted
+# values never change; these are labels only.
 BLEND_MODE_LABELS: dict[str, str] = {
-    BLEND_MODE_ROUND_ROBIN: "Round-Robin",
-    BLEND_MODE_RELAY: "Relay",
-    BLEND_MODE_SPATIAL: "Spatial Split",
-    BLEND_MODE_COLOR: "Color Blend",
-    BLEND_MODE_CYCLE: "Cycle Colors",
-    BLEND_MODE_CLASSIC: "Classic",
+    BLEND_MODE_ROUND_ROBIN: "Everyone",
+    BLEND_MODE_RELAY: "Spotlight",
+    BLEND_MODE_SPATIAL: "Split",
+    BLEND_MODE_COLOR: "Smooth",
+    BLEND_MODE_CYCLE: "One at a Time",
+    BLEND_MODE_CLASSIC: "Status Only",
 }
 
 BLEND_MODE_DESCRIPTIONS: dict[str, str] = {
-    BLEND_MODE_ROUND_ROBIN: "Every LED breathes together, in sequence.",
-    BLEND_MODE_RELAY: "One agent lights up at a time, like a baton.",
-    BLEND_MODE_SPATIAL: "Each agent gets a block sized by urgency.",
-    BLEND_MODE_COLOR: "Blends all agents into one averaged color.",
-    BLEND_MODE_CYCLE: "Whole strip shows one agent, then the next.",
-    BLEND_MODE_CLASSIC: "One color for the most urgent state.",
+    BLEND_MODE_ROUND_ROBIN: "Every agent is lit at once, each in its own color.",
+    BLEND_MODE_RELAY: "One agent flares bright at a time; the rest stay dim.",
+    BLEND_MODE_SPATIAL: "Each agent gets its own section, sized by how much it needs you.",
+    BLEND_MODE_COLOR: "One seamless light. Everyone's colors blend across the strip.",
+    BLEND_MODE_CYCLE: "The whole strip shows one agent, then the next.",
+    BLEND_MODE_CLASSIC: "One color for whatever needs you most. Agents aren't shown.",
 }
 
 # Longer versions for a tooltip, so the detail is available without
 # permanently taking up space in the window.
 BLEND_MODE_TOOLTIPS: dict[str, str] = {
     BLEND_MODE_ROUND_ROBIN: (
-        "Every LED breathes in one agent's own color -- the sequence repeats "
-        "across the strip, all at once."
+        "Agent colors repeat across the strip and breathe together, so every "
+        "active agent stays visible at a glance. Nothing waits its turn."
     ),
     BLEND_MODE_RELAY: (
-        "One agent's LED flares bright while the rest rest dim -- the "
-        "spotlight passes around the ring, agent to agent, like a baton."
+        "A single bright point travels the strip and stops on each agent in "
+        "turn while the others hold a soft resting glow. Easiest to follow "
+        "when several agents are busy at once."
     ),
-    BLEND_MODE_SPATIAL: "Each agent claims a block of LEDs sized by urgency -- more agents, smaller blocks.",
+    BLEND_MODE_SPATIAL: (
+        "The strip divides into blocks, one per agent. The more urgent an "
+        "agent is, the more LEDs it claims -- the shape tells you who needs "
+        "you before you have read the color."
+    ),
     BLEND_MODE_COLOR: (
-        "Every LED shows one color: the weighted average of all active "
-        "agents -- can look muddy with dissimilar hues."
+        "No blocks, no blinking, no marching: one continuous light made from "
+        "your active agents' colors. The quietest way to keep everyone on "
+        "screen -- pick this when the light should be furniture, not an alarm."
     ),
-    BLEND_MODE_CYCLE: "The whole strip shows one agent's color at a time, breathing, then hands off to the next.",
-    BLEND_MODE_CLASSIC: "Ignores individual agents -- shows one color for the most urgent mode across everyone.",
+    BLEND_MODE_CYCLE: (
+        "Each agent takes over the entire strip for a moment, breathes once "
+        "in its own color, then hands off. Reads correctly from across the "
+        "room."
+    ),
+    BLEND_MODE_CLASSIC: (
+        "Ignores who is who. One color for the most urgent thing happening "
+        "anywhere -- the calmest option, and the only one whose meaning "
+        "never changes as agents come and go."
+    ),
 }
 
 LAYOUT_DEBOUNCE_SECONDS = 1.5
@@ -839,31 +858,40 @@ PRESET_CHOICES: tuple[str, ...] = (PRESET_CALM, PRESET_INFORMATIVE, PRESET_EVERY
 PRESET_LABELS: dict[str, str] = {
     PRESET_CUSTOM: "Custom",
     PRESET_CALM: "Calm",
-    PRESET_INFORMATIVE: "Informative",
-    PRESET_EVERYTHING: "Everything",
+    PRESET_INFORMATIVE: "Balanced",
+    PRESET_EVERYTHING: "Lively",
 }
 PRESET_DESCRIPTIONS: dict[str, str] = {
-    PRESET_CALM: "One quiet aggregate light. Peripheral, never busy.",
-    PRESET_INFORMATIVE: "Every agent visible, breathing together.",
-    PRESET_EVERYTHING: "Full show: spotlight relay, motion, celebrations.",
+    PRESET_CALM: "Slow, dim, no celebrations. Light you can work next to.",
+    PRESET_INFORMATIVE: "Clear motion at a normal brightness. The default.",
+    PRESET_EVERYTHING: "Fast, bright, and it celebrates. Full show.",
 }
 
 
 def apply_preset(colors: ColorSettings, preset: str) -> ColorSettings:
-    """One-click personalities for the whole display engine -- each sets
-    blend mode, animation styles, speed, fade range, and event toggles as
-    a coherent package. Agent identity colors are deliberately untouched:
-    a preset changes how the light BEHAVES, never whose color it is.
+    """One-click personalities for how loud the light is.
+
+    Three independent axes: LAYOUT (which agent gets which LEDs -- the
+    blend mode), COLORS (whose color is whose), and FEEL (animation
+    styles, speed, fade range, celebration toggles). A preset owns FEEL
+    and nothing else.
+
+    Layout and colors are the two things a user picks deliberately, and
+    a preset used to silently overwrite the layout: choosing "Everything"
+    forced Spotlight, so an explicitly chosen mode kept reverting with no
+    warning and no undo. Feel is a dozen fiddly numbers nobody wants to
+    tune by hand -- that asymmetry is the entire reason presets exist,
+    and the reason they must keep their hands off the other two axes.
     """
     if preset == PRESET_CALM:
-        result = colors.with_blend_mode(BLEND_MODE_CLASSIC).with_cycle_speed(2.4)
+        result = colors.with_cycle_speed(2.4)
         for key in ANIMATION_MODE_KEYS:
             result = result.with_mode_animation(key, ANIMATION_STYLE_PULSE)
         for key in FADE_MODE_KEYS:
             result = result.with_fade_floor(key, 0.01).with_fade_ceiling(key, 0.35)
         return result.with_round_robin_urgency_alert(True).with_done_celebration_enabled(False)
     if preset == PRESET_INFORMATIVE:
-        result = colors.with_blend_mode(BLEND_MODE_ROUND_ROBIN).with_cycle_speed(1.6)
+        result = colors.with_cycle_speed(1.6)
         result = (
             result.with_mode_animation(MODE_IDLE, ANIMATION_STYLE_PULSE)
             .with_mode_animation(MODE_WORKING, ANIMATION_STYLE_PULSE)
@@ -873,7 +901,7 @@ def apply_preset(colors: ColorSettings, preset: str) -> ColorSettings:
             result = result.with_fade_floor(key, 0.01).with_fade_ceiling(key, 0.5)
         return result.with_round_robin_urgency_alert(True).with_done_celebration_enabled(True)
     if preset == PRESET_EVERYTHING:
-        result = colors.with_blend_mode(BLEND_MODE_RELAY).with_cycle_speed(1.2)
+        result = colors.with_cycle_speed(1.2)
         result = (
             result.with_mode_animation(MODE_IDLE, ANIMATION_STYLE_PULSE)
             .with_mode_animation(MODE_WORKING, ANIMATION_STYLE_ROLL)
@@ -885,12 +913,36 @@ def apply_preset(colors: ColorSettings, preset: str) -> ColorSettings:
     raise ValueError(f"Unknown preset: {preset}")
 
 
+# The FEEL axis: exactly the fields a preset owns. Everything else --
+# blend mode, per-device overrides, agent and mode colors -- belongs to
+# the user, so a preset chip must not go dark just because they chose a
+# layout or recolored an agent.
+PRESET_FEEL_FIELDS: tuple[str, ...] = (
+    "cycle_speed_seconds",
+    "mode_animation",
+    "fade_floor",
+    "fade_ceiling",
+    "round_robin_urgency_alert",
+    "done_celebration_enabled",
+)
+
+
+def _feel_projection(colors: ColorSettings) -> tuple:
+    return tuple(getattr(colors, field) for field in PRESET_FEEL_FIELDS)
+
+
 def matching_preset(colors: ColorSettings) -> str:
-    """Which preset the current settings exactly correspond to, or
-    PRESET_CUSTOM -- so the preset picker can honestly show "Custom" the
-    moment any manual tweak diverges from a package."""
+    """Which preset the current FEEL corresponds to, or PRESET_CUSTOM.
+
+    Compares the feel projection rather than whole-object equality: a
+    preset no longer writes layout or colors, so comparing everything
+    would report "Custom" for any user who picked a mode or recolored
+    an agent -- which is every user. The chip now means something true
+    and stable: "the light is currently tuned Calm."
+    """
+    current = _feel_projection(colors)
     for preset in PRESET_CHOICES:
-        if apply_preset(colors, preset) == colors:
+        if _feel_projection(apply_preset(colors, preset)) == current:
             return preset
     return PRESET_CUSTOM
 
