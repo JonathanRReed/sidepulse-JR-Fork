@@ -468,6 +468,19 @@ class CapacityHistoryStore:
     def shutdown(self, *, now: float | None = None) -> bool:
         return self.flush(now=now, force=True)
 
+    def apply_retention(self, days: int, *, now: float | None = None) -> bool:
+        """Adopt a new retention and prune to it immediately.
+
+        `flush` short-circuits on a clean store, so shortening retention
+        through it alone would leave the samples the owner just asked us
+        to stop keeping on disk until the next admitted sample -- which,
+        on a quiet desk, can be a very long time.
+        """
+        self.retention_days = HistoryRetentionPolicy(days).days
+        self._dirty = True
+        self._last_flush_at = None
+        return self.flush(now=now, force=True)
+
     def delete_capacity_history(self) -> bool:
         had_memory = self.state != CapacityHistoryState() or bool(self.cached_summaries)
         self.state = CapacityHistoryState()

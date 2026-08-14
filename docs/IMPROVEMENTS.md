@@ -95,10 +95,24 @@ competing for the lights.
   rather than something the user must know to look for.
 - **A test that runs the packaged bundle**, not just the source tree. Two
   of the worst bugs this round were only visible in the installed app.
-- **Retire the remaining dead modules or wire them.** `provider_runtime.py`
-  and `capacity_sources.py` have zero importers; they cost nothing at
-  runtime but they mislead every reader, including me — I duplicated an
-  existing detector this round before finding it.
+- ~~**Retire the remaining dead modules or wire them.**~~ **Done.** Every
+  module in `KNOWN_UNWIRED` was decided, not re-described. `capacity_view`
+  and `capacity_history_store` were wired into the "Why Is It Doing That?"
+  panel; `provider_runtime`, `delivery_ledger_store` and `reply_classifier`
+  were deleted with their tests. The list is empty and the ratchet holds it
+  there.
+- **Give the ratchet a call-reachability arm.** It measures IMPORTS, so a
+  module imported at the top of a live file passes with no caller. That is
+  not hypothetical: `delivery_ledger.py` plus the whole delivery-planning
+  half of `interruption_policy.py` (~700 lines around `plan_deliveries`)
+  read as reachable and are as dormant as anything the pinned list ever
+  held. Deciding them means deciding whether the notification path adopts
+  them, which touches the locked interrupt budget and is an owner call.
+- **Persist the notification dedup across a restart, or prove it does not
+  need to be.** `track_completions` dedups from `last_agent_modes`, which
+  is in-memory only. If an empty `previous_modes` can yield a completion
+  batch, every relaunch re-announces work that already finished — which is
+  exactly the job `delivery_ledger` was designed for and is not doing.
 
 ---
 

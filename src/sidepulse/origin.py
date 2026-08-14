@@ -87,7 +87,6 @@ def _detect_agent_origin_uncached(
     active_env: Mapping[str, str],
     parent_pid: int | None,
 ) -> AgentOrigin:
-    provider = normalized_provider
     explicit = explicit_origin_from_env(normalized_provider, active_env)
     if explicit is not None:
         return explicit

@@ -126,10 +126,42 @@ Independent corroboration: CodexBar is installed and running here, and its
 `usage-history.jsonl` contains **3,831 codex records and zero Claude
 records**. It is not resolving Claude usage on this machine either.
 
-## Waves 4–7 — not started
+## Wave 5 — multi-Mac, cloud agents, Studio, Settings — shipped
 
-Usage history and spend, multi-Mac via Tailscale, cloud agent ingest, new
-providers, the animation editor, Sparkle distribution.
+Remote peers under "Other Macs" in the dropdown (muted by default, per-machine
+consent), publishing off by default and bounded both ways, a loopback cloud
+ingest that lands in the same `monitor.ingest_record` a local hook uses,
+Studio validation in sentences, and the Messages/Extras panes.
+
+## Wave 5.1 — the unwired list, emptied
+
+The pinned `KNOWN_UNWIRED` set is **empty**. Every entry was decided and
+acted on rather than re-described:
+
+| Module | Lines | Decision | Why |
+| --- | --- | --- | --- |
+| `capacity_view` | 1,139 | **wired** | The "Why Is It Doing That?" panel now carries a capacity section built by `build_capacity_detail` off the authority projection the refresh already computed. The card could only say *"2 windows unavailable"*; the panel names each one and gives the authority layer's own refusal as a sentence. |
+| `capacity_history_store` | 501 | **wired** | It had no producer. The live refresh path already computed everything a `CapacityHistorySample` needs — the disposition, refusal code, remaining value and reset all come out of `evaluate_reset_continuity` — and then dropped them. Off by default behind `capacity_history_enabled`; Extras → Quota carries the switch and the retention; turning it off deletes the file. |
+| `provider_runtime` | 560 | **deleted** | A second implementation of a live job. `capacity_refresh.CapacityRefreshCoordinator` owns the generation fences, deadlines and cooldowns; the status bar owns the threads. Two runtimes meant a reader debugging a refresh could land in the one that never runs. |
+| `delivery_ledger_store` | 217 | **deleted** | Persistence for a ledger nothing constructs. `plan_deliveries` is the ledger's only consumer and has no caller anywhere in the app. |
+| `reply_classifier` | 112 | **deleted** | A `sidepulse-reply` CLI that ran a local Qwen model over messages to decide whether a reply was expected — a different product from the three surfaces, carrying an `mlx-lm` extra, a 308-row dataset, a generator script and a benchmark. All removed. |
+
+**Found while wiring, and fixed:** `capacity_view` had no copy for any of the
+eight *binding* refusal codes, so every lane fell through to *"Capacity is
+unavailable"* — printed next to a live, correct percentage. The binding
+refusal ("may this fire an alert") and the presentation refusal ("why is
+there no number") were also one field; they are two now, and the effect
+answer is stated once per card instead of once per row.
+
+**`MAX_CAPACITY_CARD_ROWS = 2` was not the cap.** Raising it changes nothing:
+the card is fed `CapacityProjection.binding_lanes`, which `capacity_authority`
+hard-caps at `MAX_BINDING_LANES = 2` and fills with one SHORT and one LONG
+lane on purpose. Four windows are expressible through `build_capacity_detail`,
+which is uncapped — and that is the surface now wired.
+
+## Waves 6–7 — not started
+
+Spend tracking, new providers, the animation editor, Sparkle distribution.
 
 ---
 
@@ -137,7 +169,8 @@ providers, the animation editor, Sparkle distribution.
 
 1. **Reachable or it isn't done.** Two log janitors, a 1,139-line capacity
    presentation module, and every blend mode were all written, tested, and
-   never called.
+   never called. The pinned list is empty now; keeping it empty means
+   deciding each new entry rather than describing it.
 2. **Test the seams.** Every bug worth finding this round was a reachability
    or process-boundary failure, invisible to thousands of green unit tests.
 3. **A closed switch may be load-bearing.** Before opening one, find out what

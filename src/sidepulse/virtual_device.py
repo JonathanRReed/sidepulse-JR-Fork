@@ -39,7 +39,7 @@ from .presentation_policy import MotionClass
 from .presentation_scheduler import PresentationSchedulerInputs
 from .render_policy import (
     ACTIVE_RENDER_FPS,
-    GENTLE_MOTION_FPS,
+    GENTLE_MOTION_FPS,  # noqa: F401  -- re-exported; callers patch it here
     STATIC_WATCH_FPS,
     BoundedRenderCache,
     GlowGeometryKey,
@@ -124,7 +124,10 @@ WING_AUTO_LENGTH = 14.0
 # timings. These two are RE-EXPORTED from it rather than redefined here:
 # a second copy shadowed the live constants, which is precisely how the
 # next Alcove bug would have been introduced.
-from .alcove_observation import (  # noqa: E402
+# `noqa: F401` is load-bearing, not decoration: `ruff --fix` deleted both of
+# these as unused, which is exactly the "second copy shadows the live
+# constant" failure the comment above warns about -- only in reverse.
+from .alcove_observation import (  # noqa: E402, F401
     ALCOVE_HOLD_SECONDS,
     ALCOVE_NARROW_AFTER_SECONDS,
 )

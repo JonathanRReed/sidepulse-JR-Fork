@@ -43,6 +43,19 @@ from .capacity_types import (
 )
 from .reset_policy import derive_reset_countdown
 
+# Two is not a layout budget and raising it changes nothing. The card is fed
+# `CapacityProjection.binding_lanes`, which `capacity_authority` hard-caps at
+# `MAX_BINDING_LANES = 2` and fills with one SHORT and one LONG lane -- "the
+# two ceilings that can stop your work", deliberately not a list. A provider
+# publishing four windows shows all four through `build_capacity_detail`,
+# which is uncapped; that is the surface the panel renders.
+#
+# `build_capacity_card` itself has NO caller in this build: the live refresh
+# asks for `limit=0` because no `CapacityAccountBinding` exists for any
+# source, so `binding_lanes` is always empty and this builder could only ever
+# return a status-only card. It is kept, not deleted, because it is one owner
+# decision away from live -- a data condition, not a rival implementation --
+# and the decision is whether this build may make a binding claim at all.
 MAX_CAPACITY_CARD_ROWS: Final = 2
 MAX_CAPACITY_HISTORY_SUMMARIES: Final = 3
 MAX_CAPACITY_PRESENTATION_TEXT: Final = 256
@@ -214,6 +227,12 @@ class CapacityLaneDetailModel:
     refusal_text: str | None
     binds: bool
     stale: bool
+    # Why the NUMBER is missing, as opposed to `refusal_text`, which says why
+    # the number may not drive an effect. A surface that shows the ledger
+    # needs this one; a surface that fires an alert needs the other. They
+    # were one field, and the binding refusal then printed itself next to
+    # percentages that were rendering perfectly well.
+    presentation_refusal_text: str | None = None
 
     def __post_init__(self) -> None:
         text = (
@@ -228,6 +247,10 @@ class CapacityLaneDetailModel:
         if not (
             all(_bounded_text(value) for value in text)
             and (self.refusal_text is None or _bounded_text(self.refusal_text))
+            and (
+                self.presentation_refusal_text is None
+                or _bounded_text(self.presentation_refusal_text)
+            )
             and type(self.binds) is bool
             and type(self.stale) is bool
         ):
@@ -669,6 +692,18 @@ _REFUSAL_TEXT: Final = {
     "source_partial": "Source observation is partial",
     "source_failed": "Source refresh failed",
     "source_stale": "Source observation is stale",
+    # The BINDING refusals. Every one of these was missing, so a lane that
+    # was merely unbindable -- which is every lane in a build with no
+    # `CapacityAccountBinding` -- fell through to "Capacity is unavailable"
+    # and printed that sentence next to a live percentage.
+    "account_binding_required": "Not tied to a known account yet",
+    "source_binding_mismatch": "Bound to a different source",
+    "pool_binding_mismatch": "Bound to a different pool",
+    "account_binding_mismatch": "Bound to a different account",
+    "auth_mode_binding_mismatch": "Signed in a different way",
+    "binding_clock_uncertain": "Account binding time is uncertain",
+    "binding_stale": "Account binding is out of date",
+    "capacity_not_observable": "This limit cannot be observed",
 }
 
 
@@ -679,6 +714,7 @@ def _lane_detail(
     now: float,
 ) -> CapacityLaneDetailModel:
     refusal = authority.refusal_code
+    presentation_refusal = authority.presentation_refusal
     return CapacityLaneDetailModel(
         provider=_provider_name(authority.provider_name),
         semantic_name=_safe_semantic_name(authority),
@@ -690,6 +726,11 @@ def _lane_detail(
         refusal_text=(None if refusal is None else _REFUSAL_TEXT.get(refusal, "Capacity is unavailable")),
         binds=authority.lane.key in binding_keys,
         stale=authority.freshness in _FALLBACK_STATES,
+        presentation_refusal_text=(
+            None
+            if presentation_refusal is None
+            else _REFUSAL_TEXT.get(presentation_refusal, "Capacity is unavailable")
+        ),
     )
 
 

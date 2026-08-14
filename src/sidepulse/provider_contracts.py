@@ -234,6 +234,10 @@ _FIRST_PARTY_ADAPTERS = {
     ProviderIdentifier("hermes"): frozenset({AdapterIdentifier("hooks")}),
     ProviderIdentifier("openclaw"): frozenset({AdapterIdentifier("hooks")}),
     ProviderIdentifier("opencode"): frozenset({AdapterIdentifier("hooks")}),
+    # hooks only. Antigravity's subscription ceiling is a Google plan quota
+    # with no local file to read, and it stays represented by the link-only
+    # google-antigravity policy rather than by a quota adapter here.
+    ProviderIdentifier("antigravity"): frozenset({AdapterIdentifier("hooks")}),
 }
 
 _CAPACITY_CAPABILITY_IDENTIFIERS = frozenset(

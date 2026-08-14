@@ -34,6 +34,11 @@ from .private_io import (
     unlink_private_file_if_unchanged,
 )
 from .providers import (
+    ANTIGRAVITY_CANONICAL_EVENTS,
+    ANTIGRAVITY_ENVELOPE_KEY,
+    ANTIGRAVITY_EVENTS,
+    ANTIGRAVITY_GROUPED_EVENTS,
+    ANTIGRAVITY_HOOK_NAME,
     CLAUDE_EVENTS,
     CODEX_EVENTS,
     CURSOR_EVENTS,
@@ -41,6 +46,7 @@ from .providers import (
     GROK_EVENTS,
     HERMES_EVENTS,
     OPENCLAW_HOOK_NAME,
+    default_antigravity_config_path,
     default_cursor_config_path,
     default_devin_config_path,
     default_grok_hook_config_path,
@@ -1788,6 +1794,171 @@ def uninstall_opencode_plugin(
     return InstallResult("opencode", plugin, target_log, True, None, dry_run)
 
 
+# Antigravity documents its hook loop as synchronous and blocking, so this is
+# a ceiling on how long a wedged filesystem may stall the user's agent. Ours
+# only appends one JSON line.
+ANTIGRAVITY_HOOK_TIMEOUT_SECONDS = 10
+
+
+def antigravity_hook_command(
+    canonical_event: str,
+    log_path: Path,
+    python_executable: str | None = None,
+) -> str:
+    """The shell command registered for one Antigravity hooks.json event.
+
+    Three things this command does that a bare hook invocation cannot, each
+    forced by Antigravity's own contract:
+
+    1. It stamps the canonical event name on. Antigravity's payload says which
+       conversation and which step, but never which hook fired, so the name has
+       to come from the registration site -- the same job the OpenClaw handler
+       and the OpenCode plugin do for their gateways.
+    2. It sends SidePulse's own output to /dev/null and prints `{}` itself.
+       Antigravity feeds a command hook's stdout back into the agent, and every
+       event we register documents `{}` (or an absent decision) as the no-op
+       result. Without this, SidePulse could put text into a user's session.
+    3. It always exits 0. A hook error is reported to the agent, so a broken
+       status bar must not become the agent's problem.
+
+    `-m sidepulse.hook_entry`, not a baked path into site-packages: the path
+    form stops existing the moment the package is moved, symlinked or installed
+    editable, while `import sidepulse` keeps working -- which is how every
+    registered hook once died at once.
+    """
+    if canonical_event not in ANTIGRAVITY_CANONICAL_EVENTS.values():
+        raise ValueError(f"Unsupported Antigravity hook event: {canonical_event}")
+    forward = " ".join(
+        shlex.quote(argument)
+        for argument in hook_command_arguments("antigravity", log_path, python_executable)
+    )
+    envelope = (
+        f"{{{json.dumps('hook_event_name')}:{json.dumps(canonical_event)},"
+        f"{json.dumps(ANTIGRAVITY_ENVELOPE_KEY)}:%s}}"
+    )
+    # `${payload:-null}` keeps the envelope valid JSON even when Antigravity
+    # hands the hook nothing at all; the payload is printf's ARGUMENT, never
+    # its format, so it cannot be read as format directives.
+    return (
+        f"payload=\"$(cat)\"; printf {shlex.quote(envelope)} \"${{payload:-null}}\""
+        f" | {forward} >/dev/null 2>&1; printf '{{}}'"
+    )
+
+
+def _antigravity_handler(command: str) -> dict[str, Any]:
+    return {
+        "type": "command",
+        "command": command,
+        "timeout": ANTIGRAVITY_HOOK_TIMEOUT_SECONDS,
+    }
+
+
+def _antigravity_entry(
+    target_log: Path,
+    python_executable: str | None,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {"enabled": True}
+    for event_name in ANTIGRAVITY_EVENTS:
+        handler = _antigravity_handler(
+            antigravity_hook_command(
+                ANTIGRAVITY_CANONICAL_EVENTS[event_name],
+                target_log,
+                python_executable,
+            )
+        )
+        entry[event_name] = (
+            [{"matcher": "*", "hooks": [handler]}]
+            if event_name in ANTIGRAVITY_GROUPED_EVENTS
+            else [handler]
+        )
+    return entry
+
+
+def _antigravity_entry_is_ours(entry: Any) -> bool:
+    """True only when every command under our named hook is SidePulse's own."""
+    if not isinstance(entry, dict):
+        return False
+    commands: list[str] = []
+    for event_name, entries in entry.items():
+        if event_name == "enabled" or not isinstance(entries, list):
+            continue
+        for candidate in entries:
+            if not isinstance(candidate, dict):
+                return False
+            grouped = candidate.get("hooks")
+            handlers = grouped if isinstance(grouped, list) else [candidate]
+            for handler in handlers:
+                if not isinstance(handler, dict):
+                    return False
+                command = handler.get("command")
+                if not isinstance(command, str):
+                    return False
+                commands.append(command)
+    return bool(commands) and all(
+        is_sidepulse_hook_command(command, "antigravity") for command in commands
+    )
+
+
+def install_antigravity_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+    python_executable: str | None = None,
+) -> InstallResult:
+    """Claim one named hook in ~/.gemini/config/hooks.json.
+
+    hooks.json is keyed by hook NAME rather than by event, and it is a shared
+    user-level file: other tools' named hooks, and any key we do not own, are
+    left byte-identical.
+    """
+    config = config_path or default_antigravity_config_path()
+    target_log = (log_path or detect_log_path("antigravity")).expanduser()
+    config_leaf = _validated_optional_config(config, dry_run=dry_run)
+    data = _strict_json_object(_decode_config(config_leaf), path=config)
+
+    original = json.dumps(data, sort_keys=True)
+    existing = data.get(ANTIGRAVITY_HOOK_NAME)
+    if existing is not None and not _antigravity_entry_is_ours(existing):
+        raise OSError(f"refusing to replace unowned Antigravity hook: {config}")
+    data[ANTIGRAVITY_HOOK_NAME] = _antigravity_entry(target_log, python_executable)
+
+    changed = json.dumps(data, sort_keys=True) != original
+    backup = None
+    if changed and not dry_run:
+        backup = _transactional_provider_publish(
+            config_leaf=config_leaf,
+            target_log=target_log,
+            writes={config: json.dumps(data, indent=2, sort_keys=False) + "\n"},
+            backup_config=True,
+        )
+
+    return InstallResult("antigravity", config, target_log, changed, backup, dry_run)
+
+
+def uninstall_antigravity_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+) -> InstallResult:
+    config = config_path or default_antigravity_config_path()
+    target_log = (log_path or detect_log_path("antigravity")).expanduser()
+    data = read_json_config(config, tighten=not dry_run)
+
+    original = json.dumps(data, sort_keys=True)
+    entry = data.get(ANTIGRAVITY_HOOK_NAME)
+    if entry is not None and not _antigravity_entry_is_ours(entry):
+        raise OSError(f"refusing to remove unowned Antigravity hook: {config}")
+    data.pop(ANTIGRAVITY_HOOK_NAME, None)
+
+    changed = json.dumps(data, sort_keys=True) != original
+    backup = None
+    if changed and not dry_run:
+        backup = backup_file(config)
+        _private_config_write(config, json.dumps(data, indent=2, sort_keys=False) + "\n")
+
+    return InstallResult("antigravity", config, target_log, changed, backup, dry_run)
+
+
 def uninstall_codex_hooks(
     log_path: Path | None = None,
     config_path: Path | None = None,
@@ -1936,6 +2107,7 @@ INSTALLERS = {
     "hermes": install_hermes_hooks,
     "openclaw": install_openclaw_hooks,
     "opencode": install_opencode_plugin,
+    "antigravity": install_antigravity_hooks,
 }
 
 UNINSTALLERS = {
@@ -1947,6 +2119,7 @@ UNINSTALLERS = {
     "hermes": uninstall_hermes_hooks,
     "openclaw": uninstall_openclaw_hooks,
     "opencode": uninstall_opencode_plugin,
+    "antigravity": uninstall_antigravity_hooks,
 }
 
 

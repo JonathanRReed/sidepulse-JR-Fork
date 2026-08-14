@@ -241,7 +241,17 @@ class AgentMonitorTests(unittest.TestCase):
     def test_provider_registry_includes_devin_as_first_class_provider(self) -> None:
         self.assertEqual(
             HOOK_PROVIDERS,
-            ("codex", "claude", "devin", "grok", "cursor", "hermes", "openclaw", "opencode"),
+            (
+                "codex",
+                "claude",
+                "devin",
+                "grok",
+                "cursor",
+                "hermes",
+                "openclaw",
+                "opencode",
+                "antigravity",
+            ),
         )
         self.assertEqual(provider_spec("devin").label, "Devin")
         self.assertEqual(provider_spec("devin").config_kind, "devin-json")
@@ -3781,7 +3791,7 @@ for (const event of [
                 changed=True,
                 backup_path=None,
             )
-            for provider in ("cursor", "hermes", "openclaw", "opencode")
+            for provider in ("cursor", "hermes", "openclaw", "opencode", "antigravity")
         )
         with (
             patch.object(
@@ -3812,6 +3822,7 @@ for (const event of [
                 "hermes",
                 "openclaw",
                 "opencode",
+                "antigravity",
             ],
         )
         guard.assert_called_once_with(scope="auto", dry_run=False)
@@ -10269,8 +10280,18 @@ class TranscriptFallbackTests(unittest.TestCase):
 
 class SignalEngineTests(unittest.TestCase):
     def test_default_styles_render_the_pre_engine_programs_byte_for_byte(self) -> None:
-        # The migration to the Signal Engine must be INVISIBLE: the
+        # The migration to the Signal Engine had to be INVISIBLE: the
         # default styles reproduce the old bespoke programs exactly.
+        #
+        # One exception, taken deliberately in Wave 7. The notification
+        # blink kept its 170/130ms cadence but lost `cosine`, because a
+        # cosine blink is a triangle and a triangle is what `breathe`
+        # already is -- measured through the firmware, "blink" was a second
+        # name for "breathe" at another ratio. The DURATIONS are still the
+        # pre-engine ones; only the easing moved, and it moved to the shape
+        # the pattern is named after. The low-battery and calendar
+        # breathes below are untouched, which is what still makes this a
+        # migration test rather than a changelog.
         from sidepulse import signals
         from sidepulse.led_status import style_to_program
 
@@ -10287,7 +10308,7 @@ class SignalEngineTests(unittest.TestCase):
                 signals.DEFAULT_SIGNAL_STYLES[signals.SIGNAL_NOTIFICATION],
                 color="#34C759",
             ),
-            "\n".join(["#34C759 170ms cosine\noff 130ms cosine"] * 3),
+            "\n".join(["#34C759 170ms none\noff 130ms none"] * 3),
         )
 
     def test_every_pattern_stays_within_device_limits_at_every_extreme(self) -> None:
@@ -16719,7 +16740,13 @@ class ModernNotificationControllerTests(unittest.TestCase):
             NotificationAuthorizationState.AUTHORIZED,
         )
 
-    def test_led_behavior_pane_renders_not_determined_permission_state(self) -> None:
+    def test_messages_pane_renders_not_determined_permission_state(self) -> None:
+        """The macOS permission control lives in Messages, not Signals.
+
+        Notifications are WORDS, and the owner asked for the words to have
+        their own area; Signals keeps the lights. If this ever reads
+        "led_behavior" again, the two jobs have been merged back.
+        """
         from sidepulse.macos_notifications import NotificationAuthorizationState
 
         self.controller._notification_authorization_checked = True
@@ -16727,7 +16754,7 @@ class ModernNotificationControllerTests(unittest.TestCase):
             NotificationAuthorizationState.NOT_DETERMINED
         )
         self.controller.show_settings_window()
-        self.controller.ensure_settings_pane("led_behavior")
+        self.controller.ensure_settings_pane("notifications")
 
         label = self.controller.settings_fields["notification_authorization_status"]
         button = self.controller.settings_buttons["notification_permission"]
@@ -16745,7 +16772,7 @@ class ModernNotificationControllerTests(unittest.TestCase):
             NotificationAuthorizationState.UNAVAILABLE
         )
         self.controller.show_settings_window()
-        self.controller.ensure_settings_pane("led_behavior")
+        self.controller.ensure_settings_pane("notifications")
         self.controller.refresh_notification_authorization_controls()
         button = self.controller.settings_buttons["notification_permission"]
 
@@ -16912,13 +16939,41 @@ class ResilienceHardeningTests(unittest.TestCase):
             leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "LEDS.LED"]
             self.assertEqual(leftovers, [])
 
+    #: A program the firmware itself accepts. The version of these tests
+    #: that predates the animation model used "1:#FF0000; 1s", which the
+    #: REAL sdled.wasm rejects as a syntax error -- so "the burn wrote
+    #: nothing" proved nothing about the parser being gone. Anything that
+    #: stops this one is the gate under test.
+    VALID_BURN_PROGRAM = "#FF0000 1s pulse\noff 500ms cosine"
+
+    def _connected_device(self):
+        return self.status_bar.StatusBarDevice(
+            device_id="burn-test",
+            name="SidePulse Burn Test",
+            root=Path("/Volumes/SidePulseBurnTest"),
+            target=Path("/Volumes/SidePulseBurnTest/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+
     def test_burn_refuses_to_write_init_led_when_parser_is_gone(self) -> None:
         """The WIRING half of fail-closed: with the parser broken, the
-        burn path must write no INIT.LED at all (dropping strict=True
-        from applyStudioAsPowerUp_ would pass every other test)."""
+        burn path must write no INIT.LED at all (dropping the firmware
+        gate from applyStudioAsPowerUp_ would pass every other test).
+
+        A connected device is stubbed in ON PURPOSE: without one the burn
+        returns "no hardware" and an empty write list would be true for
+        entirely the wrong reason.
+        """
         isolate_controller(self)
+        from sidepulse import status_bar
+
+        self.status_bar = status_bar
         self.controller.studio_editor = SimpleNamespace(
-            string=lambda: "1:#FF0000; 1s"
+            string=lambda: self.VALID_BURN_PROGRAM
+        )
+        self.controller.status_bar_devices = MagicMock(
+            return_value=[self._connected_device()]
         )
         writes: list = []
         with (
@@ -16927,12 +16982,23 @@ class ResilienceHardeningTests(unittest.TestCase):
                 side_effect=RuntimeError("no JavaScriptCore"),
             ),
             patch(
-                "sidepulse.status_bar.write_led_program",
+                "sidepulse.device_writer.write_led_program",
                 side_effect=lambda *a, **k: writes.append((a, k)),
             ),
         ):
             self.controller.applyStudioAsPowerUp_(None)
         self.assertEqual(writes, [])
+        # And the same wiring DOES write when the parser is available --
+        # otherwise "wrote nothing" is just a broken burn button.
+        with patch(
+            "sidepulse.device_writer.write_led_program",
+            side_effect=lambda *a, **k: (
+                writes.append((a, k)) or Path("/Volumes/SidePulseBurnTest/INIT.LED")
+            ),
+        ):
+            self.controller.applyStudioAsPowerUp_(None)
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0][1]["file_name"], "INIT.LED")
 
     def test_burn_validation_fails_closed_when_parser_is_gone(self) -> None:
         isolate_controller(self)
@@ -16940,12 +17006,22 @@ class ResilienceHardeningTests(unittest.TestCase):
             "sidepulse.led_wasm.SdLedWasmController",
             side_effect=RuntimeError("no JavaScriptCore"),
         ):
-            self.assertIsNone(self.controller.validate_studio_program("1:#FF0000; 1s"))
-            strict = self.controller.validate_studio_program(
-                "1:#FF0000; 1s", strict=True
+            self.assertIsNone(
+                self.controller.validate_studio_program(self.VALID_BURN_PROGRAM)
             )
+            strict = self.controller.validate_studio_program(
+                self.VALID_BURN_PROGRAM, strict=True
+            )
+            # A missing parser is graceful. A program the MODEL can read
+            # and refuse is not: "0:off" is a firmware syntax error, and
+            # with the firmware unreachable the grammar checker is the
+            # only thing standing between it and a boot-time red strobe.
+            content = self.controller.validate_studio_program("0:off")
         self.assertIsNotNone(strict)
         self.assertIn("unverified", strict)
+        self.assertIsNotNone(content)
+        self.assertIn("step 1", content)
+        self.assertIn("#000000", content)
 
 
 class AlcoveFollowTests(unittest.TestCase):

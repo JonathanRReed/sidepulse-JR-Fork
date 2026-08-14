@@ -155,6 +155,51 @@ OPENCODE_EVENTS = (
     "SessionEnd",
 )
 
+# Antigravity's OWN hooks.json event keys -- the three we register, verbatim
+# from the lifecycle-hooks specification shipped inside its language_server
+# binary (the same binary that parses hooks.json). Its full documented set is
+# PreToolUse, PostToolUse, PreInvocation, PostInvocation and Stop; the two we
+# do not register are refused deliberately, not for want of evidence:
+#
+#   PreToolUse   -- its stdout contract makes `decision` REQUIRED, one of
+#                   allow/deny/ask/force_ask, with no documented "no opinion"
+#                   value. Every value SidePulse could emit would override the
+#                   user's own permission policy ("allow" auto-approves every
+#                   tool call). A status bar must never decide what an agent is
+#                   allowed to do, so this event stays uninstalled.
+#   PostInvocation -- yields the identical lifecycle fact as PreInvocation (the
+#                   work is still ACTIVE) while adding a second hook to a loop
+#                   Antigravity documents as synchronous and blocking. Paying
+#                   the user's agent latency twice for one fact is not a trade
+#                   the ledger needs.
+ANTIGRAVITY_EVENTS = (
+    "PreInvocation",
+    "PostToolUse",
+    "Stop",
+)
+
+# Only PreToolUse/PostToolUse take Antigravity's grouped {matcher, hooks} shape;
+# the rest are flat handler lists. Registering the wrong shape is silently
+# accepted config that never fires.
+ANTIGRAVITY_GROUPED_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
+
+# Antigravity's hook payload carries NO event name -- its stdin object holds
+# conversationId, workspacePaths, transcriptPath, artifactDirectoryPath,
+# modelName and the per-event args, and nothing that says which hook fired. The
+# installed hook command therefore wraps each payload in a canonical envelope
+# before forwarding, exactly as the OpenClaw handler and the OpenCode plugin
+# translate their gateways' native events. These are the only names that
+# envelope ever emits; Stop and PostToolUse are refined into their failure
+# variants at the adapter boundary, from terminationReason and error.
+ANTIGRAVITY_CANONICAL_EVENTS = {
+    "PreInvocation": "UserPromptSubmit",
+    "PostToolUse": "PostToolUse",
+    "Stop": "Stop",
+}
+
+ANTIGRAVITY_HOOK_NAME = "sidepulse-status"
+ANTIGRAVITY_ENVELOPE_KEY = "antigravity"
+
 OPENCODE_PLUGIN_MARKER = "sidepulse-opencode-plugin-v1"
 _OPENCODE_PLUGIN_MAX_SOURCE_BYTES = 32 * 1024
 
@@ -789,6 +834,77 @@ def detect_openclaw_config(home: Path | None = None) -> ProviderConfig:
     )
 
 
+def default_antigravity_config_path(home: Path | None = None) -> Path:
+    """Antigravity's GLOBAL customization root is ~/.gemini/config/.
+
+    Not ~/.antigravity/ (that is only the editor's extension directory) and
+    not the app bundle: the shipped documentation names `~/.gemini/config/`
+    as the global customization root, and the same tree already holds the
+    plugins/ directory that root is defined to contain.
+    """
+    base = home or Path.home()
+    return base / ".gemini" / "config" / "hooks.json"
+
+
+def _antigravity_handler_commands(entries: object) -> list[str]:
+    """Pull SidePulse's own commands out of either hooks.json handler shape."""
+    commands: list[str] = []
+    if not isinstance(entries, list):
+        return commands
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        # Grouped shape: {"matcher": ..., "hooks": [handler, ...]}.
+        grouped = entry.get("hooks")
+        handlers = grouped if isinstance(grouped, list) else [entry]
+        for handler in handlers:
+            if not isinstance(handler, dict):
+                continue
+            command = handler.get("command")
+            if isinstance(command, str) and is_sidepulse_hook_command(command, "antigravity"):
+                commands.append(command)
+    return commands
+
+
+def detect_antigravity_config(home: Path | None = None) -> ProviderConfig:
+    """hooks.json is keyed by hook NAME, not by event.
+
+    Every other provider's config nests events under a "hooks" object; here
+    the top level is a map of named hooks, each of which then holds its own
+    event keys. It is a shared user-level file -- other tools' named hooks
+    and unknown keys must survive untouched -- so only SidePulse's own named
+    entry, and only its own commands inside it, count toward installed-ness.
+    """
+    config_path = default_antigravity_config_path(home)
+    if not config_path.exists():
+        return ProviderConfig("antigravity", config_path, False, False, (), ())
+    try:
+        data = json.loads(config_path.read_text())
+    except Exception:
+        return ProviderConfig("antigravity", config_path, True, False, (), ())
+
+    entry = data.get(ANTIGRAVITY_HOOK_NAME) if isinstance(data, dict) else None
+    hook_events: list[str] = []
+    paths: list[Path] = []
+    if isinstance(entry, dict) and entry.get("enabled", True) is not False:
+        for event_name in ANTIGRAVITY_EVENTS:
+            event_paths: list[Path] = []
+            for command in _antigravity_handler_commands(entry.get(event_name)):
+                event_paths.extend(extract_log_paths_from_command(command))
+            if event_paths:
+                hook_events.append(event_name)
+                paths.extend(event_paths)
+
+    return ProviderConfig(
+        "antigravity",
+        config_path,
+        True,
+        bool(hook_events),
+        tuple(sorted(set(hook_events))),
+        _dedupe_paths(paths),
+    )
+
+
 def default_opencode_plugin_path(home: Path | None = None) -> Path:
     base = home or Path.home()
     return base / ".config" / "opencode" / "plugins" / "sidepulse.js"
@@ -834,6 +950,14 @@ PROVIDER_SPECS = (
     ),
     ProviderSpec(
         "opencode", "OpenCode", OPENCODE_EVENTS, "opencode-plugin", default_opencode_plugin_path, detect_opencode_plugin
+    ),
+    ProviderSpec(
+        "antigravity",
+        "Antigravity",
+        ANTIGRAVITY_EVENTS,
+        "antigravity-json",
+        default_antigravity_config_path,
+        detect_antigravity_config,
     ),
 )
 PROVIDER_REGISTRY = {spec.provider: spec for spec in PROVIDER_SPECS}
@@ -1007,6 +1131,23 @@ _PROVIDER_SOURCE_REGISTRATIONS = (
             ),
         ),
     ),
+    # live_agent_events only. NO actionable_requests: the one Antigravity
+    # event that carries a user-facing decision is PreToolUse, which SidePulse
+    # refuses to install (see ANTIGRAVITY_EVENTS), so nothing in this feed can
+    # ever name a live request. Declaring the capability anyway would let the
+    # request lane look supported and permanently empty.
+    ProviderSourceRegistration(
+        ProviderIdentifier("antigravity"),
+        AdapterIdentifier("hooks"),
+        SourceInstanceIdentifier("global"),
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("live_agent_events"),
+                (SchemaVersion(1, 0), SchemaVersion(1, 1)),
+            ),
+        ),
+    ),
 )
 
 
@@ -1071,11 +1212,14 @@ def sources_with_capability(
         and source.observation_invocation_allowed
     )
 
-# The CANONICAL event vocabulary -- what everything normalizes TO. Cursor
-# and Hermes register their own native names in their configs (their spec
-# .events tuples), but those must never enter this set: canonical_event_name
-# returns members of this set verbatim, so a native name here would leak
-# through ingest un-normalized and break mode mapping downstream.
+# The CANONICAL event vocabulary -- what everything normalizes TO. Cursor,
+# Hermes and Antigravity register their own native names in their configs
+# (their spec .events tuples), but those must never enter this set:
+# canonical_event_name returns members of this set verbatim, so a native name
+# here would leak through ingest un-normalized and break mode mapping
+# downstream. ANTIGRAVITY_EVENTS is absent for exactly that reason -- its
+# PreInvocation is a config key, never an ingested event name, and a hand
+# written hook that forwarded the literal name is dropped rather than guessed.
 KNOWN_EVENTS = tuple(
     dict.fromkeys(
         event

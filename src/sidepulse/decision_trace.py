@@ -25,6 +25,11 @@ from datetime import datetime
 from enum import Enum
 from typing import Final
 
+from .capacity_view import (
+    CapacityDetailModel,
+    CapacityLaneDetailModel,
+    CapacityProviderDetailModel,
+)
 from .intake_health import (
     IntakeReport,
     format_age_ago,
@@ -276,6 +281,110 @@ def decision_trace_text(trace: DecisionTrace) -> str:
     lines.append("")
     lines.append(_CONTENT_PLEDGE)
     return "\n".join(lines)
+
+
+CAPACITY_SECTION_TITLE: Final = "WHY THE CAPACITY CARD SAYS THAT"
+_CAPACITY_EMPTY: Final = "  No capacity reading has been authorised yet."
+
+
+def _capacity_lane_lines(row: CapacityLaneDetailModel) -> tuple[str, ...]:
+    """One lane as three lines: the number, when, and whether it counts.
+
+    The refusal is the reason this section exists. The card can only say
+    "2 windows unavailable"; the authority layer computed a specific
+    refusal for each one and `capacity_view` already owns the sentence.
+
+    `presentation_refusal_text`, never `refusal_text`. The second says why
+    a reading may not fire an alert, which in a build with no account
+    binding is true of EVERY lane -- printing it per row put "Not tied to a
+    known account yet" under a percentage that was on screen and correct.
+    Whether an effect may fire is stated once, below.
+    """
+    lines = [_dotted(f"  {row.semantic_name}", row.remaining_text)]
+    second = [row.reset_text, row.freshness_text]
+    if row.stale:
+        second.append("not fresh")
+    lines.append(f"      {' · '.join(part for part in second if part)}")
+    third = [row.applicability_text, row.source_health_text]
+    if row.presentation_refusal_text:
+        third.append(row.presentation_refusal_text)
+    lines.append(f"      {' · '.join(part for part in third if part)}")
+    return tuple(lines)
+
+
+def _capacity_provider_lines(provider: CapacityProviderDetailModel) -> tuple[str, ...]:
+    lines = [f"  {provider.provider}"]
+    for group in provider.groups:
+        lines.append(f"    {group.label}")
+        for row in group.rows:
+            lines.extend(_capacity_lane_lines(row))
+    return tuple(lines)
+
+
+def capacity_detail_text(models) -> str:
+    """Render the capacity plane's own refusals in the Why panel's voice.
+
+    Numbers only. `capacity_view` builds every string here from canonical,
+    authority-gated facts, so nothing an agent said and no provider payload
+    can reach this text -- the same pledge the rest of the panel makes.
+    """
+    if type(models) is not tuple or not all(
+        type(model) is CapacityDetailModel for model in models
+    ):
+        raise ValueError("invalid capacity detail models")
+    lines: list[str] = [CAPACITY_SECTION_TITLE, ""]
+    if not models:
+        lines.append(_CAPACITY_EMPTY)
+        return "\n".join(lines)
+    for model in models:
+        if not model.providers:
+            lines.append(_CAPACITY_EMPTY)
+        for provider in model.providers:
+            lines.extend(_capacity_provider_lines(provider))
+        if model.source_health:
+            lines.append("")
+            lines.append("  Sources")
+            for health in model.source_health:
+                lines.append(_dotted(f"  {health.provider}", health.status_text))
+                detail = [health.last_success_text, health.last_attempt_text]
+                if health.cooldown_text:
+                    detail.append(health.cooldown_text)
+                if health.has_last_known_good:
+                    detail.append("holding a last-known-good reading")
+                lines.append(f"      {' · '.join(part for part in detail if part)}")
+        lines.append("")
+        # Said once for the whole card, not per row: "may this number drive
+        # an alert, an LED or a forecast" has exactly one answer in a build
+        # with no account binding, and repeating it thirteen times is how a
+        # panel stops being read.
+        rows = tuple(
+            row
+            for provider in model.providers
+            for group in provider.groups
+            for row in group.rows
+        )
+        if rows and not any(row.binds for row in rows):
+            binding_reasons = sorted(
+                {row.refusal_text for row in rows if row.refusal_text}
+            )
+            reason = binding_reasons[0] if len(binding_reasons) == 1 else None
+            lines.append(
+                _dotted(
+                    "Drives alerts",
+                    f"no — {reason.lower()}" if reason else "no",
+                )
+            )
+        forecast = model.forecast
+        lines.append(_dotted("Forecast", forecast.status_text))
+        if forecast.refusal_text:
+            lines.append(f"      {forecast.refusal_text}")
+        if not model.history_enabled:
+            lines.append(_dotted("Capacity history", "off"))
+        else:
+            for row in model.history:
+                lines.append(_dotted(f"Last {row.label}", row.summary_text))
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def _heard_value(item) -> str:

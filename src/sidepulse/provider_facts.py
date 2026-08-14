@@ -56,6 +56,7 @@ _PRODUCT_PROVIDER_LABELS: Final = {
     "hermes": "Hermes",
     "openclaw": "OpenClaw",
     "opencode": "OpenCode",
+    "antigravity": "Antigravity",
 }
 _PRIVATE_IDENTIFIER_COMPONENT: Final = re.compile(
     r"(?:^|[._~:\-])"

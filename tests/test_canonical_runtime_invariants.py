@@ -32,7 +32,6 @@ from sidepulse.delivery_ledger import (
     DeliveryReceipt,
     record_delivery,
 )
-from sidepulse.delivery_ledger_store import load_delivery_ledger, save_delivery_ledger
 from sidepulse.hook import write_normalized_hook_record
 from sidepulse.ipc import (
     MAX_HINT_BYTES,
@@ -62,7 +61,6 @@ from sidepulse.provider_facts import (
     ObservationAuthority,
     ProviderFactBatch,
     ProviderFactValidationError,
-    ProviderQuotaWindow,
     ProviderRequestFact,
     ProviderRequestState,
     ProviderWatermark,
@@ -76,16 +74,6 @@ from sidepulse.provider_facts import (
     WorkIdentifier,
     WorkKey,
     WorkLifecycle,
-)
-from sidepulse.provider_runtime import (
-    CooldownKey,
-    OpaqueScopeIdentifier,
-    ProviderInvocation,
-    ProviderOutcomeKind,
-    ProviderResult,
-    ProviderRuntime,
-    ProviderRuntimeDiagnostic,
-    RefreshTrigger,
 )
 from sidepulse.providers import negotiated_provider_sources
 from sidepulse.reset_policy import plan_reset_boundary_refresh
@@ -130,7 +118,6 @@ class _StepReceipt:
     restarted: bool
     event_keys: tuple[str, ...] = ()
     source_observations: tuple[str, ...] = ()
-    runtime_publications: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +238,6 @@ def _receipt(
     invalidations: frozenset[InvalidationDomain] = frozenset(),
     restarted: bool = False,
     source_observations: tuple[str, ...] = (),
-    runtime_publications: tuple[str, ...] = (),
 ) -> _StepReceipt:
     state = monitor.operator_state
 
@@ -295,7 +281,6 @@ def _receipt(
         restarted=restarted,
         event_keys=tuple(event_key(event) for event in events),
         source_observations=source_observations,
-        runtime_publications=runtime_publications,
     )
 
 
@@ -310,30 +295,9 @@ def _ingest(
     return result
 
 
-def _poll_runtime(
-    runtime: ProviderRuntime,
-    *,
-    wanted: int,
-    monotonic_now: float | None = None,
-) -> tuple[ProviderResult, ...]:
-    results: list[ProviderResult] = []
-    deadline = time.monotonic() + 2.0
-    while len(results) < wanted and time.monotonic() < deadline:
-        results.extend(
-            runtime.poll(
-                monotonic_now=(
-                    time.monotonic() if monotonic_now is None else monotonic_now
-                )
-            )
-        )
-    assert len(results) == wanted
-    return tuple(results)
-
-
 def _run_composed_fixture(root: Path) -> tuple[_StepReceipt, ...]:
     """Run the exact Task 9 sequence through the canonical source runtime."""
     state_path = root / "state" / "latest.json"
-    ledger_path = root / "state" / "delivery-ledger.json"
     codex_work = _work(_CODEX, "work:codex")
     claude_work = _work(_CLAUDE, "work:claude")
     claude_request = _request(claude_work)
@@ -559,16 +523,18 @@ def _run_composed_fixture(root: Path) -> tuple[_StepReceipt, ...]:
     )
 
     monitor.write_latest_state()
-    save_delivery_ledger(ledger_path, ledger)
     monitor = LiveAgentMonitor(
         latest_state_path=state_path,
         clock_sampler=lambda: _clock(4.0, 110.0),
     )
-    ledger_restore = load_delivery_ledger(ledger_path)
+    # The delivery ledger is carried across the restart in memory. It used to
+    # round-trip through `delivery_ledger_store`, which no caller in the app
+    # ever reached: nothing constructs a `DeliveryLedger` outside this file,
+    # because `plan_deliveries` -- the only consumer -- is never invoked.
+    ledger_restore = ledger
     restart_snapshot = monitor.snapshot()
     assert restart_snapshot.operator_events == ()
-    assert ledger_restore.ledger == ledger
-    receipts.append(_receipt(9, monitor, ledger=ledger_restore.ledger, restarted=True))
+    receipts.append(_receipt(9, monitor, ledger=ledger_restore, restarted=True))
 
     step10_events = []
     step10_invalidations: set[InvalidationDomain] = set()
@@ -664,122 +630,12 @@ def _run_composed_fixture(root: Path) -> tuple[_StepReceipt, ...]:
             10,
             monitor,
             events=tuple(step10_events),
-            ledger=ledger_restore.ledger,
+            ledger=ledger_restore,
             invalidations=frozenset(step10_invalidations),
         )
     )
 
     quota_source = SourceKey("codex", "quota", "local", "remote_quota_windows")
-    transcript_source = SourceKey("codex", "transcripts", "local", "transcript_usage")
-    sibling_quota = SourceKey(
-        "claude", "quota", "experimental-remote", "remote_quota_windows"
-    )
-    quota_scope = OpaqueScopeIdentifier("scope:default")
-    calls: dict[SourceKey, int] = {}
-
-    def adapter(invocation: ProviderInvocation, _cancel) -> ProviderResult:
-        calls[invocation.source_key] = calls.get(invocation.source_key, 0) + 1
-        if invocation.source_key == quota_source and calls[invocation.source_key] == 1:
-            return ProviderResult(
-                invocation,
-                ProviderOutcomeKind.COOLDOWN,
-                None,
-                (),
-                CooldownKey(quota_source, quota_scope),
-                time.monotonic() + 0.05,
-                ProviderRuntimeDiagnostic("rate_limited"),
-            )
-        if invocation.source_key == sibling_quota:
-            lane = QuotaLaneKey(
-                sibling_quota,
-                "scope:default",
-                "shared",
-                None,
-                "five-hour",
-                QuotaEffect.ALL_WORKLOADS,
-            )
-            window = ProviderQuotaWindow(
-                lane,
-                20.0,
-                300,
-                _BASE + 3_600.0,
-                _watermark(sibling_quota, 1, epoch_offset=11.0),
-                SourceHealth.HEALTHY,
-                False,
-            )
-            return ProviderResult(
-                invocation,
-                ProviderOutcomeKind.SUCCESS,
-                None,
-                (window,),
-                None,
-                None,
-                None,
-            )
-        return ProviderResult(
-            invocation,
-            ProviderOutcomeKind.SUCCESS,
-            _batch(invocation.source_key, calls[invocation.source_key], epoch_offset=11.0),
-            (),
-            None,
-            None,
-            None,
-        )
-
-    runtime = ProviderRuntime(
-        {
-            quota_source: adapter,
-            transcript_source: adapter,
-            sibling_quota: adapter,
-        }
-    )
-    initial_invocations = (
-        ProviderInvocation(quota_source, 1, 1.0, RefreshTrigger.AUTOMATIC, quota_scope),
-        ProviderInvocation(transcript_source, 1, 1.0, RefreshTrigger.AUTOMATIC),
-        ProviderInvocation(sibling_quota, 1, 1.0, RefreshTrigger.AUTOMATIC),
-    )
-    assert runtime.request(initial_invocations) == initial_invocations
-    first_results = _poll_runtime(runtime, wanted=3)
-    manual = ProviderInvocation(quota_source, 2, 1.0, RefreshTrigger.MANUAL, quota_scope)
-    assert runtime.request((manual,)) == ()
-    assert runtime.state_for(quota_source).queued_after_cooldown
-    queued_results = _poll_runtime(
-        runtime,
-        wanted=1,
-        monotonic_now=time.monotonic() + 1.0,
-    )
-    assert len(queued_results) == 1
-    queued_result = queued_results[0]
-    assert queued_result.invocation.source_key == quota_source
-    assert queued_result.invocation.generation == 2
-    assert queued_result.outcome is ProviderOutcomeKind.SUCCESS
-    assert not runtime.state_for(quota_source).queued_after_cooldown
-    assert calls[transcript_source] == calls[sibling_quota] == 1
-    runtime.stop(deadline_seconds=1.0)
-    receipts.append(
-        _receipt(
-            11,
-            monitor,
-            ledger=ledger_restore.ledger,
-            health_extra=tuple(
-                sorted(f"runtime:{result.outcome.value}" for result in first_results)
-            ),
-            refresh_invocations=(
-                *(
-                    f"{item.source_key.provider_id}:{item.source_key.capability_id}"
-                    for item in initial_invocations
-                ),
-                "codex:manual-queued",
-            ),
-            runtime_publications=(
-                f"{queued_result.invocation.source_key.provider_id}:"
-                f"{queued_result.invocation.source_key.capability_id}:"
-                f"generation-{queued_result.invocation.generation}:"
-                f"{queued_result.outcome.value}:not-queued",
-            ),
-        )
-    )
-
     lane = QuotaLaneKey(
         quota_source,
         "scope:default",
@@ -816,9 +672,9 @@ def _run_composed_fixture(root: Path) -> tuple[_StepReceipt, ...]:
     assert duplicate.lane_keys == ()
     receipts.append(
         _receipt(
-            12,
+            11,
             monitor,
-            ledger=ledger_restore.ledger,
+            ledger=ledger_restore,
             reset_lanes=tuple(item.opaque_scope for item in reset.lane_keys),
         )
     )
@@ -906,25 +762,6 @@ def _privacy_surfaces(root: Path) -> tuple[object, ...]:
             None,
         ),
     )
-    ledger_path = root / "state" / "privacy-ledger.json"
-    save_delivery_ledger(ledger_path, ledger)
-    ledger_restore = load_delivery_ledger(ledger_path)
-
-    invocation = ProviderInvocation(
-        _CODEX,
-        1,
-        1.0,
-        RefreshTrigger.AUTOMATIC,
-    )
-    fake_adapter_result = ProviderResult(
-        invocation,
-        ProviderOutcomeKind.SUCCESS,
-        batch,
-        (),
-        None,
-        None,
-        None,
-    )
     authority_evidence, authority_persistence = _authority_privacy_evidence(
         root,
         source,
@@ -939,11 +776,8 @@ def _privacy_surfaces(root: Path) -> tuple[object, ...]:
         snapshot,
         restored,
         ledger,
-        ledger_restore,
-        fake_adapter_result,
         normalized_path.read_text(),
         state_path.read_text(),
-        ledger_path.read_text(),
         authority_evidence,
         authority_persistence,
         wire_evidence,
@@ -1313,7 +1147,7 @@ def _run_scale_fixture() -> _ScaleReceipt:
     )
 
 
-def test_exact_twelve_step_canonical_runtime_sequence(tmp_path: Path) -> None:
+def test_exact_eleven_step_canonical_runtime_sequence(tmp_path: Path) -> None:
     """A broken cross-module contract must change an exact numbered receipt."""
     receipts = _run_composed_fixture(tmp_path)
 
@@ -1464,27 +1298,6 @@ def test_exact_twelve_step_canonical_runtime_sequence(tmp_path: Path) -> None:
         ),
         _StepReceipt(
             11,
-            3,
-            ("resolved",),
-            (),
-            (),
-            quiet_receipts,
-            (*healthy, "runtime:cooldown", "runtime:success"),
-            (
-                "codex:remote_quota_windows",
-                "codex:transcript_usage",
-                "claude:remote_quota_windows",
-                "codex:manual-queued",
-            ),
-            (),
-            (),
-            False,
-            (),
-            (),
-            ("codex:remote_quota_windows:generation-2:success:not-queued",),
-        ),
-        _StepReceipt(
-            12,
             3,
             ("resolved",),
             (),

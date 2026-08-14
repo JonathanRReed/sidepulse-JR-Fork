@@ -123,6 +123,23 @@ from .agent_browser_window import (
     AgentBrowserWindowController,
     build_agent_root_items,
 )
+from .animation import (
+    AnimationValidationError,
+    burn_power_up_animation,
+    describe_problems,
+    errors_only,
+    parse_animation,
+    problems_for_program,
+    warnings_only,
+)
+from .animation_store import (
+    AnimationLibrary,
+    AnimationLibraryError,
+    LibraryHealth,
+    default_animation_library_path,
+    load_animation_library,
+    save_animation_library,
+)
 from .app_bundle import default_app_bundle_path, running_inside_bundle
 from .attention import AttentionProjection, LifecycleMode, project_attention
 from .audit import (
@@ -140,7 +157,25 @@ from .battery import (
     program_for_battery,
     read_battery_snapshot,
 )
-from .capacity_authority import FALLBACK_OBSERVATION_STATES, select_binding_lanes
+from .capacity_authority import (
+    FALLBACK_OBSERVATION_STATES,
+    CapacityProjection,
+    select_binding_lanes,
+)
+from .capacity_history import (
+    CAPACITY_HISTORY_SCHEMA_VERSION,
+    SUPPORTED_RETENTION_DAYS as SUPPORTED_HISTORY_RETENTION_DAYS,
+)
+from .capacity_history import (
+    CapacityHistorySample,
+    HistoryContinuity,
+    HistoryInterval,
+    HistoryValidationError,
+)
+from .capacity_history_store import (
+    CapacityHistoryStore,
+    default_capacity_history_path,
+)
 from .capacity_refresh import (
     CapacityRefreshCoordinator,
     RefreshCause,
@@ -157,9 +192,16 @@ from .capacity_types import (
     ExecutionContext,
     ObservationState,
     QuotaLaneObservation,
+    SampleDisposition,
     SourceHealthKind,
     SourceKey,
 )
+from .capacity_view import (
+    CapacityHistoryPresentation,
+    CapacityHistorySummaryInput,
+    build_capacity_detail,
+)
+from .cloud_ingest import CloudIngestConfig, start_cloud_ingest
 from .collector import (
     CLAUDE_TRANSCRIPT_PROVIDER,
     CODEX_TRANSCRIPT_PROVIDER,
@@ -202,6 +244,17 @@ from .credentials import (
     KeychainConsentLedger,
     read_keychain_secret,
 )
+from .decision_trace import (
+    MENU_ITEM_TITLE as WHY_PANEL_MENU_TITLE,
+)
+from .decision_trace import (
+    PANEL_TITLE as WHY_PANEL_TITLE,
+)
+from .decision_trace import (
+    build_decision_trace,
+    capacity_detail_text,
+    decision_trace_text,
+)
 from .device_writer import (
     DEFAULT_FILE_NAME,
     MOUNT_ROOT,
@@ -214,16 +267,20 @@ from .device_writer import (
     validate_led_text,
     write_led_program,
 )
-from .decision_trace import (
-    MENU_ITEM_TITLE as WHY_PANEL_MENU_TITLE,
-    PANEL_TITLE as WHY_PANEL_TITLE,
-    build_decision_trace,
-    decision_trace_text,
-)
 from .freshness import bounded_age_seconds, is_recent
 from .install import (
     install_provider_hooks,
     uninstall_provider_hooks,
+)
+from .installed_agent_inventory import (
+    InstalledAgentInventoryResult,
+    default_inventory_roots,
+    execute_inventory_command,
+)
+from .installed_agents import (
+    SurfacePresence,
+    SurfaceSupportLevel,
+    installed_surface_registrations,
 )
 from .intake_health import (
     NOT_HEARING_LABEL,
@@ -237,16 +294,6 @@ from .intake_health import (
     last_heard_rows,
     last_heard_summary,
     probe_providers,
-)
-from .installed_agent_inventory import (
-    InstalledAgentInventoryResult,
-    default_inventory_roots,
-    execute_inventory_command,
-)
-from .installed_agents import (
-    SurfacePresence,
-    SurfaceSupportLevel,
-    installed_surface_registrations,
 )
 from .interruption_policy import (
     ActionTokenBinding,
@@ -265,9 +312,9 @@ from .ipc import (
 )
 from .keep_awake import KEEPALIVE_FILE_NAME, KeepAwakeController
 from .led_status import (
-    NEUTRAL_CHANNEL_GAINS,
     MAX_CHANNEL_GAIN,
     MIN_CHANNEL_GAIN,
+    NEUTRAL_CHANNEL_GAINS,
     AgentLedController,
     LedDisplayState,
     LedStatusWrite,
@@ -275,6 +322,7 @@ from .led_status import (
     apply_channel_gain_to_program,
     apply_resting_glow_to_program,
     brightness_percent,
+    burn_saved_animation_to_power_up,
     failure_signal_program,
     led_count_for_target,
     normalize_brightness,
@@ -405,6 +453,17 @@ from .refresh_policy import (
     mark_refresh_succeeded,
     plan_menu_open_refresh,
     retain_attempted_boundary_keys,
+)
+from .remote_peers import (
+    LedgerRow,
+    MergedLedger,
+    PeerRefreshResult,
+    collect_remote_ledgers,
+    default_remote_ledger_path,
+    interrupt_eligible_statuses,
+    local_machine_name,
+    merge_ledger,
+    publish_local_ledger,
 )
 from .render_policy import runtime_render_environment
 from .reset_policy import (
@@ -617,11 +676,17 @@ class AuthorisedCapacity:
     its number -- and that forgiveness was computed and then dropped on the
     floor, so a reading the layer had just called old rendered identically to
     one taken a second ago.
+
+    `projection` is the same discipline one rung further: the authority
+    decision for EVERY lane, kept instead of thrown away. `withheld` flattens
+    each refusal to a bare code for the log; the projection is what the
+    "Why Is It Doing That?" panel needs to say the refusal in a sentence.
     """
 
     lanes: tuple[QuotaLaneObservation, ...]
     withheld: tuple[tuple[str, str], ...]
     freshness: tuple[tuple[str, ObservationState], ...] = ()
+    projection: CapacityProjection | None = None
 
     def __iter__(self):
         return iter(self.lanes)
@@ -681,7 +746,12 @@ def authorised_capacity_lanes(snapshot, *, now: float) -> AuthorisedCapacity:
     freshness = tuple(
         (lane.semantic_name, decisions[lane.key].freshness) for lane in lanes
     )
-    return AuthorisedCapacity(lanes=lanes, withheld=withheld, freshness=freshness)
+    return AuthorisedCapacity(
+        lanes=lanes,
+        withheld=withheld,
+        freshness=freshness,
+        projection=projection,
+    )
 
 
 def _transcript_source_keys_by_provider():
@@ -1181,6 +1251,14 @@ CALENDAR_WATCH_SECONDS = 30.0
 CALENDAR_WATCH_RETRY_SECONDS = 300.0
 
 STATUS_BAR_REFRESH_SECONDS = 15.0
+# The second Mac's own, much slower cadence. A peer fetch is bounded
+# subprocess I/O (up to eight seconds for eight peers), so it never rides
+# the UI tick -- it gets a minute timer and a worker thread.
+REMOTE_PEER_REFRESH_SECONDS = 60.0
+# A peer marks a document stale after two minutes, so a desk where
+# nothing is happening still has to say so on a heartbeat -- otherwise
+# "quiet" is indistinguishable from "that Mac went away".
+REMOTE_PUBLISH_HEARTBEAT_SECONDS = 45.0
 MAX_NOTIFICATION_ACTION_BINDINGS = 256
 NOTIFICATION_ACTION_TTL_SECONDS = 300.0
 NOTIFICATION_FOREGROUND_PRESENTATION_OPTIONS = 1 << 2
@@ -1351,6 +1429,120 @@ def eligible_mailbox_completion_statuses(
     )
 
 
+REMOTE_AGENT_ID_PREFIX = "remote:"
+
+
+def is_remote_agent_id(agent_id: object) -> bool:
+    """Does this id name a session on ANOTHER machine?
+
+    ``remote_peers`` namespaces every peer row as ``remote:<machine>:<id>``
+    precisely so this question has a one-line answer at every seam that
+    would otherwise try to act on it locally.
+    """
+    return type(agent_id) is str and agent_id.startswith(REMOTE_AGENT_ID_PREFIX)
+
+
+def mark_remote_ledger_origins(merged: MergedLedger) -> MergedLedger:
+    """Stamp every remote row with the machine it lives on, drop sub-agents.
+
+    Two jobs, both about honesty on a surface someone reads:
+
+    1. ``origin`` is the channel the dropdown ALREADY renders (it is how a
+       cloud agent's row says "Claude Cloud"), so putting the machine there
+       marks remote rows everywhere at once instead of teaching each
+       renderer what a peer is.
+    2. Sub-agents are invisible everywhere. The publisher drops them and
+       the parser drops them; this is the third gate, because a peer
+       running an older build is not a reason for 200 worker rows to
+       appear in this ledger.
+    """
+    if type(merged) is not MergedLedger or not merged.rows:
+        return merged
+    rows: list[LedgerRow] = []
+    changed = False
+    for row in merged.rows:
+        if not row.is_remote:
+            rows.append(row)
+            continue
+        if row.status.is_subagent:
+            changed = True
+            continue
+        if row.status.origin:
+            rows.append(row)
+            continue
+        rows.append(
+            dataclass_replace(
+                row,
+                status=dataclass_replace(row.status, origin=row.machine),
+            )
+        )
+        changed = True
+    if not changed:
+        return merged
+    return dataclass_replace(merged, rows=tuple(rows))
+
+
+def remote_refresh_signature(result) -> tuple:
+    """What a peer refresh is SAYING, with no timestamps in it.
+
+    Two refreshes a minute apart carry different fetch times and identical
+    news; rebuilding the dropdown for that is churn the owner sees as rows
+    twitching under the cursor.
+    """
+    if type(result) is not PeerRefreshResult:
+        return ()
+    return (
+        tuple(
+            (
+                ledger.machine,
+                tuple(
+                    (
+                        row.status.agent_id,
+                        row.status.mode.value,
+                        row.status.display_name,
+                        row.status.event_name,
+                        row.status.tool_name or "",
+                    )
+                    for row in ledger.rows
+                ),
+                ledger.truncated_rows,
+            )
+            for ledger in result.ledgers
+        ),
+        tuple(
+            (item.machine, item.host, item.reachable, item.failure or "", item.breaker_open)
+            for item in result.health
+        ),
+    )
+
+
+def local_ledger_signature(statuses) -> tuple:
+    """The publishable content of this desk, without its clock.
+
+    Publishing on every tick would rewrite the file 4 times a minute to
+    say the same thing; publishing only on change would let a quiet desk
+    look dead. The signature answers "did anything change", the heartbeat
+    answers "are we still here", and together they bound the writes.
+    """
+    return tuple(
+        (
+            status.agent_id,
+            status.mode.value,
+            status.display_name,
+            status.event_name,
+            status.tool_name or "",
+        )
+        for status in sorted(
+            (
+                status
+                for status in (statuses or ())
+                if type(status) is AgentStatus and not status.is_subagent
+            ),
+            key=lambda status: status.agent_id,
+        )
+    )
+
+
 def mailbox_attention_statuses(snapshot) -> tuple[AgentStatus, ...]:
     """Current lifecycle rows plus eligible promoted stale completions."""
     eligible_completions = eligible_mailbox_completion_statuses(
@@ -1435,6 +1627,22 @@ class StatusBarController(NSObject):
         self.transcript_monitor = self.build_transcript_monitor()
         self.transcript_watermark = None
         self.event_server = None
+        # Off-machine intake and the second Mac. Both start inert: the
+        # cloud listener is not constructed until the owner opts in, and
+        # an empty PeerRefreshResult is what makes the merge below a
+        # provable no-op while remote peers are off.
+        self.cloud_ingest = None
+        self._remote_refresh = PeerRefreshResult()
+        self.current_merged_ledger: MergedLedger | None = None
+        self.remote_peers_timer = None
+        self._remote_peers_refresh_running = False
+        self._published_ledger_signature = None
+        self._published_ledger_at = None
+        # The Studio's saved looks live in their own bounded private
+        # file, loaded lazily: __init__ is on the AppKit launch path.
+        self.animation_library = AnimationLibrary()
+        self.animation_library_health = LibraryHealth.MISSING
+        self._animation_library_loaded = False
         self.status_item = None
         self.timer = None
         self.settings_window = None
@@ -1744,6 +1952,12 @@ class StatusBarController(NSObject):
         self._capacity_countdown_deadline: float | None = None
         self._capacity_reset_continuity = {}
         self._attempted_capacity_boundary_keys: tuple[str, ...] = ()
+        # The authority decision for every lane of the last refresh, per
+        # provider. Retained so the Why panel can name a refusal; the card
+        # only ever gets to say how MANY windows went missing.
+        self._capacity_detail_inputs: dict[str, tuple[CapacitySnapshot, CapacityProjection]] = {}
+        self._capacity_history_store: CapacityHistoryStore | None = None
+        self._capacity_history_retention_days: int | None = None
         return self
 
     def _install_accessibility_display_observer(self) -> None:
@@ -1983,6 +2197,7 @@ class StatusBarController(NSObject):
         self.trim_oversized_state_logs()
         log_status_bar("launching status item")
         self.start_event_server()
+        self.start_cloud_ingest_server()
         self.replay_debug_logs()
 
         self.status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(
@@ -2018,6 +2233,13 @@ class StatusBarController(NSObject):
         # Tornado Warning must not stay dark for 10 minutes after launch.
         if self.settings.weather_alerts_enabled:
             self._weather_observation_timer_fired()
+        # The second Mac: its own minute timer, never the UI tick. The
+        # timer is armed unconditionally and the fetch is the thing that
+        # checks the setting, so turning peers on in Settings needs no
+        # timer surgery -- and turning them off clears what they left.
+        self.start_remote_peer_timer()
+        if self.settings.remote_peers.enabled:
+            self.start_remote_peer_refresh()
         # Rotate oversized hook/event logs off the main thread.
         threading.Thread(
             target=lambda: trim_oversized_logs(default_state_dir()),
@@ -2338,6 +2560,32 @@ class StatusBarController(NSObject):
             return
 
         self.last_snapshot = snapshot
+        # One ledger, two audiences. `current_merged_ledger` carries EVERY
+        # row -- this desk's and every peer's, muted or not -- because the
+        # dropdown is the ledger. What continues down this method is only
+        # what the interrupt policy admits, because everything below it
+        # ends in a light, a chime or a banner.
+        #
+        # With remote peers off (the default) `self._remote_refresh` is
+        # empty, the merge adds nothing, and `interrupting` IS
+        # `snapshot.statuses` -- the identity below is the safety property
+        # that keeps this whole block a no-op on a machine that never
+        # turned the feature on. Do not "simplify" it into a copy.
+        merged = self.merged_ledger_for(snapshot)
+        self.current_merged_ledger = merged
+        # What this desk tells its peers is its OWN rows, never a peer's:
+        # publishing the merged ledger would let two Macs echo each other
+        # into a loop that both of them would then show as real work.
+        self.publish_local_ledger_now(
+            snapshot.statuses,
+            generated_at=snapshot.collected_at,
+        )
+        interrupting = interrupt_eligible_statuses(
+            merged,
+            self.settings.remote_peers.interrupt_policy(),
+        )
+        if interrupting != snapshot.statuses:
+            snapshot = dataclass_replace(snapshot, statuses=interrupting)
         if getattr(snapshot, "operator_state", None) is not None:
             self.current_operator_state = snapshot.operator_state
         self.observe_operator_history_events(
@@ -2413,14 +2661,159 @@ class StatusBarController(NSObject):
         if self.status_item is not None:
             self.update_status_menu(snapshot, state)
 
+    # --- The second Mac -------------------------------------------------
+
+    def merged_ledger_for(self, snapshot) -> MergedLedger:
+        """This desk's rows and every peer's, in one ordered ledger.
+
+        Remote rows come back stamped with the machine they live on, in
+        the SAME ``origin`` channel a cloud agent's row already uses, so
+        the dropdown's existing title and detail lines say where a row is
+        without a second renderer having to learn what a peer is.
+        """
+        return mark_remote_ledger_origins(
+            merge_ledger(
+                local_statuses=snapshot.statuses,
+                local_machine=local_machine_name(),
+                peer_ledgers=self._remote_refresh.ledgers,
+                health=self._remote_refresh.health,
+                now=snapshot.collected_at,
+            )
+        )
+
+    def collect_remote_peer_ledgers(self) -> PeerRefreshResult:
+        """The blocking half: discovery, then one bounded fetch per peer.
+
+        This is subprocess I/O with an eight-second ceiling -- three orders
+        of magnitude longer than a UI tick may take -- so it never runs on
+        the refresh path. The breakers ride forward from the previous
+        result; without that a dead Mac is retried every single minute.
+        """
+        if not self.settings.remote_peers.enabled:
+            return PeerRefreshResult()
+        breakers = self._remote_refresh.breakers
+        try:
+            return collect_remote_ledgers(
+                settings=self.settings.remote_peers,
+                breakers=breakers,
+            )
+        except Exception as exc:
+            log_status_bar(f"remote_peers error: {exc}")
+            return PeerRefreshResult(breakers=breakers)
+
+    def refresh_remote_peers(self) -> PeerRefreshResult:
+        """Fetch and install, synchronously. NEVER call this from refresh_."""
+        result = self.collect_remote_peer_ledgers()
+        self._remote_refresh = result
+        return result
+
+    def start_remote_peer_refresh(self) -> None:
+        """Kick one bounded fetch off the main thread."""
+        if not self.settings.remote_peers.enabled:
+            # Turning the feature off has to empty what it left behind,
+            # or a peer's last rows sit in the ledger forever, ageing.
+            if self._remote_refresh.ledgers or self._remote_refresh.health:
+                self._remote_refresh = PeerRefreshResult()
+                self.refresh_(None)
+            return
+        if self._remote_peers_refresh_running:
+            return
+        self._remote_peers_refresh_running = True
+
+        def _fetch() -> None:
+            result = self.collect_remote_peer_ledgers()
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "applyRemotePeerRefresh:",
+                result,
+                False,
+            )
+
+        threading.Thread(
+            target=_fetch,
+            daemon=True,
+            name="sidepulse-remote-peers",
+        ).start()
+
+    @objc.IBAction
+    def applyRemotePeerRefresh_(self, result) -> None:
+        self._remote_peers_refresh_running = False
+        if type(result) is not PeerRefreshResult:
+            return
+        changed = remote_refresh_signature(result) != remote_refresh_signature(
+            self._remote_refresh
+        )
+        self._remote_refresh = result
+        # A refresh per minute that changes nothing is a rebuild of the
+        # whole dropdown for no reason; only a real change re-renders.
+        if changed:
+            self.refresh_(None)
+
+    @objc.IBAction
+    def refreshRemotePeers_(self, _sender):
+        self.start_remote_peer_refresh()
+
+    def start_remote_peer_timer(self) -> None:
+        if self.remote_peers_timer is not None:
+            return
+        self.remote_peers_timer = (
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                REMOTE_PEER_REFRESH_SECONDS,
+                self,
+                "refreshRemotePeers:",
+                None,
+                True,
+            )
+        )
+
+    def stop_remote_peer_timer(self) -> None:
+        timer = self.remote_peers_timer
+        if timer is not None:
+            timer.invalidate()
+        self.remote_peers_timer = None
+
+    def publish_local_ledger_now(self, statuses, *, generated_at=None) -> Path | None:
+        """Write this desk's ledger where a peer could read it, or not.
+
+        Publishing is off by default and this returns None until the owner
+        turns it on. When it is on, the write is bounded two ways: a
+        CHANGE always publishes, and an unchanged ledger republishes on a
+        heartbeat, because a peer marks a document stale after two minutes
+        and a quiet desk is not a dead one.
+        """
+        remote = self.settings.remote_peers
+        if not remote.publish_enabled:
+            self._published_ledger_signature = None
+            return None
+        signature = local_ledger_signature(statuses)
+        now = time.monotonic()
+        last_at = getattr(self, "_published_ledger_at", None)
+        if (
+            signature == getattr(self, "_published_ledger_signature", None)
+            and last_at is not None
+            and now - last_at < REMOTE_PUBLISH_HEARTBEAT_SECONDS
+        ):
+            return None
+        try:
+            written = publish_local_ledger(
+                statuses,
+                generated_at=generated_at,
+                settings=remote,
+            )
+        except Exception as exc:
+            log_status_bar(f"remote_peers publish error: {exc}")
+            return None
+        self._published_ledger_signature = signature
+        self._published_ledger_at = now
+        return written
+
     def refresh_why_panel(self) -> bool:
         window = getattr(self, "why_panel_window", None)
         if window is None or not window.isVisible():
             return False
-        set_text_control_value(
-            self.why_panel_text_view,
-            decision_trace_text(self.current_decision_trace()),
-        )
+        # Through `why_panel_body`, not `decision_trace_text`: an open panel
+        # that refreshed itself into a SHORTER text than the one it opened
+        # with is the same defect as a section that never shipped.
+        set_text_control_value(self.why_panel_text_view, self.why_panel_body())
         return True
 
     def update_status_menu(self, snapshot, state) -> None:
@@ -3564,6 +3957,7 @@ class StatusBarController(NSObject):
             if refresh_key is None or refresh_key.source != source_key:
                 continue
             authorised = None
+            snapshot = None
             if failure is None:
                 observations = result.get("capacity_observations")
                 # Two refusals, not one. A result that carries no observations
@@ -3724,6 +4118,24 @@ class StatusBarController(NSObject):
                     )
                     self._capacity_reset_continuity[observation.key] = decision.state
                     reset_decisions[observation.key] = decision
+                # History and the Why panel are the two consumers of what
+                # the authority layer decided, as opposed to what it let
+                # through. Both hang off THIS refresh because it is the only
+                # place that holds the snapshot and its projection together.
+                self.record_capacity_history(
+                    authorised,
+                    reset_decisions,
+                    now=reset_now,
+                )
+                if (
+                    snapshot is not None
+                    and authorised is not None
+                    and authorised.projection is not None
+                ):
+                    self._capacity_detail_inputs[provider_id] = (
+                        snapshot,
+                        authorised.projection,
+                    )
                 models[provider_id] = build_provider_usage_view(
                     provider_id,
                     str(result.get("title") or provider_id.title()),
@@ -4353,6 +4765,163 @@ class StatusBarController(NSObject):
             ),
         )
 
+    # --- Agents pane: motion, other Macs, cloud agents -------------------
+
+    @objc.IBAction
+    def setAgentAnimation_(self, sender):
+        """Pick a provider's motion from the Agents pane.
+
+        Writes the SAME `colors.provider_animation` entry the Studio's own
+        row writes. Two doors, one fact -- neither pane keeps a copy, so
+        they cannot disagree about what a provider is doing.
+        """
+        item = sender.selectedItem() if hasattr(sender, "selectedItem") else None
+        payload = item.representedObject() if item is not None else None
+        if not isinstance(payload, dict):
+            return
+        provider = payload.get("provider")
+        motion = payload.get("motion")
+        if not isinstance(provider, str) or not isinstance(motion, str):
+            return
+        try:
+            colors = self.settings.colors.with_agent_animation(provider, motion)
+        except ValueError:
+            return
+        self.settings = self.settings.with_colors(colors)
+        save_settings(self.settings)
+        self.refresh_(None)
+        self.refresh_colors_window()
+        self.set_settings_message(
+            f"{colors_module.provider_color_row(provider, colors).label}: "
+            f"{colors_module.PROVIDER_ANIMATION_LABELS.get(motion, motion)}."
+        )
+
+    def _apply_remote_peer_setting(self, **changes) -> None:
+        self.settings = self.settings.with_remote_peers(
+            dataclass_replace(self.settings.remote_peers, **changes)
+        )
+        save_settings(self.settings)
+
+    @objc.IBAction
+    def toggleRemotePeers_(self, sender):
+        enabled = checkbox_is_on(sender)
+        self._apply_remote_peer_setting(enabled=enabled)
+        # Turning it ON fetches now rather than up to a minute from now;
+        # turning it OFF drops what the last fetch left behind, which is
+        # the same call, because start_remote_peer_refresh clears when
+        # the feature is off.
+        self.start_remote_peer_refresh()
+        self.refresh_settings_window()
+        self.set_settings_message(
+            "Looking for agents on your other Macs."
+            if enabled
+            else "Other Macs are hidden again."
+        )
+
+    @objc.IBAction
+    def toggleRemotePublish_(self, sender):
+        enabled = checkbox_is_on(sender)
+        self._apply_remote_peer_setting(publish_enabled=enabled)
+        if enabled:
+            snapshot = self.last_snapshot
+            self.publish_local_ledger_now(
+                getattr(snapshot, "statuses", ()) if snapshot is not None else ()
+            )
+        else:
+            # Stop publishing means the file stops being TRUE, so it stops
+            # existing -- a peer reading a frozen ledger forever is worse
+            # than a peer that can see this Mac went quiet.
+            self.remove_published_ledger()
+        self.set_settings_message(
+            "This Mac now publishes its agents for your other Macs."
+            if enabled
+            else "This Mac no longer publishes anything."
+        )
+
+    def remove_published_ledger(self) -> bool:
+        self._published_ledger_signature = None
+        self._published_ledger_at = None
+        try:
+            default_remote_ledger_path().unlink()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            log_status_bar(f"remote_peers unpublish error: {exc}")
+            return False
+        return True
+
+    @objc.IBAction
+    def toggleRemoteMessages_(self, sender):
+        enabled = checkbox_is_on(sender)
+        self._apply_remote_peer_setting(include_messages=enabled)
+        self._published_ledger_signature = None
+        snapshot = self.last_snapshot
+        self.publish_local_ledger_now(
+            getattr(snapshot, "statuses", ()) if snapshot is not None else ()
+        )
+        self.set_settings_message(
+            "Questions now travel with the row."
+            if enabled
+            else "Questions stay on the machine that asked them."
+        )
+
+    @objc.IBAction
+    def toggleRemoteInterrupts_(self, sender):
+        # The switch reads "let other Macs interrupt", the setting stores
+        # "remote interrupts are muted" -- so the switch is its inverse.
+        allow = checkbox_is_on(sender)
+        self._apply_remote_peer_setting(remote_interrupts_muted=not allow)
+        self.refresh_(None)
+        self.refresh_settings_window()
+        self.set_settings_message(
+            "Other Macs may take a light here."
+            if allow
+            else "Other Macs stay in the menu only."
+        )
+
+    @objc.IBAction
+    def toggleRemoteMachineInterrupt_(self, sender):
+        machine = str(sender.identifier() or "")
+        if not machine:
+            return
+        self.settings = self.settings.with_remote_machine_muted(
+            machine, not checkbox_is_on(sender)
+        )
+        save_settings(self.settings)
+        self.refresh_(None)
+        self.set_settings_message(
+            f"{machine} may interrupt."
+            if checkbox_is_on(sender)
+            else f"{machine} is menu-only."
+        )
+
+    @objc.IBAction
+    def refreshRemotePeersNow_(self, _sender):
+        if not self.settings.remote_peers.enabled:
+            self.set_settings_message("Turn on Other Macs first.")
+            return
+        self.start_remote_peer_refresh()
+        self.set_settings_message("Checking your other Macs…")
+
+    @objc.IBAction
+    def toggleCloudIngest_(self, sender):
+        enabled = checkbox_is_on(sender)
+        self.settings = dataclass_replace(self.settings, cloud_ingest_enabled=enabled)
+        save_settings(self.settings)
+        self.start_cloud_ingest_server()
+        self.refresh_settings_window()
+        server = self.cloud_ingest
+        if enabled and server is None:
+            self.set_settings_message(
+                "Cloud agents could not start listening — see the log."
+            )
+            return
+        self.set_settings_message(
+            f"Cloud agents can post to {server.address[0]}:{server.address[1]}."
+            if enabled and server is not None
+            else "Cloud agents are no longer accepted."
+        )
+
     @objc.IBAction
     def setEscalationTier_(self, sender):
         item = sender.selectedItem()
@@ -4510,6 +5079,91 @@ class StatusBarController(NSObject):
             led_count=led_count,
         )
 
+    # --- Saved looks (the animation library) ----------------------------
+
+    def animation_library_path(self) -> Path:
+        return default_animation_library_path()
+
+    def ensure_animation_library(self) -> AnimationLibrary:
+        """Load the saved looks once, migrating their old home on the way.
+
+        Looks used to live in settings.json as an unbounded list of pairs.
+        Three things were wrong with that and all three are why this moved:
+        settings.json is not private-mode-enforced storage for a growing
+        blob, nothing bounded it, and nothing PARSED a look before storing
+        it -- so a program the device would reject could be saved happily
+        and only discovered a month later, by the person pressing Burn.
+        """
+        if self._animation_library_loaded:
+            return self.animation_library
+        self._animation_library_loaded = True
+        restore = load_animation_library(self.animation_library_path())
+        self.animation_library = restore.library
+        self.animation_library_health = restore.health
+        if restore.health not in (LibraryHealth.HEALTHY, LibraryHealth.MISSING):
+            log_status_bar(f"animation library {restore.health.value}")
+        self.migrate_studio_library()
+        return self.animation_library
+
+    def migrate_studio_library(self) -> int:
+        """Move settings.json's looks into the bounded library. Returns moved.
+
+        A look that will not parse is NOT deleted: it stays in
+        settings.json and is reported, because "we quietly dropped four of
+        your animations" is exactly the class of loss this project keeps
+        finding after the fact.
+        """
+        legacy = tuple(self.settings.studio_library or ())
+        if not legacy:
+            return 0
+        library = self.animation_library
+        led_count = self.studio_led_count()
+        kept: list[tuple[str, str]] = []
+        moved = 0
+        for entry in legacy:
+            try:
+                name, program = entry
+            except (TypeError, ValueError):
+                continue
+            try:
+                library = library.with_program(
+                    str(name), str(program), led_count=led_count
+                )
+            except AnimationLibraryError as exc:
+                log_status_bar(f"studio look {name!r} not migrated: {exc}")
+                kept.append((str(name), str(program)))
+                continue
+            moved += 1
+        if not moved:
+            return 0
+        try:
+            save_animation_library(self.animation_library_path(), library)
+        except (AnimationLibraryError, OSError) as exc:
+            log_status_bar(f"animation library save failed: {exc}")
+            return 0
+        self.animation_library = library
+        self.settings = dataclass_replace(
+            self.settings, studio_library=tuple(kept)
+        )
+        save_settings(self.settings)
+        if kept:
+            self.set_settings_message(
+                f"Moved {moved} saved looks; {len(kept)} could not be "
+                "migrated because the device would reject them."
+            )
+        return moved
+
+    def store_animation_library(self, library: AnimationLibrary) -> bool:
+        try:
+            save_animation_library(self.animation_library_path(), library)
+        except (AnimationLibraryError, OSError) as exc:
+            self.set_settings_message(f"Could not save your looks: {exc}")
+            return False
+        self.animation_library = library
+        self._animation_library_loaded = True
+        self._refresh_studio_library_popup()
+        return True
+
     def _refresh_studio_library_popup(self) -> None:
         popup = getattr(self, "studio_library_popup", None)
         if popup is None:
@@ -4517,9 +5171,16 @@ class StatusBarController(NSObject):
         popup.removeAllItems()
         popup.addItemWithTitle_("Saved looks\u2026")
         popup.lastItem().setRepresentedObject_("")
-        for look_name, _program in self.settings.studio_library:
+        for look_name in self.ensure_animation_library().names:
             popup.addItemWithTitle_(look_name)
             popup.lastItem().setRepresentedObject_(look_name)
+
+    def selected_studio_look_name(self) -> str:
+        popup = getattr(self, "studio_library_popup", None)
+        if popup is None:
+            return ""
+        item = popup.selectedItem()
+        return str(item.representedObject() or "") if item is not None else ""
 
     @objc.IBAction
     def captureStudioProgram_(self, _sender):
@@ -4567,10 +5228,18 @@ class StatusBarController(NSObject):
         if dsl_error:
             self.set_settings_message(f"Can't save: {dsl_error}.")
             return
-        self.settings = self.settings.with_studio_saved_look(name, program)
-        save_settings(self.settings)
-        self._refresh_studio_library_popup()
-        self.set_settings_message(f"Saved \u201c{name}\u201d to your looks.")
+        library = self.ensure_animation_library()
+        try:
+            # The store parses before it writes, so a look that could not
+            # be burned cannot end up in the library at all.
+            library = library.with_program(
+                name, program, led_count=self.studio_led_count()
+            )
+        except AnimationLibraryError as exc:
+            self.set_settings_message(f"Can't save: {exc}")
+            return
+        if self.store_animation_library(library):
+            self.set_settings_message(f"Saved \u201c{name}\u201d to your looks.")
 
     @objc.IBAction
     def loadStudioLook_(self, sender):
@@ -4578,35 +5247,74 @@ class StatusBarController(NSObject):
         name = str(item.representedObject() or "") if item is not None else ""
         if not name:
             return
-        for look_name, program in self.settings.studio_library:
-            if look_name == name:
-                editor = getattr(self, "studio_editor", None)
-                if editor is not None:
-                    editor.setString_(program)
-                self.set_settings_message(f"Loaded \u201c{name}\u201d.")
-                return
+        try:
+            saved = self.ensure_animation_library().get(name)
+        except AnimationLibraryError as exc:
+            self.set_settings_message(str(exc))
+            return
+        editor = getattr(self, "studio_editor", None)
+        if editor is not None:
+            editor.setString_(saved.program)
+        field = getattr(self, "studio_save_name_field", None)
+        if field is not None:
+            field.setStringValue_(saved.name)
+        self.set_settings_message(f"Loaded \u201c{name}\u201d.")
 
     @objc.IBAction
     def deleteStudioLook_(self, _sender):
-        popup = getattr(self, "studio_library_popup", None)
-        if popup is None:
-            return
-        item = popup.selectedItem()
-        name = str(item.representedObject() or "") if item is not None else ""
+        name = self.selected_studio_look_name()
         if not name:
             self.set_settings_message("Pick a saved look to delete.")
             return
-        self.settings = self.settings.without_studio_look(name)
-        save_settings(self.settings)
-        self._refresh_studio_library_popup()
-        self.set_settings_message(f"Deleted \u201c{name}\u201d.")
+        try:
+            library = self.ensure_animation_library().without(name)
+        except AnimationLibraryError as exc:
+            self.set_settings_message(str(exc))
+            return
+        if self.store_animation_library(library):
+            self.set_settings_message(f"Deleted \u201c{name}\u201d.")
+
+    @objc.IBAction
+    def renameStudioLook_(self, _sender):
+        """Rename the selected look to whatever is in the name field.
+
+        Order is identity in that popup -- the owner has learned its
+        shape -- so the store renames IN PLACE rather than re-adding at
+        the bottom.
+        """
+        name = self.selected_studio_look_name()
+        field = getattr(self, "studio_save_name_field", None)
+        replacement = str(field.stringValue()).strip() if field is not None else ""
+        if not name:
+            self.set_settings_message("Pick a saved look to rename.")
+            return
+        if not replacement:
+            self.set_settings_message("Type the new name first.")
+            return
+        try:
+            library = self.ensure_animation_library().renamed(name, replacement)
+        except AnimationLibraryError as exc:
+            self.set_settings_message(str(exc))
+            return
+        if self.store_animation_library(library):
+            self.set_settings_message(
+                f"Renamed \u201c{name}\u201d to \u201c{replacement}\u201d."
+            )
 
     @objc.IBAction
     def applyStudioAsPowerUp_(self, _sender):
         """Burns the Studio program into every connected device's
-        INIT.LED so the hardware BOOTS wearing your light -- validated
-        through the real firmware grammar first; the firmware confirms
-        by playing it immediately (documented INIT.LED behavior)."""
+        INIT.LED so the hardware BOOTS wearing your light.
+
+        Four gates per device, in order, all inside
+        ``animation.burn_power_up_animation``: the model validates, it
+        compiles, the device writer's size checks pass, and the REAL
+        firmware parser accepts it -- refusing when that parser is
+        unavailable rather than passing. Each device is validated at ITS
+        OWN LED count: this used to burn 8-LED-validated bytes onto a
+        2-LED Dot, which parses and then paints six LEDs that do not
+        exist.
+        """
         editor = getattr(self, "studio_editor", None)
         if editor is None:
             return
@@ -4614,37 +5322,84 @@ class StatusBarController(NSObject):
         if not program:
             self.set_settings_message("Write a program first.")
             return
-        try:
-            normalized = normalize_led_text(program)
-            validate_led_text(normalized)
-        except Exception as exc:
-            self.set_settings_message(f"Power-up look invalid: {exc}")
-            return
-        dsl_error = self.validate_studio_program(normalized, strict=True)
-        if dsl_error:
-            self.set_settings_message(f"Power-up look invalid: {dsl_error}.")
-            return
         written = 0
-        for device in self.status_bar_devices(remember=False):
-            if not device.connected or device.device_id == VIRTUAL_DEVICE_ID:
-                continue
+        total_bytes = 0
+        warnings: list[str] = []
+        failures: list[str] = []
+        targets = [
+            device
+            for device in (self.status_bar_devices(remember=False) or [])
+            if device.connected and device.device_id != VIRTUAL_DEVICE_ID
+        ]
+        if not targets:
+            self.set_settings_message("No connected SidePulse hardware to write to.")
+            return
+        for device in targets:
+            led_count = led_count_for_target(device.target)
             try:
-                write_led_program(
-                    normalized, device_path=device.root, file_name="INIT.LED"
+                animation = parse_animation(program, led_count=led_count)
+                plan = burn_power_up_animation(
+                    animation,
+                    device_path=device.root,
+                    led_count=led_count,
+                    dry_run=False,
                 )
-                written += 1
+            except AnimationValidationError as exc:
+                self.set_settings_message(f"Power-up look invalid: {exc}")
+                return
             except Exception as exc:
                 log_status_bar(f"INIT.LED write failed for {device.name}: {exc}")
-        if written:
-            plural = "device" if written == 1 else "devices"
+                failures.append(device.name)
+                continue
+            written += 1
+            total_bytes = plan.byte_count
+            warnings.extend(problem.message for problem in plan.warnings)
+        if not written:
             self.set_settings_message(
-                f"Power-up look written to {written} {plural} -- it plays now "
-                "and every time the hardware boots."
+                "Power-up look could not be written to "
+                f"{', '.join(failures) or 'any device'}."
             )
-        else:
-            self.set_settings_message(
-                "No connected SidePulse hardware to write to."
-            )
+            return
+        plural = "device" if written == 1 else "devices"
+        message = (
+            f"Power-up look written to {written} {plural} ({total_bytes} bytes) "
+            "-- it plays now and every time the hardware boots."
+        )
+        if warnings:
+            message = f"{message} {warnings[0]}"
+        self.set_settings_message(message)
+
+    def burn_saved_look_as_power_up(self, name: str, *, dry_run: bool = True):
+        """Burn one saved look straight from the library, by name.
+
+        The popup's counterpart to the editor button: the thing you saved
+        is the thing that boots, without a round trip through the text
+        view where a stray keystroke could change it.
+        """
+        return burn_saved_animation_to_power_up(
+            name,
+            library_path=self.animation_library_path(),
+            dry_run=dry_run,
+        )
+
+    @objc.IBAction
+    def burnStudioLookAsPowerUp_(self, _sender):
+        name = self.selected_studio_look_name()
+        if not name:
+            self.set_settings_message("Pick a saved look to burn.")
+            return
+        try:
+            plan = self.burn_saved_look_as_power_up(name, dry_run=False)
+        except (AnimationValidationError, AnimationLibraryError) as exc:
+            self.set_settings_message(f"Can't burn \u201c{name}\u201d: {exc}")
+            return
+        except Exception as exc:
+            self.set_settings_message(f"Can't burn \u201c{name}\u201d: {exc}")
+            return
+        self.set_settings_message(
+            f"\u201c{name}\u201d written as the power-up look "
+            f"({plan.byte_count} bytes)."
+        )
 
     @objc.IBAction
     def previewStudioProgram_(self, _sender):
@@ -4822,6 +5577,45 @@ class StatusBarController(NSObject):
                 f"The {slot} profile has no devices matching this Mac's -- "
                 "nothing changed."
             )
+
+    @objc.IBAction
+    def toggleCapacityHistory_(self, sender):
+        """Consent for the only file SidePulse keeps about your usage.
+
+        Turning it off deletes what is already on disk before the switch
+        redraws -- `capacity_history_store` does the deletion the first
+        time it is asked for a store the owner has withdrawn consent for.
+        """
+        enabled = bool(sender.state())
+        self.settings = self.settings.with_capacity_history_enabled(enabled)
+        save_settings(self.settings)
+        self.capacity_history_store()
+        if enabled:
+            days = getattr(self.settings, "capacity_history_retention_days", 7)
+            self.set_settings_message(
+                f"Capacity history on — keeping {days} days on this Mac."
+            )
+        else:
+            self.set_settings_message("Capacity history off — what was kept is deleted.")
+
+    @objc.IBAction
+    def setCapacityHistoryRetention_(self, sender):
+        item = sender.selectedItem()
+        raw = str(item.representedObject() or "7") if item is not None else "7"
+        try:
+            self.settings = self.settings.with_capacity_history_retention_days(int(raw))
+        except (TypeError, ValueError):
+            return
+        save_settings(self.settings)
+        # A shorter retention has to prune NOW, not at the next flush: the
+        # owner just told us to stop keeping something.
+        store = self.capacity_history_store()
+        if store is not None:
+            try:
+                store.apply_retention(int(raw), now=time.time())
+            except (HistoryValidationError, OSError, ValueError) as exc:
+                log_status_bar(f"capacity history retention failed: {exc}")
+        self.set_settings_message(f"Capacity history kept for {raw} days.")
 
     @objc.IBAction
     def toggleWeatherAlerts_(self, sender):
@@ -5250,9 +6044,23 @@ class StatusBarController(NSObject):
         self.show_why_panel()
 
     def why_panel_body(self) -> str:
-        """The panel's whole text. Pure enough to assert on in a test."""
+        """The panel's whole text. Pure enough to assert on in a test.
+
+        The capacity section is appended here rather than folded into
+        `DecisionTrace` because it answers a different question: the trace
+        explains the LIGHT, and a lane that was refused never reached the
+        light at all -- it was refused before it could.
+        """
         self.refresh_intake_report()
-        return decision_trace_text(self.current_decision_trace())
+        parts = [decision_trace_text(self.current_decision_trace())]
+        try:
+            capacity = capacity_detail_text(self.capacity_detail_models(now=time.time()))
+        except (TypeError, ValueError) as exc:
+            log_status_bar(f"capacity panel section refused: {exc}")
+            capacity = ""
+        if capacity:
+            parts.append(capacity)
+        return "\n\n".join(parts)
 
     def show_why_panel(self) -> None:
         body = self.why_panel_body()
@@ -5646,6 +6454,14 @@ class StatusBarController(NSObject):
         if monitor is not None and hasattr(monitor, "write_latest_state"):
             # The per-event path is debounced; flush the tail on quit.
             monitor.write_latest_state()
+        # Same reasoning for the peer-facing ledger: the live path is
+        # debounced on change plus a heartbeat, so the last word this desk
+        # said to the other Mac has to be written before it goes away.
+        # An empty ledger IS the news -- "nothing is running here".
+        self.stop_remote_peer_timer()
+        self._published_ledger_signature = None
+        self.publish_local_ledger_now(())
+        self.stop_cloud_ingest_server()
         self.stop_event_server()
         self.closed_lid_awake.release()
         self.keep_awake.release()
@@ -5882,6 +6698,143 @@ class StatusBarController(NSObject):
             except (ActivityValidationError, ValueError):
                 continue
         return tuple(entries)
+
+    def capacity_history_store(self) -> CapacityHistoryStore | None:
+        """The store, or None when the owner has not consented to history.
+
+        Consent is checked on every call, never cached into a live object:
+        turning the switch off has to stop the next sample, not the next
+        launch. Turning it off also deletes what was already written, which
+        is the only reading of "off" that is not a lie.
+        """
+        settings = getattr(self, "settings", None)
+        if not getattr(settings, "capacity_history_enabled", False):
+            store = self._capacity_history_store
+            if store is not None:
+                self._capacity_history_store = None
+                self._capacity_history_retention_days = None
+                try:
+                    store.delete_capacity_history()
+                except OSError as exc:
+                    log_status_bar(f"capacity history delete failed: {exc}")
+            return None
+        days = getattr(settings, "capacity_history_retention_days", 7)
+        if days not in SUPPORTED_HISTORY_RETENTION_DAYS:
+            days = 7
+        store = self._capacity_history_store
+        if store is not None and self._capacity_history_retention_days == days:
+            return store
+        try:
+            store = CapacityHistoryStore(
+                default_capacity_history_path(),
+                retention_days=days,
+            )
+            store.restore()
+        except (HistoryValidationError, OSError, ValueError) as exc:
+            log_status_bar(f"capacity history unavailable: {exc}")
+            self._capacity_history_store = None
+            self._capacity_history_retention_days = None
+            return None
+        self._capacity_history_store = store
+        self._capacity_history_retention_days = days
+        return store
+
+    def record_capacity_history(self, authorised, reset_decisions, *, now: float) -> int:
+        """Persist one bounded sample per authorised lane, and only those.
+
+        Fed from `AuthorisedCapacity` for the same reason the threshold
+        recorder is: a drifted payload that reached history would poison
+        every summary and forecast built on top of it, permanently, in a
+        file that outlives the process that wrote it.
+
+        The continuity verdict is `evaluate_reset_continuity`'s, not a
+        second derivation of it. That call already decides whether this
+        lane's account identity is missing, changed, or intact, and two
+        answers to one question is how the reset plane broke before.
+        """
+        store = self.capacity_history_store()
+        if store is None or authorised is None:
+            return 0
+        admitted = 0
+        for lane in getattr(authorised, "lanes", ()):
+            decision = reset_decisions.get(lane.key)
+            if decision is None or lane.account_discriminator is None:
+                continue
+            remaining = decision.remaining
+            if remaining is None:
+                continue
+            if decision.disposition is SampleDisposition.IDENTITY_AMBIGUOUS:
+                continuity = (
+                    HistoryContinuity.MISSING
+                    if decision.reason_code == "reset_identity_unavailable"
+                    else HistoryContinuity.CHANGED
+                )
+            else:
+                continuity = HistoryContinuity.CONTINUOUS
+            accepted = decision.disposition is SampleDisposition.ACCEPTED
+            try:
+                sample = CapacityHistorySample(
+                    schema_version=CAPACITY_HISTORY_SCHEMA_VERSION,
+                    lane_key=lane.key,
+                    account_discriminator=lane.account_discriminator,
+                    observed_at=float(now),
+                    remaining=max(0.0, min(100.0, float(remaining))),
+                    reset_epoch=decision.reset.reset_epoch,
+                    window_minutes=decision.reset.window_minutes,
+                    source_health=lane.source_health.kind,
+                    disposition=decision.disposition,
+                    refusal_code=None if accepted else decision.reason_code,
+                )
+                if store.admit_capacity(sample, continuity).sample is not None:
+                    admitted += 1
+            except (HistoryValidationError, ValueError) as exc:
+                log_status_bar(f"capacity history sample refused: {exc}")
+        if admitted:
+            try:
+                store.flush(now=now)
+            except (HistoryValidationError, OSError, ValueError) as exc:
+                log_status_bar(f"capacity history flush failed: {exc}")
+        return admitted
+
+    def capacity_history_presentation(self, *, now: float) -> CapacityHistoryPresentation:
+        """Summaries for the panel, or the explicit "history is off" state."""
+        store = self.capacity_history_store()
+        if store is None:
+            return CapacityHistoryPresentation(enabled=False, summaries=())
+        summaries = []
+        for interval in HistoryInterval:
+            try:
+                summaries.append(
+                    CapacityHistorySummaryInput(
+                        interval=interval,
+                        summary=store.summarize(interval, now=now),
+                    )
+                )
+            except (HistoryValidationError, ValueError):
+                continue
+        return CapacityHistoryPresentation(enabled=True, summaries=tuple(summaries))
+
+    def capacity_detail_models(self, *, now: float) -> tuple:
+        """One detail projection per provider that has an authorised refresh.
+
+        Per provider, not merged: each refresh produces its own snapshot,
+        and `build_capacity_detail` validates that the projection it is
+        given describes exactly the snapshot it is given. Splicing two
+        providers' snapshots together to get one card would break that
+        check for a cosmetic gain.
+        """
+        history = self.capacity_history_presentation(now=now)
+        models = []
+        for _provider_id, (snapshot, projection) in sorted(
+            getattr(self, "_capacity_detail_inputs", {}).items()
+        ):
+            try:
+                models.append(
+                    build_capacity_detail(snapshot, projection, history, None, now)
+                )
+            except (TypeError, ValueError) as exc:
+                log_status_bar(f"capacity detail refused: {exc}")
+        return tuple(models)
 
     def track_completions(self, statuses, *, operator_events=()) -> None:
         """Detect completion transitions once and route each channel."""
@@ -7082,6 +8035,38 @@ class StatusBarController(NSObject):
             self.event_server.stop()
             self.event_server = None
 
+    def start_cloud_ingest_server(self) -> None:
+        """The loopback door for agents that do not run on this Mac.
+
+        Off unless the owner opted in: ``start_cloud_ingest`` returns None
+        rather than binding anything, and the events it does admit land in
+        the SAME sink a local hook lands in, so a cloud row is an ordinary
+        row that happens to say where it came from.
+        """
+        self.stop_cloud_ingest_server()
+        if not self.settings.cloud_ingest_enabled:
+            return
+        try:
+            self.cloud_ingest = start_cloud_ingest(
+                self.monitor.ingest_record,
+                config=CloudIngestConfig(enabled=True),
+            )
+        except Exception as exc:
+            self.cloud_ingest = None
+            log_status_bar(f"cloud_ingest error: {exc}")
+            return
+        if self.cloud_ingest is not None:
+            log_status_bar(f"cloud_ingest listening={self.cloud_ingest.address}")
+
+    def stop_cloud_ingest_server(self) -> None:
+        server = getattr(self, "cloud_ingest", None)
+        if server is not None:
+            try:
+                server.stop()
+            except Exception as exc:
+                log_status_bar(f"cloud_ingest stop error: {exc}")
+        self.cloud_ingest = None
+
     def note_legacy_hook(self, provider: str) -> None:
         """A hook predating the refresh-hint protocol just called us.
 
@@ -7190,7 +8175,11 @@ class StatusBarController(NSObject):
         panes[key] = pane
         self.settings_fields.update(fields)
         self.settings_buttons.update(buttons)
-        if key == "led_behavior":
+        if key == "notifications":
+            # The macOS permission probe belongs to the pane that shows
+            # its result -- it moved here with the Agent Notifications
+            # card, and asking for it while Signals opens would probe on
+            # a pane that no longer has anywhere to say the answer.
             self.refresh_notification_authorization_controls()
             self.start_notification_authorization_refresh()
         if key == "history":
@@ -8816,6 +9805,68 @@ class StatusBarController(NSObject):
             self.setup_window.performClose_(None)
         self.refresh_(None)
 
+    def refresh_remote_and_cloud_controls(self) -> None:
+        """Bring the Agents and Messages panes back in step with settings.
+
+        Every one of these controls can be changed from somewhere else --
+        the peer switch by a fetch that found nothing, a machine's mute by
+        the Messages pane, the cloud address by the server actually
+        binding a port -- so none of them may be left showing whatever
+        they were born with.
+        """
+        remote = self.settings.remote_peers
+        set_checkbox_state(
+            self.settings_buttons.get("remote_peers_enabled"), remote.enabled
+        )
+        set_checkbox_state(
+            self.settings_buttons.get("remote_publish_enabled"), remote.publish_enabled
+        )
+        set_checkbox_state(
+            self.settings_buttons.get("remote_messages_enabled"),
+            remote.include_messages,
+        )
+        set_checkbox_state(
+            self.settings_buttons.get("remote_interrupts_enabled"),
+            not remote.remote_interrupts_muted,
+        )
+        policy = remote.interrupt_policy()
+        for key, button in self.settings_buttons.items():
+            if type(key) is str and key.startswith("remote_machine:"):
+                set_checkbox_state(
+                    button, policy.allows_machine(key.split(":", 1)[1])
+                )
+        set_checkbox_state(
+            self.settings_buttons.get("cloud_ingest_enabled"),
+            self.settings.cloud_ingest_enabled,
+        )
+        set_field_value(
+            self.settings_fields.get("remote_peers_status"),
+            remote_peer_status_text(self),
+        )
+        set_field_value(
+            self.settings_fields.get("cloud_ingest_status"),
+            cloud_ingest_status_text(self),
+        )
+        self.refresh_agent_animation_popups()
+
+    def refresh_agent_animation_popups(self) -> None:
+        """Re-select each provider's motion in the Agents pane.
+
+        The Studio writes the same `colors.provider_animation` entry from
+        its own row, so a choice made there has to show up here -- one
+        fact with two doors is fine, two doors disagreeing is not.
+        """
+        for row in colors_module.provider_color_rows(self.settings.colors):
+            popup = self.settings_fields.get(f"{row.provider}_agent_animation")
+            if popup is None:
+                continue
+            for index in range(popup.numberOfItems()):
+                item = popup.itemAtIndex_(index)
+                payload = item.representedObject()
+                if isinstance(payload, dict) and payload.get("motion") == row.animation:
+                    popup.selectItem_(item)
+                    break
+
     def refresh_settings_window(self) -> None:
         if self.settings_window is None:
             return
@@ -8950,9 +10001,22 @@ class StatusBarController(NSObject):
             self.settings.quota_alerts_enabled,
         )
         set_checkbox_state(
+            self.settings_buttons.get("capacity_history_enabled"),
+            self.settings.capacity_history_enabled,
+        )
+        retention_popup = self.settings_fields.get("capacity_history_retention_popup")
+        if retention_popup is not None:
+            wanted = str(self.settings.capacity_history_retention_days)
+            for index in range(retention_popup.numberOfItems()):
+                item = retention_popup.itemAtIndex_(index)
+                if str(item.representedObject() or "") == wanted:
+                    retention_popup.selectItem_(item)
+                    break
+        set_checkbox_state(
             self.settings_buttons.get("subagent_asks_alert"),
             self.settings.subagent_asks_alert,
         )
+        self.refresh_remote_and_cloud_controls()
         # Signals cards: re-render each from saved state, and sync the
         # escalation controls -- like every other control here, they must
         # reflect changes made outside their own handlers.
@@ -9675,6 +10739,17 @@ class StatusBarController(NSObject):
 
     def open_session(self, status: AgentStatus | object, action: str | None, *, remember: bool) -> None:
         if not isinstance(status, AgentStatus):
+            return
+        # A row on the other Mac has no session here to open. Every open
+        # path in the app funnels through this method, so this is the one
+        # gate: without it a remote row's provider+cwd would launch a
+        # LOCAL terminal in a directory that may not even exist, and the
+        # owner would believe they were looking at the agent they clicked.
+        if is_remote_agent_id(status.agent_id):
+            self.set_settings_message(
+                f"{status.display_name} is running on "
+                f"{status.origin or 'another Mac'} — open it there."
+            )
             return
         provider = status.provider.lower()
         requested_action = (
@@ -10715,20 +11790,124 @@ class StatusBarController(NSObject):
             relay_elapsed_seconds=payload.get("relay_elapsed_seconds", 0.0),
         )
 
+    def studio_led_count(self) -> int:
+        """How many LEDs a Studio program has to fit.
+
+        The SMALLEST connected device, not the largest. An 8-LED program
+        on a 2-LED Dot parses cleanly and then paints six LEDs that do not
+        exist -- silence the owner reads as a broken animation. Warnings
+        do not block anything; they just have to be sayable.
+        """
+        counts = [
+            LED_COUNT if device.device_id == VIRTUAL_DEVICE_ID
+            else led_count_for_target(device.target)
+            for device in (self.status_bar_devices(remember=False) or [])
+            if device.connected
+        ]
+        return min(counts) if counts else LED_COUNT
+
+    def studio_program_problems(self, program: str, *, led_count: int | None = None):
+        """Everything wrong with a program, as sentences with step numbers.
+
+        This is the as-you-type call: it never raises and it never touches
+        hardware, so the Settings window can run it on every keystroke.
+        """
+        count = self.studio_led_count() if led_count is None else int(led_count)
+        return problems_for_program(program, led_count=count)
+
+    def refresh_studio_problem_label(self) -> tuple[str, str]:
+        """Repaint the Studio's live validation line. Returns what it says."""
+        editor = getattr(self, "studio_editor", None)
+        label = getattr(self, "studio_problem_label", None)
+        if editor is None:
+            return ("ok", "")
+        severity, text = self.studio_problem_summary(str(editor.string()))
+        if label is not None:
+            set_text_control_value(label, text)
+            try:
+                label.setTextColor_(
+                    NSColor.systemRedColor()
+                    if severity == "error"
+                    else NSColor.systemOrangeColor()
+                    if severity == "warning"
+                    else NSColor.secondaryLabelColor()
+                )
+            except Exception:
+                pass
+        return (severity, text)
+
+    def textDidChange_(self, notification) -> None:
+        """NSTextView delegate: the Studio editor validating as you type.
+
+        Guarded on identity because the controller is the action target
+        for most of this window -- another text view acquiring this
+        delegate must not repaint the Studio's line with its own contents.
+        """
+        editor = getattr(self, "studio_editor", None)
+        if editor is None:
+            return
+        try:
+            changed = notification.object()
+        except Exception:
+            changed = None
+        if changed is not None and changed is not editor:
+            return
+        self.refresh_studio_problem_label()
+
+    def studio_problem_summary(self, program: str) -> tuple[str, str]:
+        """(severity, text) for the Studio's live validation line.
+
+        Severity is "error", "warning" or "ok" -- the pane colours the
+        label from it. "the wasm said no" was the entire feedback this
+        editor gave before; these are sentences that name the step and
+        the fix.
+        """
+        problems = self.studio_program_problems(program)
+        errors = errors_only(problems)
+        if errors:
+            return ("error", describe_problems(errors))
+        warnings = warnings_only(problems)
+        if warnings:
+            return ("warning", describe_problems(warnings))
+        return ("ok", "")
+
     def validate_studio_program(
-        self, program: str, *, strict: bool = False
+        self,
+        program: str,
+        *,
+        strict: bool = False,
+        led_count: int | None = None,
     ) -> str | None:
-        """Real firmware-grammar validation via the same sdled.wasm the
-        Screen Bar runs -- validate_led_text only checks size limits,
-        and a program the FIRMWARE can't parse makes the device strobe
-        red. Returns an error message, or None when the program parses.
+        """Everything wrong with a Studio program, in words, or None.
+
+        Two checkers, in this order, for two different reasons:
+
+        1. ``animation.problems_for_program`` names the STEP and says how
+           to fix it ("step 3: a delay needs a duration or an easing --
+           the firmware reads a lone time as the duration, so this would
+           play immediately instead of waiting"). The firmware parser
+           cannot say that: it answers with an error name, a line and a
+           column, which is what this method used to hand the owner.
+        2. the real sdled.wasm still gets the last word, because it is the
+           thing that will actually read these bytes. It is RESET first --
+           the controller keeps state across parses, and a verdict
+           inherited from whatever the preview was doing a moment ago is
+           not a verdict about this program.
+
         Parser unavailable: None for preview/save (graceful), but with
         strict=True an ERROR -- the INIT.LED burn replays at every
-        hardware boot and must never fail open on a broken parser."""
+        hardware boot and must never fail open on a broken parser.
+        """
+        count = self.studio_led_count() if led_count is None else int(led_count)
+        errors = errors_only(self.studio_program_problems(program, led_count=count))
+        if errors:
+            return errors[0].message
         try:
             from .led_wasm import SdLedWasmController
 
-            result = SdLedWasmController(led_count=8).parse(program, 0)
+            controller = SdLedWasmController(led_count=count)
+            controller.reset(0)
+            result = controller.parse(program, 0)
         except Exception:
             if strict:
                 return (
@@ -13526,9 +14705,12 @@ DAILY_TIPS: tuple[tuple[str, str | None, str | None], ...] = (
     ("Whites looking off? Calibrate each device under Devices", "devices", None),
     ("Day, Night, and Travel calibration profiles live under Profiles", None, None),
     ("Ignored asks can escalate: light, menu bar, chime, takeover", "led_behavior", None),
-    ("Severe-weather warnings can flash your lights", "led_behavior", None),
-    ("Calendar events and Reminders can glow before they're due", "led_behavior", None),
+    ("Severe-weather warnings can flash your lights", "extras", None),
+    ("Calendar events and Reminders can glow before they're due", "extras", None),
     ("Every signal card in Signals has a Test button -- try one", "led_behavior", None),
+    ("Agents on your other Macs can show up in this menu", "agents", None),
+    ("A cloud code review can post its own status to SidePulse", "agents", None),
+    ("Choose how each provider's light moves under Agents", "agents", None),
     ("A macOS Focus can dim or silence your lights automatically", "focus", None),
     ("A device can show Agent status, Battery, Timer, or your Studio program", "devices", None),
     (
@@ -14045,7 +15227,37 @@ def menu_content_signature(snapshot, state, target) -> tuple:
         # First-run honesty rows: "you are not set up" must disappear the
         # moment the user IS set up, not when the 30s valve below fires.
         intake_content_signature(getattr(target, "current_intake_report", None)),
+        # The other Mac's rows are drawn straight from the merged ledger,
+        # not from the mailbox projection, so nothing above this line can
+        # see them change. Without this the "Other Macs" section would
+        # only ever repaint on the 30s valve below.
+        remote_ledger_content_signature(target),
         int(time.monotonic() // 30),
+    )
+
+
+def remote_ledger_content_signature(target) -> tuple:
+    """What the "Other Macs" section is currently saying."""
+    ledger = getattr(target, "current_merged_ledger", None)
+    if type(ledger) is not MergedLedger:
+        return ()
+    return (
+        tuple(
+            (
+                row.machine,
+                row.status.agent_id,
+                row.status.mode.value,
+                row.status.display_name,
+                row.status.stale,
+            )
+            for row in remote_ledger_menu_rows(target)
+        ),
+        ledger.dropped_remote_rows,
+        tuple(
+            (item.machine, item.failure or "")
+            for item in ledger.health
+            if not item.reachable
+        ),
     )
 
 
@@ -14712,6 +15924,79 @@ def _canonical_agent_root_snapshot(snapshot, target, *, menu=None):
     return tuple(states), items
 
 
+#: How many peer rows the dropdown will list before saying "and N more".
+#: The ledger is a glance, not an inventory: 1-5 main agents per machine
+#: is the real scale, and a peer that publishes 64 rows is having a bad
+#: day that this menu is not the place to read about.
+MAX_REMOTE_LEDGER_MENU_ROWS = 8
+
+
+def remote_ledger_menu_rows(target) -> tuple[LedgerRow, ...]:
+    """Every peer row the ledger should show right now.
+
+    The modern dropdown is built from ``operator_state``, which only ever
+    contains work this machine's own collector saw -- so a peer's rows
+    reach the ledger through here or not at all. Muted rows are INCLUDED
+    on purpose: muting decides what may take a light, not what the ledger
+    is allowed to say.
+    """
+    ledger = getattr(target, "current_merged_ledger", None)
+    if type(ledger) is not MergedLedger:
+        return ()
+    return tuple(row for row in ledger.remote_rows if not row.status.is_subagent)
+
+
+def remote_ledger_row_title(row: LedgerRow, now: datetime) -> str:
+    state = state_for_mode(row.status.mode)
+    parts = [state.label, format_age(row.status.age_seconds(now))]
+    if row.status.stale:
+        parts.append("stale")
+    return f"{row.ledger_label} — {' · '.join(parts)}"
+
+
+def add_remote_ledger_menu_items(menu: NSMenu, target, now: datetime) -> int:
+    """The other Mac, in the ledger. Returns how many rows it drew.
+
+    Rows are DISABLED, and that is the design rather than an omission:
+    there is no session here to open, and a clickable row that cannot do
+    the thing it looks like it does is the same lie as a light that means
+    two things.
+    """
+    rows = remote_ledger_menu_rows(target)
+    ledger = getattr(target, "current_merged_ledger", None)
+    unreachable = (
+        tuple(item for item in ledger.health if not item.reachable)
+        if type(ledger) is MergedLedger
+        else ()
+    )
+    if not rows and not unreachable:
+        return 0
+    menu.addItem_(NSMenuItem.separatorItem())
+    menu.addItem_(disabled_menu_item("Other Macs"))
+    shown = rows[:MAX_REMOTE_LEDGER_MENU_ROWS]
+    for row in shown:
+        item = disabled_menu_item(remote_ledger_row_title(row, now))
+        image = status_icon_for_status(row.status)
+        if image is not None:
+            item.setImage_(image)
+        menu.addItem_(item)
+    hidden = len(rows) - len(shown)
+    if type(ledger) is MergedLedger:
+        hidden += ledger.dropped_remote_rows
+    if hidden > 0:
+        menu.addItem_(disabled_menu_item(f"and {hidden} more"))
+    for item in unreachable:
+        # Naming the failure beats an empty section: "mac-b is quiet" and
+        # "mac-b cannot be reached" are completely different facts, and
+        # only one of them means nothing is running there.
+        menu.addItem_(
+            disabled_menu_item(
+                f"⚠ {item.machine}: {item.failure or 'unreachable'}"
+            )
+        )
+    return len(shown)
+
+
 def add_intake_menu_items(menu: NSMenu, target) -> None:
     """The dropdown half of first-run honesty: the fault, then the ledger.
 
@@ -14797,6 +16082,14 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     if activity_item is not None:
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItem_(activity_item)
+    # The other Mac goes UNDER this desk's own rows and above everything
+    # else: it is still the ledger's subject (what is happening), just not
+    # here. With remote peers off it draws nothing at all.
+    add_remote_ledger_menu_items(
+        menu,
+        target,
+        getattr(snapshot, "collected_at", None) or datetime.now(timezone.utc),
+    )
     statuses = recent_statuses(snapshot)
 
     focus_summary = (
@@ -15466,8 +16759,10 @@ SETTINGS_SIDEBAR_ITEMS: tuple[tuple[str, str], ...] = (
     ("animations", "Animations"),
     ("header:behavior", "BEHAVIOR"),
     ("led_behavior", "Signals"),
+    ("notifications", "Messages"),
     ("focus", "Focus"),
     ("power", "Power"),
+    ("extras", "Extras"),
     ("header:advanced", "ADVANCED"),
     ("debug", "Debug"),
 )
@@ -15483,8 +16778,10 @@ SIDEBAR_ICONS: dict[str, str] = {
     "colors_screen_bar": "menubar.rectangle",
     "animations": "film",
     "led_behavior": "bell.badge",
+    "notifications": "envelope.badge",
     "focus": "moon",
     "power": "bolt",
+    "extras": "square.grid.2x2",
     "debug": "wrench.and.screwdriver",
 }
 
@@ -16981,7 +18278,7 @@ def main() -> int:
 # and callers keep addressing status_bar.<name>. settings_window never
 # imports status_bar, so no import cycle can exist.
 from . import settings_window as _settings_window  # noqa: E402
-from .virtual_device import LED_COUNT  # noqa: E402, F401 -- re-export; tests address status_bar.LED_COUNT
+from .virtual_device import LED_COUNT  # noqa: E402 -- re-export; tests address status_bar.LED_COUNT
 
 _settings_window._install(dict(globals()))
 from .settings_window import (  # noqa: E402, F401 -- re-export: tests and
@@ -17010,11 +18307,13 @@ from .settings_window import (  # noqa: E402, F401 -- re-export: tests and
     _build_colors_screen_bar_pane,
     _build_debug_pane,
     _build_devices_pane,
+    _build_extras_pane,
     _build_focus_pane,
     _build_history_pane,
     _build_led_behavior_pane,
     _build_lid_animations_pane,
     _build_lid_preset_row,
+    _build_notifications_pane,
     _build_power_pane,
     _build_profile_pane,
     _build_settings_pane,
@@ -17024,10 +18323,14 @@ from .settings_window import (  # noqa: E402, F401 -- re-export: tests and
     build_calibration_popover_content,
     build_settings_window,
     calibration_summary_text,
+    cloud_ingest_status_text,
+    known_remote_machines,
+    make_agent_animation_popup,
     make_focus_dim_popup,
     make_signal_color_row,
     make_signal_style_card,
     refresh_blend_and_speed_fields,
+    remote_peer_status_text,
     select_focus_dim_choice,
 )
 

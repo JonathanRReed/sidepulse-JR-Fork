@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from .device_writer import (
     DEFAULT_FILE_NAME,
+    POWER_UP_FILE_NAME,
     DeviceWriteError,
     resolve_target_path,
     write_led_program,
@@ -651,6 +652,55 @@ def write_mode_to_leds(
     )
 
 
+def burn_saved_animation_to_power_up(
+    name: str,
+    *,
+    library_path: Path | None = None,
+    device_path: Path | None = None,
+    led_count: int | None = None,
+    dry_run: bool = True,
+    allow_warnings: bool = False,
+):
+    """Burn one of the owner's saved animations into INIT.LED.
+
+    The device-facing half of the animation editor, kept here with the rest
+    of the writing so there is ONE module that talks to LED files. Returns
+    an ``animation.BurnPlan``: on a dry run (the default) that is the exact
+    bytes and the target path with nothing written, and a caller that wants
+    the write has to say ``dry_run=False`` out loud.
+
+    ``led_count`` defaults to whatever the resolved device actually is, so a
+    2-LED Dot is validated as a 2-LED Dot -- an 8-LED program burned onto a
+    Dot is accepted by the parser and then silently paints six LEDs that do
+    not exist.
+    """
+    from .animation import burn_power_up_animation, parse_animation
+    from .animation_store import (
+        default_animation_library_path,
+        load_animation_library,
+    )
+
+    path = Path(library_path) if library_path else default_animation_library_path()
+    saved = load_animation_library(path).library.get(str(name))
+    if led_count is None:
+        try:
+            target = resolve_target_path(
+                device_path=device_path, file_name=POWER_UP_FILE_NAME
+            )
+        except DeviceWriteError:
+            led_count = 8
+        else:
+            led_count = led_count_for_target(target)
+    animation = parse_animation(saved.program, name=saved.name, led_count=led_count)
+    return burn_power_up_animation(
+        animation,
+        device_path=device_path,
+        led_count=led_count,
+        dry_run=dry_run,
+        allow_warnings=allow_warnings,
+    )
+
+
 def led_count_for_target(target: Path) -> int:
     name = normalized_device_name(target.parent.name)
     for hint, led_count in DEVICE_LED_COUNTS.items():
@@ -782,11 +832,30 @@ def style_to_program(
 
     if style.pattern == "breathe":
         body = f"off 400ms cosine\n{hex_color} {speed_ms}ms pulse\nrepeat"
-    elif style.pattern in ("blink", "double-blink"):
-        cycles = 3 if style.pattern == "blink" else 2
+    elif style.pattern == "blink":
+        # A SQUARE, and the only shape here with no easing at all. It used
+        # to be `cosine` on both halves, which is a triangle -- measured
+        # through the firmware, a cosine blink and a breathe are the same
+        # smooth bump at different ratios, so "blink" was a second name for
+        # "breathe" rather than its own signal. Hard edges are the whole
+        # point of the word, and they are what a dichromat can still read
+        # when the hue is gone.
         flash = max(1, round(speed_ms * 17 / 30))
         gap = max(1, round(speed_ms * 13 / 30))
-        body = "\n".join([f"{hex_color} {flash}ms cosine\noff {gap}ms cosine"] * cycles)
+        body = "\n".join([f"{hex_color} {flash}ms none\noff {gap}ms none"] * 3)
+    elif style.pattern == "double-blink":
+        # A KNOCK: two hard taps close together, then a rest that is half
+        # the cycle. It used to be literally `blink` truncated to two
+        # cycles -- byte-for-byte the same two lines, so a knock and a
+        # blink were indistinguishable in a still frame AND in motion until
+        # the third flash that never came. The rest is what makes it a
+        # knock: rap-rap, pause.
+        tap = max(1, round(speed_ms / 6))
+        rest = max(1, speed_ms - 3 * tap)
+        body = (
+            f"{hex_color} {tap}ms none\noff {tap}ms none\n"
+            f"{hex_color} {tap}ms none\noff {rest}ms none"
+        )
     elif style.pattern == "solid":
         body = hex_color
     elif style.pattern == "sweep":
@@ -827,13 +896,25 @@ def style_to_program(
         )
         body = f"off 300ms cosine\n{segments}\nrepeat"
     elif style.pattern == "heartbeat":
-        # Lub-dub: two quick whole-bar thumps, then a rest.
-        thump = max(1, round(speed_ms * 0.18))
-        gap = max(1, round(speed_ms * 0.12))
-        rest = max(1, round(speed_ms * 0.52))
+        # LUB-dub. Three things make this a heartbeat rather than a third
+        # spelling of blink, and the old version had none of them:
+        #
+        #   * each beat is a `pulse`, so it rises AND falls inside its own
+        #     duration -- a thump. The old one ramped up with `cosine` and
+        #     then held until the line ended, so beat two was a 180ms rise
+        #     followed by a 520ms fade: a long sigh, not a beat.
+        #   * the rest is a flat `none` hold at dark. A cosine rest is a
+        #     decay, and a decay is indistinguishable from the beat it is
+        #     decaying from.
+        #   * the second beat is dimmer than the first. Two equal taps is a
+        #     knock; unequal ones are a pulse you can feel.
+        thump = max(1, round(speed_ms * 0.14))
+        gap = max(1, round(speed_ms * 0.10))
+        rest = max(1, speed_ms - 2 * thump - gap)
+        dub = scale_hex_brightness(hex_color, 0.55)
         body = (
-            f"{hex_color} {thump}ms cosine\noff {gap}ms cosine\n"
-            f"{hex_color} {thump}ms cosine\noff {rest}ms cosine\nrepeat"
+            f"{hex_color} {thump}ms pulse\noff {gap}ms none\n"
+            f"{dub} {thump}ms pulse\noff {rest}ms none\nrepeat"
         )
     else:  # pragma: no cover - normalized() forbids this
         body = hex_color

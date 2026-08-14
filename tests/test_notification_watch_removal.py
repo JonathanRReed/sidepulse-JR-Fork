@@ -155,7 +155,11 @@ def test_application_launch_schedules_no_foreign_notification_poll(
     controller.applicationDidFinishLaunching_(None)
 
     assert "pollNotifications:" not in selectors
-    assert selectors == ["refresh:", "pollLid:"]
+    # Every repeating timer launch arms, named. The peer timer joined this
+    # list deliberately: it is the ONLY thing that fetches other Macs, and
+    # it is here rather than on the refresh tick because that fetch is
+    # bounded subprocess I/O measured in seconds, not milliseconds.
+    assert selectors == ["refresh:", "pollLid:", "refreshRemotePeers:"]
     assert notification_client.delegates == [controller]
     assert notification_client.authorization_requests == 0
 

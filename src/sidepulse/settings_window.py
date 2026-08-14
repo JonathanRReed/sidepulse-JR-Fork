@@ -1821,165 +1821,6 @@ def _build_led_behavior_pane(target: StatusBarController):
     fields = {"idle_dim_minutes_field": minutes_field, "idle_dim_fraction_field": fraction_field}
 
 
-    # SidePulse-owned agent lifecycle notifications only. Foreign app
-    # notifications are never observed or mirrored into the lights.
-    notif_outer, notif_inner = native_ui.make_card("Agent Notifications")
-    completion_row, completion_switch = native_ui.make_switch_row(
-        "Sweep when any agent finishes",
-        target,
-        "toggleCompletionSweep:",
-        help_text=(
-            "A brief sweep in the finishing agent's own color -- without "
-            "it, a completion is invisible whenever another agent is "
-            "still working."
-        ),
-    )
-    notif_inner.addArrangedSubview_(completion_row)
-    native_ui.add_separator(notif_inner)
-    completion_banner_row, completion_banner_switch = native_ui.make_switch_row(
-        "Post a macOS notification when a session finishes",
-        target,
-        "toggleCompletionNotification:",
-        help_text=(
-            "A content-free banner identifies only the provider and whether "
-            "a session finished or needs you. Quiet Hour and Focus policies "
-            "hold it."
-        ),
-    )
-    notif_inner.addArrangedSubview_(completion_banner_row)
-    native_ui.add_separator(notif_inner)
-    notification_status = native_ui.make_label(
-        target.notification_authorization_status_text(),
-        secondary=True,
-    )
-    notification_permission = native_ui.make_button(
-        "Enable Notifications…",
-        target,
-        "requestNotificationPermission:",
-    )
-    notification_permission.setHidden_(
-        not target._notification_authorization_checked
-        or target.notification_authorization_state.value != "not_determined"
-    )
-    notification_controls = native_ui.make_stack(
-        orientation="horizontal",
-        spacing=native_ui.SPACE_S,
-    )
-    notification_controls.addArrangedSubview_(notification_status)
-    notification_controls.addArrangedSubview_(native_ui.make_hspacer())
-    notification_controls.addArrangedSubview_(notification_permission)
-    notif_inner.addArrangedSubview_(
-        native_ui.make_row("macOS permission", notification_controls)
-    )
-    fields["notification_authorization_status"] = notification_status
-    stack.addArrangedSubview_(notif_outer)
-
-    # Calendar & Reminders: warning lights, not a calendar app.
-    # (This card used to be a five-feature grab-bag titled "Calendar",
-    # with weather's location fields orphaned three rows from the
-    # weather switch. One card per subject now.)
-    cal_outer, cal_inner = native_ui.make_card("Calendar & Reminders")
-    cal_row, cal_switch = native_ui.make_switch_row(
-        "Glow before events start",
-        target,
-        "toggleCalendarAlerts:",
-        help_text=(
-            "A calm purple breathe on every surface while an event is "
-            "about to begin. Turning this on asks macOS for Calendar "
-            "access."
-        ),
-    )
-    cal_inner.addArrangedSubview_(cal_row)
-    native_ui.add_separator(cal_inner)
-    lead_field = native_ui.make_field(
-        f"{target.settings.calendar_lead_minutes:g}",
-        target=target,
-        action="applyCalendarLead:",
-    )
-    native_ui.constrain_width(lead_field, 48.0)
-    lead_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
-    lead_controls.addArrangedSubview_(lead_field)
-    lead_controls.addArrangedSubview_(native_ui.make_label("minutes before", secondary=True))
-    cal_inner.addArrangedSubview_(native_ui.make_row("Start glowing", lead_controls))
-    native_ui.add_separator(cal_inner)
-    rem_row, rem_switch = native_ui.make_switch_row(
-        "Glow when a Reminder comes due",
-        target,
-        "toggleReminderAlerts:",
-        help_text=(
-            "A short amber glow the moment a Reminder's due time "
-            "arrives. Turning this on asks macOS for Reminders access."
-        ),
-    )
-    cal_inner.addArrangedSubview_(rem_row)
-    stack.addArrangedSubview_(cal_outer)
-    fields["calendar_lead_field"] = lead_field
-
-    # Weather: the switch and ITS location fields, together.
-    weather_outer, weather_inner = native_ui.make_card("Weather")
-    weather_row, weather_switch = native_ui.make_switch_row(
-        "Flash on severe weather warnings",
-        target,
-        "toggleWeatherAlerts:",
-        help_text=(
-            "An urgent heartbeat while a Severe or Extreme National "
-            "Weather Service warning covers your area. Location comes "
-            "from your network address -- no Location permission "
-            "needed. A live agent ask still takes the bar first."
-        ),
-    )
-    weather_inner.addArrangedSubview_(weather_row)
-    native_ui.add_separator(weather_inner)
-    lat_field = native_ui.make_field(
-        ""
-        if target.settings.weather_latitude is None
-        else f"{target.settings.weather_latitude:g}",
-        target=target,
-        action="applyWeatherLocation:",
-    )
-    lon_field = native_ui.make_field(
-        ""
-        if target.settings.weather_longitude is None
-        else f"{target.settings.weather_longitude:g}",
-        target=target,
-        action="applyWeatherLocation:",
-    )
-    native_ui.constrain_width(lat_field, 72.0)
-    native_ui.constrain_width(lon_field, 72.0)
-    location_controls = native_ui.make_stack(
-        orientation="horizontal", spacing=native_ui.SPACE_XS
-    )
-    location_controls.addArrangedSubview_(lat_field)
-    location_controls.addArrangedSubview_(native_ui.make_label("lat", secondary=True))
-    location_controls.addArrangedSubview_(lon_field)
-    location_controls.addArrangedSubview_(native_ui.make_label("lon", secondary=True))
-    weather_inner.addArrangedSubview_(
-        native_ui.make_row(
-            "Location override",
-            location_controls,
-            help_text=(
-                "Leave both blank to locate automatically from your "
-                "network address. NWS alerts cover the United States "
-                "and its territories."
-            ),
-        )
-    )
-    fields["weather_latitude_field"] = lat_field
-    fields["weather_longitude_field"] = lon_field
-    stack.addArrangedSubview_(weather_outer)
-
-    # Capacity effects remain withheld until a separately reviewed release.
-    quota_outer, quota_inner = native_ui.make_card("Quota")
-    quota_inner.addArrangedSubview_(
-        native_ui.make_wrapping_label(
-            "Capacity alerts, outbound events, queue advice, and hardware "
-            "runway are unavailable until a supported source and explicit "
-            "forecast release authority exist.",
-            secondary=True,
-        )
-    )
-    stack.addArrangedSubview_(quota_outer)
-
     # Needs-you escalation: how loud an ignored ask may get.
     esc_outer, esc_inner = native_ui.make_card("Needs-You Escalation")
     tier_popup = native_ui.make_popup_button(target, "setEscalationTier:")
@@ -2076,15 +1917,316 @@ def _build_led_behavior_pane(target: StatusBarController):
 
     buttons = {
         "idle_dim_enabled": idle_switch,
-        "completion_sweep_enabled": completion_switch,
-        "completion_notification": completion_banner_switch,
-        "notification_permission": notification_permission,
-        "calendar_alerts_enabled": cal_switch,
-        "reminder_alerts_enabled": rem_switch,
-        "weather_alerts_enabled": weather_switch,
         "subagent_asks_alert": subask_switch,
     }
     buttons.update(webhook_event_boxes)
+    return native_ui.wrap_in_scroll_pane(stack), fields, buttons
+
+
+def _build_notifications_pane(target: StatusBarController):
+    """Messages: everything SidePulse may say to you in WORDS.
+
+    Split out of Signals, which had grown into a seven-subject pane
+    holding dimming, notifications, calendars, weather, quota and
+    escalation at once. The lights and the words are different jobs --
+    a light is peripheral, a banner is an interruption with text in it --
+    and the owner asked for the words to have their own place.
+    """
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    fields: dict[str, object] = {}
+
+    # SidePulse-owned agent lifecycle notifications only. Foreign app
+    # notifications are never observed or mirrored into the lights.
+    notif_outer, notif_inner = native_ui.make_card("Agent Notifications")
+    completion_row, completion_switch = native_ui.make_switch_row(
+        "Sweep when any agent finishes",
+        target,
+        "toggleCompletionSweep:",
+        help_text=(
+            "A brief sweep in the finishing agent's own color -- without "
+            "it, a completion is invisible whenever another agent is "
+            "still working."
+        ),
+    )
+    notif_inner.addArrangedSubview_(completion_row)
+    native_ui.add_separator(notif_inner)
+    completion_banner_row, completion_banner_switch = native_ui.make_switch_row(
+        "Post a macOS notification when a session finishes",
+        target,
+        "toggleCompletionNotification:",
+        help_text=(
+            "A content-free banner identifies only the provider and whether "
+            "a session finished or needs you. Quiet Hour and Focus policies "
+            "hold it."
+        ),
+    )
+    notif_inner.addArrangedSubview_(completion_banner_row)
+    native_ui.add_separator(notif_inner)
+    notification_status = native_ui.make_label(
+        target.notification_authorization_status_text(),
+        secondary=True,
+    )
+    notification_permission = native_ui.make_button(
+        "Enable Notifications…",
+        target,
+        "requestNotificationPermission:",
+    )
+    notification_permission.setHidden_(
+        not target._notification_authorization_checked
+        or target.notification_authorization_state.value != "not_determined"
+    )
+    notification_controls = native_ui.make_stack(
+        orientation="horizontal",
+        spacing=native_ui.SPACE_S,
+    )
+    notification_controls.addArrangedSubview_(notification_status)
+    notification_controls.addArrangedSubview_(native_ui.make_hspacer())
+    notification_controls.addArrangedSubview_(notification_permission)
+    notif_inner.addArrangedSubview_(
+        native_ui.make_row("macOS permission", notification_controls)
+    )
+    fields["notification_authorization_status"] = notification_status
+    stack.addArrangedSubview_(notif_outer)
+
+    # Who is allowed to interrupt: the ledger shows every machine, the
+    # lights are only for the desk you are sitting at.
+    interrupt_outer, interrupt_inner = native_ui.make_card("Who May Interrupt You")
+    interrupt_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Agents on another Mac and agents in the cloud always appear in "
+            "the menu. Whether they may also take a light here is a separate "
+            "question, and the answer starts as no.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    remote_interrupt_row, remote_interrupt_switch = native_ui.make_switch_row(
+        "Let other Macs' agents take a light here",
+        target,
+        "toggleRemoteInterrupts:",
+        help_text=(
+            "Off (default) means a peer's rows are ledger-only. On means "
+            "every machine may interrupt unless you mute it below."
+        ),
+    )
+    interrupt_inner.addArrangedSubview_(remote_interrupt_row)
+    machine_boxes = _add_remote_machine_rows(target, interrupt_inner)
+    stack.addArrangedSubview_(interrupt_outer)
+
+    buttons = {
+        "completion_sweep_enabled": completion_switch,
+        "completion_notification": completion_banner_switch,
+        "notification_permission": notification_permission,
+        "remote_interrupts_enabled": remote_interrupt_switch,
+    }
+    buttons.update(machine_boxes)
+    return native_ui.wrap_in_scroll_pane(stack), fields, buttons
+
+
+def known_remote_machines(target) -> tuple[str, ...]:
+    """Every peer machine the owner could have an opinion about.
+
+    Union of what was actually seen this session and what the settings
+    file already names, so a machine that is asleep right now does not
+    silently lose the mute the owner set for it last week.
+    """
+    names: list[str] = []
+    ledger = getattr(target, "current_merged_ledger", None)
+    if ledger is not None:
+        for item in getattr(ledger, "health", ()):
+            if item.machine and item.machine not in names:
+                names.append(item.machine)
+        for row in getattr(ledger, "rows", ()):
+            if row.is_remote and row.machine not in names:
+                names.append(row.machine)
+    remote = target.settings.remote_peers
+    for machine in (*remote.unmuted_machines, *remote.muted_machines):
+        if machine not in names:
+            names.append(machine)
+    return tuple(sorted(names))
+
+
+def _add_remote_machine_rows(target, inner) -> dict[str, object]:
+    """One checkbox per known peer machine, or an honest empty line."""
+    machines = known_remote_machines(target)
+    if not machines:
+        native_ui.add_separator(inner)
+        inner.addArrangedSubview_(
+            native_ui.make_label(
+                "No other Macs seen yet."
+                if target.settings.remote_peers.enabled
+                else "Turn on Other Macs in the Agents pane first.",
+                secondary=True,
+                size=11.0,
+            )
+        )
+        return {}
+    policy = target.settings.remote_peers.interrupt_policy()
+    boxes: dict[str, object] = {}
+    for machine in machines:
+        native_ui.add_separator(inner)
+        box = native_ui.make_checkbox(
+            f"Let {machine} interrupt",
+            target,
+            "toggleRemoteMachineInterrupt:",
+        )
+        box.setIdentifier_(machine)
+        set_checkbox_state(box, policy.allows_machine(machine))
+        inner.addArrangedSubview_(box)
+        boxes[f"remote_machine:{machine}"] = box
+    return boxes
+
+
+def _build_extras_pane(target: StatusBarController):
+    """Extras: the non-agent things the bar can also tell you about.
+
+    Calendar, Reminders, weather and the (still withheld) quota effects
+    used to live inside Signals, three cards below a dimming slider, with
+    nothing tying them together except "we had nowhere else to put them".
+    They are a coherent group -- ambient facts that are not agents -- and
+    the owner asked for them to have their own area.
+    """
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    fields: dict[str, object] = {}
+
+    # Calendar & Reminders: warning lights, not a calendar app.
+    cal_outer, cal_inner = native_ui.make_card("Calendar & Reminders")
+    cal_row, cal_switch = native_ui.make_switch_row(
+        "Glow before events start",
+        target,
+        "toggleCalendarAlerts:",
+        help_text=(
+            "A calm purple breathe on every surface while an event is "
+            "about to begin. Turning this on asks macOS for Calendar "
+            "access."
+        ),
+    )
+    cal_inner.addArrangedSubview_(cal_row)
+    native_ui.add_separator(cal_inner)
+    lead_field = native_ui.make_field(
+        f"{target.settings.calendar_lead_minutes:g}",
+        target=target,
+        action="applyCalendarLead:",
+    )
+    native_ui.constrain_width(lead_field, 48.0)
+    lead_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
+    lead_controls.addArrangedSubview_(lead_field)
+    lead_controls.addArrangedSubview_(native_ui.make_label("minutes before", secondary=True))
+    cal_inner.addArrangedSubview_(native_ui.make_row("Start glowing", lead_controls))
+    native_ui.add_separator(cal_inner)
+    rem_row, rem_switch = native_ui.make_switch_row(
+        "Glow when a Reminder comes due",
+        target,
+        "toggleReminderAlerts:",
+        help_text=(
+            "A short amber glow the moment a Reminder's due time "
+            "arrives. Turning this on asks macOS for Reminders access."
+        ),
+    )
+    cal_inner.addArrangedSubview_(rem_row)
+    stack.addArrangedSubview_(cal_outer)
+    fields["calendar_lead_field"] = lead_field
+
+    # Weather: the switch and ITS location fields, together.
+    weather_outer, weather_inner = native_ui.make_card("Weather")
+    weather_row, weather_switch = native_ui.make_switch_row(
+        "Flash on severe weather warnings",
+        target,
+        "toggleWeatherAlerts:",
+        help_text=(
+            "An urgent heartbeat while a Severe or Extreme National "
+            "Weather Service warning covers your area. Location comes "
+            "from your network address -- no Location permission "
+            "needed. A live agent ask still takes the bar first."
+        ),
+    )
+    weather_inner.addArrangedSubview_(weather_row)
+    native_ui.add_separator(weather_inner)
+    lat_field = native_ui.make_field(
+        ""
+        if target.settings.weather_latitude is None
+        else f"{target.settings.weather_latitude:g}",
+        target=target,
+        action="applyWeatherLocation:",
+    )
+    lon_field = native_ui.make_field(
+        ""
+        if target.settings.weather_longitude is None
+        else f"{target.settings.weather_longitude:g}",
+        target=target,
+        action="applyWeatherLocation:",
+    )
+    native_ui.constrain_width(lat_field, 72.0)
+    native_ui.constrain_width(lon_field, 72.0)
+    location_controls = native_ui.make_stack(
+        orientation="horizontal", spacing=native_ui.SPACE_XS
+    )
+    location_controls.addArrangedSubview_(lat_field)
+    location_controls.addArrangedSubview_(native_ui.make_label("lat", secondary=True))
+    location_controls.addArrangedSubview_(lon_field)
+    location_controls.addArrangedSubview_(native_ui.make_label("lon", secondary=True))
+    weather_inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Location override",
+            location_controls,
+            help_text=(
+                "Leave both blank to locate automatically from your "
+                "network address. NWS alerts cover the United States "
+                "and its territories."
+            ),
+        )
+    )
+    fields["weather_latitude_field"] = lat_field
+    fields["weather_longitude_field"] = lon_field
+    stack.addArrangedSubview_(weather_outer)
+
+    # Capacity EFFECTS remain withheld. Capacity HISTORY is a different
+    # decision -- it is a record kept on this Mac, not an outbound event --
+    # and it is the owner's to make, which is why it has a switch and the
+    # effects have a sentence.
+    quota_outer, quota_inner = native_ui.make_card("Quota")
+    history_row, history_switch = native_ui.make_switch_row(
+        "Remember how capacity moved",
+        target,
+        "toggleCapacityHistory:",
+        help_text=(
+            "Keeps the percentage left and the reset time for each "
+            "window, on this Mac only, so “Why Is It Doing That?” "
+            "can show the last day and week instead of only this "
+            "moment. No prompts, no session names, no paths. Turning "
+            "it off deletes the file."
+        ),
+    )
+    quota_inner.addArrangedSubview_(history_row)
+    native_ui.add_separator(quota_inner)
+    retention_popup = native_ui.make_popup_button(target, "setCapacityHistoryRetention:")
+    current_days = getattr(target.settings, "capacity_history_retention_days", 7)
+    for days in (7, 30, 90):
+        retention_popup.addItemWithTitle_(f"{days} days")
+        item = retention_popup.lastItem()
+        item.setRepresentedObject_(str(days))
+        if days == current_days:
+            retention_popup.selectItem_(item)
+    quota_inner.addArrangedSubview_(native_ui.make_row("Keep for", retention_popup))
+    native_ui.add_separator(quota_inner)
+    quota_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Capacity alerts, outbound events, queue advice, and hardware "
+            "runway are unavailable until a supported source and explicit "
+            "forecast release authority exist.",
+            secondary=True,
+        )
+    )
+    stack.addArrangedSubview_(quota_outer)
+    fields["capacity_history_retention_popup"] = retention_popup
+
+    buttons = {
+        "calendar_alerts_enabled": cal_switch,
+        "reminder_alerts_enabled": rem_switch,
+        "weather_alerts_enabled": weather_switch,
+        "capacity_history_enabled": history_switch,
+    }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
@@ -2185,8 +2327,222 @@ def _build_agents_pane(target: StatusBarController):
         fields[f"{provider}_session_opener"] = popup
     stack.addArrangedSubview_(openers_outer)
 
+    # Pick a provider, choose how it moves. The same setting the Studio's
+    # Animations section writes -- one fact, two doors, and both of them
+    # read `colors.provider_animation` rather than keeping a copy.
+    anim_outer, anim_inner = native_ui.make_card("Agent Animation")
+    anim_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Pick a provider, choose how it moves. Automatic follows the "
+            "state (breathe when idle, chase while working). Whatever you "
+            "choose, an agent that needs you keeps its urgent beat -- that "
+            "one is not up for negotiation.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    for index, row in enumerate(colors_module.provider_color_rows(target.settings.colors)):
+        popup = make_agent_animation_popup(row, target)
+        anim_inner.addArrangedSubview_(
+            native_ui.make_row(
+                _provider_display_label(row.provider),
+                popup,
+                help_text=row.animation_description,
+            )
+        )
+        fields[f"{row.provider}_agent_animation"] = popup
+        if index < len(PROVIDER_SPECS) - 1:
+            native_ui.add_separator(anim_inner)
+    stack.addArrangedSubview_(anim_outer)
+
+    peers_outer, peers_inner, peer_buttons, peer_fields = _build_remote_peers_card(target)
+    stack.addArrangedSubview_(peers_outer)
+    fields.update(peer_fields)
+
+    cloud_outer, cloud_inner, cloud_buttons, cloud_fields = _build_cloud_agents_card(target)
+    stack.addArrangedSubview_(cloud_outer)
+    fields.update(cloud_fields)
+
     buttons = {"codex_transcripts": codex_switch, "claude_transcripts": claude_switch}
+    buttons.update(peer_buttons)
+    buttons.update(cloud_buttons)
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
+
+
+def _provider_display_label(provider: str) -> str:
+    for spec in PROVIDER_SPECS:
+        if spec.provider == provider:
+            return spec.label
+    return provider.title() or provider
+
+
+def make_agent_animation_popup(row, target):
+    """One provider's motion picker, bound straight to the controller.
+
+    The Studio's own version of this row talks to SidePulseStudioActions,
+    which only exists while the Studio pane is built. This one targets the
+    controller, so the two panes can hold the same choice without either
+    needing the other to be on screen.
+    """
+    popup = native_ui.make_popup_button(target, "setAgentAnimation:")
+    popup.setIdentifier_(row.provider)
+    for motion in colors_module.PROVIDER_ANIMATION_CHOICES:
+        popup.addItemWithTitle_(colors_module.PROVIDER_ANIMATION_LABELS[motion])
+        item = popup.lastItem()
+        item.setRepresentedObject_({"provider": row.provider, "motion": motion})
+        item.setToolTip_(colors_module.PROVIDER_ANIMATION_DESCRIPTIONS[motion])
+        if motion == row.animation:
+            popup.selectItem_(item)
+    return popup
+
+
+def _build_remote_peers_card(target: StatusBarController):
+    """The second Mac. Every switch here starts OFF.
+
+    Three separate consents, deliberately not one: reading peers, being
+    readable BY peers, and letting the words of a session travel. A Mac
+    that can see the other one is not automatically a Mac that publishes
+    itself, and neither of those is permission to copy prompt text off
+    the machine that produced it.
+    """
+    outer, inner = native_ui.make_card("Other Macs")
+    inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Show agents running on your other Macs in this menu. Reads one "
+            "small file per peer over Tailscale + SSH; nothing is ever run "
+            "on the other machine, and no capacity number crosses the wire.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    enabled_row, enabled_switch = native_ui.make_switch_row(
+        "Show agents from my other Macs",
+        target,
+        "toggleRemotePeers:",
+        help_text=(
+            "Discovers peers with the Tailscale CLI and fetches each one's "
+            "published ledger once a minute, bounded at eight seconds total."
+        ),
+    )
+    inner.addArrangedSubview_(enabled_row)
+    native_ui.add_separator(inner)
+    publish_row, publish_switch = native_ui.make_switch_row(
+        "Let my other Macs see this one",
+        target,
+        "toggleRemotePublish:",
+        help_text=(
+            "Writes this Mac's own rows to a private file peers can read. "
+            "Sub-agents are never published, and the working directory and "
+            "launch origin never leave this machine."
+        ),
+    )
+    inner.addArrangedSubview_(publish_row)
+    native_ui.add_separator(inner)
+    messages_row, messages_switch = native_ui.make_switch_row(
+        "Include what each agent is asking",
+        target,
+        "toggleRemoteMessages:",
+        help_text=(
+            "Off (default) publishes the session name and its state, not "
+            "its words. On sends the question text too -- turn it on only "
+            "for machines you would read those questions on."
+        ),
+    )
+    inner.addArrangedSubview_(messages_row)
+    native_ui.add_separator(inner)
+    status_label = native_ui.make_label(
+        remote_peer_status_text(target),
+        secondary=True,
+        size=11.0,
+    )
+    controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    controls.addArrangedSubview_(status_label)
+    controls.addArrangedSubview_(native_ui.make_hspacer())
+    controls.addArrangedSubview_(
+        native_ui.make_button("Check Now", target, "refreshRemotePeersNow:")
+    )
+    inner.addArrangedSubview_(native_ui.make_row("Peers", controls))
+    buttons = {
+        "remote_peers_enabled": enabled_switch,
+        "remote_publish_enabled": publish_switch,
+        "remote_messages_enabled": messages_switch,
+    }
+    return outer, inner, buttons, {"remote_peers_status": status_label}
+
+
+def remote_peer_status_text(target) -> str:
+    """What the peer transport can honestly claim right now."""
+    remote = target.settings.remote_peers
+    if not remote.enabled:
+        return "Off."
+    result = getattr(target, "_remote_refresh", None)
+    health = tuple(getattr(result, "health", ()) or ())
+    if not health:
+        return "No peers found yet."
+    reachable = [item.machine for item in health if item.reachable]
+    failed = [
+        f"{item.machine} ({item.failure or 'unreachable'})"
+        for item in health
+        if not item.reachable
+    ]
+    parts = []
+    if reachable:
+        parts.append("Reading " + ", ".join(sorted(reachable)))
+    if failed:
+        parts.append("Cannot reach " + ", ".join(sorted(failed)))
+    return ". ".join(parts) + "."
+
+
+def _build_cloud_agents_card(target: StatusBarController):
+    """The loopback door for agents that do not run on this Mac at all."""
+    outer, inner = native_ui.make_card("Cloud Agents")
+    inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Let a cloud agent -- a hosted code review, say -- post its own "
+            "lifecycle to a loopback port so it appears here like any other "
+            "session. Binds 127.0.0.1 only, and every request needs a token "
+            "kept in your private state directory.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    enabled_row, enabled_switch = native_ui.make_switch_row(
+        "Accept events from cloud agents",
+        target,
+        "toggleCloudIngest:",
+        help_text=(
+            "Off by default: this opens a listening socket, and any process "
+            "running as you can reach a loopback port -- which is why the "
+            "token exists."
+        ),
+    )
+    inner.addArrangedSubview_(enabled_row)
+    native_ui.add_separator(inner)
+    address_label = native_ui.make_label(
+        cloud_ingest_status_text(target),
+        secondary=True,
+        size=11.0,
+    )
+    inner.addArrangedSubview_(native_ui.make_row("Listening", address_label))
+    return (
+        outer,
+        inner,
+        {"cloud_ingest_enabled": enabled_switch},
+        {"cloud_ingest_status": address_label},
+    )
+
+
+def cloud_ingest_status_text(target) -> str:
+    if not target.settings.cloud_ingest_enabled:
+        return "Off."
+    server = getattr(target, "cloud_ingest", None)
+    address = getattr(server, "address", None) if server is not None else None
+    if address is None:
+        return "Enabled — starts with the app."
+    return f"http://{address[0]}:{address[1]}/v1/agent-event"
 
 
 # Curated one-shot lid looks. Built only from grammar primitives already
@@ -2211,7 +2567,12 @@ LID_ANIMATION_PRESETS: dict[str, tuple[tuple[str, float, str], ...]] = {
         ("Still Cooking", 1.5, "#FF9F0A 300ms pulse\n#FF9F0A 250ms cosine\n#5A3A00 350ms cosine\n#1A1200 600ms cosine"),
         ("Baton Pass", 1.2, "#00E5FF 250ms pulse\n#8A7CFF 250ms cosine\n#12E3B0 250ms pulse\noff 450ms cosine"),
         ("Ember Watch", 1.8, "#FF6A3D 400ms pulse\n#802000 500ms cosine\n#331000 900ms cosine"),
-        ("Heartbeat Out", 1.3, "#FF2D55 150ms pulse\noff 120ms linear\n#FF2D55 150ms pulse\noff 880ms cosine"),
+        # Named for the shape it actually has. Two equal hard-ish thumps
+        # and a long rest is a KNOCK; a heartbeat's second thump is dimmer
+        # than its first, which is the whole difference between the two in
+        # the signal vocabulary. Calling this one "Heartbeat" left the
+        # window using one word for two motions.
+        ("Knock Out", 1.3, "#FF2D55 150ms pulse\noff 120ms linear\n#FF2D55 150ms pulse\noff 880ms cosine"),
     ),
     LID_ANIMATION_OPEN_ACTIVE: (
         ("Back On It", 1.2, "#12E3B0 200ms pulse\n#00E5FF 300ms cosine\n#00E5FF 700ms pulse"),
@@ -2278,6 +2639,25 @@ def _add_studio_card(target: StatusBarController, stack) -> None:
         height=110.0,
     )
     studio_inner.addArrangedSubview_(studio_scroll)
+    target.studio_editor = studio_editor
+    # Live validation, in sentences. What this replaces was a single
+    # message that appeared only when you pressed a button and said
+    # "syntax at line 2, column 7" -- the firmware parser's vocabulary,
+    # not a person's. These name the STEP and the fix, and they update
+    # as you type because the checker is pure and never touches hardware.
+    problem_label = native_ui.make_wrapping_label(
+        "",
+        secondary=True,
+        size=11.0,
+        max_width=520.0,
+    )
+    studio_inner.addArrangedSubview_(problem_label)
+    target.studio_problem_label = problem_label
+    try:
+        studio_editor.setDelegate_(target)
+    except Exception:
+        pass
+    target.refresh_studio_problem_label()
     studio_buttons = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     studio_buttons.addArrangedSubview_(
         native_ui.make_button("Preview on Everything", target, "previewStudioProgram:")
@@ -2299,21 +2679,25 @@ def _add_studio_card(target: StatusBarController, stack) -> None:
         native_ui.make_button("Save Look", target, "saveStudioLook:")
     )
     library_popup = native_ui.make_popup_button(target, "loadStudioLook:")
-    library_popup.addItemWithTitle_("Saved looks\u2026")
-    library_popup.lastItem().setRepresentedObject_("")
-    for look_name, _program in target.settings.studio_library:
-        library_popup.addItemWithTitle_(look_name)
-        library_popup.lastItem().setRepresentedObject_(look_name)
     library_row.addArrangedSubview_(library_popup)
     library_row.addArrangedSubview_(
+        native_ui.make_button("Rename", target, "renameStudioLook:")
+    )
+    library_row.addArrangedSubview_(
         native_ui.make_button("Delete", target, "deleteStudioLook:")
+    )
+    library_row.addArrangedSubview_(
+        native_ui.make_button("Burn as Power-Up", target, "burnStudioLookAsPowerUp:")
     )
     library_row.addArrangedSubview_(native_ui.make_hspacer())
     studio_inner.addArrangedSubview_(library_row)
     target.studio_save_name_field = save_name
     target.studio_library_popup = library_popup
+    # Fill from the bounded private library, not from settings.json --
+    # the popup is the one place a saved look is named, so it has to name
+    # what is actually stored.
+    target._refresh_studio_library_popup()
     stack.addArrangedSubview_(studio_outer)
-    target.studio_editor = studio_editor
 
 
 
@@ -2578,6 +2962,10 @@ def _build_settings_pane(target: StatusBarController, key: str):
         return _build_installed_agents_pane(target)
     if key == "led_behavior":
         return _build_led_behavior_pane(target)
+    if key == "notifications":
+        return _build_notifications_pane(target)
+    if key == "extras":
+        return _build_extras_pane(target)
     if key == "focus":
         return _build_focus_pane(target)
     if key == "power":

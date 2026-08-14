@@ -603,9 +603,14 @@ def test_a_signal_dialled_into_strobe_range_is_slowed_before_the_hardware(
         if token.endswith("ms") and token.removesuffix("ms").isdigit()
     ]
     assert durations, program
-    # One full on+off cycle is 500ms, so neither half can exceed it and
-    # their sum is the cycle the law permits.
-    assert sum(durations[:2]) == 500
+    # The whole knock -- two taps, the gap between them, and the rest after
+    # them -- is one 500ms cycle, which is the cadence the law permits. (It
+    # used to be "durations[:2] == 500": a double-blink was two even
+    # on/off halves, i.e. blink truncated. Wave 7 gave the knock its rest,
+    # so the cycle is four spans rather than two, and the law is still the
+    # sum of them.)
+    assert sum(durations) == 500
+    assert max(durations) < 500
 
 
 def test_an_escalation_chime_is_hushed_only_by_an_explicit_silent_focus(

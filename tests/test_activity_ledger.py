@@ -74,8 +74,6 @@ from sidepulse.capacity_types import (
     SourceKey,
 )
 from sidepulse.completions import detect_attention_transitions
-from sidepulse.delivery_ledger import DeliveryLedger
-from sidepulse.delivery_ledger_store import save_delivery_ledger
 from sidepulse.models import AgentMode, AgentStatus
 from tests.test_sidepulse import isolate_controller
 
@@ -399,8 +397,13 @@ def test_trimming_activity_can_never_evict_a_delivery_receipt(
     document would make trimming the display feed silently re-fire delivered
     cues, so they are two files and this pins that they are.
     """
+    # A stand-in document at the delivery ledger's path. It used to be
+    # written by `delivery_ledger_store`, which had no caller in the app --
+    # `plan_deliveries` is the ledger's only consumer and is never invoked --
+    # so the store is gone. The claim under test is unchanged: the activity
+    # writer must not touch that path, whatever wrote it.
     delivery_path = tmp_path / "delivery-ledger.json"
-    save_delivery_ledger(delivery_path, DeliveryLedger(()))
+    delivery_path.write_text('{"version": 1, "receipts": []}', encoding="utf-8")
     before = delivery_path.read_text(encoding="utf-8")
 
     ledger = ActivityLedger()

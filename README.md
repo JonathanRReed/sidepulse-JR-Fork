@@ -284,36 +284,6 @@ coverage. The detector reports the config and log paths to `doctor`; the
 adapter must preserve unrelated configuration while adding and removing only
 SidePulse hooks.
 
-#### Local reply classifier (Apple Silicon)
-
-Install the optional MLX dependency, then classify a message with the default
-4-bit `mlx-community/Qwen2.5-0.5B-Instruct-4bit` model:
-
-```sh
-python3 -m pip install -e '.[reply-classifier]'
-sidepulse-reply "Could you check this for me?"
-echo "Thanks, I received it." | sidepulse-reply --json
-```
-
-The model runs locally and uses deterministic greedy decoding. To benchmark the
-canonical labeled examples plus recent assistant messages collected in the
-SidePulse decision log:
-
-```sh
-python3 examples/benchmark_reply_classifier.py --warm-runs 20 --log-examples 12
-```
-
-Generate the labeled dataset (eight human-collected examples plus 300 balanced,
-reproducible synthetic examples):
-
-```sh
-python3 scripts/generate_reply_dataset.py
-```
-
-The resulting `data/reply_expectation.jsonl` records `label`, `source`, `split`,
-and `category`. Human-collected examples are kept in the test split and synthetic
-examples are explicitly marked so evaluation can report them separately.
-
 For CLI snapshots, debugging, or recovery after missed hook events, the
 file-based monitor can optionally read recent local transcripts as a fallback:
 

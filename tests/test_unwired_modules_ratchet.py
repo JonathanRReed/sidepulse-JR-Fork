@@ -9,9 +9,24 @@ So the set of unwired modules is pinned. Adding to it requires editing this
 list, which is the moment to ask "why is this not reachable yet?". Removing
 from it -- by wiring a module up -- is always allowed.
 
-These are NOT deletion candidates. They are designed, tested domain code
-that Waves 3-4 depend on. The cost of leaving them unwired is that readers
-(including future me) cannot tell live code from dormant code.
+The list is empty now, and it stayed empty by deciding each entry rather
+than re-describing it. `capacity_view` and `capacity_history_store` were
+wired -- the "Why Is It Doing That?" panel says which capacity window was
+refused and why, and remembers how the numbers moved. `provider_runtime`,
+`delivery_ledger_store` and `reply_classifier` were deleted: the first two
+were second implementations of jobs the shipped code already does
+(`capacity_refresh` plus the status bar's own workers, and the activity
+ledger's own store), and the third classified message replies for an inbox
+this product does not have.
+
+KNOWN THIS RATCHET CANNOT SEE: it measures IMPORTS, not CALLS. A module
+imported at the top of a live file passes even when nothing ever calls into
+it. `delivery_ledger` is the live example -- `interruption_policy` imports it
+for `plan_deliveries`, and `plan_deliveries` has no caller anywhere in the
+app, so a ~700-line delivery-planning subsystem reads as reachable here and
+is as dormant as anything this list ever held. Deciding it means deciding
+whether the notification path should adopt it, which is an owner call about
+the locked interrupt budget, not a cleanup.
 """
 
 from __future__ import annotations
@@ -21,14 +36,11 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "sidepulse"
 
-# module -> why it is not reachable yet
-KNOWN_UNWIRED = {
-    "capacity_view": "card/detail presentation; the menu ledger still renders its own rows",
-    "capacity_history_store": "Wave 4 persisted usage history",
-    "provider_runtime": "Wave 4 per-provider runtime",
-    "delivery_ledger_store": "notification delivery ledger",
-    "reply_classifier": "reply classification for the agent inbox",
-}
+# module -> why it is not reachable yet. Empty is the goal state, not an
+# accident: an entry here is a decision deferred, and the deferral is what
+# cost this project its blend modes, its log janitors and a 1,139-line
+# presentation layer.
+KNOWN_UNWIRED: dict[str, str] = {}
 
 # Legitimate separate entry points -- not imported by the app by design.
 ENTRY_POINTS = {"__init__", "__main__", "cli", "doctor", "hook", "hook_entry"}

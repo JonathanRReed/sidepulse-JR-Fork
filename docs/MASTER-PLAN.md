@@ -66,11 +66,16 @@ degraded notch layout instead of a design of its own.
 
 ## Phase 3 — Per-provider usage limits (CodexBar-grade)
 
-- **A large, tested capacity plane already exists and is entirely
-  unreachable**: `capacity_view.py` (1,139 lines) has zero importers;
-  `provider_runtime.py` is instantiated only in tests; so are
-  `capacity_authority.py` and `capacity_sources.py`. The domain design is
-  done. The gap is adapters and UI wiring.
+- ~~**A large, tested capacity plane already exists and is entirely
+  unreachable.**~~ **Closed.** `capacity_authority` and `capacity_sources`
+  were wired in the capacity-plane wave; `capacity_view` (1,139 lines) and
+  `capacity_history_store` (501) are wired now, through the "Why Is It
+  Doing That?" panel — the card's numbers come from `usage_view`, and the
+  panel says which windows the authority layer refused and why.
+  `provider_runtime.py` was deleted: it was a second implementation of the
+  job `capacity_refresh.CapacityRefreshCoordinator` plus the status bar's
+  own workers already do, and a reader debugging a refresh could land in
+  either. The remaining gap is adapters, not wiring.
 - **Only Codex has a working adapter.** Claude has three independent kill
   switches: `fetch_windows()` always raises, `with_claude_plan_limits_enabled()`
   ignores its argument and always writes `False`, and Claude is never

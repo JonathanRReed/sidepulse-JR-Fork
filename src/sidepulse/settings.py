@@ -27,6 +27,7 @@ from .private_io import (
     ensure_private_file,
     read_private_text,
 )
+from .remote_peers import RemotePeerSettings
 from .session_actions import SESSION_OPEN_CHOICES
 
 LED_DISPLAY_AGENT = "agent"
@@ -360,6 +361,15 @@ class AgentMonitorSettings:
     capacity_history_enabled: bool = False
     capacity_history_retention_days: int = 7
     local_activity_history_enabled: bool = False
+    # The second Mac. Off by default in every direction: nothing is
+    # discovered, nothing is fetched, nothing about this desk is written
+    # where a peer could read it, and a peer's row may not take a light
+    # here until the owner unmutes that machine by name.
+    remote_peers: RemotePeerSettings = field(default_factory=RemotePeerSettings)
+    # The loopback ingest port for off-machine agents (a cloud code
+    # review posting its own lifecycle). Off by default: it opens a
+    # listening socket, and "local" is not "trusted".
+    cloud_ingest_enabled: bool = False
     # Zero is the explicit off state. Broad or legacy history consent never
     # enables the metadata-only operator ledger.
     operator_history_retention_days: int = 0
@@ -1096,6 +1106,21 @@ class AgentMonitorSettings:
     def with_weather_alerts_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, weather_alerts_enabled=bool(enabled))
 
+    def with_capacity_history_enabled(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, capacity_history_enabled=bool(enabled))
+
+    def with_capacity_history_retention_days(self, days: int) -> AgentMonitorSettings:
+        """Only the three retentions the store will actually accept.
+
+        `HistoryRetentionPolicy` raises on anything else, and a settings
+        value that makes the store refuse to construct turns capacity
+        history off without ever saying so.
+        """
+        value = int(days)
+        if value not in (7, 30, 90):
+            raise ValueError("unsupported capacity history retention")
+        return replace(self, capacity_history_retention_days=value)
+
     def with_studio_program(self, program: str) -> AgentMonitorSettings:
         return replace(self, studio_program=str(program))
 
@@ -1204,6 +1229,33 @@ class AgentMonitorSettings:
             rules[mode_identifier] = max(0.0, min(1.0, float(fraction)))
         return replace(self, focus_dim_rules=rules)
 
+    def with_remote_peers(self, remote: RemotePeerSettings) -> AgentMonitorSettings:
+        """Replace the whole peer record, normalised on the way in.
+
+        Every bound (peer count, timeouts, the published path) is enforced
+        by RemotePeerSettings itself, so nothing that reaches the transport
+        can have been widened by a settings-window control.
+        """
+        if type(remote) is not RemotePeerSettings:
+            return self
+        return replace(self, remote_peers=remote.normalized())
+
+    def with_remote_machine_muted(self, machine: str, muted: bool) -> AgentMonitorSettings:
+        """Mute or unmute ONE peer machine's rows in the interrupt budget.
+
+        The ledger keeps showing that machine either way -- this only
+        decides whether its rows may take a light on this desk.
+        """
+        current = self.remote_peers.normalized()
+        policy = current.interrupt_policy().with_machine_muted(str(machine), bool(muted))
+        return self.with_remote_peers(
+            replace(
+                current,
+                unmuted_machines=tuple(sorted(policy.unmuted_machines)),
+                muted_machines=tuple(sorted(policy.muted_machines)),
+            )
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "settings_schema_version": SETTINGS_SCHEMA_VERSION,
@@ -1286,6 +1338,8 @@ class AgentMonitorSettings:
                 else 7
             ),
             "local_activity_history_enabled": self.local_activity_history_enabled,
+            "remote_peers": self.remote_peers.to_dict(),
+            "cloud_ingest_enabled": self.cloud_ingest_enabled,
             "operator_history_retention_days": (
                 self.operator_history_retention_days
                 if type(self.operator_history_retention_days) is int
@@ -1598,6 +1652,11 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         local_activity_history_enabled=_bool_setting(
             data.get("local_activity_history_enabled"), False
         ),
+        # RemotePeerSettings.from_dict never raises and normalises every
+        # bound itself, so a hand-edited or truncated block degrades to
+        # the off-by-default record rather than to an exception on launch.
+        remote_peers=RemotePeerSettings.from_dict(data.get("remote_peers")),
+        cloud_ingest_enabled=_bool_setting(data.get("cloud_ingest_enabled"), False),
         operator_history_retention_days=(
             data.get("operator_history_retention_days")
             if type(data.get("operator_history_retention_days")) is int

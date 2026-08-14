@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
-import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,14 +23,6 @@ from sidepulse.provider_facts import (
     ProviderWatermark,
     SourceHealth,
     WatermarkBasis,
-)
-from sidepulse.provider_runtime import (
-    ProviderInvocation,
-    ProviderOutcomeKind,
-    ProviderResult,
-    ProviderRuntime,
-    ProviderRuntimeDiagnostic,
-    RefreshTrigger,
 )
 from sidepulse.providers import (
     NegotiatedProviderSource,
@@ -419,18 +409,18 @@ def test_older_quota_watermark_cannot_replace_a_newer_reset_boundary() -> None:
     assert accept_newer_quota_windows((current,), (older,)) == (current,)
 
 
-def _poll(runtime: ProviderRuntime, wanted: int) -> tuple[ProviderResult, ...]:
-    published: list[ProviderResult] = []
-    deadline = time.monotonic() + 1.0
-    while len(published) < wanted and time.monotonic() < deadline:
-        published.extend(runtime.poll(monotonic_now=time.monotonic()))
-    assert len(published) == wanted
-    return tuple(published)
-
-
 def test_static_capability_composition_runs_enabled_exact_sources_independently(
     tmp_path: Path,
 ) -> None:
+    """Two capabilities, two providers, one plan -- and no shared scan state.
+
+    This used to drive `provider_runtime.ProviderRuntime`, which nothing in
+    the app ever constructed: the live refresh is
+    `capacity_refresh.CapacityRefreshCoordinator` plus the status bar's own
+    workers. Driving a second runtime proved that runtime worked, not that
+    the shipped composition does, so the invocation plan and the per-source
+    scans are asserted directly.
+    """
     transcript_rows = sources_with_capability(
         negotiated_provider_sources(), CapabilityIdentifier("transcript_usage")
     )
@@ -457,84 +447,23 @@ def test_static_capability_composition_runs_enabled_exact_sources_independently(
         _claude_row("message", model="claude-sonnet-5", input_tokens=37),
     )
     usages: dict[SourceKey, ProviderUsageResult] = {}
-    calls: list[SourceKey] = []
-    quota_calls = 0
-
-    def adapter(call: ProviderInvocation, _cancel: threading.Event) -> ProviderResult:
-        nonlocal quota_calls
-        calls.append(call.source_key)
-        if call.source_key.capability_id == "transcript_usage":
-            row = next(row for row in transcript_rows if row.source_key == call.source_key)
-            usages[call.source_key] = scan_provider_usage(
-                row,
-                roots[call.source_key.provider_id],
-                None,
-                since_epoch=0.0,
-            )
-            return ProviderResult(
-                call,
-                ProviderOutcomeKind.EMPTY,
-                None,
-                (),
-                None,
-                None,
-                None,
-            )
-        quota_calls += 1
-        if quota_calls == 1:
-            lane_key = QuotaLaneKey(
-                call.source_key,
-                "scope:source-only",
-                "shared",
-                None,
-                "five-hour",
-                QuotaEffect.ALL_WORKLOADS,
-            )
-            return ProviderResult(
-                call,
-                ProviderOutcomeKind.SUCCESS,
-                None,
-                (
-                    ProviderQuotaWindow(
-                        lane_key,
-                        20.0,
-                        300,
-                        2_000.0,
-                        _watermark(call.source_key, 1),
-                        SourceHealth.HEALTHY,
-                        False,
-                    ),
-                ),
-                None,
-                None,
-                None,
-            )
-        return ProviderResult(
-            call,
-            ProviderOutcomeKind.FAILED,
+    for row in transcript_rows:
+        usages[row.source_key] = scan_provider_usage(
+            row,
+            roots[row.source_key.provider_id],
             None,
-            (),
-            None,
-            None,
-            ProviderRuntimeDiagnostic("source_unavailable"),
+            since_epoch=0.0,
         )
 
-    runtime = ProviderRuntime({key: adapter for key in expected_keys})
-    invocations = tuple(
-        ProviderInvocation(key, 1, 1.0, RefreshTrigger.MENU_OPEN)
-        for key in plan.invocations
+    codex_key = next(
+        row.source_key for row in transcript_rows if row.source_key.provider_id == "codex"
     )
-    assert runtime.request(invocations) == invocations
-    first = _poll(runtime, len(invocations))
-    assert tuple(calls) == expected_keys
-    assert usages[next(row.source_key for row in transcript_rows if row.source_key.provider_id == "codex")].input_tokens == 29
-    assert usages[next(row.source_key for row in transcript_rows if row.source_key.provider_id == "claude")].input_tokens == 37
-    quota_key = next(key for key in expected_keys if key.capability_id == "remote_quota_windows")
-    first_success_at = runtime.state_for(quota_key).last_success_at
-    assert any(result.outcome is ProviderOutcomeKind.SUCCESS for result in first)
-
-    second = ProviderInvocation(quota_key, 2, 1.0, RefreshTrigger.AUTOMATIC)
-    assert runtime.request((second,)) == (second,)
-    assert _poll(runtime, 1)[0].outcome is ProviderOutcomeKind.FAILED
-    assert runtime.state_for(quota_key).last_success_at == first_success_at
-    runtime.stop(deadline_seconds=1.0)
+    claude_key = next(
+        row.source_key for row in transcript_rows if row.source_key.provider_id == "claude"
+    )
+    # The independence claim: each scan sees only its own provider's root.
+    assert usages[codex_key].input_tokens == 29
+    assert usages[claude_key].input_tokens == 37
+    assert usages[codex_key].source_key == codex_key
+    assert usages[claude_key].source_key == claude_key
+    assert all(result.observed_session_count == 1 for result in usages.values())

@@ -96,6 +96,7 @@ _PRODUCT_PROVIDER_LABELS: Final = {
     "hermes": "Hermes",
     "openclaw": "OpenClaw",
     "opencode": "OpenCode",
+    "antigravity": "Antigravity",
 }
 _INERT_DIAGNOSTIC_IDS: Final = frozenset(
     {
@@ -119,6 +120,7 @@ _CREDENTIAL_SHAPED_IDENTITY: Final = re.compile(
     re.ASCII | re.IGNORECASE,
 )
 _CURSOR_CONVERSATION_HASH_DOMAIN: Final = b"sidepulse.cursor.conversation.v1\0"
+_ANTIGRAVITY_ENVELOPE_KEY: Final = "antigravity"
 
 
 class ProviderAdapterValidationError(ValueError):
@@ -518,6 +520,26 @@ _PROVIDER_EVENT_RULES: Final[dict[str, dict[str, _EventRule]]] = {
         "StopFailure": _STOP_FAILURE,
         "SessionEnd": _SESSION_END,
     },
+    # Only the three names the installed Antigravity envelope emits, plus the
+    # two outcome variants _antigravity_event_rule refines Stop into.
+    # Antigravity's native PreInvocation/PostInvocation/PreToolUse names are
+    # absent on purpose: two of them are never registered, and the third is a
+    # config key that the envelope always replaces before ingest.
+    #
+    # There is deliberately no PostToolUseFailure row. Antigravity's PostToolUse
+    # carries an `error` field that is just the tool's own exit status ("exit
+    # status 1"), and its loop keeps running afterwards -- an agent whose test
+    # command exits non-zero has NOT failed. Mapping that to a FAILED lifecycle
+    # would blink the blocked light, which blinks until dealt with, for a
+    # routine failing test. Antigravity establishes failure at Stop, via
+    # terminationReason, and that is the only place this provider reads it.
+    "antigravity": {
+        "UserPromptSubmit": _USER_PROMPT,
+        "PostToolUse": _POST_TOOL,
+        "Stop": _STOP,
+        "StopFailure": _STOP_FAILURE,
+        "StopIncomplete": _STOP_INCOMPLETE,
+    },
 }
 
 _NOTIFICATION_KINDS: Final[dict[str, dict[str, NotificationKind]]] = {
@@ -704,6 +726,24 @@ def _hermes_work_identity(record: HookEvent) -> tuple[bool, WorkIdentifier | Non
     return (work_value is None or work_id is not None), work_id
 
 
+def _antigravity_work_identity(record: HookEvent) -> tuple[bool, WorkIdentifier | None]:
+    """conversationId is the ONLY name Antigravity gives a unit of work.
+
+    Its payload has no session_id, no turn id and no agent id, so this is the
+    single field the whole provider hangs on. It is read straight out of the
+    installed bridge's envelope and held to the same opaque-identifier rule as
+    every other provider's identity: a value that is not a plain bounded token
+    -- or that looks like a credential -- fails the event closed rather than
+    becoming a row label the ledger would then display.
+    """
+    envelope = _antigravity_envelope(record)
+    if envelope is None or "conversationId" not in envelope:
+        return True, None
+    if not _opaque_provider_identity(envelope["conversationId"], max_bytes=64):
+        return False, None
+    return True, _work_identifier(envelope["conversationId"])
+
+
 def _provider_work_identity(
     provider: str,
     record: HookEvent,
@@ -712,6 +752,8 @@ def _provider_work_identity(
         return _cursor_work_identity(record)
     if provider == "hermes":
         return _hermes_work_identity(record)
+    if provider == "antigravity":
+        return _antigravity_work_identity(record)
     work_value = record.agent_id if record.agent_id is not None else record.session_id
     return True, _work_identifier(work_value)
 
@@ -896,11 +938,65 @@ def _hermes_event_rule(record: HookEvent) -> tuple[_EventRule | None, str | None
     return _STOP_INCOMPLETE, None
 
 
+def _antigravity_envelope(record: HookEvent) -> dict[object, object] | None:
+    raw = record.raw
+    if type(raw) is not dict:
+        return None
+    envelope = raw.get(_ANTIGRAVITY_ENVELOPE_KEY)
+    return envelope if type(envelope) is dict else None
+
+
+def _antigravity_event_rule(record: HookEvent) -> tuple[_EventRule | None, str | None]:
+    """Refine Antigravity's single Stop event into its real outcome.
+
+    Antigravity fires one `Stop` when the execution loop terminates and says
+    why in `terminationReason`. Its own documentation lists the values with an
+    "e.g.", so the set is explicitly OPEN -- an unlisted reason is a reason
+    this build has not seen, not a malformed payload, and it still means the
+    loop ended. That is why an unrecognized string lands on STOP_INCOMPLETE
+    (lifecycle UNKNOWN, no next actor) rather than being dropped: dropping a
+    Stop would leave the work ACTIVE in the ledger forever. A non-string, by
+    contrast, really is malformed and fails closed.
+
+    `fullyIdle` is honoured for the reason this project already learned once:
+    a parent is not finished while work it started is still running. When
+    Antigravity says background tasks remain, COMPLETED would be a lie.
+    """
+    rules = _PROVIDER_EVENT_RULES["antigravity"]
+    rule = rules.get(record.event_name)
+    if record.event_name != "Stop":
+        return rule, None
+    envelope = _antigravity_envelope(record)
+    if envelope is None:
+        return rule, None
+
+    fully_idle = envelope.get("fullyIdle")
+    if "fullyIdle" in envelope and type(fully_idle) is not bool:
+        return None, "invalid_provider_outcome"
+
+    reason = envelope.get("terminationReason")
+    if reason is not None and type(reason) is not str:
+        return None, "invalid_provider_outcome"
+    error = envelope.get("error")
+    if error is not None and type(error) is not str:
+        return None, "invalid_provider_outcome"
+
+    if reason == "error" or (not reason and error):
+        return _STOP_FAILURE, None
+    if fully_idle is False:
+        return _STOP_INCOMPLETE, None
+    if not reason or reason == "model_stop":
+        return _STOP, None
+    return _STOP_INCOMPLETE, None
+
+
 def _provider_event_rule(record: HookEvent) -> tuple[_EventRule | None, str | None]:
     if record.provider == "cursor":
         return _cursor_event_rule(record)
     if record.provider == "hermes":
         return _hermes_event_rule(record)
+    if record.provider == "antigravity":
+        return _antigravity_event_rule(record)
     return _PROVIDER_EVENT_RULES.get(record.provider, {}).get(record.event_name), None
 
 
