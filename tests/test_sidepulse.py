@@ -13604,7 +13604,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             )
 
         codex_limits.assert_called_once()
-        claude_limits.assert_called_once_with()
+        claude_limits.assert_called_once_with(access_token=None)
         self.assertEqual(len(published), 2)
         by_source = {
             next(iter(payload["requests"])): payload for payload in published
@@ -17241,19 +17241,19 @@ class QuotaAlertTests(unittest.TestCase):
         from sidepulse.settings import AgentMonitorSettings, load_settings, save_settings
 
         configured = AgentMonitorSettings().with_quota_alert_thresholds([90, 50.5, 90])
-        self.assertEqual(configured.quota_alert_thresholds, (75.0, 90.0))
+        self.assertEqual(configured.quota_alert_thresholds, (90.0, 95.0))
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
             save_settings(configured.with_quota_alerts_enabled(True), path)
             loaded = load_settings(path)
             payload = json.loads(path.read_text())
         self.assertFalse(loaded.quota_alerts_enabled)
-        self.assertEqual(loaded.quota_alert_thresholds, (75.0, 90.0))
+        self.assertEqual(loaded.quota_alert_thresholds, (90.0, 95.0))
         self.assertNotIn("quota_alerts_enabled", payload)
         self.assertNotIn("quota_alert_thresholds", payload)
         self.assertEqual(
             AgentMonitorSettings().with_quota_alert_thresholds([]).quota_alert_thresholds,
-            (75.0, 90.0),
+            (90.0, 95.0),
         )
 
 

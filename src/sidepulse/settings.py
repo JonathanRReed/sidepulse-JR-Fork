@@ -15,6 +15,7 @@ from .capacity_calibration import (
 )
 from .colors import ColorSettings
 from .led_status import DEFAULT_CHANNEL_GAIN, normalize_channel_gain
+from .signals import DEFAULT_QUOTA_THRESHOLDS
 from .private_io import (
     atomic_private_write,
     ensure_private_directory,
@@ -372,7 +373,8 @@ class AgentMonitorSettings:
     # Sub-agent asks can't be answered (their parent handles them), so
     # by default only MAIN sessions may ring the Ask signal.
     subagent_asks_alert: bool = False
-    quota_alert_thresholds: tuple[float, ...] = (75.0, 90.0)
+    # The owner's defaults: a nudge at 90, a real warning at 95.
+    quota_alert_thresholds: tuple[float, ...] = DEFAULT_QUOTA_THRESHOLDS
     dismissed_tips: tuple[str, ...] = ()
     # Per-Focus dim rules, keyed by the Focus mode identifier (e.g.
     # "com.apple.donotdisturb.mode.default"): 1.0 = don't dim, 0.0 = LEDs
@@ -862,14 +864,29 @@ class AgentMonitorSettings:
         return replace(self, usage_graph_days=int(days))
 
     def with_quota_alerts_enabled(self, enabled: bool) -> AgentMonitorSettings:
+        # Fails closed on purpose. Threshold effects are only allowed to reach
+        # the user through the capacity AUTHORITY layer (select_binding_lanes),
+        # which refuses stale, model-inapplicable and unknown-source readings.
+        # Until this is wired to that layer -- rather than to raw provider
+        # percentages -- enabling it would let an unauthoritative reading blink
+        # the lights. quota_alerts.QuotaThresholdDetector is built and tested
+        # and waiting for exactly that wiring.
         del enabled
         return replace(self, quota_alerts_enabled=False)
 
     def with_quota_alert_thresholds(self, thresholds) -> AgentMonitorSettings:
         del thresholds
-        return replace(self, quota_alert_thresholds=(75.0, 90.0))
+        return replace(self, quota_alert_thresholds=DEFAULT_QUOTA_THRESHOLDS)
 
     def with_claude_plan_limits_enabled(self, enabled: bool) -> AgentMonitorSettings:
+        # Still fails closed, and deliberately. The credential read, the OAuth
+        # fetch and the window parsing are all built and tested now, but a
+        # capacity reading may only reach a consumer through the authority
+        # layer (capacity_authority.select_binding_lanes), which refuses
+        # stale, model-inapplicable and unknown-source evidence. Claude has no
+        # declared capacity lanes in provider_contracts yet, so there is
+        # nothing for that layer to authorise. Declaring them is what opens
+        # this switch honestly. See tests/test_capacity_consumer_authority.py.
         del enabled
         return replace(self, claude_plan_limits_enabled=False)
 
@@ -1596,7 +1613,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             if data.get("usage_graph_days") in (7, 30, 90, 365)
             else 7
         ),
-        quota_alert_thresholds=(75.0, 90.0),
+        quota_alert_thresholds=DEFAULT_QUOTA_THRESHOLDS,
         dismissed_tips=tuple(
             str(item)
             for item in (data.get("dismissed_tips") or [])

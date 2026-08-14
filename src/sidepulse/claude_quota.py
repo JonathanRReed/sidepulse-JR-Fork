@@ -1,23 +1,45 @@
-"""Pure normalization boundary for explicitly supplied Claude quota evidence.
+"""Claude subscription quota: the live read, and the normalization boundary.
 
-Credential discovery and remote quota acquisition are deliberately outside the
-trusted SidePulse core. Until an independently supported provider capability
-delivers evidence to this module, ``fetch_windows`` fails closed with a
-product-owned reason code.
+`windows_from_payload` stays pure and fixture-testable -- it is where the
+schema's growth is absorbed (the flat `five_hour`/`seven_day` keys, the
+per-model sub-caps, and the newer `limits[]` array with scoped weekly limits).
+
+`fetch_windows` performs the actual read against the same OAuth usage endpoint
+Claude Code itself uses, presenting Claude Code's own credential. It does not
+discover that credential: obtaining one requires user consent and belongs to
+`credentials`, which never raises a Keychain dialog on a background timer.
+Called without a token this still fails closed, exactly as before.
+
+Errors here carry reason *codes*, never response bodies. The body can contain
+account identifiers, and these strings surface in the UI and in doctor output.
 """
 
 from __future__ import annotations
 
+import json
 import math
+from dataclasses import dataclass
 
 from .capacity_types import CapacitySourceHealth, SourceHealthKind, SourceKey
 
 MAX_CLAUDE_WINDOWS = 32
 CLAUDE_REMOTE_QUOTA_UNSUPPORTED = "claude_remote_quota_unsupported"
+CLAUDE_REMOTE_QUOTA_UNAUTHORIZED = "claude_remote_quota_unauthorized"
+CLAUDE_REMOTE_QUOTA_RATE_LIMITED = "claude_remote_quota_rate_limited"
+CLAUDE_REMOTE_QUOTA_SERVER_ERROR = "claude_remote_quota_server_error"
+CLAUDE_REMOTE_QUOTA_NETWORK = "claude_remote_quota_network"
+CLAUDE_REMOTE_QUOTA_NO_WINDOWS = "claude_remote_quota_no_windows"
+CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN = "claude_remote_quota_needs_sign_in"
+
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_OAUTH_BETA_HEADER = "oauth-2025-04-20"
+CLAUDE_CODE_VERSION_FALLBACK = "2.1.0"
+CLAUDE_USAGE_TIMEOUT_SECONDS = 30.0
+CLAUDE_USAGE_MAX_BYTES = 1024 * 1024
 CLAUDE_QUOTA_SOURCE = SourceKey(
     provider_id="claude",
     adapter_id="quota",
-    source_instance_id="unsupported",
+    source_instance_id="oauth",
     capability_id="remote_quota_windows",
 )
 _PRODUCT_MODEL_LABELS = {
@@ -46,9 +68,155 @@ def unsupported_source_health(*, observed_at: float) -> CapacitySourceHealth:
     )
 
 
-def fetch_windows() -> list[dict]:
-    """Fail closed until a supported provider capability supplies evidence."""
-    raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_UNSUPPORTED)
+@dataclass(frozen=True, slots=True)
+class ClaudeOAuthCredential:
+    """Claude Code's own OAuth credential, as it stores it."""
+
+    access_token: str
+    expires_at: float | None = None
+    subscription_type: str | None = None
+
+    def __repr__(self) -> str:  # pragma: no cover - defensive
+        return (
+            "ClaudeOAuthCredential("
+            f"subscription_type={self.subscription_type!r}, token=<redacted>)"
+        )
+
+    def is_expired(self, now: float) -> bool:
+        return self.expires_at is not None and now >= self.expires_at
+
+
+def credential_from_keychain_payload(raw: object) -> ClaudeOAuthCredential | None:
+    """Parse the Keychain blob Claude Code writes. Absence is not an error."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    oauth = payload.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return None
+    token = oauth.get("accessToken")
+    if not isinstance(token, str) or not token.strip():
+        return None
+    raw_expiry = oauth.get("expiresAt")
+    expires_at: float | None = None
+    if not isinstance(raw_expiry, bool) and isinstance(raw_expiry, (int, float)):
+        value = float(raw_expiry)
+        if math.isfinite(value) and value > 0.0:
+            # Claude Code stores milliseconds since the epoch.
+            expires_at = value / 1000.0 if value > 1e11 else value
+    subscription = oauth.get("subscriptionType")
+    return ClaudeOAuthCredential(
+        access_token=token.strip(),
+        expires_at=expires_at,
+        subscription_type=subscription if isinstance(subscription, str) else None,
+    )
+
+
+def credential_needs_sign_in(raw: object) -> bool:
+    """True when Claude Code holds a refresh token but no usable access token.
+
+    Observed on the owner's machine: `accessToken` empty, `expiresAt` 0, a
+    valid `refreshToken` present. Claude Code mints access tokens on demand
+    rather than caching them.
+
+    We deliberately do NOT perform that refresh ourselves. The refresh token
+    rotates on use, so minting our own token would invalidate the one Claude
+    Code holds and break the user's `claude` login -- trading a status
+    readout for their actual tooling. Refresh belongs to the app that owns
+    the credential; our job is to say so clearly and re-read afterwards.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    oauth = payload.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return False
+    token = oauth.get("accessToken")
+    has_access = isinstance(token, str) and bool(token.strip())
+    refresh = oauth.get("refreshToken")
+    has_refresh = isinstance(refresh, str) and bool(refresh.strip())
+    return has_refresh and not has_access
+
+
+def _claude_code_user_agent() -> str:
+    """Identify honestly as the client whose credential we are presenting."""
+    return f"claude-code/{CLAUDE_CODE_VERSION_FALLBACK}"
+
+
+def _default_opener(request, timeout: float):
+    from urllib.request import urlopen
+
+    return urlopen(request, timeout=timeout)
+
+
+def fetch_windows(
+    *,
+    access_token: str | None = None,
+    opener=None,
+    timeout: float = CLAUDE_USAGE_TIMEOUT_SECONDS,
+) -> list[dict]:
+    """Read the live per-window quota for a Claude subscription.
+
+    Called with no credential this still fails closed, exactly as before --
+    the caller is responsible for obtaining consent and a token first (see
+    `credentials.read_keychain_secret`, which never prompts in background).
+
+    Failures raise with a reason *code*, never a server body: the response can
+    contain account identifiers, and this string reaches the UI and doctor.
+    """
+    if not isinstance(access_token, str) or not access_token.strip():
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_UNSUPPORTED)
+
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request
+
+    request = Request(
+        CLAUDE_USAGE_URL,
+        method="GET",
+        headers={
+            "Authorization": f"Bearer {access_token.strip()}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "anthropic-beta": CLAUDE_OAUTH_BETA_HEADER,
+            "User-Agent": _claude_code_user_agent(),
+        },
+    )
+    try:
+        with (opener or _default_opener)(request, timeout) as response:
+            status = getattr(response, "status", 200)
+            if status != 200:
+                raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR)
+            body = response.read(CLAUDE_USAGE_MAX_BYTES + 1)
+    except HTTPError as error:
+        if error.code == 401:
+            raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_UNAUTHORIZED) from None
+        if error.code == 429:
+            raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_RATE_LIMITED) from None
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR) from None
+    except (URLError, OSError, ValueError):
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NETWORK) from None
+
+    if len(body) > CLAUDE_USAGE_MAX_BYTES:
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR)
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR) from None
+
+    windows = windows_from_payload(payload)
+    if not windows:
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NO_WINDOWS)
+    return windows
 
 
 def _product_model_label(model: object) -> str | None:

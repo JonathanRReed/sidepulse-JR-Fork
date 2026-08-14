@@ -189,6 +189,48 @@ def table_row(record: dict[str, str]) -> str:
 
 TRIM_THRESHOLD_BYTES = 5 * 1024 * 1024
 TRIM_KEEP_LINES = 4000
+# A line COUNT alone cannot bound a file: records vary from ~500 bytes
+# (claude) to ~5,800 (codex), so 4,000 lines is anywhere from 1 MB to 22 MB.
+# Measured live, three logs sat at exactly 4,000 lines and 23.1 / 10.7 /
+# 7.8 MB -- pinned at the line cap and permanently above the byte threshold,
+# so compaction re-ran on EVERY hook write: read the whole file, rebuild it,
+# atomically replace it, fsync. 46 MB of I/O per event, forever.
+#
+# So the post-trim size is also bounded, strictly below the threshold that
+# triggers a trim. One compaction now actually ends the need to compact.
+TRIM_TARGET_BYTES = 2 * 1024 * 1024
+
+
+# State files left behind by features that no longer exist. Nothing in the
+# tree reads or writes these; they are pure residue from a removed debug
+# path, and one of them was 17.7 MB on the owner's machine. Matched by exact
+# stem so a rename can never turn this into a wildcard delete.
+ORPHANED_STATE_STEMS = ("usage-debug-cache.json",)
+
+
+def remove_orphaned_state_files(state_dir: Path) -> int:
+    """Delete state files whose owning feature was removed. Never raises.
+
+    Deliberately narrow: exact names only, only directly inside the state
+    directory, and only regular files. A cache with no reader is dead weight,
+    but a janitor that guesses is worse than the weight.
+    """
+    removed = 0
+    base = Path(state_dir)
+    for stem in ORPHANED_STATE_STEMS:
+        for path in (base / stem, *base.glob(f"{stem}.*")):
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+    return removed
 
 
 def trim_oversized_logs(state_dir: Path) -> int:
@@ -221,5 +263,24 @@ def compact_jsonl_file(path: Path) -> bool:
     if not stat.S_ISREG(info.st_mode) or info.st_size <= TRIM_THRESHOLD_BYTES:
         return False
     lines = read_private_text(path, errors="replace").splitlines(keepends=True)
-    atomic_private_write(path, "".join(lines[-TRIM_KEEP_LINES:]))
+    atomic_private_write(path, "".join(_bounded_tail(lines)))
     return True
+
+
+def _bounded_tail(lines: list[str]) -> list[str]:
+    """Newest lines within BOTH the line cap and the byte budget.
+
+    Always keeps at least one line: an empty log would read as "no history"
+    to the collector rather than "history was trimmed".
+    """
+    kept = lines[-TRIM_KEEP_LINES:]
+    if not kept:
+        return kept
+    total = 0
+    first = len(kept) - 1
+    for index in range(len(kept) - 1, -1, -1):
+        total += len(kept[index].encode("utf-8", errors="replace"))
+        if total > TRIM_TARGET_BYTES and index < len(kept) - 1:
+            break
+        first = index
+    return kept[first:]

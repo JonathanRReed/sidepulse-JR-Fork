@@ -197,6 +197,44 @@ def escalation_stage(
     return min(stage, _TIER_CEILING.get(tier, 2))
 
 
+# The owner's numbers: a nudge at 90, a real warning at 95. Edge detection
+# itself already lives in quota_crossings/quota_resets below -- these are the
+# thresholds it is fed, and the burst budget the signal layer spends when one
+# fires ("a couple of times means a burst of three").
+DEFAULT_QUOTA_THRESHOLDS: tuple[float, ...] = (90.0, 95.0)
+DEFAULT_ALERT_BURST = 3
+MAX_QUOTA_THRESHOLDS = 4
+MAX_ALERT_BURST = 10
+
+
+def normalize_quota_thresholds(value: object) -> tuple[float, ...]:
+    """Coerce user input into sane, ordered, deduplicated thresholds."""
+    from collections.abc import Iterable
+
+    if value is None or isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
+        return DEFAULT_QUOTA_THRESHOLDS
+    cleaned: list[float] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            continue
+        number = float(item)
+        if number != number or number <= 0.0 or number > 100.0:
+            continue
+        rounded = round(number, 2)
+        if rounded not in cleaned:
+            cleaned.append(rounded)
+    if not cleaned:
+        return DEFAULT_QUOTA_THRESHOLDS
+    return tuple(sorted(cleaned)[:MAX_QUOTA_THRESHOLDS])
+
+
+def normalize_alert_burst(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return DEFAULT_ALERT_BURST
+    number = int(value)
+    return DEFAULT_ALERT_BURST if number < 1 else min(number, MAX_ALERT_BURST)
+
+
 def quota_crossings(
     previous: dict[str, float],
     current: dict[str, float],

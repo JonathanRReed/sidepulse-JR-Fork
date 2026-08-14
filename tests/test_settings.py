@@ -314,7 +314,7 @@ def test_settings_migration_disables_legacy_quota_authority_and_runway(
 
     assert restored.claude_plan_limits_enabled is False
     assert restored.quota_alerts_enabled is False
-    assert restored.quota_alert_thresholds == (75.0, 90.0)
+    assert restored.quota_alert_thresholds == (90.0, 95.0)
     assert restored.led_display == LED_DISPLAY_AGENT
     assert restored.devices[0].led_display == LED_DISPLAY_AGENT
     assert restored.webhook_events == ("completion",)
@@ -349,7 +349,7 @@ def test_settings_migration_programmatic_legacy_quota_controls_fail_closed(
 
     assert settings.claude_plan_limits_enabled is False
     assert settings.quota_alerts_enabled is False
-    assert settings.quota_alert_thresholds == (75.0, 90.0)
+    assert settings.quota_alert_thresholds == (90.0, 95.0)
     assert settings.led_display == LED_DISPLAY_AGENT
     assert settings.devices[0].led_display == LED_DISPLAY_AGENT
     with pytest.raises(ValueError):

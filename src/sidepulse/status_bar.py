@@ -112,6 +112,7 @@ from .audit import (
     default_status_audit_log_path,
     export_status_audit_csv,
     export_status_audit_html,
+    remove_orphaned_state_files,
     trim_oversized_logs,
 )
 from .battery import (
@@ -170,6 +171,11 @@ from .completions import (
     COMPLETION_NOTIFY_FRESHNESS_SECONDS as COMPLETION_NOTIFY_FRESHNESS_SECONDS,
 )
 from .completions import canonical_current_statuses, detect_completion_batch
+from .credentials import (
+    CLAUDE_CODE_KEYCHAIN,
+    KeychainConsentLedger,
+    read_keychain_secret,
+)
 from .device_writer import (
     DEFAULT_FILE_NAME,
     MOUNT_ROOT,
@@ -1455,16 +1461,7 @@ class StatusBarController(NSObject):
             )
             for provider_id, source_key in CAPACITY_SOURCE_KEYS_BY_PROVIDER.items()
         }
-        self._capacity_refresh_coordinator = CapacityRefreshCoordinator(
-            tuple(
-                RefreshSourceRegistration(
-                    key=refresh_key,
-                    enabled=refresh_key.source.provider_id != "claude",
-                    supported=True,
-                )
-                for refresh_key in self._capacity_refresh_keys_by_provider.values()
-            )
-        )
+        self.rebuild_capacity_refresh_coordinator()
         self._capacity_refresh_deadline_timers = {}
         self._capacity_refresh_retry_timers = {}
         self._usage_provider_models: dict[str, ProviderUsageViewModel] = {}
@@ -1717,6 +1714,7 @@ class StatusBarController(NSObject):
         self.start_notification_authorization_refresh()
         NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
         self.load_operator_local_state()
+        self.trim_oversized_state_logs()
         log_status_bar("launching status item")
         self.start_event_server()
         self.replay_debug_logs()
@@ -2421,6 +2419,87 @@ class StatusBarController(NSObject):
         if timer is not None:
             timer.invalidate()
 
+    def rebuild_capacity_refresh_coordinator(self) -> None:
+        """Rebuild refresh registrations from current settings.
+
+        Registrations are immutable and were built once at startup, so a
+        provider toggled on later stayed disabled for the life of the
+        process -- the setting appeared to do nothing until relaunch.
+        """
+        self._capacity_refresh_coordinator = CapacityRefreshCoordinator(
+            tuple(
+                RefreshSourceRegistration(
+                    key=refresh_key,
+                    enabled=self._capacity_source_enabled(
+                        refresh_key.source.provider_id
+                    ),
+                    supported=True,
+                )
+                for refresh_key in self._capacity_refresh_keys_by_provider.values()
+            )
+        )
+
+    def _capacity_source_enabled(self, provider_id: str) -> bool:
+        """Whether this provider's capacity source may be refreshed at all.
+
+        Claude was hardcoded off here -- the last of four independent kill
+        switches that each, alone, made Claude limits unreachable. It is now
+        the user's opt-in that decides, and nothing else.
+        """
+        if provider_id == "claude":
+            return bool(self.settings.claude_plan_limits_enabled)
+        return True
+
+    def claude_access_token(self) -> str | None:
+        """Claude Code's own OAuth token, cached for this process.
+
+        Turning on Claude plan limits is the consent: there is no way to show
+        a subscription's limits without presenting that subscription's token.
+        The read still goes through the hardened path, so a refusal earns an
+        escalating cooldown instead of a dialog on every refresh tick.
+
+        The token is held in memory only. It is never written to settings, to
+        the state directory, or to any log.
+        """
+        if not self.settings.claude_plan_limits_enabled:
+            self._claude_credential = None
+            return None
+        now = time.time()
+        credential = getattr(self, "_claude_credential", None)
+        if credential is not None and not credential.is_expired(now):
+            return credential.access_token
+
+        ledger = getattr(self, "_keychain_consent_ledger", None)
+        if ledger is None:
+            ledger = KeychainConsentLedger(
+                default_state_dir() / "keychain-consent.json"
+            )
+            self._keychain_consent_ledger = ledger
+        result = read_keychain_secret(
+            CLAUDE_CODE_KEYCHAIN,
+            allow_prompt=True,
+            ledger=ledger,
+            now=now,
+        )
+        if not result.ok:
+            self._claude_credential = None
+            return None
+        credential = claude_quota.credential_from_keychain_payload(result.secret)
+        if credential is None or credential.is_expired(now):
+            # An expired or absent access token is Claude Code's to mint, not
+            # ours: the refresh token ROTATES on use, so refreshing it here
+            # would invalidate the copy Claude Code holds and break the user's
+            # `claude` login. Record the distinction so the UI can say
+            # "sign in to Claude Code" instead of a shrug.
+            self._claude_needs_sign_in = claude_quota.credential_needs_sign_in(
+                result.secret
+            )
+            self._claude_credential = None
+            return None
+        self._claude_needs_sign_in = False
+        self._claude_credential = credential
+        return credential.access_token
+
     def invalidate_usage_providers(self, provider_ids: tuple[str, ...]) -> None:
         """Make selected providers due and obsolete any older publishers."""
         provider_ids = tuple(dict.fromkeys(provider_ids))
@@ -2921,9 +3000,17 @@ class StatusBarController(NSObject):
             windows = []
             if self.settings.claude_plan_limits_enabled:
                 try:
-                    windows = claude_quota.fetch_windows()
-                except claude_quota.ClaudeQuotaUnavailableError:
-                    log_status_bar("claude quota unavailable: source_unavailable")
+                    token = self.claude_access_token()
+                    if token is None and getattr(self, "_claude_needs_sign_in", False):
+                        raise claude_quota.ClaudeQuotaUnavailableError(
+                            claude_quota.CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN
+                        )
+                    windows = claude_quota.fetch_windows(access_token=token)
+                except claude_quota.ClaudeQuotaUnavailableError as error:
+                    # The reason code is product-owned and content-free, so it
+                    # is safe to say out loud -- and saying WHY is the whole
+                    # difference between "unavailable" and "reconnect Claude".
+                    log_status_bar(f"claude quota unavailable: {error}")
                     failure = RefreshFailureKind.SOURCE_UNAVAILABLE
                 except Exception:
                     log_status_bar("claude usage unavailable: source_unavailable")
@@ -3298,8 +3385,39 @@ class StatusBarController(NSObject):
             if secondary_label is not None:
                 secondary_label.setStringValue_(secondary)
 
+    def trim_oversized_state_logs(self) -> int:
+        """Bound every state log at launch, not just the ones being written.
+
+        Per-write compaction already existed, and `trim_oversized_logs` (the
+        sweep that catches files whose writer went quiet) already existed --
+        with zero callers. So a provider that stopped emitting left its log
+        frozen at whatever size it had reached. Measured here: codex.jsonl
+        23 MB and devin.jsonl 10.6 MB, both long past the 5 MB threshold,
+        neither shrinking because nothing was appending to them any more.
+        """
+        state_dir = default_state_dir()
+        try:
+            trimmed = trim_oversized_logs(state_dir)
+        except Exception:
+            trimmed = 0
+        try:
+            removed = remove_orphaned_state_files(state_dir)
+        except Exception:
+            removed = 0
+        if trimmed:
+            log_status_bar(f"trimmed {trimmed} oversized state log(s)")
+        if removed:
+            log_status_bar(f"removed {removed} orphaned state file(s)")
+        return trimmed
+
     def track_quota_thresholds(self, percents: dict) -> None:
-        """Retain the legacy call shape while raw-percent effects stay disabled."""
+        """Retain the legacy call shape while raw-percent effects stay disabled.
+
+        Raw provider percentages must never drive a user-visible effect: the
+        capacity authority layer exists to refuse stale, model-inapplicable and
+        unknown-source readings, and bypassing it is how a false 95% ends up
+        blinking the hardware. See tests/test_capacity_consumer_authority.py.
+        """
         del percents
         self.quota_last_percents = {}
         self.quota_blink_until = 0.0
@@ -4613,6 +4731,10 @@ class StatusBarController(NSObject):
             checkbox_is_on(sender)
         )
         save_settings(self.settings)
+        # Registrations are immutable, so the coordinator has to be rebuilt
+        # for the toggle to mean anything before the next relaunch.
+        self.rebuild_capacity_refresh_coordinator()
+        self._claude_credential = None
         # Refresh immediately so the line appears without the 5-min wait.
         self.invalidate_usage_providers(("claude",))
         self.maybe_refresh_usage_summary()
