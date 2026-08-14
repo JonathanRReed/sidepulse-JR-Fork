@@ -678,6 +678,28 @@ class StudioPaneTests(unittest.TestCase):
             PROVIDER_ANIMATION_LABELS[PROVIDER_ANIMATION_AUTO],
         )
 
+    def test_a_reset_underneath_an_open_hover_drops_the_stale_candidate(self) -> None:
+        """Reset to Defaults (or a palette button) changes the baseline while
+        the pointer is still on a swatch; the candidate derived from the old
+        baseline must not survive to repaint over the new one."""
+        self.controller.virtual_status_device = SimpleNamespace(
+            hold_preview_program=lambda program, **kwargs: None,
+            release_preview_program=lambda: False,
+        )
+        button = self.controller.color_swatches[(("agent", "claude"), "#10A37F")]
+        button.hover_enter(button)
+        self.assertTrue(self.actions.preview_session.previewing)
+
+        self.controller.settings = self.controller.settings.with_colors(
+            self.controller.settings.colors.with_agent_color("claude", "#FF3A00")
+        )
+        self.controller.refresh_colors_window()
+
+        self.assertFalse(self.actions.preview_session.previewing)
+        self.assertEqual(
+            self.actions.preview_session.committed.agent_color("claude"), "#FF3A00"
+        )
+
     def test_hovering_a_swatch_previews_on_the_screen_bar_and_leaving_reverts(
         self,
     ) -> None:
@@ -722,6 +744,50 @@ class StudioPaneTests(unittest.TestCase):
 
         self.actions.end_preview()
         self.assertIn("Hover", compare["caption"].stringValue())
+
+    def test_no_section_overlaps_itself_or_collapses_to_nothing(self) -> None:
+        """The generic pane-overlap guard in test_sidepulse skips this pane
+        (it is a pinned header plus its own scroll view, not the standard
+        wrap_in_scroll_pane shape), so it needs its own."""
+        self.controller.settings_window.contentView().layoutSubtreeIfNeeded()
+        self.pane.layoutSubtreeIfNeeded()
+
+        def overlaps(a, b):
+            return (
+                a.origin.x < b.origin.x + b.size.width
+                and b.origin.x < a.origin.x + a.size.width
+                and a.origin.y < b.origin.y + b.size.height
+                and b.origin.y < a.origin.y + a.size.height
+            )
+
+        for key in STUDIO_SECTION_CHOICES:
+            self.actions.select_section(key)
+            self.pane.layoutSubtreeIfNeeded()
+            section = self.actions.section_views[key]
+            self.assertGreater(section.frame().size.height, 0, key)
+            self.assertGreater(section.frame().size.width, 0, key)
+            frames = [
+                card.frame()
+                for card in section.arrangedSubviews()
+                if card.frame().size.width > 0 and card.frame().size.height > 0
+            ]
+            self.assertGreater(len(frames), 0, key)
+            for i in range(len(frames)):
+                for j in range(i + 1, len(frames)):
+                    self.assertFalse(overlaps(frames[i], frames[j]), f"{key} cards overlap")
+
+    def test_every_swatch_caption_fits_inside_its_own_column(self) -> None:
+        """A name that spills into the chip beside it is the same failure as
+        having no name at all -- you cannot tell which colour it belongs to."""
+        from sidepulse.settings_window import STUDIO_SWATCH_COLUMN_WIDTH
+
+        for button in self.controller.color_swatches.values():
+            caption = button.studio_caption
+            self.assertLessEqual(
+                caption.fittingSize().width,
+                STUDIO_SWATCH_COLUMN_WIDTH,
+                caption.stringValue(),
+            )
 
     def test_hardware_preview_is_a_control_you_have_to_find_and_flip(self) -> None:
         toggle = self.controller.color_fields["live_toggle"]

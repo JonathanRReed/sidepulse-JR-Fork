@@ -12415,17 +12415,75 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         values.update(changes)
         return self.ProviderRefreshState(**values)
 
+    def _declared_observation(
+        self,
+        provider_id,
+        percent,
+        *,
+        minutes=300,
+        resets_at=None,
+        observed_at=None,
+    ):
+        """One contract-stamped lane, exactly as this provider's producer makes it.
+
+        The fixture used to hand `applyUsageSummary_` a raw
+        ``{"label": "primary", "used_percent": ...}`` window, which is the
+        shape the display is no longer allowed to accept from anyone: it
+        arrives without ever passing the authority layer. Building it through
+        the real descriptor keeps every rendered string in these tests the
+        string a real refresh produces.
+        """
+        from sidepulse import usage_stats
+        from sidepulse.capacity_sources import normalize_supported_quota_evidence
+        from sidepulse.status_bar import CAPACITY_DESCRIPTORS_BY_SOURCE
+
+        evidence_builders = {
+            "codex": usage_stats.codex_capacity_evidence_from_windows,
+            "claude": self._claude_evidence_from_windows,
+        }
+        window_labels = {"codex": "primary", "claude": "5-hour"}
+        percent_keys = {"codex": "used_percent", "claude": "utilization"}
+        source = self._refresh_key(provider_id).source
+        descriptor = CAPACITY_DESCRIPTORS_BY_SOURCE[source]
+        stamp = time.time() if observed_at is None else float(observed_at)
+        window = {
+            "label": window_labels[provider_id],
+            percent_keys[provider_id]: percent,
+            "window_minutes": minutes,
+            "resets_at": resets_at,
+        }
+        evidence = evidence_builders[provider_id](
+            descriptor,
+            [window],
+            observed_at=stamp,
+        )
+        return normalize_supported_quota_evidence(
+            descriptor,
+            evidence,
+            observed_at=stamp,
+        ).snapshot.lanes
+
+    @staticmethod
+    def _claude_evidence_from_windows(descriptor, windows, *, observed_at):
+        from sidepulse import claude_quota
+
+        return claude_quota.capacity_evidence_from_windows(
+            descriptor,
+            windows,
+            observed_at=observed_at,
+        )
+
     def _result(self, provider_id, percent, *, minutes=300, summary=None):
         return {
             "provider_id": provider_id,
             "title": provider_id.title(),
-            "windows": [
-                {
-                    "label": "primary",
-                    "used_percent": percent,
-                    "window_minutes": minutes,
-                }
-            ],
+            "capacity_observations": self._declared_observation(
+                provider_id,
+                percent,
+                minutes=minutes,
+            ),
+            "capacity_requested": True,
+            "source_generation": 1,
             "summary_text": summary,
             "detail_text": None,
             "day_bars": [],
@@ -12498,7 +12556,12 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         source_text=None,
     ):
         result = self._result(provider_id, percent, minutes=minutes)
-        result["windows"][0]["resets_at"] = reset_epoch
+        result["capacity_observations"] = self._declared_observation(
+            provider_id,
+            percent,
+            minutes=minutes,
+            resets_at=reset_epoch,
+        )
         result["partial"] = partial
         result["source_text"] = source_text
         return result
@@ -12613,12 +12676,17 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             {row.key.source.provider_id: row.key.pool for row in source_states},
             {"codex": "codex-chatgpt-plan", "claude": "claude-consumer-plan"},
         )
+        # Codex has an account scope now for the same reason Claude does: its
+        # producer stamps one on every lane, and the coordinator throws away
+        # any snapshot whose lanes do not match the key exactly. It is a
+        # constant meaning "the plan currently signed in on this machine",
+        # never an account identifier.
         self.assertEqual(
             {
                 row.key.source.provider_id: row.key.account_discriminator
                 for row in source_states
             },
-            {"codex": None, "claude": "claude-consumer"},
+            {"codex": "codex-chatgpt", "claude": "claude-consumer"},
         )
         self.assertTrue(
             all(row.status is RefreshStatusKind.IDLE for row in source_states)
@@ -13220,6 +13288,8 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         self.assertEqual(reset_calls, [])
 
     def test_unscoped_source_generation_keeps_remaining_but_disputes_reset(self) -> None:
+        from dataclasses import replace as dataclass_replace
+
         from sidepulse.capacity_types import (
             CapacitySourceHealth,
             CapacityUnit,
@@ -13234,6 +13304,19 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             SourceHealthKind,
         )
 
+        # A source whose policy declares no account scope -- several in the
+        # table do not. Its lanes carry no discriminator, so reset continuity
+        # has no identity to scope a boundary to. Codex's own key names one
+        # now, and the coordinator would refuse an unscoped lane as
+        # cross-scope long before continuity ever saw it.
+        self.controller._capacity_refresh_keys_by_provider = {
+            **self.controller._capacity_refresh_keys_by_provider,
+            "codex": dataclass_replace(
+                self._refresh_key("codex"),
+                account_discriminator=None,
+            ),
+        }
+        self.controller.rebuild_capacity_refresh_coordinator()
         refresh_key = self._refresh_key("codex")
         source = refresh_key.source
         lane_key = QuotaLaneKey(

@@ -189,6 +189,10 @@ def test_semantic_lanes_are_literal_bounded_and_immutable() -> None:
             for lane in policy.lanes
         )
 
+    # The names are the ledger's vocabulary and are deliberately the same
+    # words the Claude consumer lanes use below. One card lists both
+    # providers, and "5-hour window" next to "5-hour" reads as two different
+    # kinds of window rather than the same window at two providers.
     assert identities(codex) == (
         (
             "codex-chatgpt-plan",
@@ -196,7 +200,7 @@ def test_semantic_lanes_are_literal_bounded_and_immutable() -> None:
             None,
             "five-hour",
             QuotaEffect.ALL_WORKLOADS,
-            "5-hour window",
+            "5-hour",
             True,
         ),
         (
@@ -205,7 +209,7 @@ def test_semantic_lanes_are_literal_bounded_and_immutable() -> None:
             None,
             "weekly",
             QuotaEffect.ALL_WORKLOADS,
-            "Weekly window",
+            "Weekly",
             True,
         ),
     )

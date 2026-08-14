@@ -61,7 +61,6 @@ try:
         NSScrollView,
         NSSlider,
         NSStackView,
-        NSSegmentedControl,
         NSStackViewDistributionFill,
         NSSwitch,
         NSTableColumn,

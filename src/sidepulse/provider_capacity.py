@@ -264,6 +264,11 @@ def _source(provider_id: str, adapter_id: str, source_instance_id: str) -> Sourc
 # Complete reviewed policy matrix. A declared source identity is inert until an
 # exact runtime source registration exists and successfully negotiates it.
 _PROVIDER_CAPACITY_POLICIES = (
+    # Codex publishes a 5-hour and a weekly ceiling in every rollout file it
+    # writes. The semantic names are the ledger's own vocabulary and are
+    # deliberately the same words Claude's consumer lanes use: one card lists
+    # both providers, and "5-hour window" beside "5-hour" would read as two
+    # different kinds of window rather than the same one at two providers.
     ProviderCapacityPolicy(
         "openai-codex-consumer",
         "codex",
@@ -273,14 +278,14 @@ _PROVIDER_CAPACITY_POLICIES = (
             _lane(
                 "codex-chatgpt-plan",
                 "five-hour",
-                "5-hour window",
+                "5-hour",
                 horizon=QuotaHorizon.SHORT,
                 bindable=True,
             ),
             _lane(
                 "codex-chatgpt-plan",
                 "weekly",
-                "Weekly window",
+                "Weekly",
                 horizon=QuotaHorizon.LONG,
                 bindable=True,
             ),

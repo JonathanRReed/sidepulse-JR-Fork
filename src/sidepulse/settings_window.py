@@ -2694,7 +2694,7 @@ STUDIO_SWATCH_SIZE = 20.0
 STUDIO_SWATCH_COLUMN_WIDTH = 50.0
 STUDIO_GROUP_LABEL_WIDTH = 58.0
 STUDIO_COMPARE_LED_COUNT = 8
-STUDIO_IDLE_COMPARE_CAPTION = "Hover any colour or animation to try it here first."
+STUDIO_IDLE_COMPARE_CAPTION = "Hover any color or animation to try it here first."
 
 
 class SidePulseStudioActions(NSObject):
@@ -3110,13 +3110,11 @@ def _provider_animation_thumb_program(target: StatusBarController, row) -> str:
     so "Chase" is a thing you watch, not a word you have to trust."""
     colors = target.settings.colors
     motion = row.animation
-    style = (
-        ANIMATION_STYLE_CHOICES[0]
-        if motion == colors_module.PROVIDER_ANIMATION_AUTO
-        else colors_module.PROVIDER_ANIMATION_STYLES.get(motion, ANIMATION_STYLE_CHOICES[0])
-    )
     if motion == colors_module.PROVIDER_ANIMATION_AUTO:
+        # Automatic means "whatever Working already does", so show that.
         style = colors.animation_style(colors_module.MODE_WORKING)
+    else:
+        style = colors_module.PROVIDER_ANIMATION_STYLES.get(motion, ANIMATION_STYLE_CHOICES[0])
     try:
         return program_for_display_state(
             LedDisplayState.WORKING,
@@ -3233,12 +3231,12 @@ def _build_studio_compare_strip(target: StatusBarController):
 def _build_studio_colors_section(target, actions, swatches, hex_labels):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
 
-    agent_outer, agent_inner = native_ui.make_card("Agent Colours")
+    agent_outer, agent_inner = native_ui.make_card("Agent Colors")
     agent_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "One row per agent, each led by its own name. The Brand group is "
-            "the official colour of Claude, OpenAI, Codex and Gemini; Palette "
-            "is the system set. Hover any colour to see it on the Screen Bar "
+            "the official color of Claude, OpenAI, Codex and Gemini; Palette "
+            "is the system set. Hover any color to see it on the Screen Bar "
             "before you keep it.",
             secondary=True,
             size=11.0,
@@ -3257,7 +3255,7 @@ def _build_studio_colors_section(target, actions, swatches, hex_labels):
             native_ui.add_separator(agent_inner)
     stack.addArrangedSubview_(agent_outer)
 
-    mode_outer, mode_inner = native_ui.make_card("State Colours")
+    mode_outer, mode_inner = native_ui.make_card("State Colors")
     mode_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "What each state looks like, whoever is in it.",
@@ -3288,9 +3286,9 @@ def _build_studio_colors_section(target, actions, swatches, hex_labels):
     palette_outer, palette_inner = native_ui.make_card("Palettes")
     palette_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
-            "A complete look in one click -- state colours and agent colours "
+            "A complete look in one click -- state colors and agent colors "
             "together, derived so every set stays legible. Individual "
-            "colours above still override anything.",
+            "colors above still override anything.",
             secondary=True,
             size=11.0,
             max_width=560.0,
@@ -3316,7 +3314,7 @@ def _build_studio_colors_section(target, actions, swatches, hex_labels):
         provider_button = native_ui.make_button(palette_name, target, "applyPalette:")
         provider_button.setIdentifier_(palette_name)
         provider_button.setToolTip_(
-            f"A full look seeded from {palette_name}'s brand colour"
+            f"A full look seeded from {palette_name}'s brand color"
         )
         provider_row.addArrangedSubview_(provider_button)
     provider_row.addArrangedSubview_(native_ui.make_hspacer())
@@ -3538,7 +3536,7 @@ def _build_studio_preview_section(target, actions):
     surfaces_outer, surfaces_inner = native_ui.make_card("Where Previews Play")
     surfaces_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
-            "Hovering a colour or an animation plays it on the Screen Bar "
+            "Hovering a color or an animation plays it on the Screen Bar "
             "only, and the Screen Bar goes straight back to the truth the "
             "moment you move away. Your hardware is never touched unless you "
             "ask for it here.",
@@ -3582,7 +3580,7 @@ def _build_color_studio_pane(target: StatusBarController) -> NSView:
     header_outer, header_inner = native_ui.make_card(None)
     root.addSubview_(header_outer)
     header_inner.addArrangedSubview_(
-        native_ui.make_label("Colour & Animation Studio", size=15.0, bold=True)
+        native_ui.make_label("Color & Animation Studio", size=15.0, bold=True)
     )
     segmented = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
         [colors_module.STUDIO_SECTION_LABELS[key] for key in colors_module.STUDIO_SECTION_CHOICES],
@@ -3675,7 +3673,13 @@ def refresh_blend_and_speed_fields(target: StatusBarController) -> None:
     fields = target.color_fields
     # Called once per refresh_colors_window, which is the one hook this
     # module has into "the saved colours just changed" -- so the Studio's
-    # before/after strip re-bakes here rather than needing its own.
+    # before/after strip re-bakes here rather than needing its own, and an
+    # in-flight hover is rebased onto the new baseline rather than left
+    # holding a candidate derived from settings that no longer exist
+    # (Reset to Defaults and the palette buttons both land here).
+    actions = getattr(target, "studio_actions", None)
+    if actions is not None:
+        actions.preview_session.rebase(colors)
     refresh_studio_compare(target)
     live_toggle = fields.get("live_toggle")
     if live_toggle is not None:

@@ -28,10 +28,16 @@ _FRESH_STATES = {
     ObservationState.OBSERVED,
     ObservationState.OBSERVED_ZERO,
 }
-_FALLBACK_STATES = {
-    ObservationState.STALE,
-    ObservationState.LAST_KNOWN_GOOD,
-}
+# The two states that mean "old but real". Public because a display that shows
+# a forgiven reading has to be able to ask whether it was forgiven: the card
+# owns a stale marker, and `LaneAuthority.freshness` is the only thing that
+# knows the reading needs it.
+FALLBACK_OBSERVATION_STATES: Final = frozenset(
+    {
+        ObservationState.STALE,
+        ObservationState.LAST_KNOWN_GOOD,
+    }
+)
 _DIRECT_HEALTH_KINDS = {
     SourceHealthKind.HEALTHY,
     SourceHealthKind.REFRESHING,
@@ -105,10 +111,18 @@ def _validated_now(now: float) -> float:
 
 def _source_in_context(lane: QuotaLaneObservation, context: ExecutionContext) -> bool:
     source = lane.key.source
-    # One exact pair, never two independent memberships. The independent form
-    # accepted every provider crossed with every source instance, so adding a
-    # second registered source silently widened what every OTHER provider
-    # could speak for.
+    # The WHOLE identity when the context knows it. A SourceKey has four
+    # components and only two were compared, so a lane could name an adapter
+    # or a capability this build never registered -- claude/transcripts/oauth
+    # and claude/quota/oauth were one source to the authority layer -- and
+    # still be authorised for display.
+    if context.source_keys:
+        return source in context.source_keys
+    # A context that genuinely only knows pairs still gets one exact pair,
+    # never two independent memberships. The independent form accepted every
+    # provider crossed with every source instance, so adding a second
+    # registered source silently widened what every OTHER provider could
+    # speak for.
     return (source.provider_id, source.source_instance_id) in context.source_scopes
 
 
@@ -151,7 +165,7 @@ def classify_applicability(
 def _effective_freshness(lane: QuotaLaneObservation) -> ObservationState:
     state = lane.value.state
     health = lane.source_health
-    if state in _FALLBACK_STATES:
+    if state in FALLBACK_OBSERVATION_STATES:
         return state
     if health.kind is SourceHealthKind.STALE:
         return ObservationState.STALE
@@ -183,7 +197,7 @@ def _value_refusal(lane: QuotaLaneObservation) -> str | None:
         return "usage_unavailable"
     if state is ObservationState.PARTIAL or lane.source_health.kind is SourceHealthKind.PARTIAL:
         return "usage_partial"
-    if state not in _FRESH_STATES | _FALLBACK_STATES:
+    if state not in _FRESH_STATES | FALLBACK_OBSERVATION_STATES:
         return "usage_invalid"
     if lane.value.remaining is None:
         return "usage_missing"
@@ -279,7 +293,7 @@ def evaluate_lane_authority(
 
 def _selection_rank(authority: LaneAuthority) -> tuple[float, float, float, object]:
     lane = authority.lane
-    is_fallback = authority.freshness in _FALLBACK_STATES
+    is_fallback = authority.freshness in FALLBACK_OBSERVATION_STATES
     remaining = lane.value.remaining
     reset_epoch = lane.reset.reset_epoch if authority.reset_credible else None
     return (
@@ -379,6 +393,7 @@ def project_source_health(
 
 
 __all__ = [
+    "FALLBACK_OBSERVATION_STATES",
     "MAX_BINDING_LANES",
     "MAX_CAPACITY_BINDING_AGE_SECONDS",
     "CapacityProjection",

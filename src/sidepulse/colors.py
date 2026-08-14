@@ -179,7 +179,7 @@ PROVIDER_ANIMATION_DESCRIPTIONS: dict[str, str] = {
     PROVIDER_ANIMATION_AUTO: "Follows the state: breathe when idle, chase while working.",
     MOTION_BREATHE: "One slow swell, every LED together.",
     MOTION_CHASE: "The same swell, staggered into a travelling wave.",
-    MOTION_STEADY: "Holds its colour. Never moves.",
+    MOTION_STEADY: "Holds its color. Never moves.",
     MOTION_BLINK: "Hard-edged on/off, no easing.",
 }
 
@@ -2684,7 +2684,7 @@ SWATCH_GROUP_LABELS: dict[str, str] = {
     SWATCH_GROUP_CUSTOM: "Custom",
 }
 SWATCH_GROUP_HINTS: dict[str, str] = {
-    SWATCH_GROUP_BRAND: "Official colours, straight from the makers.",
+    SWATCH_GROUP_BRAND: "Official colors, straight from the makers.",
     SWATCH_GROUP_PALETTE: "System hues, chosen to stay far apart from each other.",
     SWATCH_GROUP_CUSTOM: "Anything else you pick.",
 }
@@ -2757,9 +2757,9 @@ class Swatch:
         if self.opens_picker:
             if self.selected:
                 return f"{self.name} · {self.hex} — click to pick another"
-            return "Pick any colour…"
+            return "Pick any color…"
         if self.is_brand:
-            return f"{self.name} brand colour · {self.hex}"
+            return f"{self.name} brand color · {self.hex}"
         return f"{self.name} · {self.hex}"
 
 
@@ -2971,12 +2971,12 @@ STUDIO_SECTION_CHOICES: tuple[str, ...] = (
     STUDIO_SECTION_PREVIEW,
 )
 STUDIO_SECTION_LABELS: dict[str, str] = {
-    STUDIO_SECTION_COLORS: "Colours",
+    STUDIO_SECTION_COLORS: "Colors",
     STUDIO_SECTION_ANIMATIONS: "Animations",
     STUDIO_SECTION_PREVIEW: "Preview",
 }
 STUDIO_SECTION_SUBTITLES: dict[str, str] = {
-    STUDIO_SECTION_COLORS: "Which colour each agent and each state gets.",
+    STUDIO_SECTION_COLORS: "Which color each agent and each state gets.",
     STUDIO_SECTION_ANIMATIONS: "How each agent and each state moves.",
     STUDIO_SECTION_PREVIEW: "See it before you keep it.",
 }

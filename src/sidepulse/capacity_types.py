@@ -418,12 +418,21 @@ class CapacitySnapshot:
 class ExecutionContext:
     """The exact sources this execution may speak for.
 
-    ``source_scopes`` is the authoritative field: one ``(provider_id,
-    source_instance_id)`` pair per source actually registered. The two flat
-    tuples remain for display and validation, but membership in them is NOT a
-    scope -- testing them independently accepts the cross product, so a build
-    registering ``claude/…/oauth`` and ``codex/…/local`` also accepted
-    ``claude/…/local`` and ``codex/…/oauth``, neither of which exists.
+    ``source_keys`` is the authoritative field when a caller knows what it
+    registered: the COMPLETE ``SourceKey`` of every source, all four
+    components. A ``SourceKey`` names a provider, an adapter, a source
+    instance and a capability, and two of those four were being compared, so
+    ``claude/transcripts/oauth`` and ``claude/quota/oauth`` were the same
+    source to the authority layer, as were the same adapter read through two
+    different capabilities.
+
+    ``source_scopes`` is the weaker form kept for callers that genuinely only
+    know pairs: one ``(provider_id, source_instance_id)`` per source. It is
+    still not a cross product -- testing the two flat tuples independently
+    accepted one, so a build registering ``claude/…/oauth`` and
+    ``codex/…/local`` also accepted ``claude/…/local`` and ``codex/…/oauth``,
+    neither of which exists. The flat tuples remain for display and
+    validation, and membership in them is NOT a scope.
     """
 
     provider_ids: tuple[str, ...]
@@ -431,6 +440,7 @@ class ExecutionContext:
     selected_model: str | None
     selected_feature: str | None
     source_scopes: tuple[tuple[str, str], ...] = ()
+    source_keys: tuple[SourceKey, ...] = ()
 
     def __post_init__(self) -> None:
         if not (
@@ -465,6 +475,34 @@ class ExecutionContext:
             )
         ):
             raise CapacityValidationError("invalid execution context")
+
+        if not (
+            type(self.source_keys) is tuple
+            and len(self.source_keys) <= MAX_EXECUTION_CONTEXT_MEMBERS
+            and len(self.source_keys) == len(set(self.source_keys))
+            and all(isinstance(source, SourceKey) for source in self.source_keys)
+            and all(
+                source.provider_id in self.provider_ids
+                and source.source_instance_id in self.source_instances
+                for source in self.source_keys
+            )
+        ):
+            raise CapacityValidationError("invalid execution context")
+        if self.source_keys:
+            # The exact identities are the scope. The pairs are a projection of
+            # them, never an independent claim, so they are derived rather than
+            # accepted -- a caller cannot name one set of sources and a
+            # different set of pairs.
+            derived = tuple(
+                dict.fromkeys(
+                    (source.provider_id, source.source_instance_id)
+                    for source in self.source_keys
+                )
+            )
+            if self.source_scopes and set(self.source_scopes) != set(derived):
+                raise CapacityValidationError("invalid execution context")
+            object.__setattr__(self, "source_scopes", derived)
+            return
         if self.source_scopes:
             return
 

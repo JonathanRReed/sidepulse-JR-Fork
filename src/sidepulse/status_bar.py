@@ -123,7 +123,7 @@ from .battery import (
     program_for_battery,
     read_battery_snapshot,
 )
-from .capacity_authority import select_binding_lanes
+from .capacity_authority import FALLBACK_OBSERVATION_STATES, select_binding_lanes
 from .capacity_refresh import (
     CapacityRefreshCoordinator,
     RefreshCause,
@@ -138,6 +138,7 @@ from .capacity_types import (
     CapacitySnapshot,
     CapacitySourceHealth,
     ExecutionContext,
+    ObservationState,
     QuotaLaneObservation,
     SourceHealthKind,
     SourceKey,
@@ -497,6 +498,7 @@ CAPACITY_DESCRIPTORS_BY_SOURCE = _capacity_descriptors_by_source()
 # reading as "cross-scope" -- silently, because the commit just fails.
 CAPACITY_ACCOUNT_SCOPES_BY_SOURCE = {
     claude_quota.CLAUDE_QUOTA_SOURCE: claude_quota.CLAUDE_ACCOUNT_SCOPE,
+    usage_stats.CODEX_QUOTA_SOURCE: usage_stats.CODEX_ACCOUNT_SCOPE,
 }
 
 
@@ -539,10 +541,12 @@ def _capacity_refresh_pool(source_key: SourceKey) -> str:
 def capacity_execution_context() -> ExecutionContext:
     """Bound the authority layer to the sources this build actually registered.
 
-    The scopes are PAIRS, one per registered source. Handing the context two
-    flat lists let it match their cross product, so registering a second
-    source (claude/quota/oauth) also taught it to accept claude/*/local and
-    codex/*/oauth -- sources nothing here negotiated.
+    The scope is the COMPLETE SourceKey of each registered source, not a pair
+    and not two flat lists. Two flat lists matched their cross product, so
+    registering a second source (claude/quota/oauth) also taught it to accept
+    claude/*/local and codex/*/oauth. Pairs closed that but still compared two
+    of a SourceKey's four components, so claude/transcripts/oauth -- an
+    adapter this build never registered for capacity -- passed as well.
 
     `selected_model` stays None because nothing here knows which model the
     user is on. That is not a gap to paper over: it makes every per-model
@@ -555,9 +559,7 @@ def capacity_execution_context() -> ExecutionContext:
         source_instances=tuple(sorted({source.source_instance_id for source in sources})),
         selected_model=None,
         selected_feature=None,
-        source_scopes=tuple(
-            (source.provider_id, source.source_instance_id) for source in sources
-        ),
+        source_keys=sources,
     )
 
 
@@ -568,10 +570,18 @@ class AuthorisedCapacity:
     Withheld lanes are carried rather than dropped so the surface the owner is
     already looking at can say a reading exists and could not be trusted,
     instead of a row quietly disappearing.
+
+    `freshness` carries `LaneAuthority.freshness` for each lane that survived.
+    The authority layer deliberately FORGIVES an old reading -- a source that
+    is STALE, or one that failed while holding a last-known-good, still shows
+    its number -- and that forgiveness was computed and then dropped on the
+    floor, so a reading the layer had just called old rendered identically to
+    one taken a second ago.
     """
 
     lanes: tuple[QuotaLaneObservation, ...]
     withheld: tuple[tuple[str, str], ...]
+    freshness: tuple[tuple[str, ObservationState], ...] = ()
 
     def __iter__(self):
         return iter(self.lanes)
@@ -581,6 +591,13 @@ class AuthorisedCapacity:
 
     def __contains__(self, value) -> bool:
         return value in self.lanes
+
+    @property
+    def stale(self) -> bool:
+        """Whether any published number is a forgiven, not a fresh, reading."""
+        return any(
+            state in FALLBACK_OBSERVATION_STATES for _name, state in self.freshness
+        )
 
 
 def authorised_capacity_lanes(snapshot, *, now: float) -> AuthorisedCapacity:
@@ -617,7 +634,14 @@ def authorised_capacity_lanes(snapshot, *, now: float) -> AuthorisedCapacity:
         for lane in snapshot.lanes
         if lane.key not in decisions or not decisions[lane.key].presentable
     )
-    return AuthorisedCapacity(lanes=lanes, withheld=withheld)
+    # Carried, not recomputed. `_effective_freshness` already folded the
+    # source's health into the value's own state -- an OBSERVED number from a
+    # source that had failed is LAST_KNOWN_GOOD -- and nothing downstream can
+    # rederive that from the observation alone.
+    freshness = tuple(
+        (lane.semantic_name, decisions[lane.key].freshness) for lane in lanes
+    )
+    return AuthorisedCapacity(lanes=lanes, withheld=withheld, freshness=freshness)
 
 
 def _transcript_source_keys_by_provider():
@@ -3175,22 +3199,25 @@ class StatusBarController(NSObject):
             provider_id: self._capacity_source_generation(provider_id) + 1,
         }
 
-    def _claude_capacity_observations(
+    def _contract_capacity_observations(
         self,
         source_key: SourceKey,
         windows,
+        evidence_from_windows,
     ) -> tuple[QuotaLaneObservation, ...]:
-        """Turn fetched Claude windows into observations the contract stamped.
+        """Turn one provider's fetched windows into contract-stamped lanes.
 
         Never constructed ad hoc: the descriptor owns each lane's semantic
         name, horizon and identity, so a window this build did not declare
-        raises rather than arriving under a borrowed lane's name.
+        raises rather than arriving under a borrowed lane's name. Every
+        capacity producer goes through here -- a provider without one has no
+        way onto the card at all, which is the point.
         """
         descriptor = CAPACITY_DESCRIPTORS_BY_SOURCE.get(source_key)
         if descriptor is None or not windows:
             return ()
         observed_at = time.time()
-        evidence = claude_quota.capacity_evidence_from_windows(
+        evidence = evidence_from_windows(
             descriptor,
             windows,
             observed_at=observed_at,
@@ -3203,6 +3230,37 @@ class StatusBarController(NSObject):
             observed_at=observed_at,
         )
         return normalized.snapshot.lanes
+
+    def _claude_capacity_observations(
+        self,
+        source_key: SourceKey,
+        windows,
+    ) -> tuple[QuotaLaneObservation, ...]:
+        """Map fetched Claude windows onto the lanes its policy declared."""
+        return self._contract_capacity_observations(
+            source_key,
+            windows,
+            claude_quota.capacity_evidence_from_windows,
+        )
+
+    def _codex_capacity_observations(
+        self,
+        source_key: SourceKey,
+        windows,
+    ) -> tuple[QuotaLaneObservation, ...]:
+        """Map local Codex rate-limit windows onto its declared lanes.
+
+        Codex is the provider that actually works today, and until this
+        existed its numbers went from the rollout file to the card without
+        ever passing the authority layer: `adapt_legacy_usage_windows` minted
+        keys outside the contract (pool "unspecified", opaque_scope "legacy:N")
+        and rendered `windows[0]` as the ceiling, whatever that happened to be.
+        """
+        return self._contract_capacity_observations(
+            source_key,
+            windows,
+            usage_stats.codex_capacity_evidence_from_windows,
+        )
 
     def _usage_refresh_source_worker(
         self,
@@ -3217,33 +3275,43 @@ class StatusBarController(NSObject):
         result = None
         failure = None
         if provider_id == "codex":
-            windows = []
-            try:
-                limits = (
-                    usage_stats.codex_rate_limits(totals)
-                    if totals is not None
-                    else usage_stats.cached_codex_rate_limits(
-                        default_state_dir() / "usage-scan-cache.json"
+            observations = ()
+            requested = bool(self.settings.codex_percent_enabled)
+            if requested:
+                try:
+                    limits = (
+                        usage_stats.codex_rate_limits(totals)
+                        if totals is not None
+                        else usage_stats.cached_codex_rate_limits(
+                            default_state_dir() / "usage-scan-cache.json"
+                        )
                     )
-                )
-                windows = usage_stats.codex_windows_from_limits(limits)
-                if not windows:
-                    raise ValueError("local capacity evidence unavailable")
-                if not self.settings.codex_percent_enabled:
-                    windows = []
-            except Exception:
-                log_status_bar("codex usage unavailable: source_unavailable")
-                failure = RefreshFailureKind.SOURCE_UNAVAILABLE
+                    windows = usage_stats.codex_windows_from_limits(limits)
+                    if not windows:
+                        raise ValueError("local capacity evidence unavailable")
+                    observations = self._codex_capacity_observations(
+                        source_key,
+                        windows,
+                    )
+                except Exception:
+                    log_status_bar("codex usage unavailable: source_unavailable")
+                    failure = RefreshFailureKind.SOURCE_UNAVAILABLE
             result = {
                 "provider_id": "codex",
                 "title": "Codex",
-                "windows": windows,
+                # No "windows" key, for the same reason Claude has none: the
+                # fetched list lives only long enough to be mapped onto
+                # declared lanes. Shipping it to the main thread as well gave
+                # the display something raw to fall back to.
+                "capacity_observations": observations,
+                "capacity_requested": requested,
+                "source_generation": self._capacity_source_generation("codex"),
             }
 
         elif provider_id == "claude":
-            windows = []
             observations = ()
-            if self.settings.claude_plan_limits_enabled:
+            requested = bool(self.settings.claude_plan_limits_enabled)
+            if requested:
                 try:
                     token = self.claude_access_token()
                     if token is None and getattr(self, "_claude_needs_sign_in", False):
@@ -3272,6 +3340,11 @@ class StatusBarController(NSObject):
                 # the main thread as well gave the display something raw to
                 # fall back to the moment the authority pass kept nothing.
                 "capacity_observations": observations,
+                # Whether capacity was asked for at all. "Nothing authorised"
+                # and "the owner turned this off" both produce zero lanes and
+                # mean opposite things, and only the producer can tell them
+                # apart.
+                "capacity_requested": requested,
                 # Deliberately the SOURCE generation, not the refresh
                 # generation: reset continuity scopes a reset boundary to one
                 # uninterrupted run of this source, so a value that changed on
@@ -3389,10 +3462,16 @@ class StatusBarController(NSObject):
                 continue
             authorised = None
             if failure is None:
-                observations = result.get("capacity_observations") or ()
-                if not (
-                    type(observations) is tuple
-                    and all(
+                observations = result.get("capacity_observations")
+                # Two refusals, not one. A result that carries no observations
+                # KEY never went through a producer, and a result that still
+                # carries a raw window list has a second, unauthorised way onto
+                # the card. Both are refused here rather than rendered, so the
+                # only route to a number is the contract.
+                if (
+                    "windows" in result
+                    or type(observations) is not tuple
+                    or not all(
                         type(observation) is QuotaLaneObservation
                         for observation in observations
                     )
@@ -3450,48 +3529,14 @@ class StatusBarController(NSObject):
             row = self._project_capacity_refresh_state(refresh_key, now=now)
             state = self._usage_provider_states[provider_id]
             old_model = models.get(provider_id)
-            # A result that carries capacity observations is contract-built,
-            # and its numbers may only come from the authorised projection.
-            # The legacy window list stays reachable exactly for the sources
-            # that have no producer yet, and never as a fallback for one that
-            # does -- an authority veto must not be the trigger for a bypass.
-            contract_built = isinstance(result, dict) and "capacity_observations" in result
             if failure is not None:
                 error_text = CAPACITY_REFRESH_FAILURE_COPY[failure]
-                if isinstance(result, dict) and not contract_built:
-                    result_windows = result.get("windows") or ()
-                    if not result_windows and old_model is not None:
-                        result_windows = usage_window_payloads(old_model)
-                    models[provider_id] = build_provider_usage_view(
-                        provider_id,
-                        str(result.get("title") or provider_id.title()),
-                        result_windows,
-                        last_success_at=state.last_success_at,
-                        now=now,
-                        reset_now=reset_now,
-                        error_text=error_text,
-                        summary_text=(
-                            result.get("summary_text")
-                            if result.get("summary_text") is not None
-                            else getattr(old_model, "summary_text", None)
-                        ),
-                        detail_text=(
-                            result.get("detail_text")
-                            if result.get("detail_text") is not None
-                            else getattr(old_model, "detail_text", None)
-                        ),
-                        partial=(
-                            bool(result.get("partial"))
-                            if "partial" in result
-                            else bool(getattr(old_model, "partial", False))
-                        ),
-                        source_text=(
-                            result.get("source_text")
-                            if result.get("source_text") is not None
-                            else getattr(old_model, "source_text", None)
-                        ),
-                    )
-                elif old_model is not None:
+                if old_model is not None:
+                    # The typed model is preserved and marked stale, which
+                    # keeps the last-known-good numbers on screen without
+                    # round-tripping them back through a raw window list --
+                    # that round trip re-minted `legacy:N` keys outside the
+                    # contract for readings that had once been authorised.
                     models[provider_id] = dataclass_replace(
                         old_model,
                         stale=True,
@@ -3511,40 +3556,47 @@ class StatusBarController(NSObject):
             elif isinstance(result, dict):
                 notice = None
                 last_success_at = row.last_success_at
-                if contract_built:
-                    # The authorised projection is the ONLY source of numbers
-                    # here. `authorised` is a tuple-like, so an empty one used
-                    # to read as "no authority pass ran" and promoted the raw
-                    # window list; there is now no raw list to promote and no
-                    # branch that would reach for one.
-                    result_windows = ()
-                    capacity_observations = (
-                        authorised.lanes if authorised is not None else ()
+                # The authorised projection is the ONLY source of numbers
+                # here. There is no raw-window branch left for ANY provider:
+                # codex had a live producer and a negotiated descriptor and
+                # still published straight off the wire, so "the legacy path
+                # survives for sources with no producer yet" was describing a
+                # route that was actually carrying the daily-use provider.
+                capacity_observations = (
+                    authorised.lanes if authorised is not None else ()
+                )
+                withheld = authorised.withheld if authorised is not None else ()
+                if withheld:
+                    log_status_bar(
+                        "capacity lanes withheld: "
+                        + ", ".join(f"{name}={reason}" for name, reason in withheld)
                     )
-                    withheld = authorised.withheld if authorised is not None else ()
-                    if withheld:
-                        log_status_bar(
-                            "capacity lanes withheld: "
-                            + ", ".join(f"{name}={reason}" for name, reason in withheld)
-                        )
-                    if not capacity_observations:
-                        # Either every window fell outside the declared lanes
-                        # or the authority layer kept none of them. To the
-                        # owner both mean the same thing, and saying it is the
-                        # only honest option left.
-                        notice = CAPACITY_UNAUTHORISED_COPY
-                        # A refresh that authorised nothing is not a success
-                        # the card may lean on, or it would read "No usage
-                        # yet" over a fresh timestamp.
-                        last_success_at = None
-                    elif withheld:
-                        notice = (
-                            f"{len(withheld)} window"
-                            f"{'' if len(withheld) == 1 else 's'} unavailable"
-                        )
-                else:
-                    result_windows = result.get("windows") or ()
-                    capacity_observations = ()
+                # A reading the authority layer forgave as old-but-real is
+                # shown, and has to LOOK old. `freshness` is the only thing
+                # that knows: the refresh itself succeeded, so every
+                # clock-derived staleness test says the card is current.
+                stale_evidence = authorised is not None and authorised.stale
+                # An owner who switched capacity off is not looking at a
+                # fault, and an opt-out authorises exactly as many lanes as a
+                # dead source does: none. Only the producer can tell them
+                # apart, so it says which it was rather than letting the card
+                # cry wolf over a switch the owner threw deliberately.
+                requested = result.get("capacity_requested", True)
+                if not capacity_observations and requested:
+                    # Either every window fell outside the declared lanes or
+                    # the authority layer kept none of them. To the owner both
+                    # mean the same thing, and saying it is the only honest
+                    # option left.
+                    notice = CAPACITY_UNAUTHORISED_COPY
+                    # A refresh that authorised nothing is not a success the
+                    # card may lean on, or it would read "No usage yet" over a
+                    # fresh timestamp.
+                    last_success_at = None
+                elif capacity_observations and withheld:
+                    notice = (
+                        f"{len(withheld)} window"
+                        f"{'' if len(withheld) == 1 else 's'} unavailable"
+                    )
                 reset_decisions = {}
                 source_generation = result.get("source_generation")
                 for observation in capacity_observations:
@@ -3561,7 +3613,7 @@ class StatusBarController(NSObject):
                 models[provider_id] = build_provider_usage_view(
                     provider_id,
                     str(result.get("title") or provider_id.title()),
-                    result_windows,
+                    (),
                     last_success_at=last_success_at,
                     now=now,
                     reset_now=reset_now,
@@ -3571,6 +3623,7 @@ class StatusBarController(NSObject):
                     # trade: no countdown beats a countdown on a reading whose
                     # neighbours were refused.
                     error_text=notice,
+                    stale_evidence=stale_evidence,
                     summary_text=(
                         result.get("summary_text")
                         if result.get("summary_text") is not None
@@ -12936,16 +12989,11 @@ def concise_usage_error(error: Exception) -> str:
     return (text or "usage unavailable")[:80]
 
 
-def usage_window_payloads(model: ProviderUsageViewModel) -> tuple[dict, ...]:
-    return tuple(
-        {
-            "label": window.label,
-            "used_percent": window.percent_used,
-            "window_minutes": window.window_minutes,
-            "resets_at": window.reset_at,
-        }
-        for window in model.windows
-    )
+# `usage_window_payloads` lived here: it flattened a typed model back into
+# untyped `{"label", "used_percent", ...}` dicts so a failed refresh could
+# re-adapt them as legacy windows. Nothing needs it now -- a failed refresh
+# keeps the typed model and marks it stale -- and keeping it would leave a
+# ready-made way to turn authorised lanes back into raw ones.
 
 
 def _capacity_age_text(model: ProviderUsageViewModel, *, monotonic_now: float) -> str | None:

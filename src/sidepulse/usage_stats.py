@@ -41,9 +41,21 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-from .capacity_types import SourceKey
+from .capacity_sources import (
+    EvidenceMetricKind,
+    SupportedCapacityEvidence,
+    SupportedLaneEvidence,
+)
+from .capacity_types import (
+    ObservationState,
+    QuotaEffect,
+    ResetState,
+    SourceHealthKind,
+    SourceKey,
+)
 from .private_io import atomic_private_write, ensure_private_directory, read_private_text
 from .providers import NegotiatedProviderSource, negotiated_provider_sources
+from .reset_policy import parse_reset_epoch
 
 CACHE_VERSION = 6
 USAGE_CACHE_MAX_FILES = 4096
@@ -748,6 +760,128 @@ def codex_windows_from_limits(payload: object) -> list[dict]:
                     continue
             add(label, entry)
     return windows
+
+
+# The only translation from a Codex window label to a declared lane identity.
+# `codex_windows_from_limits` already collapses the payload's shapes onto a
+# small product-owned label set; exactly two of those labels name a ceiling
+# this build declared. Everything else -- "Spark", a bare "limit", a nested
+# secondary -- is DROPPED rather than force-fitted, because Codex's own window
+# set is not stable: OpenAI removed the 5-hour window entirely for ~2.5 weeks
+# in 2026 and `additional_rate_limits[]` carries model-specific sub-caps. When
+# `primary` is absent, `windows[0]` is whatever that list held, and the legacy
+# path rendered it as the ceiling that stops work.
+CODEX_LANE_IDENTITIES = {
+    "primary": "five-hour",
+    "secondary": "weekly",
+}
+CODEX_QUOTA_SOURCE = SourceKey(
+    provider_id="codex",
+    adapter_id="quota",
+    source_instance_id="local",
+    capability_id="remote_quota_windows",
+)
+# One machine runs one signed-in Codex CLI at a time, so this scopes reset
+# continuity to "the ChatGPT plan currently signed in for Codex". Like
+# Claude's, it is deliberately NOT an account identifier and nothing derived
+# from a token reaches it; an account switch is handled by advancing the
+# source generation, which retires every reset boundary the old account set.
+CODEX_ACCOUNT_SCOPE = "codex-chatgpt"
+
+
+def _codex_lane_evidence(descriptor, window: object, *, observed_at: float):
+    """Map one normalized Codex window onto one declared lane, or nothing."""
+    if not isinstance(window, dict):
+        return None
+    window_id = CODEX_LANE_IDENTITIES.get(window.get("label"))
+    if window_id is None:
+        return None
+    lane = next(
+        (
+            candidate
+            for candidate in descriptor.lanes
+            if candidate.key.window == window_id
+            and candidate.key.model is None
+            and candidate.key.effect is QuotaEffect.ALL_WORKLOADS
+        ),
+        None,
+    )
+    if lane is None:
+        return None
+
+    used = window.get("used_percent")
+    if (
+        isinstance(used, bool)
+        or not isinstance(used, (int, float))
+        or not math.isfinite(float(used))
+    ):
+        return None
+
+    # `parse_reset_epoch` is the one place that accepts both the ISO string and
+    # the epoch/second forms this file has carried, and returns None for
+    # anything that is not a credible future boundary. A window with no such
+    # boundary stays honestly reset-less rather than gaining a countdown.
+    reset_epoch = parse_reset_epoch(window.get("resets_at"), now=observed_at)
+    minutes = window.get("window_minutes")
+    return SupportedLaneEvidence(
+        key=lane.key,
+        metric_kind=EvidenceMetricKind.PERCENT_USED,
+        percent=max(0.0, min(100.0, float(used))),
+        state=ObservationState.OBSERVED,
+        reset_state=(ResetState.FUTURE if reset_epoch is not None else ResetState.UNKNOWN),
+        reset_epoch=reset_epoch,
+        window_minutes=(
+            float(minutes)
+            if not isinstance(minutes, bool)
+            and isinstance(minutes, (int, float))
+            and math.isfinite(float(minutes))
+            and float(minutes) > 0.0
+            else None
+        ),
+    )
+
+
+def codex_capacity_evidence_from_windows(
+    descriptor,
+    windows,
+    *,
+    observed_at: float,
+):
+    """Project normalized Codex windows onto the declared lanes of one source.
+
+    The descriptor owns lane identity; this only decides which declared lane
+    each product label refers to. `used_percent` stays used-first all the way
+    into `SupportedLaneEvidence` -- the single inversion to remaining belongs
+    to `capacity_sources`, so exactly one place can invert it wrongly.
+
+    `auth_mode` is deliberately left unset: the codex policy declares two
+    ChatGPT modes and a rollout file on disk cannot say which credential wrote
+    it. Claiming one would be a guess, and it also has to match the refresh
+    key's scope, which is None for the same reason.
+    """
+    if descriptor.source != CODEX_QUOTA_SOURCE:
+        raise ValueError("codex capacity descriptor mismatch")
+    matched: dict[object, SupportedLaneEvidence] = {}
+    for window in windows or ():
+        evidence = _codex_lane_evidence(descriptor, window, observed_at=observed_at)
+        if evidence is not None:
+            # First match wins, and `codex_windows_from_limits` emits the
+            # plan's own primary and secondary windows before anything from
+            # `additional_rate_limits[]`. That ordering is load-bearing: an
+            # extra allowance that happens to be named "primary" must not be
+            # able to displace the real 5-hour ceiling.
+            matched.setdefault(evidence.key, evidence)
+    # Declaration order, not payload order: Codex has moved windows around
+    # between releases, and reading order (shortest window first) is a product
+    # decision rather than whatever the file happened to list first.
+    return SupportedCapacityEvidence(
+        source=CODEX_QUOTA_SOURCE,
+        health_kind=SourceHealthKind.HEALTHY,
+        lanes=tuple(matched[lane.key] for lane in descriptor.lanes if lane.key in matched),
+        account_discriminator=CODEX_ACCOUNT_SCOPE,
+        has_last_known_good=False,
+        auth_mode=None,
+    )
 
 
 def _parse_file(

@@ -449,6 +449,7 @@ def build_provider_usage_view(
     cost_estimate: CostEstimateSection | None = None,
     reset_now: float | None = None,
     stale_after_seconds: float = 300.0,
+    stale_evidence: bool = False,
     capacity_observations=(),
     reset_decisions: Mapping[QuotaLaneKey, object] | None = None,
     source_key: SourceKey | None = None,
@@ -495,10 +496,16 @@ def build_provider_usage_view(
     )
     missing = not known_data
     error = str(error_text).strip() if error_text else None
+    # `stale_evidence` is the freshness the AUTHORITY layer decided, not one
+    # derived from a clock. A reading it forgave as "old but real" -- a source
+    # that is STALE, or one that failed while still holding a last-known-good
+    # -- arrives with a fresh `last_success_at` (the refresh itself worked) and
+    # no error, so every clock-derived test called it current.
     stale = bool(
         known_data
         and (
-            error is not None
+            bool(stale_evidence)
+            or error is not None
             or last_success_at is None
             or _elapsed(now, last_success_at) >= float(stale_after_seconds)
         )
