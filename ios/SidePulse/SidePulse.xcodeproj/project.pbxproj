@@ -17,6 +17,7 @@
         9F0000010000000000000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9F0000010000000000000108 /* Assets.xcassets */; };
         9F0000010000000000000009 /* EventLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000010000000000000112 /* EventLog.swift */; };
         9F0000010000000000000010 /* PushPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000010000000000000113 /* PushPayload.swift */; };
+        9F0000010000000000000011 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000010000000000000114 /* KeychainStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,6 +34,7 @@
         9F0000010000000000000111 /* SidePulse.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SidePulse.app; sourceTree = BUILT_PRODUCTS_DIR; };
         9F0000010000000000000112 /* EventLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventLog.swift; sourceTree = "<group>"; };
         9F0000010000000000000113 /* PushPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushPayload.swift; sourceTree = "<group>"; };
+        9F0000010000000000000114 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -60,6 +62,7 @@
                 9F0000010000000000000101 /* SidePulseApp.swift */,
                 9F0000010000000000000102 /* ContentView.swift */,
                 9F0000010000000000000103 /* AppModel.swift */,
+                9F0000010000000000000114 /* KeychainStore.swift */,
                 9F0000010000000000000104 /* DriveWriter.swift */,
                 9F0000010000000000000105 /* AppDelegate.swift */,
                 9F0000010000000000000112 /* EventLog.swift */,
@@ -157,6 +160,7 @@
                 9F0000010000000000000005 /* AppDelegate.swift in Sources */,
                 9F0000010000000000000009 /* EventLog.swift in Sources */,
                 9F0000010000000000000010 /* PushPayload.swift in Sources */,
+                9F0000010000000000000011 /* KeychainStore.swift in Sources */,
                 9F0000010000000000000006 /* FolderPicker.swift in Sources */,
                 9F0000010000000000000007 /* WriteLEDsIntent.swift in Sources */,
             );

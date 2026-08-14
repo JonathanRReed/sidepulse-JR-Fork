@@ -5,6 +5,15 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from .provider_facts import (
+    RequestKey,
+    WorkKey,
+    request_key_to_payload,
+    work_key_to_payload,
+)
+
+_CODEX_TRANSCRIPT_USAGE_LIMIT_PROVENANCE = object()
+
 
 class AgentMode(str, Enum):
     IDLE_READY = "idle_ready"
@@ -54,6 +63,7 @@ class HookEvent:
     tool_name: str | None = None
     message: str | None = None
     origin: str | None = None
+    _terminal_provenance: object | None = None
 
     @property
     def status_key(self) -> str:
@@ -78,19 +88,21 @@ class AgentStatus:
     message: str | None = None
     origin: str | None = None
     stale: bool = False
+    work_key: WorkKey | None = None
+    request_key: RequestKey | None = None
 
     @property
     def is_hard_ask(self) -> bool:
-        """A TRACKED blocked-on-you request (permission prompt, error,
-        actionable notification) versus a SOFT ask inferred from a
-        finished turn's closing question. Only hard asks escalate --
-        the T3 lesson: escalation belongs to request lifecycles, not
-        text heuristics."""
-        if self.mode == AgentMode.BLOCKED_ERROR:
-            return True
-        if self.mode != AgentMode.WAITING_FOR_INPUT:
-            return False
-        return self.event_name in ("PermissionRequest", "Notification")
+        """Whether this status proves a request the user can still answer.
+
+        Terminal errors remain visible as failures, but must not be treated
+        as persistent attention. Escalation belongs to live request
+        lifecycles, not error modes or text heuristics.
+        """
+        return (
+            self.mode == AgentMode.WAITING_FOR_INPUT
+            and self.event_name in ("PermissionRequest", "Notification")
+        )
 
     @property
     def is_plan_ready(self) -> bool:
@@ -149,6 +161,16 @@ class AgentStatus:
             "message": self.message,
             "origin": self.origin,
             "stale": self.stale,
+            "work_key": (
+                work_key_to_payload(self.work_key)
+                if self.work_key is not None
+                else None
+            ),
+            "request_key": (
+                request_key_to_payload(self.request_key)
+                if self.request_key is not None
+                else None
+            ),
         }
 
 

@@ -5,9 +5,7 @@ import UIKit
 final class AppModel: ObservableObject {
     static let shared = AppModel()
 
-    @Published var pushToken: String {
-        didSet { UserDefaults.standard.set(pushToken, forKey: Defaults.pushToken) }
-    }
+    @Published private(set) var pushToken: String
 
     @Published var selectedFolderPath: String = "No USB folder selected"
     @Published var hasFolderAccess: Bool = false
@@ -17,12 +15,15 @@ final class AppModel: ObservableObject {
     }
 
     @Published var serverBaseURL: String {
-        didSet { UserDefaults.standard.set(serverBaseURL, forKey: Defaults.serverBaseURL) }
+        didSet {
+            guard let sanitized = Self.sanitizedBaseURL(serverBaseURL) else {
+                return
+            }
+            UserDefaults.standard.set(sanitized, forKey: Defaults.serverBaseURL)
+        }
     }
 
-    @Published var sharedSecret: String {
-        didSet { UserDefaults.standard.set(sharedSecret, forKey: Defaults.sharedSecret) }
-    }
+    @Published private(set) var sharedSecret: String
 
     @Published var lastMessage: String = "Ready"
     @Published var eventLog: [String] = []
@@ -31,32 +32,53 @@ final class AppModel: ObservableObject {
     }
 
     private enum Defaults {
-        static let pushToken = "pushToken"
         static let ledText = "ledText"
         static let serverBaseURL = "serverBaseURL"
-        static let sharedSecret = "sharedSecret"
         static let receivedPushes = "receivedPushes"
     }
 
     private init() {
-        self.pushToken = UserDefaults.standard.string(forKey: Defaults.pushToken) ?? ""
+        let keychain = KeychainStore.shared
+        keychain.migrateLegacySecrets()
+        self.pushToken = keychain.string(for: .pushToken) ?? ""
         self.ledText = UserDefaults.standard.string(forKey: Defaults.ledText) ?? """
         #404040 1.4s pulse
         off 400ms none
         repeat
         """
-        self.serverBaseURL = UserDefaults.standard.string(forKey: Defaults.serverBaseURL) ?? "http://127.0.0.1:8787"
-        self.sharedSecret = UserDefaults.standard.string(forKey: Defaults.sharedSecret) ?? ""
+        let savedBaseURL = UserDefaults.standard.string(forKey: Defaults.serverBaseURL) ?? "http://127.0.0.1:8787"
+        self.serverBaseURL = Self.sanitizedBaseURL(savedBaseURL) ?? "http://127.0.0.1:8787"
+        self.sharedSecret = keychain.string(for: .sharedSecret) ?? ""
         self.receivedPushes = Self.loadReceivedPushes()
         self.eventLog = EventLog.entries()
+        UserDefaults.standard.set(self.serverBaseURL, forKey: Defaults.serverBaseURL)
         refreshFolderStatus()
     }
 
     func setPushToken(from deviceToken: Data) {
-        pushToken = deviceToken.map { String(format: "%02x", $0) }.joined()
+        let candidate = deviceToken.map { String(format: "%02x", $0) }.joined()
+        guard KeychainStore.shared.set(candidate, for: .pushToken) else {
+            recordCredentialSaveFailure()
+            return
+        }
+        pushToken = candidate
         EventLog.append("APNs token updated")
         lastMessage = "Push token updated"
         refreshEventLog()
+    }
+
+    @discardableResult
+    func saveSharedSecret(_ candidate: String) -> Bool {
+        guard KeychainStore.shared.set(candidate, for: .sharedSecret) else {
+            recordCredentialSaveFailure()
+            return false
+        }
+        sharedSecret = candidate
+        let message = candidate.isEmpty ? "Shared secret cleared" : "Shared secret updated"
+        EventLog.append(message)
+        lastMessage = message
+        refreshEventLog()
+        return true
     }
 
     func refreshFolderStatus() {
@@ -71,9 +93,9 @@ final class AppModel: ObservableObject {
         refreshEventLog()
     }
 
-    func recordError(_ error: Error) {
-        let message = error.localizedDescription
-        EventLog.append("Error: \(message)")
+    func recordError(_: Error) {
+        let message = "Operation failed"
+        EventLog.append(message)
         lastMessage = message
         refreshFolderStatus()
         refreshEventLog()
@@ -108,33 +130,18 @@ final class AppModel: ObservableObject {
         refreshEventLog()
     }
 
-    var preauthenticatedPostURL: String? {
-        let trimmedBase = serverBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !trimmedBase.isEmpty, !pushToken.isEmpty else {
-            return nil
-        }
-
-        var components = URLComponents(string: trimmedBase + "/v1/push")
-        var items = [
-            URLQueryItem(name: "device_token", value: pushToken)
-        ]
-
-        if !sharedSecret.isEmpty {
-            items.append(URLQueryItem(name: "key", value: sharedSecret))
-        }
-
-        components?.queryItems = items
-        return components?.url?.absoluteString
+    private func recordCredentialSaveFailure() {
+        let message = "Protected credential save failed"
+        EventLog.append(message)
+        lastMessage = message
+        refreshEventLog()
     }
 
     var pushEndpointURL: String? {
-        let trimmedBase = serverBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !trimmedBase.isEmpty else {
+        guard let sanitizedBaseURL = Self.sanitizedBaseURL(serverBaseURL) else {
             return nil
         }
-        return trimmedBase + "/v1/push"
+        return sanitizedBaseURL + "/v1/push"
     }
 
     var curlExample: String? {
@@ -142,16 +149,8 @@ final class AppModel: ObservableObject {
             return nil
         }
 
-        let tokenLine = pushToken.isEmpty ? "" : "\n  -d '{\"device_token\":\"\(pushToken)\",\"pattern\":\"green_pulse_2\"}'"
-        let authHeader = sharedSecret.isEmpty ? "" : " \\\n  -H \"Authorization: Bearer \(sharedSecret)\""
-        if tokenLine.isEmpty {
-            return """
-            curl -X POST \(pushEndpointURL)\(authHeader) \\
-              -H "content-type: application/json" \\
-              -d '{"pattern":"green_pulse_2"}'
-            """
-        }
-
+        let tokenLine = "\n  -d \"{\\\"device_token\\\":\\\"${SIDEPULSE_DEVICE_TOKEN}\\\",\\\"pattern\\\":\\\"green_pulse_2\\\"}\""
+        let authHeader = " \\\n  -H \"Authorization: Bearer ${SIDEPULSE_SHARED_SECRET}\""
         return """
         curl -X POST \(pushEndpointURL)\(authHeader) \\
           -H "content-type: application/json" \(tokenLine)
@@ -180,6 +179,28 @@ final class AppModel: ObservableObject {
             URLQueryItem(name: "pattern", value: pattern.name)
         ]
         return components.url?.absoluteString
+    }
+
+    private static func sanitizedBaseURL(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard var components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              components.host != nil else {
+            return nil
+        }
+
+        components.user = nil
+        components.password = nil
+        components.query = nil
+        components.fragment = nil
+        let trimmedPath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        components.path = trimmedPath.isEmpty ? "" : "/" + trimmedPath
+        guard let result = components.url?.absoluteString else {
+            return nil
+        }
+        return result.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
     private func persistReceivedPushes() {

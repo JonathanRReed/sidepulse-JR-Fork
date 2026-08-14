@@ -107,13 +107,19 @@ export SIDEPULSE_DEVICE_TOKEN="token copied from the app"
 export SIDEPULSE_SHARED_SECRET="choose-a-local-testing-secret"
 ```
 
+`SIDEPULSE_SHARED_SECRET` is required. The server refuses all mutation when it
+is unset or blank. `SIDEPULSE_DEVICE_TOKEN` is optional only when every request
+provides its token in the authenticated JSON body.
+
 Run the server:
 
 ```sh
 python server.py
 ```
 
-Open `http://127.0.0.1:8787` for the simple sender page, or use curl:
+Open `http://127.0.0.1:8787` for status and the finite-pattern list. The page
+does not render credentials or send mutations. Use curl to send a catalog
+pattern:
 
 ```sh
 curl -X POST http://127.0.0.1:8787/v1/push \
@@ -122,20 +128,16 @@ curl -X POST http://127.0.0.1:8787/v1/push \
   -d '{"pattern":"green_pulse_2"}'
 ```
 
-Send raw LED text:
-
-```sh
-curl -X POST http://127.0.0.1:8787/v1/push \
-  -H "Authorization: Bearer $SIDEPULSE_SHARED_SECRET" \
-  -H "content-type: application/json" \
-  -d '{"leds":"#00ff00 280ms pulse\noff 160ms none\n"}'
-```
-
 The helper script calls the same endpoint:
 
 ```sh
 python send_push.py --pattern green_pulse_2
 ```
+
+The quarantined server accepts only `off`, `green_pulse_2`, `success`, and
+`error`, which are the finite programs in the current catalog. Raw LED text,
+raw APNs payloads, alerts, custom payload fields, APNs header overrides, and
+the helper's corresponding legacy options are rejected.
 
 ## API
 
@@ -145,42 +147,27 @@ Returns server health.
 
 `GET /v1/patterns`
 
-Returns server-known pattern names and LED text.
+Returns only the finite server-accepted catalog patterns.
 
 `POST /v1/push`
 
-Friendly envelope:
+Authenticated JSON envelope:
 
 ```json
 {
   "device_token": "optional if SIDEPULSE_DEVICE_TOKEN is set",
-  "pattern": "green_pulse_2",
-  "leds": "optional raw LEDS.LED",
-  "payload": {"optional": "extra custom payload fields"},
-  "apns": {
-    "push_type": "background",
-    "priority": 5,
-    "collapse_id": "optional",
-    "expiration": "optional"
-  }
+  "pattern": "green_pulse_2"
 }
 ```
 
-`POST /v1/push/raw`
+The body is limited to 4096 bytes before parsing. Only `application/json` is
+accepted. A body token must be 1 to 256 ASCII letters, digits, underscores, or
+hyphens. Query and request-header tokens are ignored. The server constructs a
+fixed background APNs payload from the finite pattern intent.
 
-Passes the JSON body through as the exact APNs payload. Provide the device token
-with `?device_token=...`, `X-Side-Device-Token`, or `SIDEPULSE_DEVICE_TOKEN`.
-Optional APNs overrides can be sent as `apns-push-type`, `apns-priority`,
-`apns-collapse-id`, `apns-expiration`, or `apns-topic` request headers.
-
-```sh
-curl -X POST "http://127.0.0.1:8787/v1/push/raw?device_token=$SIDEPULSE_DEVICE_TOKEN" \
-  -H "Authorization: Bearer $SIDEPULSE_SHARED_SECRET" \
-  -H "content-type: application/json" \
-  -H "apns-push-type: background" \
-  -H "apns-priority: 5" \
-  -d '{"aps":{"content-available":1},"pattern":"success","data":{"source":"curl"}}'
-```
+The former `POST /push` and `POST /v1/push/raw` routes are unavailable. Form,
+text, query-secret, raw LED program, and raw APNs payload mutation are not part
+of the trusted server path.
 
 ## Notes
 

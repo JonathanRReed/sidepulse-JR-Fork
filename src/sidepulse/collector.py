@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
 import time
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
+from .capacity_types import SourceKey
+from .freshness import bounded_age_seconds, is_recent
 from .models import (
+    _CODEX_TRANSCRIPT_USAGE_LIMIT_PROVENANCE,
     MODE_PRIORITY,
     AgentMode,
     AgentStatus,
@@ -19,8 +25,60 @@ from .models import (
     parse_datetime,
     provider_label,
 )
+from .operator_state import (
+    AcknowledgementEligibility,
+    BootIdentifier,
+    CanonicalOperatorEvent,
+    CanonicalOperatorState,
+    CanonicalRequestTruth,
+    CanonicalWorkTruth,
+    ClockContinuityState,
+    ClockContinuityStatus,
+    ClockSample,
+    RequestPhase,
+    SemanticEventKey,
+    empty_operator_state,
+    reduce_operator_state,
+    semantic_event_key_from_payload,
+    semantic_event_key_to_payload,
+)
 from .origin import origin_label_from_payload
-from .providers import HOOK_PROVIDERS, detect_log_path, parse_log_line
+from .private_io import (
+    atomic_private_write,
+    read_private_text,
+)
+from .provider_adapters import (
+    minimize_hook_event,
+    normalized_provider_record_from_payload,
+    provider_facts_for_record,
+)
+from .provider_facts import (
+    EventToken,
+    NextActor,
+    ObservationAuthority,
+    ProviderFactBatch,
+    ProviderWatermark,
+    RequestKey,
+    RequestKind,
+    SourceFreshness,
+    SourceHealth,
+    WatermarkBasis,
+    WatermarkOrder,
+    WorkKey,
+    WorkLifecycle,
+    compare_watermarks,
+    request_key_from_payload,
+    request_key_to_payload,
+    work_key_from_payload,
+    work_key_to_payload,
+)
+from .providers import (
+    HOOK_PROVIDERS,
+    NegotiatedProviderSource,
+    detect_log_path,
+    negotiated_provider_sources,
+    parse_log_line,
+)
 from .settings import AgentMonitorSettings, load_settings
 
 CODEX_TRANSCRIPT_PROVIDER = "codex-transcripts"
@@ -33,6 +91,10 @@ CLAUDE_TRANSCRIPT_MAX_LINES = 500
 # main thread, at the top of every refresh. New transcript FILES appear
 # rarely; new LINES in known files are caught by per-file signatures.
 TRANSCRIPT_FILE_LIST_CACHE_SECONDS = 45.0
+TRANSCRIPT_RECORDS_CACHE_MAX_ENTRIES = (
+    CODEX_TRANSCRIPT_MAX_FILES + CLAUDE_TRANSCRIPT_MAX_FILES
+) * 4
+TRANSCRIPT_FILE_LIST_CACHE_MAX_ENTRIES = 16
 # Keep at most a day of finished sessions: latest.json accumulated every
 # session ever seen (118 statuses / 367KB on a real install) and was
 # re-serialized on every hook event.
@@ -47,6 +109,30 @@ CODEX_SESSION_INDEX_MAX_LINES = 5000
 COMPLETED_VISIBLE_SECONDS = 20 * 60.0
 IDLE_VISIBLE_SECONDS = 0.0
 POST_TOOL_WORKING_VISIBLE_SECONDS = 2 * 60.0
+CODEX_USAGE_LIMIT_TERMINAL_CLASSIFICATIONS = frozenset({"usage_limit_exceeded"})
+LATEST_STATE_MAX_BYTES = 4 * 1_024 * 1_024
+MAX_PENDING_OPERATOR_EVENTS = 2_000
+_BOOT_EPOCH_BUCKET_SECONDS = 10
+_LOCAL_BOOT_IDENTIFIER = BootIdentifier(
+    hashlib.sha256(
+        str(
+            int(
+                (time.time() - time.monotonic())
+                // _BOOT_EPOCH_BUCKET_SECONDS
+            )
+        ).encode("ascii")
+    ).hexdigest()
+)
+
+
+class RestoreHealth(str, Enum):
+    NOT_ATTEMPTED = "not_attempted"
+    HEALTHY = "healthy"
+    MISSING = "missing"
+    DEGRADED = "degraded"
+    CORRUPT = "corrupt"
+    UNSUPPORTED = "unsupported"
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True)
@@ -83,8 +169,275 @@ class CachedCodexSessionIndex:
     titles: dict[str, str]
 
 
+@dataclass(frozen=True)
+class CanonicalStatusOverlay:
+    watermark: ProviderWatermark
+    status: AgentStatus
+    preserve_display_name: bool = False
+    preserve_details: bool = False
+
+
 _codex_session_index_cache: CachedCodexSessionIndex | None = None
 _codex_session_index_lock = threading.RLock()
+
+
+def _default_clock_sample() -> ClockSample:
+    now = datetime.now(timezone.utc)
+    return ClockSample(
+        now.timestamp(),
+        time.monotonic(),
+        _LOCAL_BOOT_IDENTIFIER,
+    )
+
+
+def _registered_hook_source(provider: str) -> NegotiatedProviderSource | None:
+    return next(
+        (
+            source
+            for source in negotiated_provider_sources()
+            if source.source_key.provider_id == provider
+            and source.source_key.adapter_id == "hooks"
+            and source.source_key.capability_id == "live_agent_events"
+            and source.observation_invocation_allowed
+        ),
+        None,
+    )
+
+
+def _batch_for_hook_record(
+    record: HookEvent,
+    *,
+    clock: ClockSample,
+) -> ProviderFactBatch | None:
+    source = _registered_hook_source(record.provider)
+    if source is None:
+        return None
+    observation_authority = (
+        ObservationAuthority.FALLBACK_OBSERVATION
+        if record.raw.get("source")
+        in {CODEX_TRANSCRIPT_PROVIDER, CLAUDE_TRANSCRIPT_PROVIDER}
+        else source.registration.observation_authority
+    )
+    normalized = minimize_hook_event(
+        record,
+        source_key=source.source_key,
+        contract=source.contract,
+        observation_authority=observation_authority,
+    )
+    return provider_facts_for_record(
+        normalized,
+        contract=source.contract,
+        observation_authority=observation_authority,
+        observed_at_epoch=clock.wall_epoch,
+    )
+
+
+def _source_sort_key(source: SourceKey) -> tuple[str, str, str, str]:
+    return (
+        source.provider_id,
+        source.adapter_id,
+        source.source_instance_id,
+        source.capability_id,
+    )
+
+
+def _batch_sort_key(batch: ProviderFactBatch) -> tuple[object, ...]:
+    watermark = batch.watermark
+    return (
+        _source_sort_key(batch.source_key),
+        0 if watermark.sequence is not None else 1,
+        -1 if watermark.sequence is None else watermark.sequence,
+        watermark.occurred_at_epoch,
+        watermark.tie_break_rank,
+        watermark.event_token.value,
+    )
+
+
+def _canonical_datetime(epoch: float) -> datetime:
+    try:
+        return datetime.fromtimestamp(epoch, timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return datetime.max.replace(tzinfo=timezone.utc)
+
+
+def agent_status_from_canonical_work(
+    work: CanonicalWorkTruth,
+    *,
+    overlay: CanonicalStatusOverlay | None = None,
+) -> AgentStatus:
+    """Project one canonical work row into the temporary AgentStatus facade."""
+    if type(work) is not CanonicalWorkTruth:
+        raise ValueError("invalid canonical work truth")
+    if overlay is not None and type(overlay) is not CanonicalStatusOverlay:
+        raise ValueError("invalid canonical status overlay")
+    mode, event_name = {
+        WorkLifecycle.IDLE: (AgentMode.IDLE_READY, "SessionStart"),
+        WorkLifecycle.ACTIVE: (AgentMode.WORKING, "UserPromptSubmit"),
+        WorkLifecycle.WAITING: (
+            AgentMode.WAITING_FOR_INPUT,
+            "PermissionRequest" if work.request_keys else "Waiting",
+        ),
+        WorkLifecycle.COMPLETED: (AgentMode.COMPLETED, "Stop"),
+        WorkLifecycle.FAILED: (AgentMode.BLOCKED_ERROR, "StopFailure"),
+        WorkLifecycle.UNKNOWN: (AgentMode.UNKNOWN, "Unknown"),
+    }[work.lifecycle]
+    provider = work.key.source_key.provider_id
+    is_worker = work.parent_key is not None
+    matching_overlay = overlay is not None and (
+        overlay.watermark == work.watermark
+        or overlay.status.updated_at
+        >= _canonical_datetime(work.watermark.occurred_at_epoch)
+    )
+    projected_mode = (
+        mode
+        if work.request_keys
+        else overlay.status.mode
+        if matching_overlay
+        else mode
+    )
+    projected_event_name = overlay.status.event_name if matching_overlay else event_name
+    projected_updated_at = (
+        overlay.status.updated_at
+        if matching_overlay
+        else _canonical_datetime(work.watermark.occurred_at_epoch)
+    )
+    session_id = (
+        work.parent_key.work_id.value if work.parent_key is not None else work.key.work_id.value
+    )
+    return AgentStatus(
+        provider=provider,
+        agent_id=f"{provider}:{'agent' if is_worker else 'session'}:{work.key.work_id.value}",
+        display_name=(
+            overlay.status.display_name
+            if matching_overlay and overlay.preserve_display_name
+            else work.safe_label
+        ),
+        mode=projected_mode,
+        updated_at=projected_updated_at,
+        event_name=projected_event_name,
+        session_id=session_id,
+        cwd=None,
+        tool_name=(
+            overlay.status.tool_name if matching_overlay and overlay.preserve_details else None
+        ),
+        message=overlay.status.message if matching_overlay and overlay.preserve_details else None,
+        origin=overlay.status.origin if matching_overlay and overlay.preserve_details else None,
+        stale=work.source_freshness
+        not in {SourceFreshness.FRESH, SourceFreshness.PARTIAL}
+        and not (
+            work.source_freshness is SourceFreshness.RESTORED
+            and matching_overlay
+        ),
+        work_key=work.key,
+        request_key=work.request_keys[0] if work.request_keys else None,
+    )
+
+
+def _snapshot_from_operator_state(
+    state: CanonicalOperatorState,
+    *,
+    events: tuple[CanonicalOperatorEvent, ...],
+    sources: tuple[SourceSpec, ...],
+    collected_at: datetime,
+    restore_health: RestoreHealth,
+    status_overlays: Mapping[WorkKey, CanonicalStatusOverlay] = MappingProxyType({}),
+    supplemental_statuses: tuple[AgentStatus, ...] = (),
+    stale_after_seconds: float,
+    tool_running_timeout_seconds: float,
+    completed_visible_seconds: float,
+    idle_visible_seconds: float,
+    post_tool_working_visible_seconds: float,
+    canonical_projected_uses_age_windows: bool,
+) -> MonitorSnapshot:
+    projected = tuple(
+        agent_status_from_canonical_work(
+            work,
+            overlay=status_overlays.get(work.key),
+        )
+        for work in state.works
+    )
+    projected_by_agent_id = {status.agent_id: status for status in projected}
+    merged = _merged_status_candidates(
+        (
+            *projected,
+            *(
+                status
+                for status in supplemental_statuses
+                if (
+                    (projected := projected_by_agent_id.get(status.agent_id)) is None
+                    or status.priority < projected.priority
+                    or (
+                        status.updated_at > projected.updated_at
+                        and (
+                            status.priority <= projected.priority
+                            or status.event_name == "Notification"
+                        )
+                    )
+                )
+            ),
+        )
+    )
+    fresh: list[AgentStatus] = []
+    stale: list[AgentStatus] = []
+    for status in merged:
+        effective = status_for_snapshot(
+            status,
+            collected_at,
+            post_tool_working_visible_seconds=post_tool_working_visible_seconds,
+        )
+        projected_status = projected_by_agent_id.get(status.agent_id)
+        is_stale = (
+            status_is_stale(
+                effective,
+                collected_at,
+                stale_after_seconds=stale_after_seconds,
+                tool_running_timeout_seconds=tool_running_timeout_seconds,
+                completed_visible_seconds=completed_visible_seconds,
+                idle_visible_seconds=idle_visible_seconds,
+            )
+            if projected_status is not None and canonical_projected_uses_age_windows
+            else projected_status.stale
+            if projected_status is not None
+            else status_is_stale(
+                effective,
+                collected_at,
+                stale_after_seconds=stale_after_seconds,
+                tool_running_timeout_seconds=tool_running_timeout_seconds,
+                completed_visible_seconds=completed_visible_seconds,
+                idle_visible_seconds=idle_visible_seconds,
+            )
+        )
+        current = _replace_stale(effective, is_stale)
+        if is_stale:
+            stale.append(current)
+        else:
+            fresh.append(current)
+
+    if any(status_counts_active(status) for status in fresh):
+        inactive = [status for status in fresh if not status_counts_active(status)]
+        fresh = [status for status in fresh if status_counts_active(status)]
+        stale.extend(_replace_stale(status, True) for status in inactive)
+
+    fresh.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
+    stale.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
+    aggregate = aggregate_status(tuple(fresh), tuple(stale))
+    if not fresh and not stale and restore_health in {
+        RestoreHealth.DEGRADED,
+        RestoreHealth.CORRUPT,
+        RestoreHealth.UNSUPPORTED,
+        RestoreHealth.UNAVAILABLE,
+    }:
+        aggregate = AggregateStatus(AgentMode.UNKNOWN, 0, 0, None)
+    return MonitorSnapshot(
+        aggregate=aggregate,
+        statuses=tuple(fresh),
+        stale_statuses=tuple(stale),
+        sources=sources,
+        collected_at=collected_at,
+        operator_state=state,
+        operator_events=events,
+        restore_health=restore_health,
+    )
 
 
 @dataclass(frozen=True)
@@ -94,6 +447,9 @@ class MonitorSnapshot:
     stale_statuses: tuple[AgentStatus, ...]
     sources: tuple[SourceSpec, ...]
     collected_at: datetime
+    operator_state: CanonicalOperatorState | None = None
+    operator_events: tuple[CanonicalOperatorEvent, ...] = ()
+    restore_health: RestoreHealth = RestoreHealth.NOT_ATTEMPTED
 
     def to_dict(self) -> dict:
         return {
@@ -109,6 +465,13 @@ class MonitorSnapshot:
             "stale_statuses": [
                 status.to_dict(self.collected_at) for status in self.stale_statuses
             ],
+            "operator_generation": (
+                self.operator_state.generation
+                if self.operator_state is not None
+                else None
+            ),
+            "operator_event_count": len(self.operator_events),
+            "restore_health": self.restore_health.value,
         }
 
 
@@ -122,6 +485,9 @@ class AgentMonitor:
         idle_visible_seconds: float = IDLE_VISIBLE_SECONDS,
         post_tool_working_visible_seconds: float = POST_TOOL_WORKING_VISIBLE_SECONDS,
         max_lines_per_source: int = 5000,
+        transcript_records_cache_max_entries: int = TRANSCRIPT_RECORDS_CACHE_MAX_ENTRIES,
+        transcript_file_list_cache_max_entries: int = TRANSCRIPT_FILE_LIST_CACHE_MAX_ENTRIES,
+        clock_sampler: Callable[[], ClockSample] = _default_clock_sample,
     ) -> None:
         self.sources = tuple(sources) if sources is not None else default_sources()
         self.stale_after_seconds = stale_after_seconds
@@ -130,11 +496,26 @@ class AgentMonitor:
         self.idle_visible_seconds = idle_visible_seconds
         self.post_tool_working_visible_seconds = post_tool_working_visible_seconds
         self.max_lines_per_source = max_lines_per_source
+        self.transcript_records_cache_max_entries = max(
+            0, transcript_records_cache_max_entries
+        )
+        self.transcript_file_list_cache_max_entries = max(
+            0, transcript_file_list_cache_max_entries
+        )
         self._log_records_cache: dict[tuple[str, str, int], CachedTranscriptRecords] = {}
         self._transcript_records_cache: dict[tuple[str, str], CachedTranscriptRecords] = {}
-        self._transcript_file_list_cache: dict[tuple[str, int], CachedTranscriptFileList] = {}
+        self._transcript_file_list_cache: dict[
+            tuple[str, str, int], CachedTranscriptFileList
+        ] = {}
         self._latest_status_signature: tuple[Any, ...] | None = None
         self._latest_statuses_by_key: dict[str, AgentStatus] | None = None
+        self._clock_sampler = clock_sampler
+        self.operator_state = empty_operator_state()
+        self._canonical_signature: tuple[Any, ...] | None = None
+        self._pending_operator_events: tuple[CanonicalOperatorEvent, ...] = ()
+        self._canonical_records_seen = False
+        self._canonical_status_overlays_by_work_key: dict[WorkKey, CanonicalStatusOverlay] = {}
+        self._canonical_statuses_by_agent_id: dict[str, AgentStatus] = {}
 
     @classmethod
     def from_default_sources(
@@ -156,7 +537,27 @@ class AgentMonitor:
         )
 
     def snapshot(self) -> MonitorSnapshot:
-        now = datetime.now(timezone.utc)
+        now = _canonical_datetime(self._clock_sampler().wall_epoch)
+        if self._refresh_canonical_state():
+            events = self._pending_operator_events
+            self._pending_operator_events = ()
+            return _snapshot_from_operator_state(
+                self.operator_state,
+                events=events,
+                sources=self.sources,
+                collected_at=now,
+                restore_health=RestoreHealth.NOT_ATTEMPTED,
+                status_overlays=MappingProxyType(
+                    dict(self._canonical_status_overlays_by_work_key)
+                ),
+                supplemental_statuses=tuple(self._canonical_statuses_by_agent_id.values()),
+                stale_after_seconds=self.stale_after_seconds,
+                tool_running_timeout_seconds=self.tool_running_timeout_seconds,
+                completed_visible_seconds=self.completed_visible_seconds,
+                idle_visible_seconds=self.idle_visible_seconds,
+                post_tool_working_visible_seconds=self.post_tool_working_visible_seconds,
+                canonical_projected_uses_age_windows=True,
+            )
         statuses_by_key = self._latest_statuses()
 
         fresh: list[AgentStatus] = []
@@ -196,6 +597,103 @@ class AgentMonitor:
             sources=self.sources,
             collected_at=now,
         )
+
+    def _refresh_canonical_state(self) -> bool:
+        signature = self._input_signature()
+        if signature == self._canonical_signature:
+            return self._canonical_records_seen
+        clock = self._clock_sampler()
+        metadata_by_session: dict[str, StatusMetadata] = {}
+        metadata_by_status: dict[str, StatusMetadata] = {}
+        pending_permissions_by_key: dict[str, set[str]] = {}
+        status_overlays: dict[WorkKey, CanonicalStatusOverlay] = {}
+        compatibility_statuses_by_agent_id: dict[str, AgentStatus] = {}
+        suppressed_work_keys: set[WorkKey] = set()
+        batches: list[ProviderFactBatch] = []
+        for record in sorted(self._iter_records(), key=lambda candidate: candidate.logged_at):
+            metadata = metadata_for_record(
+                record,
+                metadata_by_session,
+                metadata_by_status,
+            )
+            ignored = mode_for_event(record) is not None and should_ignore_record(record, metadata)
+            status = None if ignored else status_from_event(record, metadata)
+            keep_status = False
+            if status is not None:
+                track_pending_permissions(record, pending_permissions_by_key)
+                previous = compatibility_statuses_by_agent_id.get(status.agent_id)
+                keep_status = not should_ignore_status_transition(
+                    previous,
+                    status,
+                    pending_permissions_by_key.get(status.agent_id, set()),
+                )
+                if keep_status:
+                    compatibility_statuses_by_agent_id[status.agent_id] = status
+            batch = _batch_for_hook_record(record, clock=clock)
+            if batch is None:
+                continue
+            if ignored:
+                suppressed_work_keys.update(fact.key for fact in batch.work_facts)
+                continue
+            if status is not None and keep_status:
+                transcript_source = record.raw.get("source") in {
+                    CODEX_TRANSCRIPT_PROVIDER,
+                    CLAUDE_TRANSCRIPT_PROVIDER,
+                }
+                for fact in batch.work_facts:
+                    status_overlays[fact.key] = CanonicalStatusOverlay(
+                        watermark=fact.watermark,
+                        status=status,
+                        preserve_display_name=True,
+                        preserve_details=transcript_source,
+                    )
+            batches.append(batch)
+        batches = sorted(batches, key=_batch_sort_key)
+        self._canonical_signature = signature
+        self._canonical_records_seen = bool(batches)
+        self._canonical_status_overlays_by_work_key = status_overlays
+        self._canonical_statuses_by_agent_id = compatibility_statuses_by_agent_id
+        if not batches:
+            self.operator_state = empty_operator_state()
+            self._pending_operator_events = ()
+            return False
+        previous_watermarks = dict(self.operator_state.source_watermarks)
+        state = empty_operator_state()
+        events: dict[SemanticEventKey, CanonicalOperatorEvent] = {}
+        for batch in batches:
+            reduced = reduce_operator_state(state, batch, clock=clock)
+            state = reduced.state
+            events.update((event.key, event) for event in reduced.events)
+        if suppressed_work_keys:
+            remaining_works = tuple(
+                work for work in state.works if work.key not in suppressed_work_keys
+            )
+            remaining_requests = tuple(
+                request
+                for request in state.requests
+                if request.key.work_key not in suppressed_work_keys
+            )
+            remaining_sources = {work.key.source_key for work in remaining_works}
+            state = replace(
+                state,
+                works=remaining_works,
+                requests=remaining_requests,
+                source_watermarks=tuple(
+                    item for item in state.source_watermarks if item[0] in remaining_sources
+                ),
+            )
+        self.operator_state = state
+        self._pending_operator_events = tuple(
+            event
+            for key, event in sorted(events.items())
+            if (
+                (retained := previous_watermarks.get(key.provider_watermark.source_key))
+                is None
+                or compare_watermarks(key.provider_watermark, retained)
+                is WatermarkOrder.NEWER
+            )
+        )[:MAX_PENDING_OPERATOR_EVENTS]
+        return True
 
     def _latest_statuses(self) -> dict[str, AgentStatus]:
         signature = self._input_signature()
@@ -255,6 +753,7 @@ class AgentMonitor:
                         self._transcript_source_signature(
                             source.path,
                             limit=CODEX_TRANSCRIPT_MAX_FILES,
+                            provider=source.provider,
                         ),
                     )
                 )
@@ -267,6 +766,7 @@ class AgentMonitor:
                         self._transcript_source_signature(
                             source.path,
                             limit=CLAUDE_TRANSCRIPT_MAX_FILES,
+                            provider=source.provider,
                         ),
                     )
                 )
@@ -280,10 +780,15 @@ class AgentMonitor:
         root: Path,
         *,
         limit: int,
+        provider: str,
     ) -> tuple[tuple[str, tuple[float, int] | None], ...]:
         return tuple(
             (str(path), file_signature(path))
-            for path in self._recent_transcript_files(root, limit=limit)
+            for path in self._recent_transcript_files(
+                root,
+                limit=limit,
+                provider=provider,
+            )
         )
 
     def iter_records(self) -> Iterable[HookEvent]:
@@ -330,7 +835,11 @@ class AgentMonitor:
         return cached_records
 
     def _iter_codex_transcript_records(self, root: Path) -> Iterable[HookEvent]:
-        for path in self._recent_transcript_files(root, limit=CODEX_TRANSCRIPT_MAX_FILES):
+        for path in self._recent_transcript_files(
+            root,
+            limit=CODEX_TRANSCRIPT_MAX_FILES,
+            provider=CODEX_TRANSCRIPT_PROVIDER,
+        ):
             yield from self._cached_transcript_records(
                 CODEX_TRANSCRIPT_PROVIDER,
                 path,
@@ -338,25 +847,53 @@ class AgentMonitor:
             )
 
     def _iter_claude_transcript_records(self, root: Path) -> Iterable[HookEvent]:
-        for path in self._recent_transcript_files(root, limit=CLAUDE_TRANSCRIPT_MAX_FILES):
+        for path in self._recent_transcript_files(
+            root,
+            limit=CLAUDE_TRANSCRIPT_MAX_FILES,
+            provider=CLAUDE_TRANSCRIPT_PROVIDER,
+        ):
             yield from self._cached_transcript_records(
                 CLAUDE_TRANSCRIPT_PROVIDER,
                 path,
                 iter_claude_transcript_file,
             )
 
-    def _recent_transcript_files(self, root: Path, *, limit: int) -> tuple[Path, ...]:
-        key = (str(root), limit)
+    def _recent_transcript_files(
+        self,
+        root: Path,
+        *,
+        limit: int,
+        provider: str,
+    ) -> tuple[Path, ...]:
+        key = (provider, str(root), limit)
         now = time.monotonic()
         cached = self._transcript_file_list_cache.get(key)
         if cached is not None and now < cached.expires_at:
             return cached.paths
 
         paths = tuple(recent_transcript_files(root, limit=limit))
+        root_prefix = str(root)
+        eligible_keys = {(provider, str(path)) for path in paths}
+        for record_key in list(self._transcript_records_cache):
+            cached_provider, cached_path = record_key
+            if cached_provider != provider:
+                continue
+            try:
+                Path(cached_path).relative_to(root_prefix)
+            except ValueError:
+                continue
+            if record_key not in eligible_keys:
+                del self._transcript_records_cache[record_key]
         self._transcript_file_list_cache[key] = CachedTranscriptFileList(
             expires_at=now + TRANSCRIPT_FILE_LIST_CACHE_SECONDS,
             paths=paths,
         )
+        while (
+            len(self._transcript_file_list_cache)
+            > self.transcript_file_list_cache_max_entries
+        ):
+            oldest_key = next(iter(self._transcript_file_list_cache))
+            del self._transcript_file_list_cache[oldest_key]
         return paths
 
     def _cached_transcript_records(
@@ -381,10 +918,13 @@ class AgentMonitor:
             size=stat.st_size,
             records=records,
         )
+        while len(self._transcript_records_cache) > self.transcript_records_cache_max_entries:
+            oldest_key = next(iter(self._transcript_records_cache))
+            del self._transcript_records_cache[oldest_key]
         return records
 
     def is_stale_status(self, status: AgentStatus, now: datetime) -> bool:
-        age = status.age_seconds(now)
+        age = bounded_age_seconds(now, status.updated_at)
         if status.mode == AgentMode.COMPLETED and self.completed_visible_seconds >= 0:
             return age > self.completed_visible_seconds
         if status.mode == AgentMode.IDLE_READY and self.idle_visible_seconds >= 0:
@@ -398,11 +938,17 @@ class AgentMonitor:
         return (
             status.mode == AgentMode.TOOL_RUNNING
             and self.tool_running_timeout_seconds > 0
-            and status.age_seconds(now) > self.tool_running_timeout_seconds
+            and not is_recent(
+                now,
+                status.updated_at,
+                self.tool_running_timeout_seconds,
+            )
         )
 
 
 class LiveAgentMonitor:
+    """Own the sole mutable canonical reducer state for live production flow."""
+
     def __init__(
         self,
         *,
@@ -413,6 +959,8 @@ class LiveAgentMonitor:
         idle_visible_seconds: float = IDLE_VISIBLE_SECONDS,
         post_tool_working_visible_seconds: float = POST_TOOL_WORKING_VISIBLE_SECONDS,
         latest_state_path: Path | None = None,
+        restore_work_keys: tuple[WorkKey, ...] = (),
+        clock_sampler: Callable[[], ClockSample] = _default_clock_sample,
     ) -> None:
         self.sources = tuple(sources)
         self.stale_after_seconds = stale_after_seconds
@@ -421,106 +969,303 @@ class LiveAgentMonitor:
         self.idle_visible_seconds = idle_visible_seconds
         self.post_tool_working_visible_seconds = post_tool_working_visible_seconds
         self.latest_state_path = latest_state_path
+        self.restore_work_keys = restore_work_keys
+        self._clock_sampler = clock_sampler
         self.lock = threading.RLock()
-        self.statuses_by_key: dict[str, AgentStatus] = {}
-        self.metadata_by_session: dict[str, StatusMetadata] = {}
-        self.metadata_by_status: dict[str, StatusMetadata] = {}
-        self.pending_permissions_by_key: dict[str, set[str]] = {}
+        self.operator_state = empty_operator_state()
+        self._pending_operator_events: tuple[CanonicalOperatorEvent, ...] = ()
+        self._status_metadata_by_session: dict[str, StatusMetadata] = {}
+        self._status_metadata_by_status: dict[str, StatusMetadata] = {}
+        self._status_overlays_by_work_key: dict[WorkKey, CanonicalStatusOverlay] = {}
+        self._compatibility_statuses_by_agent_id: dict[str, AgentStatus] = {}
+        self._compatibility_status_authority_by_agent_id: dict[
+            str, ObservationAuthority
+        ] = {}
+        self._compatibility_status_watermark_by_agent_id: dict[
+            str, ProviderWatermark
+        ] = {}
+        self._pending_permissions_by_key: dict[str, set[str]] = {}
+        self.restore_health = RestoreHealth.NOT_ATTEMPTED
         self._latest_state_dirty = False
         self._latest_state_written_at = 0.0
         self._latest_state_write_lock = threading.Lock()
         self.load_latest_state()
 
     def ingest_record(self, record: HookEvent) -> None:
+        clock = self._clock_sampler()
+        batch = _batch_for_hook_record(record, clock=clock)
         with self.lock:
             metadata = metadata_for_record(
                 record,
-                self.metadata_by_session,
-                self.metadata_by_status,
+                self._status_metadata_by_session,
+                self._status_metadata_by_status,
             )
-            status = status_from_event(record, metadata)
-            if status is None:
-                return
+            ignored = mode_for_event(record) is not None and should_ignore_record(record, metadata)
+            status = None if ignored else status_from_event(record, metadata)
+            keep_status = False
+            if status is not None:
+                track_pending_permissions(record, self._pending_permissions_by_key)
+                previous = self._compatibility_statuses_by_agent_id.get(status.agent_id)
+                keep_status = not should_ignore_status_transition(
+                    previous,
+                    status,
+                    self._pending_permissions_by_key.get(status.agent_id, set()),
+                )
+                transcript_source = record.raw.get("source") in {
+                    CODEX_TRANSCRIPT_PROVIDER,
+                    CLAUDE_TRANSCRIPT_PROVIDER,
+                }
+                previous_authority = (
+                    self._compatibility_status_authority_by_agent_id.get(status.agent_id)
+                )
+                previous_watermark = self._compatibility_status_watermark_by_agent_id.get(
+                    status.agent_id
+                )
+                if (
+                    transcript_source
+                    and previous is not None
+                    and batch is not None
+                    and previous_authority is not None
+                    and (
+                        status.event_name in {"Stop", "StopFailure", "SessionEnd"}
+                    )
+                    and (
+                        previous_authority > batch.observation_authority
+                        or (
+                            previous_authority == batch.observation_authority
+                            and previous_watermark is not None
+                            and compare_watermarks(batch.watermark, previous_watermark)
+                            is not WatermarkOrder.NEWER
+                        )
+                    )
+                ):
+                    keep_status = False
+                if keep_status:
+                    self._compatibility_statuses_by_agent_id[status.agent_id] = status
+                    if batch is not None:
+                        self._compatibility_status_authority_by_agent_id[status.agent_id] = (
+                            batch.observation_authority
+                        )
+                        self._compatibility_status_watermark_by_agent_id[status.agent_id] = (
+                            batch.watermark
+                        )
+                if batch is not None and keep_status:
+                    for fact in batch.work_facts:
+                        self._status_overlays_by_work_key[fact.key] = CanonicalStatusOverlay(
+                            watermark=fact.watermark,
+                            status=status,
+                            preserve_display_name=transcript_source,
+                            preserve_details=True,
+                        )
+            elif record.event_name in {"Stop", "SessionEnd", "UserPromptSubmit"}:
+                self._pending_permissions_by_key.pop(record.status_key, None)
+        if batch is not None and not ignored:
+            self.ingest_batch(batch, clock=clock)
 
-            track_pending_permissions(record, self.pending_permissions_by_key)
-            previous = self.statuses_by_key.get(status.agent_id)
-            if should_ignore_status_transition(
-                previous,
-                status,
-                self.pending_permissions_by_key.get(status.agent_id, set()),
-            ):
-                return
-            self.statuses_by_key[status.agent_id] = status
-            self._prune_expired(datetime.now(timezone.utc))
+    def ingest_batch(
+        self,
+        batch: ProviderFactBatch,
+        *,
+        clock: ClockSample | None = None,
+    ) -> None:
+        sampled_clock = self._clock_sampler() if clock is None else clock
+        with self.lock:
+            reduced = reduce_operator_state(
+                self.operator_state,
+                batch,
+                clock=sampled_clock,
+            )
+            self.operator_state = reduced.state
+            events = {
+                event.key: event
+                for event in (*self._pending_operator_events, *reduced.events)
+            }
+            self._pending_operator_events = tuple(
+                event for _key, event in sorted(events.items())
+            )[:MAX_PENDING_OPERATOR_EVENTS]
+            current_keys = {work.key for work in self.operator_state.works}
+            self._status_overlays_by_work_key = {
+                key: overlay
+                for key, overlay in self._status_overlays_by_work_key.items()
+                if key in current_keys
+            }
             self._latest_state_dirty = True
         self.maybe_write_latest_state()
 
-    def _prune_expired(self, now: datetime) -> None:
-        """Drop statuses (and their metadata) too old to matter even to
-        the dropdown's recent-sessions fallback. Callers hold self.lock."""
-        horizon = now - timedelta(seconds=STATUS_RETENTION_SECONDS)
-        expired = [
-            key
-            for key, status in self.statuses_by_key.items()
-            if status.updated_at < horizon
-        ]
-        if not expired:
+    def reconcile_refresh_hint(
+        self,
+        hint: object,
+        *,
+        log_path: Path,
+    ) -> None:
+        """Reconcile a hint only by rereading the registered normalized log."""
+        from .ipc import ProviderRefreshHint
+
+        if type(hint) is not ProviderRefreshHint:
             return
-        for key in expired:
-            del self.statuses_by_key[key]
-            self.metadata_by_status.pop(key, None)
-            self.pending_permissions_by_key.pop(key, None)
-        live_keys = set(self.statuses_by_key)
-        session_keys = {
-            f"{status.provider}:session:{status.session_id}"
-            for status in self.statuses_by_key.values()
-            if status.session_id
-        }
-        for session_key in list(self.metadata_by_session):
-            if session_key not in session_keys and session_key not in live_keys:
-                del self.metadata_by_session[session_key]
+        clock = self._clock_sampler()
+        batches: list[ProviderFactBatch] = []
+        source = next(
+            (
+                registered
+                for registered in negotiated_provider_sources()
+                if registered.source_key == hint.source_key
+                and registered.observation_invocation_allowed
+            ),
+            None,
+        )
+        if source is None:
+            return
+        try:
+            lines = read_private_text(
+                Path(log_path),
+                max_bytes=LATEST_STATE_MAX_BYTES,
+            ).splitlines()
+        except OSError:
+            return
+        for line in lines[-5_000:]:
+            normalized = None
+            try:
+                payload = _decode_strict_json_document(line)
+            except (RecursionError, TypeError, UnicodeError, ValueError):
+                payload = None
+            if payload is not None:
+                normalized = normalized_provider_record_from_payload(payload)
+                if (
+                    normalized is None
+                    and type(payload) is dict
+                    and "record_kind" in payload
+                ):
+                    continue
+            if normalized is not None:
+                if normalized.source_key != hint.source_key:
+                    continue
+            else:
+                try:
+                    legacy = parse_log_line(hint.source_key.provider_id, line)
+                except (RecursionError, TypeError, UnicodeError, ValueError):
+                    legacy = None
+                if legacy is None:
+                    continue
+                normalized = minimize_hook_event(
+                    legacy,
+                    source_key=source.source_key,
+                    contract=source.contract,
+                    observation_authority=source.registration.observation_authority,
+                )
+            batch = provider_facts_for_record(
+                normalized,
+                contract=source.contract,
+                observation_authority=source.registration.observation_authority,
+                observed_at_epoch=clock.wall_epoch,
+            )
+            batches.append(batch)
+        for batch in sorted(batches, key=_batch_sort_key):
+            self.ingest_batch(batch, clock=clock)
 
     def snapshot(self) -> MonitorSnapshot:
-        now = datetime.now(timezone.utc)
+        now = _canonical_datetime(self._clock_sampler().wall_epoch)
         with self.lock:
-            statuses = tuple(self.statuses_by_key.values())
-        return snapshot_from_statuses(
-            statuses,
+            state = self.operator_state
+            events = self._pending_operator_events
+            self._pending_operator_events = ()
+            health = self.restore_health
+        return _snapshot_from_operator_state(
+            state,
+            events=events,
             sources=self.sources,
             collected_at=now,
+            restore_health=health,
+            status_overlays=MappingProxyType(dict(self._status_overlays_by_work_key)),
+            supplemental_statuses=tuple(self._compatibility_statuses_by_agent_id.values()),
             stale_after_seconds=self.stale_after_seconds,
             tool_running_timeout_seconds=self.tool_running_timeout_seconds,
             completed_visible_seconds=self.completed_visible_seconds,
             idle_visible_seconds=self.idle_visible_seconds,
             post_tool_working_visible_seconds=self.post_tool_working_visible_seconds,
+            canonical_projected_uses_age_windows=False,
         )
 
     def load_latest_state(self) -> None:
-        if self.latest_state_path is None or not self.latest_state_path.exists():
+        if self.latest_state_path is None:
             return
         try:
-            data = json.loads(self.latest_state_path.read_text())
-        except Exception:
+            raw = read_private_text(
+                self.latest_state_path,
+                max_bytes=LATEST_STATE_MAX_BYTES,
+            )
+            document = _decode_strict_json_document(raw)
+            state, health = _operator_state_from_document(
+                document,
+                restore_work_keys=self.restore_work_keys,
+            )
+        except FileNotFoundError:
+            self.restore_health = RestoreHealth.MISSING
             return
-        statuses = data.get("statuses") if isinstance(data, dict) else None
-        if not isinstance(statuses, list):
+        except _UnsupportedLatestState:
+            self.restore_health = RestoreHealth.UNSUPPORTED
             return
-        loaded: dict[str, AgentStatus] = {}
-        for status_data in statuses:
-            status = agent_status_from_dict(status_data)
-            if status is not None:
-                loaded[status.agent_id] = status
-        self.statuses_by_key.update(loaded)
+        except OSError:
+            self.restore_health = RestoreHealth.UNAVAILABLE
+            return
+        except (RecursionError, TypeError, UnicodeError, ValueError):
+            self.restore_health = RestoreHealth.CORRUPT
+            return
+        self.operator_state = state
+        self._status_overlays_by_work_key = (
+            _presentation_overlays_from_document(document)
+            if type(document) is dict and document.get("version") == 2
+            else {}
+        )
+        if (
+            type(document) is dict
+            and "statuses" in document
+            and not state.works
+        ):
+            statuses = tuple(
+                status
+                for row in document.get("statuses", ())
+                if (status := agent_status_from_dict(row)) is not None
+            )
+            self._compatibility_statuses_by_agent_id = {
+                status.agent_id: status for status in statuses
+            }
+        else:
+            self._compatibility_statuses_by_agent_id = {}
+        self._pending_permissions_by_key = {}
+        self.restore_health = health
+        self._pending_operator_events = ()
+
+    def current_statuses_by_key(self) -> dict[str, AgentStatus]:
+        with self.lock:
+            state = self.operator_state
+            overlays = MappingProxyType(dict(self._status_overlays_by_work_key))
+        snapshot = _snapshot_from_operator_state(
+            state,
+            events=(),
+            sources=self.sources,
+            collected_at=_canonical_datetime(self._clock_sampler().wall_epoch),
+            restore_health=self.restore_health,
+            status_overlays=overlays,
+            supplemental_statuses=tuple(self._compatibility_statuses_by_agent_id.values()),
+            stale_after_seconds=self.stale_after_seconds,
+            tool_running_timeout_seconds=self.tool_running_timeout_seconds,
+            completed_visible_seconds=self.completed_visible_seconds,
+            idle_visible_seconds=self.idle_visible_seconds,
+            post_tool_working_visible_seconds=self.post_tool_working_visible_seconds,
+            canonical_projected_uses_age_windows=False,
+        )
+        return {
+            status.agent_id: status
+            for status in (*snapshot.statuses, *snapshot.stale_statuses)
+        }
 
     def write_latest_state(self) -> None:
-        """Unconditional flush -- the shutdown path and tests."""
+        """Unconditionally flush one exact metadata-only v2 snapshot."""
         self._write_latest_state(force=True)
 
     def maybe_write_latest_state(self) -> None:
-        """Debounced flush -- the per-event path. Serialization used to
-        run on every hook event while HOLDING the monitor lock (367KB /
-        ~10ms per event on a real install, with the main thread's
-        snapshot() contending on that same lock)."""
+        """Debounce private persistence without holding the reducer lock."""
         self._write_latest_state(force=False)
 
     def _write_latest_state(self, *, force: bool) -> None:
@@ -536,21 +1281,727 @@ class LiveAgentMonitor:
                     < LATEST_STATE_WRITE_INTERVAL_SECONDS
                 ):
                     return
-            now = datetime.now(timezone.utc)
             with self.lock:
-                statuses = [
-                    status.to_dict(now) for status in self.statuses_by_key.values()
-                ]
-                self._latest_state_dirty = False
-            self._latest_state_written_at = now_monotonic
-            payload = {"updated_at": now.isoformat(), "statuses": statuses}
+                state = self.operator_state
+                overlays = dict(self._status_overlays_by_work_key)
             try:
-                self.latest_state_path.parent.mkdir(parents=True, exist_ok=True)
-                temp_path = self.latest_state_path.with_suffix(".json.tmp")
-                temp_path.write_text(json.dumps(payload, sort_keys=True) + "\n")
-                temp_path.replace(self.latest_state_path)
-            except OSError:
-                pass
+                serialized = _serialize_latest_state(
+                    state,
+                    overlays=MappingProxyType(overlays),
+                )
+                atomic_private_write(self.latest_state_path, serialized)
+            except (OSError, ValueError):
+                return
+            with self.lock:
+                if self.operator_state == state:
+                    self._latest_state_dirty = False
+            self._latest_state_written_at = now_monotonic
+
+
+class _UnsupportedLatestState(ValueError):
+    pass
+
+
+_LATEST_DOCUMENT_FIELDS = frozenset(
+    {
+        "version",
+        "generation",
+        "works",
+        "requests",
+        "source_watermarks",
+        "timing_uncertain_sources",
+        "clock_continuity",
+        "last_clock",
+        "presentation_hints",
+    }
+)
+_SOURCE_KEY_FIELDS = frozenset(
+    {"provider_id", "adapter_id", "source_instance_id", "capability_id"}
+)
+_WATERMARK_FIELDS = frozenset(
+    {
+        "source_key",
+        "basis",
+        "occurred_at_epoch",
+        "event_token",
+        "sequence",
+        "tie_break_rank",
+    }
+)
+_WORK_FIELDS = frozenset(
+    {
+        "key",
+        "lifecycle",
+        "watermark",
+        "observation_authority",
+        "source_health",
+        "source_freshness",
+        "next_actor",
+        "safe_label",
+        "parent_key",
+        "request_keys",
+        "timing_uncertain",
+    }
+)
+_REQUEST_FIELDS = frozenset(
+    {
+        "key",
+        "phase",
+        "request_kind",
+        "next_actor",
+        "watermark",
+        "source_freshness",
+        "acknowledgement_eligibility",
+        "semantic_event_key",
+        "opened_at_epoch",
+        "eligible_elapsed_seconds",
+        "observation_authority",
+    }
+)
+_CLOCK_CONTINUITY_FIELDS = frozenset(
+    {"status", "uncertain_since_monotonic", "recovery_confirmations"}
+)
+_CLOCK_FIELDS = frozenset({"wall_epoch", "monotonic_seconds", "boot_id"})
+_PRESENTATION_HINT_FIELDS = frozenset(
+    {"key", "mode", "event_name", "updated_at", "source_label"}
+)
+_PRODUCT_PROVIDER_LABELS = {
+    "codex": "Codex",
+    "claude": "Claude",
+    "devin": "Devin",
+    "grok": "Grok",
+    "cursor": "Cursor",
+    "hermes": "Hermes",
+    "openclaw": "OpenClaw",
+    "opencode": "OpenCode",
+}
+
+
+def _has_exact_fields(value: object, fields: frozenset[str]) -> bool:
+    return type(value) is dict and frozenset(value) == fields
+
+
+def _strict_json_object(
+    pairs: list[tuple[object, object]],
+) -> dict[object, object]:
+    result: dict[object, object] = {}
+    for key, value in pairs:
+        if type(key) is not str or key in result:
+            raise ValueError("invalid latest-state document")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("invalid latest-state number")
+
+
+def _decode_strict_json_document(raw: str) -> object:
+    return json.loads(
+        raw,
+        object_pairs_hook=_strict_json_object,
+        parse_constant=_reject_json_constant,
+    )
+
+
+def _source_key_to_payload(source: SourceKey) -> dict[str, object]:
+    return {
+        "provider_id": source.provider_id,
+        "adapter_id": source.adapter_id,
+        "source_instance_id": source.source_instance_id,
+        "capability_id": source.capability_id,
+    }
+
+
+def _source_key_from_payload(payload: object) -> SourceKey | None:
+    if not _has_exact_fields(payload, _SOURCE_KEY_FIELDS):
+        return None
+    if not all(type(payload[field]) is str for field in _SOURCE_KEY_FIELDS):
+        return None
+    try:
+        return SourceKey(
+            payload["provider_id"],
+            payload["adapter_id"],
+            payload["source_instance_id"],
+            payload["capability_id"],
+        )
+    except ValueError:
+        return None
+
+
+def _watermark_to_payload(watermark: ProviderWatermark) -> dict[str, object]:
+    return {
+        "source_key": _source_key_to_payload(watermark.source_key),
+        "basis": watermark.basis.value,
+        "occurred_at_epoch": watermark.occurred_at_epoch,
+        "event_token": watermark.event_token.value,
+        "sequence": watermark.sequence,
+        "tie_break_rank": watermark.tie_break_rank,
+    }
+
+
+def _watermark_from_payload(payload: object) -> ProviderWatermark | None:
+    if not _has_exact_fields(payload, _WATERMARK_FIELDS):
+        return None
+    source = _source_key_from_payload(payload["source_key"])
+    if source is None:
+        return None
+    if not (
+        type(payload["basis"]) is str
+        and type(payload["event_token"]) is str
+        and type(payload["occurred_at_epoch"]) in {int, float}
+        and (
+            payload["sequence"] is None
+            or type(payload["sequence"]) is int
+        )
+        and type(payload["tie_break_rank"]) is int
+    ):
+        return None
+    try:
+        return ProviderWatermark(
+            source,
+            WatermarkBasis(payload["basis"]),
+            payload["occurred_at_epoch"],
+            EventToken(payload["event_token"]),
+            payload["sequence"],
+            payload["tie_break_rank"],
+        )
+    except ValueError:
+        return None
+
+
+def _work_to_payload(work: CanonicalWorkTruth) -> dict[str, object]:
+    return {
+        "key": work_key_to_payload(work.key),
+        "lifecycle": work.lifecycle.value,
+        "watermark": _watermark_to_payload(work.watermark),
+        "observation_authority": int(work.observation_authority),
+        "source_health": work.source_health.value,
+        "source_freshness": work.source_freshness.value,
+        "next_actor": work.next_actor.value,
+        "safe_label": work.safe_label,
+        "parent_key": (
+            None if work.parent_key is None else work_key_to_payload(work.parent_key)
+        ),
+        "request_keys": [request_key_to_payload(key) for key in work.request_keys],
+        "timing_uncertain": work.timing_uncertain,
+    }
+
+
+def _request_to_payload(request: CanonicalRequestTruth) -> dict[str, object]:
+    return {
+        "key": request_key_to_payload(request.key),
+        "phase": request.phase.value,
+        "request_kind": request.request_kind.value,
+        "next_actor": request.next_actor.value,
+        "watermark": _watermark_to_payload(request.watermark),
+        "source_freshness": request.source_freshness.value,
+        "acknowledgement_eligibility": request.acknowledgement_eligibility.value,
+        "semantic_event_key": semantic_event_key_to_payload(
+            request.semantic_event_key
+        ),
+        "opened_at_epoch": request.opened_at_epoch,
+        "eligible_elapsed_seconds": request.eligible_elapsed_seconds,
+        "observation_authority": int(request._observation_authority),
+    }
+
+
+def _clock_continuity_to_payload(
+    continuity: ClockContinuityState,
+) -> dict[str, object]:
+    return {
+        "status": continuity.status.value,
+        "uncertain_since_monotonic": continuity.uncertain_since_monotonic,
+        "recovery_confirmations": continuity.recovery_confirmations,
+    }
+
+
+def _clock_to_payload(clock: ClockSample) -> dict[str, object]:
+    return {
+        "wall_epoch": clock.wall_epoch,
+        "monotonic_seconds": clock.monotonic_seconds,
+        "boot_id": clock.boot_id.value,
+    }
+
+
+def _presentation_hint_payloads(
+    overlays: Mapping[WorkKey, CanonicalStatusOverlay],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "key": work_key_to_payload(key),
+            "mode": overlay.status.mode.value,
+            "event_name": overlay.status.event_name,
+            "updated_at": overlay.status.updated_at.isoformat(),
+            "source_label": overlay.status.origin,
+        }
+        for key, overlay in sorted(
+            overlays.items(),
+            key=lambda item: (
+                item[0].source_key.provider_id,
+                item[0].source_key.adapter_id,
+                item[0].source_key.source_instance_id,
+                item[0].source_key.capability_id,
+                item[0].work_id.value,
+            ),
+        )
+    ]
+
+
+def _state_to_document(
+    state: CanonicalOperatorState,
+    *,
+    overlays: Mapping[WorkKey, CanonicalStatusOverlay] = MappingProxyType({}),
+) -> dict[str, object]:
+    return {
+        "version": 2,
+        "generation": state.generation,
+        "works": [_work_to_payload(work) for work in state.works],
+        "requests": [_request_to_payload(request) for request in state.requests],
+        "source_watermarks": [
+            _watermark_to_payload(watermark)
+            for _source, watermark in state.source_watermarks
+        ],
+        "timing_uncertain_sources": [
+            _source_key_to_payload(source)
+            for source in state.timing_uncertain_sources
+        ],
+        "clock_continuity": _clock_continuity_to_payload(state.clock_continuity),
+        "last_clock": (
+            None if state.last_clock is None else _clock_to_payload(state.last_clock)
+        ),
+        "presentation_hints": _presentation_hint_payloads(overlays),
+    }
+
+
+def _serialize_latest_state(
+    state: CanonicalOperatorState,
+    *,
+    overlays: Mapping[WorkKey, CanonicalStatusOverlay] = MappingProxyType({}),
+) -> str:
+    serialized = json.dumps(
+        _state_to_document(state, overlays=overlays),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    encoded = f"{serialized}\n"
+    if len(encoded.encode("utf-8")) > LATEST_STATE_MAX_BYTES:
+        raise ValueError("latest state exceeds maximum size")
+    return encoded
+
+
+def _safe_label_for_key(key: WorkKey) -> str:
+    label = _PRODUCT_PROVIDER_LABELS.get(key.source_key.provider_id, "Provider")
+    return f"{label} {key.work_id.value}"
+
+
+def _work_from_payload(payload: object) -> CanonicalWorkTruth:
+    if not _has_exact_fields(payload, _WORK_FIELDS):
+        raise ValueError("invalid work restore row")
+    key = work_key_from_payload(payload["key"])
+    watermark = _watermark_from_payload(payload["watermark"])
+    parent_payload = payload["parent_key"]
+    parent = None if parent_payload is None else work_key_from_payload(parent_payload)
+    request_payloads = payload["request_keys"]
+    if (
+        key is None
+        or watermark is None
+        or watermark.source_key != key.source_key
+        or (parent_payload is not None and parent is None)
+        or type(request_payloads) is not list
+        or len(request_payloads) > 1_000
+        or type(payload["lifecycle"]) is not str
+        or type(payload["observation_authority"]) is not int
+        or type(payload["source_health"]) is not str
+        or type(payload["source_freshness"]) is not str
+        or type(payload["next_actor"]) is not str
+        or type(payload["safe_label"]) is not str
+        or payload["safe_label"] != _safe_label_for_key(key)
+        or type(payload["timing_uncertain"]) is not bool
+    ):
+        raise ValueError("invalid work restore row")
+    request_keys = tuple(request_key_from_payload(item) for item in request_payloads)
+    if any(item is None for item in request_keys):
+        raise ValueError("invalid work restore row")
+    ObservationAuthority(payload["observation_authority"])
+    SourceFreshness(payload["source_freshness"])
+    return CanonicalWorkTruth(
+        key=key,
+        lifecycle=WorkLifecycle(payload["lifecycle"]),
+        watermark=watermark,
+        observation_authority=ObservationAuthority.RESTORED_LAST_KNOWN,
+        source_health=SourceHealth(payload["source_health"]),
+        source_freshness=SourceFreshness.RESTORED,
+        next_actor=NextActor(payload["next_actor"]),
+        safe_label=payload["safe_label"],
+        parent_key=parent,
+        request_keys=request_keys,
+        timing_uncertain=payload["timing_uncertain"],
+    )
+
+
+def _restored_request_eligibility(phase: RequestPhase) -> AcknowledgementEligibility:
+    if phase is RequestPhase.RESOLVED:
+        return AcknowledgementEligibility.RESOLVED
+    if phase is RequestPhase.STALE_HOLD:
+        return AcknowledgementEligibility.STALE_HOLD
+    return AcknowledgementEligibility.NOT_ACTIONABLE
+
+
+def _request_from_payload(payload: object) -> CanonicalRequestTruth:
+    if not _has_exact_fields(payload, _REQUEST_FIELDS):
+        raise ValueError("invalid request restore row")
+    key = request_key_from_payload(payload["key"])
+    watermark = _watermark_from_payload(payload["watermark"])
+    event_key = semantic_event_key_from_payload(payload["semantic_event_key"])
+    opened = payload["opened_at_epoch"]
+    elapsed = payload["eligible_elapsed_seconds"]
+    if (
+        key is None
+        or watermark is None
+        or watermark.source_key != key.work_key.source_key
+        or event_key is None
+        or event_key.subject_key != key
+        or type(payload["phase"]) is not str
+        or type(payload["request_kind"]) is not str
+        or type(payload["next_actor"]) is not str
+        or type(payload["source_freshness"]) is not str
+        or type(payload["acknowledgement_eligibility"]) is not str
+        or type(payload["observation_authority"]) is not int
+        or (opened is not None and type(opened) not in {int, float})
+        or type(elapsed) not in {int, float}
+    ):
+        raise ValueError("invalid request restore row")
+    persisted_phase = RequestPhase(payload["phase"])
+    AcknowledgementEligibility(payload["acknowledgement_eligibility"])
+    ObservationAuthority(payload["observation_authority"])
+    SourceFreshness(payload["source_freshness"])
+    phase = (
+        RequestPhase.STALE_HOLD
+        if persisted_phase
+        in {RequestPhase.LIVE_UNACKNOWLEDGED, RequestPhase.LIVE_ACKNOWLEDGED}
+        else persisted_phase
+    )
+    return CanonicalRequestTruth(
+        key=key,
+        phase=phase,
+        request_kind=RequestKind(payload["request_kind"]),
+        next_actor=NextActor(payload["next_actor"]),
+        watermark=watermark,
+        source_freshness=SourceFreshness.RESTORED,
+        acknowledgement_eligibility=_restored_request_eligibility(phase),
+        semantic_event_key=event_key,
+        opened_at_epoch=opened,
+        eligible_elapsed_seconds=elapsed,
+        _observation_authority=ObservationAuthority.RESTORED_LAST_KNOWN,
+    )
+
+
+def _clock_continuity_from_payload(payload: object) -> ClockContinuityState:
+    if not _has_exact_fields(payload, _CLOCK_CONTINUITY_FIELDS):
+        raise ValueError("invalid clock continuity")
+    since = payload["uncertain_since_monotonic"]
+    confirmations = payload["recovery_confirmations"]
+    if not (
+        type(payload["status"]) is str
+        and (since is None or type(since) in {int, float})
+        and type(confirmations) is int
+    ):
+        raise ValueError("invalid clock continuity")
+    return ClockContinuityState(
+        ClockContinuityStatus(payload["status"]),
+        since,
+        confirmations,
+    )
+
+
+def _clock_from_payload(payload: object) -> ClockSample | None:
+    if payload is None:
+        return None
+    if not _has_exact_fields(payload, _CLOCK_FIELDS):
+        raise ValueError("invalid clock sample")
+    if not (
+        type(payload["wall_epoch"]) in {int, float}
+        and type(payload["monotonic_seconds"]) in {int, float}
+        and type(payload["boot_id"]) is str
+    ):
+        raise ValueError("invalid clock sample")
+    return ClockSample(
+        payload["wall_epoch"],
+        payload["monotonic_seconds"],
+        BootIdentifier(payload["boot_id"]),
+    )
+
+
+def _presentation_overlays_from_document(
+    document: object,
+) -> dict[WorkKey, CanonicalStatusOverlay]:
+    if type(document) is not dict:
+        raise ValueError("invalid latest-state document")
+    payloads = document.get("presentation_hints")
+    if type(payloads) is not list or len(payloads) > 1_000:
+        raise ValueError("invalid latest-state document")
+    overlays: dict[WorkKey, CanonicalStatusOverlay] = {}
+    for payload in payloads:
+        if not _has_exact_fields(payload, _PRESENTATION_HINT_FIELDS):
+            raise ValueError("invalid latest-state document")
+        key = work_key_from_payload(payload["key"])
+        if (
+            key is None
+            or type(payload["mode"]) is not str
+            or type(payload["event_name"]) is not str
+            or (payload["source_label"] is not None and type(payload["source_label"]) is not str)
+        ):
+            raise ValueError("invalid latest-state document")
+        status = AgentStatus(
+            provider=key.source_key.provider_id,
+            agent_id=f"{key.source_key.provider_id}:session:{key.work_id.value}",
+            display_name=_safe_label_for_key(key),
+            mode=AgentMode(payload["mode"]),
+            updated_at=parse_datetime(payload["updated_at"]),
+            event_name=payload["event_name"],
+            session_id=key.work_id.value,
+            origin=payload["source_label"],
+            work_key=key,
+        )
+        overlays[key] = CanonicalStatusOverlay(
+            watermark=ProviderWatermark(
+                key.source_key,
+                WatermarkBasis.PROVIDER_EVENT_ID,
+                status.updated_at.timestamp(),
+                EventToken(hashlib.sha256(json.dumps(work_key_to_payload(key), sort_keys=True).encode()).hexdigest()),
+                None,
+                0,
+            ),
+            status=status,
+            preserve_details=True,
+        )
+    return overlays
+
+
+def _v2_state_from_document(document: object) -> CanonicalOperatorState:
+    if not _has_exact_fields(document, _LATEST_DOCUMENT_FIELDS):
+        raise ValueError("invalid latest-state document")
+    if type(document["version"]) is not int or document["version"] != 2:
+        raise _UnsupportedLatestState
+    works_payload = document["works"]
+    requests_payload = document["requests"]
+    watermarks_payload = document["source_watermarks"]
+    uncertain_payload = document["timing_uncertain_sources"]
+    if not (
+        type(document["generation"]) is int
+        and document["generation"] >= 0
+        and type(works_payload) is list
+        and len(works_payload) <= 1_000
+        and type(requests_payload) is list
+        and len(requests_payload) <= 1_000
+        and type(watermarks_payload) is list
+        and len(watermarks_payload) <= 1_000
+        and type(uncertain_payload) is list
+        and len(uncertain_payload) <= 1_000
+        and type(document["presentation_hints"]) is list
+        and len(document["presentation_hints"]) <= 1_000
+    ):
+        raise ValueError("invalid latest-state document")
+    works = tuple(_work_from_payload(item) for item in works_payload)
+    requests = tuple(_request_from_payload(item) for item in requests_payload)
+    watermarks = tuple(_watermark_from_payload(item) for item in watermarks_payload)
+    uncertain = tuple(_source_key_from_payload(item) for item in uncertain_payload)
+    if any(item is None for item in watermarks) or any(item is None for item in uncertain):
+        raise ValueError("invalid latest-state document")
+    state = CanonicalOperatorState(
+        schema_version=1,
+        generation=document["generation"],
+        works=works,
+        requests=requests,
+        source_watermarks=tuple(
+            (watermark.source_key, watermark) for watermark in watermarks
+        ),
+        timing_uncertain_sources=uncertain,
+        clock_continuity=_clock_continuity_from_payload(document["clock_continuity"]),
+        last_clock=_clock_from_payload(document["last_clock"]),
+    )
+    request_keys_by_work: dict[WorkKey, list[RequestKey]] = {}
+    for request in state.requests:
+        request_keys_by_work.setdefault(request.key.work_key, []).append(request.key)
+    if any(
+        work.request_keys != tuple(request_keys_by_work.get(work.key, ()))
+        for work in state.works
+    ):
+        raise ValueError("invalid latest-state request linkage")
+    return state
+
+
+def _legacy_lifecycle(value: object) -> WorkLifecycle | None:
+    if type(value) is not str:
+        return None
+    return {
+        AgentMode.IDLE_READY.value: WorkLifecycle.IDLE,
+        AgentMode.WORKING.value: WorkLifecycle.ACTIVE,
+        AgentMode.TOOL_RUNNING.value: WorkLifecycle.ACTIVE,
+        AgentMode.LONG_TASK_PROGRESS.value: WorkLifecycle.ACTIVE,
+        AgentMode.WAITING_FOR_INPUT.value: WorkLifecycle.WAITING,
+        AgentMode.BLOCKED_ERROR.value: WorkLifecycle.FAILED,
+        AgentMode.COMPLETED.value: WorkLifecycle.COMPLETED,
+        AgentMode.UNKNOWN.value: WorkLifecycle.UNKNOWN,
+    }.get(value)
+
+
+def _legacy_timestamp(value: object) -> float | None:
+    if type(value) is not str or not value:
+        return None
+    text = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    epoch = parsed.timestamp()
+    return epoch if epoch >= 0.0 else None
+
+
+def _legacy_matches(
+    provider: str,
+    agent_id: str,
+    keys: tuple[WorkKey, ...],
+) -> tuple[WorkKey, ...]:
+    return tuple(
+        key
+        for key in keys
+        if key.source_key.provider_id == provider
+        and agent_id
+        in {
+            key.work_id.value,
+            f"{provider}:session:{key.work_id.value}",
+            f"{provider}:agent:{key.work_id.value}",
+        }
+    )
+
+
+def _v1_state_from_document(
+    document: object,
+    *,
+    restore_work_keys: tuple[WorkKey, ...],
+) -> tuple[CanonicalOperatorState, RestoreHealth]:
+    if type(document) is not dict or frozenset(document) != {
+        "updated_at",
+        "statuses",
+    }:
+        raise ValueError("invalid legacy latest-state document")
+    if _legacy_timestamp(document["updated_at"]) is None:
+        raise ValueError("invalid legacy latest-state document")
+    rows = document["statuses"]
+    if type(rows) is not list or len(rows) > 1_000:
+        raise ValueError("invalid legacy latest-state document")
+    works: list[CanonicalWorkTruth] = []
+    degraded = False
+    for row in rows:
+        if type(row) is not dict:
+            raise ValueError("invalid legacy latest-state row")
+        provider = row.get("provider")
+        agent_id = row.get("agent_id")
+        lifecycle = _legacy_lifecycle(row.get("mode"))
+        epoch = _legacy_timestamp(row.get("updated_at"))
+        if not (
+            type(provider) is str
+            and type(agent_id) is str
+            and lifecycle is not None
+            and epoch is not None
+        ):
+            raise ValueError("invalid legacy latest-state row")
+        matches = _legacy_matches(provider, agent_id, restore_work_keys)
+        if len(matches) != 1:
+            degraded = True
+            continue
+        key = matches[0]
+        token_payload = json.dumps(
+            work_key_to_payload(key),
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        watermark = ProviderWatermark(
+            key.source_key,
+            WatermarkBasis.PROVIDER_EVENT_ID,
+            epoch,
+            EventToken(hashlib.sha256(token_payload).hexdigest()),
+            None,
+            0,
+        )
+        next_actor = (
+            NextActor.USER
+            if lifecycle is WorkLifecycle.WAITING
+            else NextActor.PROVIDER
+            if lifecycle is WorkLifecycle.ACTIVE
+            else NextActor.UNKNOWN
+            if lifecycle is WorkLifecycle.UNKNOWN
+            else NextActor.NONE
+        )
+        works.append(
+            CanonicalWorkTruth(
+                key,
+                lifecycle,
+                watermark,
+                ObservationAuthority.RESTORED_LAST_KNOWN,
+                SourceHealth.PARTIAL,
+                SourceFreshness.RESTORED,
+                next_actor,
+                _safe_label_for_key(key),
+                None,
+                (),
+                False,
+            )
+        )
+    work_by_key = {work.key: work for work in works}
+    source_watermarks: dict[SourceKey, ProviderWatermark] = {}
+    for work in work_by_key.values():
+        previous = source_watermarks.get(work.key.source_key)
+        if previous is None or (
+            work.watermark.occurred_at_epoch,
+            work.watermark.event_token.value,
+        ) > (previous.occurred_at_epoch, previous.event_token.value):
+            source_watermarks[work.key.source_key] = work.watermark
+    state = CanonicalOperatorState(
+        schema_version=1,
+        generation=1 if work_by_key else 0,
+        works=tuple(work_by_key.values()),
+        requests=(),
+        source_watermarks=tuple(source_watermarks.items()),
+        timing_uncertain_sources=(),
+        clock_continuity=ClockContinuityState(
+            ClockContinuityStatus.STABLE,
+            None,
+            0,
+        ),
+        last_clock=None,
+    )
+    return state, RestoreHealth.DEGRADED if degraded else RestoreHealth.HEALTHY
+
+
+def _operator_state_from_document(
+    document: object,
+    *,
+    restore_work_keys: tuple[WorkKey, ...],
+) -> tuple[CanonicalOperatorState, RestoreHealth]:
+    if type(document) is not dict:
+        raise ValueError("invalid latest-state document")
+    if frozenset(document) == {"updated_at", "statuses"}:
+        return _v1_state_from_document(
+            document,
+            restore_work_keys=restore_work_keys,
+        )
+    version = document.get("version")
+    if type(version) is not int:
+        raise ValueError("invalid latest-state version")
+    if version == 2:
+        return _v2_state_from_document(document), RestoreHealth.HEALTHY
+    if version == 1:
+        return _v1_state_from_document(
+            document,
+            restore_work_keys=restore_work_keys,
+        )
+    raise _UnsupportedLatestState
 
 
 def default_sources(settings: AgentMonitorSettings | None = None) -> tuple[SourceSpec, ...]:
@@ -762,27 +2213,54 @@ def codex_transcript_event(
         )
 
     if payload_type == "task_complete":
-        message = _string_or_none(payload.get("last_agent_message")) or ""
+        event_name = (
+            "StopFailure"
+            if codex_usage_limit_terminal(payload)
+            else "Stop"
+        )
+        message = (
+            None
+            if event_name == "StopFailure"
+            else _string_or_none(payload.get("last_agent_message")) or ""
+        )
+        raw = {
+            "hook_event_name": event_name,
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "cwd": cwd,
+            "transcript_path": str(path),
+            "source": CODEX_TRANSCRIPT_PROVIDER,
+        }
+        if message:
+            raw["last_assistant_message"] = message
         return HookEvent(
             provider="codex",
             logged_at=timestamp,
-            event_name="Stop",
-            raw={
-                "hook_event_name": "Stop",
-                "session_id": session_id,
-                "turn_id": turn_id,
-                "cwd": cwd,
-                "last_assistant_message": message,
-                "transcript_path": str(path),
-                "source": CODEX_TRANSCRIPT_PROVIDER,
-            },
+            event_name=event_name,
+            raw=raw,
             session_id=session_id,
             turn_id=turn_id,
             cwd=cwd,
             message=message,
+            _terminal_provenance=(
+                _CODEX_TRANSCRIPT_USAGE_LIMIT_PROVENANCE
+                if event_name == "StopFailure"
+                else None
+            ),
         )
 
     return None
+
+
+def codex_usage_limit_terminal(payload: Mapping[str, Any]) -> bool:
+    """Recognize only the exact structured Codex usage-limit terminal forms."""
+    error = payload.get("error")
+    if type(error) is not dict:
+        return False
+    return any(
+        _string_or_none(error.get(field)) in CODEX_USAGE_LIMIT_TERMINAL_CLASSIFICATIONS
+        for field in ("code", "message")
+    )
 
 
 def iter_claude_transcript_records(root: Path) -> Iterable[HookEvent]:
@@ -1280,6 +2758,27 @@ def aggregate_status(
     )
 
 
+def _status_merge_key(status: AgentStatus) -> tuple[datetime, bool, bool, str]:
+    return (
+        -status.priority,
+        status.updated_at,
+        status.mode != AgentMode.COMPLETED,
+        status.event_name == "SessionEnd",
+        status.event_name,
+    )
+
+
+def _merged_status_candidates(
+    statuses: Iterable[AgentStatus],
+) -> tuple[AgentStatus, ...]:
+    merged: dict[str, AgentStatus] = {}
+    for status in statuses:
+        existing = merged.get(status.agent_id)
+        if existing is None or _status_merge_key(status) > _status_merge_key(existing):
+            merged[status.agent_id] = status
+    return tuple(merged[agent_id] for agent_id in sorted(merged))
+
+
 def snapshot_from_statuses(
     statuses: tuple[AgentStatus, ...],
     *,
@@ -1341,7 +2840,7 @@ def status_is_stale(
     completed_visible_seconds: float,
     idle_visible_seconds: float,
 ) -> bool:
-    age = status.age_seconds(now)
+    age = bounded_age_seconds(now, status.updated_at)
     if status.mode == AgentMode.COMPLETED and completed_visible_seconds >= 0:
         return age > completed_visible_seconds
     if status.mode == AgentMode.IDLE_READY and idle_visible_seconds >= 0:
@@ -1366,7 +2865,11 @@ def status_for_snapshot(
         status.mode == AgentMode.WORKING
         and status.event_name == "PostToolUse"
         and post_tool_working_visible_seconds >= 0
-        and status.age_seconds(now) > post_tool_working_visible_seconds
+        and not is_recent(
+            now,
+            status.updated_at,
+            post_tool_working_visible_seconds,
+        )
     ):
         return _replace_mode(status, AgentMode.COMPLETED)
     return status
@@ -1536,6 +3039,8 @@ def _replace_stale(status: AgentStatus, stale: bool) -> AgentStatus:
         message=status.message,
         origin=status.origin,
         stale=stale,
+        work_key=status.work_key,
+        request_key=status.request_key,
     )
 
 
@@ -1555,6 +3060,8 @@ def _replace_mode(status: AgentStatus, mode: AgentMode) -> AgentStatus:
         message=status.message,
         origin=status.origin,
         stale=status.stale,
+        work_key=status.work_key,
+        request_key=status.request_key,
     )
 
 

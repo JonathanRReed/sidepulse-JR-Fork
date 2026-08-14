@@ -1,20 +1,38 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import tomllib
+
+from .private_io import (
+    PrivateWriteTransaction,
+    RetentionPolicy,
+    atomic_private_write,
+    enforce_retention,
+    ensure_private_directory,
+    ensure_private_file,
+    read_private_bytes,
+    read_private_bytes_with_identity,
+    read_private_text,
+    read_private_text_with_identity,
+    unlink_private_file_if_unchanged,
+)
 from .providers import (
     CLAUDE_EVENTS,
     CODEX_EVENTS,
@@ -28,13 +46,249 @@ from .providers import (
     default_grok_hook_config_path,
     default_hermes_config_path,
     default_openclaw_config_path,
+    default_opencode_plugin_path,
     detect_log_path,
     is_sidepulse_hook_command,
+    managed_opencode_plugin_log_path,
     openclaw_hook_dir,
+    opencode_plugin_source_for_arguments,
 )
 
 MANAGED_START = "# >>> agent-monitor hooks >>>"
 MANAGED_END = "# <<< agent-monitor hooks <<<"
+BACKUP_MAX_FILES = 5
+MAX_CONFIG_BYTES = 1024 * 1024
+MAX_RUNTIME_TREE_FILES = 4096
+MAX_RUNTIME_TREE_BYTES = 256 * 1024 * 1024
+RUNTIME_BACKUP_MAX_FILES = 2
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedInstallLeaf:
+    path: Path
+    contents: bytes | None
+    identity: tuple[int, int] | None
+    parent_identity: tuple[int, int]
+
+
+def _validate_install_parent(path: Path) -> tuple[int, int]:
+    parent = Path(path).expanduser().parent
+    info = parent.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise OSError(f"refusing non-directory provider parent: {parent}")
+    if info.st_uid != os.getuid():
+        raise OSError(f"refusing non-owner provider parent: {parent}")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        raise OSError(f"refusing permissive provider parent: {parent}")
+    return (info.st_dev, info.st_ino)
+
+
+def _prepare_install_parent(path: Path) -> tuple[int, int]:
+    parent = Path(path).expanduser().parent
+    try:
+        return _validate_install_parent(path)
+    except FileNotFoundError:
+        ensure_private_directory(parent)
+        return _validate_install_parent(path)
+
+
+def _validate_install_leaf(
+    path: Path,
+    *,
+    max_bytes: int,
+    allow_missing: bool = True,
+) -> _ValidatedInstallLeaf:
+    target = Path(path).expanduser()
+    parent_identity = _validate_install_parent(target)
+    try:
+        contents, identity = read_private_bytes_with_identity(
+            target,
+            tighten=False,
+            max_bytes=max_bytes,
+        )
+    except FileNotFoundError:
+        if not allow_missing:
+            raise
+        return _ValidatedInstallLeaf(target, None, None, parent_identity)
+    info = target.lstat()
+    if info.st_uid != os.getuid():
+        raise OSError(f"refusing non-owner provider file: {target}")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        raise OSError(f"refusing permissive provider file: {target}")
+    if (info.st_dev, info.st_ino) != identity:
+        raise OSError(f"provider file changed during validation: {target}")
+    return _ValidatedInstallLeaf(target, contents, identity, parent_identity)
+
+
+def _validated_optional_config(path: Path, *, dry_run: bool) -> _ValidatedInstallLeaf:
+    target = Path(path).expanduser()
+    if dry_run and not target.parent.exists():
+        ancestor = target.parent
+        while not ancestor.exists():
+            if ancestor.parent == ancestor:
+                raise OSError(f"no existing provider parent for {target}")
+            ancestor = ancestor.parent
+        info = ancestor.lstat()
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o022
+        ):
+            raise OSError(f"refusing unsafe provider ancestor: {ancestor}")
+        return _ValidatedInstallLeaf(target, None, None, (info.st_dev, info.st_ino))
+    _prepare_install_parent(target)
+    return _validate_install_leaf(target, max_bytes=MAX_CONFIG_BYTES)
+
+
+def _validate_install_marker(path: Path) -> _ValidatedInstallLeaf:
+    target = Path(path).expanduser()
+    parent_identity = _validate_install_parent(target)
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return _ValidatedInstallLeaf(target, None, None, parent_identity)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+    ):
+        raise OSError(f"refusing non-regular provider file: {target}")
+    if info.st_uid != os.getuid():
+        raise OSError(f"refusing non-owner provider file: {target}")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        raise OSError(f"refusing permissive provider file: {target}")
+    return _ValidatedInstallLeaf(
+        target,
+        None,
+        (info.st_dev, info.st_ino),
+        parent_identity,
+    )
+
+
+def _decode_config(leaf: _ValidatedInstallLeaf) -> str:
+    return "" if leaf.contents is None else leaf.contents.decode("utf-8")
+
+
+def _strict_json_object(text: str, *, path: Path) -> dict[str, Any]:
+    if not text:
+        return {}
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate key in provider config: {key}")
+            result[key] = value
+        return result
+
+    data = json.loads(text, object_pairs_hook=reject_duplicates)
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected an object at the top level of {path}")
+    return data
+
+
+def _strict_hooks_object(data: dict[str, Any], *, path: Path) -> dict[str, Any]:
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError(f"Expected hooks object in {path}")
+    return hooks
+
+
+def _backup_path(path: Path) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    return path.with_name(
+        f"{path.name}.bak.{stamp}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}"
+    )
+
+
+def _finish_backup_retention(path: Path) -> None:
+    enforce_retention(
+        path.parent,
+        RetentionPolicy(
+            max_files=BACKUP_MAX_FILES,
+            patterns=(f"{path.name}.bak.*",),
+            recursive=False,
+        ),
+    )
+
+
+def _fsync_provider_parent(transaction: PrivateWriteTransaction, path: Path) -> None:
+    transaction.fsync_parent(path)
+
+
+def _verify_provider_install(
+    transaction: PrivateWriteTransaction,
+    expected_writes: dict[Path, bytes],
+) -> None:
+    for path, expected in expected_writes.items():
+        transaction.verify(path, expected, max_bytes=max(MAX_CONFIG_BYTES, len(expected)))
+
+
+def _transactional_provider_publish(
+    *,
+    config_leaf: _ValidatedInstallLeaf,
+    target_log: Path,
+    writes: dict[Path, str | bytes],
+    backup_config: bool,
+    after_publish=None,
+) -> Path | None:
+    validated: dict[Path, _ValidatedInstallLeaf] = {config_leaf.path: config_leaf}
+    for path in writes:
+        target = Path(path).expanduser()
+        if target not in validated:
+            _prepare_install_parent(target)
+            validated[target] = _validate_install_leaf(target, max_bytes=MAX_CONFIG_BYTES)
+    _prepare_install_parent(target_log)
+    log_leaf = _validate_install_marker(target_log)
+    backup = (
+        _backup_path(config_leaf.path)
+        if backup_config and config_leaf.contents is not None
+        else None
+    )
+    expected_writes = {
+        Path(path).expanduser(): data.encode("utf-8") if isinstance(data, str) else bytes(data)
+        for path, data in writes.items()
+    }
+    with PrivateWriteTransaction() as transaction:
+        if backup is not None:
+            backup_parent = _prepare_install_parent(backup)
+            transaction.write(
+                backup,
+                config_leaf.contents or b"",
+                max_original_bytes=0,
+                expected_identity=None,
+                expected_parent_identity=backup_parent,
+            )
+        for path, payload in expected_writes.items():
+            leaf = validated[path]
+            transaction.write(
+                path,
+                payload,
+                max_original_bytes=MAX_CONFIG_BYTES,
+                expected_identity=leaf.identity,
+                expected_parent_identity=leaf.parent_identity,
+            )
+        if after_publish is not None:
+            after_publish(transaction, expected_writes)
+        transaction.ensure_empty_file(
+            target_log,
+            expected_identity=log_leaf.identity,
+            expected_parent_identity=log_leaf.parent_identity,
+        )
+        for path in expected_writes:
+            _fsync_provider_parent(transaction, path)
+        _verify_provider_install(transaction, expected_writes)
+    if backup is not None:
+        _finish_backup_retention(config_leaf.path)
+    return backup
+
+
+def _read_optional_text(path: Path, *, tighten: bool) -> str:
+    try:
+        return read_private_text(path, tighten=tighten)
+    except FileNotFoundError:
+        return ""
 
 
 @dataclass(frozen=True)
@@ -57,6 +311,745 @@ class InstallResult:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeIdentityReceipt:
+    interpreter: Path
+    interpreter_sha256: str
+    payload_sha256: str
+    imported_package: Path
+    imported_package_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeInstallCandidate:
+    interpreter: Path
+    interpreter_sha256: str
+    staged_payload: Path
+    payload_sha256: str
+    staged_bundle: Path
+    bundle_sha256: str
+    payload_destination: Path
+    bundle_destination: Path
+    launch_agent_destination: Path
+    launch_agent_bytes: bytes
+    replace_existing: bool = False
+
+    def __post_init__(self) -> None:
+        paths = (
+            self.interpreter,
+            self.staged_payload,
+            self.staged_bundle,
+            self.payload_destination,
+            self.bundle_destination,
+            self.launch_agent_destination,
+        )
+        if not all(isinstance(path, Path) and path.is_absolute() for path in paths):
+            raise ValueError("runtime installer paths must be absolute")
+        hashes = (
+            self.interpreter_sha256,
+            self.payload_sha256,
+            self.bundle_sha256,
+        )
+        if not all(
+            type(value) is str
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
+            for value in hashes
+        ):
+            raise ValueError("runtime installer hashes must be exact sha256 values")
+        if not isinstance(self.launch_agent_bytes, bytes) or not self.launch_agent_bytes:
+            raise ValueError("runtime installer LaunchAgent must be nonempty bytes")
+        if type(self.replace_existing) is not bool:
+            raise ValueError("runtime installer replacement choice must be explicit")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeInstallReceipt:
+    identity: RuntimeIdentityReceipt
+    payload_destination: Path
+    bundle_destination: Path
+    launch_agent_destination: Path
+    payload_backup: Path | None
+    bundle_backup: Path | None
+
+
+@dataclass(slots=True)
+class _PublishedRuntimeTree:
+    stage: Path
+    destination: Path
+    backup: Path | None
+    published_identity: tuple[int, int]
+    backup_identity: tuple[int, int] | None
+    stage_parent_descriptor: int
+    destination_parent_descriptor: int
+
+
+def _validate_runtime_candidate_paths(candidate: RuntimeInstallCandidate) -> None:
+    trees = (
+        candidate.staged_payload,
+        candidate.staged_bundle,
+        candidate.payload_destination,
+        candidate.bundle_destination,
+    )
+    normalized = tuple(Path(os.path.normpath(path)) for path in trees)
+    for index, path in enumerate(normalized):
+        for other in normalized[index + 1 :]:
+            if path == other or path in other.parents or other in path.parents:
+                raise ValueError("runtime candidate tree paths overlap")
+    launch_agent = Path(os.path.normpath(candidate.launch_agent_destination))
+    if any(launch_agent == tree or launch_agent in tree.parents for tree in normalized):
+        raise ValueError("runtime LaunchAgent path overlaps a candidate tree")
+
+
+def _sha256_file(path: Path, *, max_bytes: int = MAX_RUNTIME_TREE_BYTES) -> str:
+    info = path.lstat()
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid not in {0, os.getuid()}
+        or stat.S_IMODE(info.st_mode) & 0o022
+        or info.st_size > max_bytes
+    ):
+        raise OSError(f"refusing unsafe runtime file: {path}")
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino, opened.st_size) != (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+        ):
+            raise OSError(f"runtime file changed while opening: {path}")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 65_536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise OSError("runtime file exceeds maximum size")
+            digest.update(chunk)
+    finally:
+        os.close(descriptor)
+    after = path.lstat()
+    if (after.st_dev, after.st_ino, after.st_size) != (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+    ):
+        raise OSError(f"runtime file changed while hashing: {path}")
+    return digest.hexdigest()
+
+
+def directory_tree_sha256(root: Path) -> str:
+    """Hash one bounded runtime tree, including safe internal relative links."""
+    selected = Path(root)
+    root_info = selected.lstat()
+    if (
+        stat.S_ISLNK(root_info.st_mode)
+        or not stat.S_ISDIR(root_info.st_mode)
+        or root_info.st_uid != os.getuid()
+        or stat.S_IMODE(root_info.st_mode) & 0o022
+    ):
+        raise OSError(f"refusing unsafe runtime tree: {selected}")
+    selected_resolved = selected.resolve(strict=True)
+    digest = hashlib.sha256()
+    total_bytes = 0
+    count = 0
+    for path in sorted(selected.rglob("*"), key=lambda candidate: candidate.relative_to(selected).as_posix()):
+        count += 1
+        if count > MAX_RUNTIME_TREE_FILES:
+            raise OSError("runtime tree exceeds maximum file count")
+        relative = path.relative_to(selected).as_posix().encode("utf-8")
+        info = path.lstat()
+        if info.st_uid != os.getuid():
+            raise OSError(f"refusing non-owner runtime path: {path}")
+        if stat.S_ISLNK(info.st_mode):
+            link_target_text = os.readlink(path)
+            link_target = Path(link_target_text)
+            if link_target.is_absolute():
+                raise OSError(f"refusing absolute runtime symlink: {path}")
+            target_bytes = os.fsencode(link_target_text)
+            if not target_bytes or len(target_bytes) > 4096:
+                raise OSError(f"refusing invalid runtime symlink target: {path}")
+            try:
+                resolved_target = (path.parent / link_target).resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise OSError(f"refusing dangling runtime symlink: {path}") from exc
+            if not (
+                resolved_target == selected_resolved
+                or selected_resolved in resolved_target.parents
+            ):
+                raise OSError(f"refusing escaping runtime symlink: {path}")
+            target_info = resolved_target.lstat()
+            if (
+                target_info.st_uid != os.getuid()
+                or stat.S_IMODE(target_info.st_mode) & 0o022
+                or not (
+                    stat.S_ISDIR(target_info.st_mode)
+                    or (
+                        stat.S_ISREG(target_info.st_mode)
+                        and target_info.st_nlink == 1
+                    )
+                )
+            ):
+                raise OSError(f"refusing unsafe runtime symlink target: {path}")
+            total_bytes += len(target_bytes)
+            if total_bytes > MAX_RUNTIME_TREE_BYTES:
+                raise OSError("runtime tree exceeds maximum byte size")
+            digest.update(b"L\0" + relative + b"\0" + target_bytes + b"\0")
+            continue
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o022:
+            raise OSError(f"refusing permissive runtime path: {path}")
+        if stat.S_ISDIR(info.st_mode):
+            digest.update(b"D\0" + relative + b"\0" + str(mode).encode("ascii") + b"\0")
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError(f"refusing unexpected runtime path: {path}")
+        total_bytes += info.st_size
+        if total_bytes > MAX_RUNTIME_TREE_BYTES:
+            raise OSError("runtime tree exceeds maximum byte size")
+        digest.update(b"F\0" + relative + b"\0" + str(mode).encode("ascii") + b"\0")
+        digest.update(bytes.fromhex(_sha256_file(path)))
+    after = selected.lstat()
+    if (after.st_dev, after.st_ino) != (root_info.st_dev, root_info.st_ino):
+        raise OSError(f"runtime tree changed while hashing: {selected}")
+    return digest.hexdigest()
+
+
+def verify_runtime_candidate_identity(
+    interpreter: Path,
+    interpreter_sha256: str,
+    payload_root: Path,
+    payload_sha256: str,
+) -> RuntimeIdentityReceipt:
+    """Import SidePulse in isolated mode from exactly one candidate payload."""
+    selected_interpreter = Path(interpreter)
+    if _sha256_file(selected_interpreter) != interpreter_sha256:
+        raise OSError("runtime interpreter hash mismatch")
+    selected_payload = Path(payload_root)
+    if directory_tree_sha256(selected_payload) != payload_sha256:
+        raise OSError("runtime payload hash mismatch")
+    script = """
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1]).resolve(strict=True)
+sys.path.insert(0, str(root))
+import sidepulse
+module = pathlib.Path(sidepulse.__file__).resolve(strict=True)
+print(json.dumps({"module": str(module), "sha256": hashlib.sha256(module.read_bytes()).hexdigest()}))
+"""
+    process = subprocess.run(
+        [str(selected_interpreter), "-I", "-S", "-B", "-c", script, str(selected_payload)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+        env={
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+    )
+    if process.returncode != 0:
+        raise OSError("runtime candidate identity import failed")
+    if directory_tree_sha256(selected_payload) != payload_sha256:
+        raise OSError("runtime payload changed during identity import")
+    try:
+        result = json.loads(process.stdout)
+        imported = Path(result["module"])
+        imported_hash = result["sha256"]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise OSError("runtime candidate identity receipt was malformed") from exc
+    expected_import = selected_payload.resolve(strict=True) / "sidepulse" / "__init__.py"
+    if imported != expected_import or _sha256_file(imported) != imported_hash:
+        raise OSError("runtime candidate imported an unexpected SidePulse payload")
+    return RuntimeIdentityReceipt(
+        interpreter=selected_interpreter,
+        interpreter_sha256=interpreter_sha256,
+        payload_sha256=payload_sha256,
+        imported_package=imported,
+        imported_package_sha256=imported_hash,
+    )
+
+
+def _validate_runtime_launch_agent(candidate: RuntimeInstallCandidate) -> None:
+    try:
+        plist = __import__("plistlib").loads(candidate.launch_agent_bytes)
+    except Exception as exc:
+        raise ValueError("runtime candidate LaunchAgent is invalid") from exc
+    executable = candidate.bundle_destination / "Contents" / "MacOS" / "SidePulse"
+    environment = plist.get("EnvironmentVariables", {}) if isinstance(plist, dict) else {}
+    expected_arguments = [
+        str(executable),
+        "status-bar",
+        "start",
+        "--foreground",
+    ]
+    safe_environment = (
+        isinstance(environment, dict)
+        and set(environment).issubset({"PATH", "PYTHONUNBUFFERED"})
+        and environment.get("PATH") == "/usr/bin:/bin:/usr/sbin:/sbin"
+        and environment.get("PYTHONUNBUFFERED", "1") == "1"
+        and all(type(key) is str and type(value) is str for key, value in environment.items())
+    )
+    if not (
+        isinstance(plist, dict)
+        and plist.get("Label") == "io.sidepulse.agentstatus"
+        and plist.get("ProgramArguments") == expected_arguments
+        and "Program" not in plist
+        and safe_environment
+    ):
+        raise ValueError("runtime candidate LaunchAgent does not bind the candidate bundle")
+
+
+def _fsync_directory_path(path: Path) -> None:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _runtime_directory_info(
+    descriptor: int,
+    name: str,
+    *,
+    display_path: Path,
+) -> os.stat_result | None:
+    try:
+        info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) & 0o022
+    ):
+        raise OSError(f"refusing unsafe runtime directory: {display_path}")
+    return info
+
+
+def _open_runtime_parent(path: Path, expected_identity: tuple[int, int]) -> int:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o022
+            or (info.st_dev, info.st_ino) != expected_identity
+        ):
+            raise OSError(f"runtime parent changed before publish: {path}")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _fsync_runtime_parent(descriptor: int) -> None:
+    """Durably publish a runtime directory rename, kept narrow for injection."""
+    os.fsync(descriptor)
+
+
+def _runtime_replace(
+    source_name: str,
+    destination_name: str,
+    source_parent: int,
+    destination_parent: int,
+) -> None:
+    os.replace(
+        source_name,
+        destination_name,
+        src_dir_fd=source_parent,
+        dst_dir_fd=destination_parent,
+    )
+
+
+def _publish_runtime_tree(
+    stage: Path,
+    destination: Path,
+    *,
+    expected_stage_identity: tuple[int, int],
+    expected_destination_identity: tuple[int, int] | None,
+    expected_stage_parent_identity: tuple[int, int],
+    expected_destination_parent_identity: tuple[int, int],
+) -> _PublishedRuntimeTree:
+    stage_parent_descriptor = _open_runtime_parent(
+        stage.parent,
+        expected_stage_parent_identity,
+    )
+    try:
+        destination_parent_descriptor = _open_runtime_parent(
+            destination.parent,
+            expected_destination_parent_identity,
+        )
+    except BaseException:
+        os.close(stage_parent_descriptor)
+        raise
+    keep_descriptors = False
+    backup = None
+    backup_name = None
+    backup_identity = None
+    backup_moved = False
+    published = False
+    try:
+        stage_info = _runtime_directory_info(
+            stage_parent_descriptor,
+            stage.name,
+            display_path=stage,
+        )
+        stage_identity = (
+            None if stage_info is None else (stage_info.st_dev, stage_info.st_ino)
+        )
+        if stage_identity != expected_stage_identity:
+            raise OSError(f"runtime stage changed before publish: {stage}")
+        destination_info = _runtime_directory_info(
+            destination_parent_descriptor,
+            destination.name,
+            display_path=destination,
+        )
+        destination_identity = (
+            None
+            if destination_info is None
+            else (destination_info.st_dev, destination_info.st_ino)
+        )
+        if destination_identity != expected_destination_identity:
+            raise OSError(f"runtime destination changed before publish: {destination}")
+        if stage_info is None or stage_info.st_dev != os.fstat(
+            destination_parent_descriptor
+        ).st_dev:
+            raise OSError("runtime staging and destination must share a filesystem")
+        if destination_info is not None:
+            backup_name = (
+                f"{destination.name}.bak."
+                f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}."
+                f"{uuid.uuid4().hex}"
+            )
+            if os.stat(
+                backup_name,
+                dir_fd=destination_parent_descriptor,
+                follow_symlinks=False,
+            ):
+                raise OSError("runtime backup collision")
+    except FileNotFoundError:
+        pass
+    try:
+        if destination_info is not None:
+            backup = destination.with_name(backup_name or "")
+            backup_identity = destination_identity
+            _runtime_replace(
+                destination.name,
+                backup_name or "",
+                destination_parent_descriptor,
+                destination_parent_descriptor,
+            )
+            backup_moved = True
+            _fsync_runtime_parent(destination_parent_descriptor)
+        _runtime_replace(
+            stage.name,
+            destination.name,
+            stage_parent_descriptor,
+            destination_parent_descriptor,
+        )
+        published = True
+        current = _runtime_directory_info(
+            destination_parent_descriptor,
+            destination.name,
+            display_path=destination,
+        )
+        if current is None or (current.st_dev, current.st_ino) != expected_stage_identity:
+            raise OSError(f"runtime tree changed during publish: {destination}")
+        _fsync_runtime_parent(destination_parent_descriptor)
+        _fsync_runtime_parent(stage_parent_descriptor)
+        keep_descriptors = True
+        return _PublishedRuntimeTree(
+            stage=stage,
+            destination=destination,
+            backup=backup,
+            published_identity=expected_stage_identity,
+            backup_identity=backup_identity,
+            stage_parent_descriptor=stage_parent_descriptor,
+            destination_parent_descriptor=destination_parent_descriptor,
+        )
+    except BaseException as primary_error:
+        rollback_errors: list[OSError] = []
+        try:
+            if published:
+                current = _runtime_directory_info(
+                    destination_parent_descriptor,
+                    destination.name,
+                    display_path=destination,
+                )
+                staged = _runtime_directory_info(
+                    stage_parent_descriptor,
+                    stage.name,
+                    display_path=stage,
+                )
+                if current is None or (
+                    current.st_dev,
+                    current.st_ino,
+                ) != expected_stage_identity or staged is not None:
+                    raise OSError("runtime publish changed before local rollback")
+                _runtime_replace(
+                    destination.name,
+                    stage.name,
+                    destination_parent_descriptor,
+                    stage_parent_descriptor,
+                )
+            if backup_moved:
+                current_destination = _runtime_directory_info(
+                    destination_parent_descriptor,
+                    destination.name,
+                    display_path=destination,
+                )
+                backup_info = _runtime_directory_info(
+                    destination_parent_descriptor,
+                    backup_name or "",
+                    display_path=backup or destination,
+                )
+                if current_destination is not None or backup_info is None or (
+                    backup_info.st_dev,
+                    backup_info.st_ino,
+                ) != backup_identity:
+                    raise OSError("runtime backup changed before local rollback")
+                _runtime_replace(
+                    backup_name or "",
+                    destination.name,
+                    destination_parent_descriptor,
+                    destination_parent_descriptor,
+                )
+            _fsync_runtime_parent(destination_parent_descriptor)
+            _fsync_runtime_parent(stage_parent_descriptor)
+        except OSError as rollback_error:
+            rollback_errors.append(rollback_error)
+        if rollback_errors:
+            raise OSError("runtime publish rollback failed") from rollback_errors[0]
+        raise primary_error
+    finally:
+        if not keep_descriptors:
+            os.close(destination_parent_descriptor)
+            os.close(stage_parent_descriptor)
+
+
+def _rollback_runtime_trees(published: list[_PublishedRuntimeTree]) -> None:
+    errors: list[OSError] = []
+    for record in reversed(published):
+        try:
+            current = _runtime_directory_info(
+                record.destination_parent_descriptor,
+                record.destination.name,
+                display_path=record.destination,
+            )
+            staged = _runtime_directory_info(
+                record.stage_parent_descriptor,
+                record.stage.name,
+                display_path=record.stage,
+            )
+            if current is None or (
+                current.st_dev,
+                current.st_ino,
+            ) != record.published_identity or staged is not None:
+                raise OSError(f"runtime destination changed before rollback: {record.destination}")
+            _runtime_replace(
+                record.destination.name,
+                record.stage.name,
+                record.destination_parent_descriptor,
+                record.stage_parent_descriptor,
+            )
+            if record.backup is not None:
+                backup_info = _runtime_directory_info(
+                    record.destination_parent_descriptor,
+                    record.backup.name,
+                    display_path=record.backup,
+                )
+                if backup_info is None or (
+                    backup_info.st_dev,
+                    backup_info.st_ino,
+                ) != record.backup_identity:
+                    raise OSError(f"runtime backup changed before rollback: {record.backup}")
+                _runtime_replace(
+                    record.backup.name,
+                    record.destination.name,
+                    record.destination_parent_descriptor,
+                    record.destination_parent_descriptor,
+                )
+            _fsync_runtime_parent(record.destination_parent_descriptor)
+            _fsync_runtime_parent(record.stage_parent_descriptor)
+        except OSError as exc:
+            errors.append(exc)
+    if errors:
+        raise OSError("runtime rollback failed") from errors[0]
+
+
+def _close_runtime_trees(published: list[_PublishedRuntimeTree]) -> None:
+    for record in published:
+        os.close(record.destination_parent_descriptor)
+        os.close(record.stage_parent_descriptor)
+
+
+def _prune_runtime_backups(destination: Path) -> None:
+    backups = sorted(destination.parent.glob(f"{destination.name}.bak.*"))
+    for backup in backups[:-RUNTIME_BACKUP_MAX_FILES]:
+        _remove_owned_tree(backup)
+
+
+def install_runtime_candidate(
+    candidate: RuntimeInstallCandidate,
+    *,
+    activate,
+    recover_activation,
+) -> RuntimeInstallReceipt:
+    """Publish one verified payload, app bundle, and LaunchAgent transaction."""
+    if (
+        type(candidate) is not RuntimeInstallCandidate
+        or not callable(activate)
+        or not callable(recover_activation)
+    ):
+        raise ValueError("invalid runtime install candidate")
+    _validate_runtime_candidate_paths(candidate)
+    _validate_runtime_launch_agent(candidate)
+    verify_runtime_candidate_identity(
+        candidate.interpreter,
+        candidate.interpreter_sha256,
+        candidate.staged_payload,
+        candidate.payload_sha256,
+    )
+    if directory_tree_sha256(candidate.staged_bundle) != candidate.bundle_sha256:
+        raise OSError("runtime bundle hash mismatch")
+    bundle_executable = candidate.staged_bundle / "Contents" / "MacOS" / "SidePulse"
+    executable_info = bundle_executable.lstat()
+    if not stat.S_ISREG(executable_info.st_mode) or not executable_info.st_mode & 0o100:
+        raise OSError("runtime bundle executable is missing or not executable")
+    staged_identities: dict[Path, tuple[int, int]] = {}
+    staged_parent_identities: dict[Path, tuple[int, int]] = {}
+    destination_identities: dict[Path, tuple[int, int] | None] = {}
+    destination_parent_identities: dict[Path, tuple[int, int]] = {}
+    for stage in (candidate.staged_payload, candidate.staged_bundle):
+        stage_info = stage.lstat()
+        staged_identities[stage] = (stage_info.st_dev, stage_info.st_ino)
+        staged_parent_identities[stage] = _validate_install_parent(stage)
+    for destination in (candidate.payload_destination, candidate.bundle_destination):
+        destination_parent_identities[destination] = _prepare_install_parent(destination)
+        destination_info = _existing_directory_kind(destination)
+        destination_identities[destination] = (
+            None
+            if destination_info is None
+            else (destination_info.st_dev, destination_info.st_ino)
+        )
+        if destination_info is not None:
+            if not candidate.replace_existing:
+                raise OSError(f"runtime destination already exists: {destination}")
+            directory_tree_sha256(destination)
+    _prepare_install_parent(candidate.launch_agent_destination)
+    launch_leaf = _validate_install_leaf(
+        candidate.launch_agent_destination,
+        max_bytes=MAX_CONFIG_BYTES,
+    )
+    if launch_leaf.identity is not None and not candidate.replace_existing:
+        raise OSError("runtime LaunchAgent already exists")
+    published: list[_PublishedRuntimeTree] = []
+    activation_attempted = False
+    try:
+        with PrivateWriteTransaction() as transaction:
+            published.append(
+                _publish_runtime_tree(
+                    candidate.staged_payload,
+                    candidate.payload_destination,
+                    expected_stage_identity=staged_identities[candidate.staged_payload],
+                    expected_destination_identity=destination_identities[
+                        candidate.payload_destination
+                    ],
+                    expected_stage_parent_identity=staged_parent_identities[
+                        candidate.staged_payload
+                    ],
+                    expected_destination_parent_identity=destination_parent_identities[
+                        candidate.payload_destination
+                    ],
+                )
+            )
+            published.append(
+                _publish_runtime_tree(
+                    candidate.staged_bundle,
+                    candidate.bundle_destination,
+                    expected_stage_identity=staged_identities[candidate.staged_bundle],
+                    expected_destination_identity=destination_identities[
+                        candidate.bundle_destination
+                    ],
+                    expected_stage_parent_identity=staged_parent_identities[
+                        candidate.staged_bundle
+                    ],
+                    expected_destination_parent_identity=destination_parent_identities[
+                        candidate.bundle_destination
+                    ],
+                )
+            )
+            transaction.write(
+                candidate.launch_agent_destination,
+                candidate.launch_agent_bytes,
+                max_original_bytes=MAX_CONFIG_BYTES,
+                expected_identity=launch_leaf.identity,
+                expected_parent_identity=launch_leaf.parent_identity,
+            )
+            transaction.verify(
+                candidate.launch_agent_destination,
+                candidate.launch_agent_bytes,
+                max_bytes=MAX_CONFIG_BYTES,
+            )
+            installed_identity = verify_runtime_candidate_identity(
+                candidate.interpreter,
+                candidate.interpreter_sha256,
+                candidate.payload_destination,
+                candidate.payload_sha256,
+            )
+            if directory_tree_sha256(candidate.bundle_destination) != candidate.bundle_sha256:
+                raise OSError("installed runtime bundle hash mismatch")
+            activation_attempted = True
+            activate()
+    except BaseException as primary_error:
+        try:
+            _rollback_runtime_trees(published)
+        finally:
+            _close_runtime_trees(published)
+        if activation_attempted:
+            try:
+                recover_activation()
+            except BaseException as recovery_error:
+                raise OSError("runtime activation recovery failed") from recovery_error
+        raise primary_error
+    _close_runtime_trees(published)
+    _prune_runtime_backups(candidate.payload_destination)
+    _prune_runtime_backups(candidate.bundle_destination)
+    return RuntimeInstallReceipt(
+        identity=installed_identity,
+        payload_destination=candidate.payload_destination,
+        bundle_destination=candidate.bundle_destination,
+        launch_agent_destination=candidate.launch_agent_destination,
+        payload_backup=published[0].backup,
+        bundle_backup=published[1].backup,
+    )
+
+
 def install_codex_hooks(
     log_path: Path | None = None,
     config_path: Path | None = None,
@@ -65,7 +1058,10 @@ def install_codex_hooks(
 ) -> InstallResult:
     config = config_path or Path.home() / ".codex" / "config.toml"
     target_log = (log_path or detect_log_path("codex")).expanduser()
-    original = config.read_text() if config.exists() else ""
+    config_leaf = _validated_optional_config(config, dry_run=dry_run)
+    original = _decode_config(config_leaf)
+    if original:
+        tomllib.loads(original)
 
     block = codex_hook_block(target_log, python_executable)
     if is_pristine_codex_hook_install(original, block, target_log):
@@ -79,24 +1075,70 @@ def install_codex_hooks(
 
     backup = None
     if not dry_run:
-        config.parent.mkdir(parents=True, exist_ok=True)
-        if changed:
-            backup = backup_file(config)
-            config.write_text(new_text)
+        refresh_trust = should_refresh_codex_hook_trust(config, config_path)
 
-        if should_refresh_codex_hook_trust(config, config_path):
+        def after_publish(
+            transaction: PrivateWriteTransaction,
+            expected_writes: dict[Path, bytes],
+        ) -> None:
+            nonlocal changed
+            if not refresh_trust:
+                return
             trusted_hashes = resolve_codex_hook_hashes(config)
-            if trusted_hashes:
-                current_text = config.read_text() if config.exists() else ""
-                trusted_text = update_codex_trusted_hashes(current_text, trusted_hashes)
-                if trusted_text != current_text:
-                    if backup is None:
-                        backup = backup_file(config)
-                    config.write_text(trusted_text)
-                    changed = True
+            if not trusted_hashes:
+                return
+            current = expected_writes.get(config, original.encode("utf-8")).decode("utf-8")
+            trusted_text = update_codex_trusted_hashes(current, trusted_hashes)
+            if trusted_text == current:
+                return
+            payload = trusted_text.encode("utf-8")
+            transaction.write(
+                config,
+                payload,
+                max_original_bytes=MAX_CONFIG_BYTES,
+                expected_identity=config_leaf.identity,
+                expected_parent_identity=config_leaf.parent_identity,
+            )
+            expected_writes[config] = payload
+            changed = True
 
-        target_log.parent.mkdir(parents=True, exist_ok=True)
-        target_log.touch(exist_ok=True)
+        if changed:
+            backup = _transactional_provider_publish(
+                config_leaf=config_leaf,
+                target_log=target_log,
+                writes={config: new_text},
+                backup_config=True,
+                after_publish=after_publish,
+            )
+        elif refresh_trust:
+            trusted_hashes = resolve_codex_hook_hashes(config)
+            trusted_text = update_codex_trusted_hashes(original, trusted_hashes)
+            if trusted_text != original:
+                changed = True
+                backup = _transactional_provider_publish(
+                    config_leaf=config_leaf,
+                    target_log=target_log,
+                    writes={config: trusted_text},
+                    backup_config=True,
+                )
+            else:
+                _prepare_install_parent(target_log)
+                log_leaf = _validate_install_marker(target_log)
+                with PrivateWriteTransaction() as transaction:
+                    transaction.ensure_empty_file(
+                        target_log,
+                        expected_identity=log_leaf.identity,
+                        expected_parent_identity=log_leaf.parent_identity,
+                    )
+        else:
+            _prepare_install_parent(target_log)
+            log_leaf = _validate_install_marker(target_log)
+            with PrivateWriteTransaction() as transaction:
+                transaction.ensure_empty_file(
+                    target_log,
+                    expected_identity=log_leaf.identity,
+                    expected_parent_identity=log_leaf.parent_identity,
+                )
 
     return InstallResult("codex", config, target_log, changed, backup, dry_run)
 
@@ -110,19 +1152,18 @@ def install_claude_hooks(
     config = config_path or Path.home() / ".claude" / "settings.json"
     target_log = (log_path or detect_log_path("claude")).expanduser()
 
-    if config.exists():
-        data = json.loads(config.read_text())
-    else:
-        data = {}
+    config_leaf = _validated_optional_config(config, dry_run=dry_run)
+    original_text = _decode_config(config_leaf)
+    data = _strict_json_object(original_text, path=config)
 
     original = json.dumps(data, sort_keys=True)
-    hooks = data.setdefault("hooks", {})
+    hooks = _strict_hooks_object(data, path=config)
     command = hook_command("claude", target_log, python_executable)
 
     for event_name in CLAUDE_EVENTS:
         entries = hooks.get(event_name, [])
         if not isinstance(entries, list):
-            entries = []
+            raise ValueError(f"Expected hooks.{event_name} array in {config}")
         cleaned = remove_claude_hooks_for_log(entries, target_log)
         cleaned.append({"matcher": "*", "hooks": [{"type": "command", "command": command}]})
         hooks[event_name] = cleaned
@@ -130,11 +1171,12 @@ def install_claude_hooks(
     changed = json.dumps(data, sort_keys=True) != original
     backup = None
     if changed and not dry_run:
-        config.parent.mkdir(parents=True, exist_ok=True)
-        backup = backup_file(config)
-        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
-        target_log.parent.mkdir(parents=True, exist_ok=True)
-        target_log.touch(exist_ok=True)
+        backup = _transactional_provider_publish(
+            config_leaf=config_leaf,
+            target_log=target_log,
+            writes={config: json.dumps(data, indent=2, sort_keys=False) + "\n"},
+            backup_config=True,
+        )
 
     return InstallResult("claude", config, target_log, changed, backup, dry_run)
 
@@ -147,16 +1189,17 @@ def install_grok_hooks(
 ) -> InstallResult:
     config = config_path or default_grok_hook_config_path()
     target_log = (log_path or detect_log_path("grok")).expanduser()
-    data = read_json_config(config)
+    config_leaf = _validated_optional_config(config, dry_run=dry_run)
+    data = _strict_json_object(_decode_config(config_leaf), path=config)
 
     original = json.dumps(data, sort_keys=True)
-    hooks = data.setdefault("hooks", {})
+    hooks = _strict_hooks_object(data, path=config)
     command = hook_command("grok", target_log, python_executable)
 
     for event_name in GROK_EVENTS:
         entries = hooks.get(event_name, [])
         if not isinstance(entries, list):
-            entries = []
+            raise ValueError(f"Expected hooks.{event_name} array in {config}")
         cleaned = remove_json_command_hooks_for_log(entries, target_log, "grok")
         cleaned.append(grok_hook_entry(event_name, command))
         hooks[event_name] = cleaned
@@ -164,11 +1207,12 @@ def install_grok_hooks(
     changed = json.dumps(data, sort_keys=True) != original
     backup = None
     if changed and not dry_run:
-        config.parent.mkdir(parents=True, exist_ok=True)
-        backup = backup_file(config)
-        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
-        target_log.parent.mkdir(parents=True, exist_ok=True)
-        target_log.touch(exist_ok=True)
+        backup = _transactional_provider_publish(
+            config_leaf=config_leaf,
+            target_log=target_log,
+            writes={config: json.dumps(data, indent=2, sort_keys=False) + "\n"},
+            backup_config=True,
+        )
 
     return InstallResult("grok", config, target_log, changed, backup, dry_run)
 
@@ -181,12 +1225,11 @@ def install_devin_hooks(
 ) -> InstallResult:
     config = config_path or default_devin_config_path()
     target_log = (log_path or detect_log_path("devin")).expanduser()
-    data = read_json_config(config)
+    config_leaf = _validated_optional_config(config, dry_run=dry_run)
+    data = _strict_json_object(_decode_config(config_leaf), path=config)
 
     original = json.dumps(data, sort_keys=True)
-    hooks = data.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        raise ValueError(f"Expected hooks object in {config}")
+    hooks = _strict_hooks_object(data, path=config)
     command = hook_command("devin", target_log, python_executable)
     for event_name in DEVIN_EVENTS:
         entries = hooks.get(event_name, [])
@@ -199,11 +1242,12 @@ def install_devin_hooks(
     changed = json.dumps(data, sort_keys=True) != original
     backup = None
     if changed and not dry_run:
-        config.parent.mkdir(parents=True, exist_ok=True)
-        backup = backup_file(config)
-        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
-        target_log.parent.mkdir(parents=True, exist_ok=True)
-        target_log.touch(exist_ok=True)
+        backup = _transactional_provider_publish(
+            config_leaf=config_leaf,
+            target_log=target_log,
+            writes={config: json.dumps(data, indent=2, sort_keys=False) + "\n"},
+            backup_config=True,
+        )
 
     return InstallResult("devin", config, target_log, changed, backup, dry_run)
 
@@ -233,19 +1277,20 @@ def install_cursor_hooks(
     file: other tools' hooks and unknown keys are preserved untouched)."""
     config = config_path or default_cursor_config_path()
     target_log = (log_path or detect_log_path("cursor")).expanduser()
-    data = read_json_config(config)
+    config_leaf = _validated_optional_config(config, dry_run=dry_run)
+    data = _strict_json_object(_decode_config(config_leaf), path=config)
 
     original = json.dumps(data, sort_keys=True)
     data.setdefault("version", 1)
-    hooks = data.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        raise ValueError(f"Expected hooks object in {config}")
+    if not isinstance(data["version"], int) or isinstance(data["version"], bool):
+        raise ValueError(f"Expected integer version in {config}")
+    hooks = _strict_hooks_object(data, path=config)
     command = hook_command("cursor", target_log, python_executable)
 
     for event_name in CURSOR_EVENTS:
         entries = hooks.get(event_name, [])
         if not isinstance(entries, list):
-            entries = []
+            raise ValueError(f"Expected hooks.{event_name} array in {config}")
         cleaned = _remove_flat_sidepulse_hooks(entries, "cursor")
         cleaned.append({"command": command})
         hooks[event_name] = cleaned
@@ -253,11 +1298,12 @@ def install_cursor_hooks(
     changed = json.dumps(data, sort_keys=True) != original
     backup = None
     if changed and not dry_run:
-        config.parent.mkdir(parents=True, exist_ok=True)
-        backup = backup_file(config)
-        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
-        target_log.parent.mkdir(parents=True, exist_ok=True)
-        target_log.touch(exist_ok=True)
+        backup = _transactional_provider_publish(
+            config_leaf=config_leaf,
+            target_log=target_log,
+            writes={config: json.dumps(data, indent=2, sort_keys=False) + "\n"},
+            backup_config=True,
+        )
 
     return InstallResult("cursor", config, target_log, changed, backup, dry_run)
 
@@ -269,7 +1315,7 @@ def uninstall_cursor_hooks(
 ) -> InstallResult:
     config = config_path or default_cursor_config_path()
     target_log = (log_path or detect_log_path("cursor")).expanduser()
-    data = read_json_config(config)
+    data = read_json_config(config, tighten=not dry_run)
 
     original = json.dumps(data, sort_keys=True)
     hooks = data.get("hooks")
@@ -289,9 +1335,8 @@ def uninstall_cursor_hooks(
     changed = json.dumps(data, sort_keys=True) != original
     backup = None
     if changed and not dry_run:
-        config.parent.mkdir(parents=True, exist_ok=True)
         backup = backup_file(config)
-        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+        _private_config_write(config, json.dumps(data, indent=2, sort_keys=False) + "\n")
 
     return InstallResult("cursor", config, target_log, changed, backup, dry_run)
 
@@ -325,8 +1370,10 @@ def install_hermes_hooks(
     config = config_path or default_hermes_config_path()
     target_log = (log_path or detect_log_path("hermes")).expanduser()
     yaml = _hermes_yaml()
-    if config.exists():
-        data = yaml.load(config.read_text())
+    config_leaf = _validated_optional_config(config, dry_run=dry_run)
+    original_text = _decode_config(config_leaf)
+    if original_text:
+        data = yaml.load(original_text)
         if data is None:
             data = {}
     else:
@@ -357,11 +1404,12 @@ def install_hermes_hooks(
     changed = _hermes_dump(yaml, data) != original
     backup = None
     if changed and not dry_run:
-        config.parent.mkdir(parents=True, exist_ok=True)
-        backup = backup_file(config)
-        config.write_text(_hermes_dump(yaml, data))
-        target_log.parent.mkdir(parents=True, exist_ok=True)
-        target_log.touch(exist_ok=True)
+        backup = _transactional_provider_publish(
+            config_leaf=config_leaf,
+            target_log=target_log,
+            writes={config: _hermes_dump(yaml, data)},
+            backup_config=True,
+        )
 
     return InstallResult("hermes", config, target_log, changed, backup, dry_run)
 
@@ -374,8 +1422,9 @@ def uninstall_hermes_hooks(
     config = config_path or default_hermes_config_path()
     target_log = (log_path or detect_log_path("hermes")).expanduser()
     yaml = _hermes_yaml()
-    if config.exists():
-        data = yaml.load(config.read_text())
+    original_text = _read_optional_text(config, tighten=not dry_run)
+    if original_text:
+        data = yaml.load(original_text)
         if data is None:
             data = {}
     else:
@@ -401,9 +1450,8 @@ def uninstall_hermes_hooks(
     changed = _hermes_dump(yaml, data) != original
     backup = None
     if changed and not dry_run:
-        config.parent.mkdir(parents=True, exist_ok=True)
         backup = backup_file(config)
-        config.write_text(_hermes_dump(yaml, data))
+        _private_config_write(config, _hermes_dump(yaml, data))
 
     return InstallResult("hermes", config, target_log, changed, backup, dry_run)
 
@@ -479,12 +1527,12 @@ def install_openclaw_hooks(
     config = config_path or default_openclaw_config_path()
     target_log = (log_path or detect_log_path("openclaw")).expanduser()
     hook_dir = openclaw_hook_dir() if config_path is None else config.parent / "hooks" / OPENCLAW_HOOK_NAME
-    data = read_json_config(config)
+    hook_info = _existing_directory_kind(hook_dir)
+    config_leaf = _validated_optional_config(config, dry_run=dry_run)
+    data = _strict_json_object(_decode_config(config_leaf), path=config)
 
     original = json.dumps(data, sort_keys=True)
-    hooks = data.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        raise ValueError(f"Expected hooks object in {config}")
+    hooks = _strict_hooks_object(data, path=config)
     internal = hooks.setdefault("internal", {})
     if not isinstance(internal, dict):
         raise ValueError(f"Expected hooks.internal object in {config}")
@@ -497,23 +1545,56 @@ def install_openclaw_hooks(
     handler_source = openclaw_handler_source(target_log, python_executable)
     handler_path = hook_dir / "handler.ts"
     hook_md_path = hook_dir / "HOOK.md"
+    current_handler = ""
+    current_hook_md = ""
+    if hook_info is not None:
+        if _existing_regular_kind(handler_path) is not None:
+            current_handler = read_private_text(
+                handler_path,
+                tighten=False,
+                max_bytes=MAX_CONFIG_BYTES,
+            )
+            if current_handler and not current_handler.startswith("// Managed by SidePulse"):
+                raise OSError(f"refusing unowned OpenClaw handler: {handler_path}")
+        if _existing_regular_kind(hook_md_path) is not None:
+            current_hook_md = read_private_text(
+                hook_md_path,
+                tighten=False,
+                max_bytes=MAX_CONFIG_BYTES,
+            )
+            if current_hook_md and "Managed\nby SidePulse" not in current_hook_md:
+                raise OSError(f"refusing unowned OpenClaw metadata: {hook_md_path}")
+    wanted_hook_md = OPENCLAW_HOOK_MD.format(name=OPENCLAW_HOOK_NAME)
     files_changed = (
-        not handler_path.exists()
-        or handler_path.read_text() != handler_source
-        or not hook_md_path.exists()
+        current_handler != handler_source
+        or current_hook_md != wanted_hook_md
     )
 
     changed = json.dumps(data, sort_keys=True) != original or files_changed
     backup = None
     if changed and not dry_run:
-        hook_dir.mkdir(parents=True, exist_ok=True)
-        handler_path.write_text(handler_source)
-        hook_md_path.write_text(OPENCLAW_HOOK_MD.format(name=OPENCLAW_HOOK_NAME))
-        config.parent.mkdir(parents=True, exist_ok=True)
-        backup = backup_file(config)
-        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
-        target_log.parent.mkdir(parents=True, exist_ok=True)
-        target_log.touch(exist_ok=True)
+        writes: dict[Path, str] = {}
+        if current_handler != handler_source:
+            writes[handler_path] = handler_source
+        if current_hook_md != wanted_hook_md:
+            writes[hook_md_path] = wanted_hook_md
+        config_text = json.dumps(data, indent=2, sort_keys=False) + "\n"
+        if json.dumps(data, sort_keys=True) != original:
+            writes[config] = config_text
+        try:
+            backup = _transactional_provider_publish(
+                config_leaf=config_leaf,
+                target_log=target_log,
+                writes=writes,
+                backup_config=json.dumps(data, sort_keys=True) != original,
+            )
+        except BaseException:
+            if hook_info is None:
+                try:
+                    hook_dir.rmdir()
+                except OSError:
+                    pass
+            raise
 
     return InstallResult("openclaw", config, target_log, changed, backup, dry_run)
 
@@ -528,7 +1609,8 @@ def uninstall_openclaw_hooks(
     config = config_path or default_openclaw_config_path()
     target_log = (log_path or detect_log_path("openclaw")).expanduser()
     hook_dir = openclaw_hook_dir() if config_path is None else config.parent / "hooks" / OPENCLAW_HOOK_NAME
-    data = read_json_config(config)
+    hook_info = _existing_directory_kind(hook_dir)
+    data = read_json_config(config, tighten=not dry_run)
 
     original = json.dumps(data, sort_keys=True)
     internal = (data.get("hooks") or {}).get("internal")
@@ -539,17 +1621,127 @@ def uninstall_openclaw_hooks(
             if not entries:
                 internal.pop("entries", None)
 
-    changed = json.dumps(data, sort_keys=True) != original or hook_dir.exists()
+    changed = json.dumps(data, sort_keys=True) != original or hook_info is not None
     backup = None
     if changed and not dry_run:
         if json.dumps(data, sort_keys=True) != original:
-            config.parent.mkdir(parents=True, exist_ok=True)
             backup = backup_file(config)
-            config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
-        if hook_dir.exists():
-            shutil.rmtree(hook_dir, ignore_errors=True)
+            _private_config_write(config, json.dumps(data, indent=2, sort_keys=False) + "\n")
+        if hook_info is not None:
+            _remove_owned_tree(hook_dir)
 
     return InstallResult("openclaw", config, target_log, changed, backup, dry_run)
+
+
+def hook_command_arguments(
+    provider: str,
+    log_path: Path,
+    python_executable: str | None = None,
+) -> list[str]:
+    """Return the frozen hook entry as an argument array, never a shell string."""
+    executable = python_executable or sys.executable or "python3"
+    target_log = str(log_path.expanduser())
+    if getattr(sys, "frozen", False) and python_executable is None:
+        return [
+            executable,
+            "agent-monitor",
+            "hook-log",
+            "--provider",
+            provider,
+            "--log",
+            target_log,
+        ]
+    return [
+        executable,
+        str(Path(__file__).with_name("hook_entry.py")),
+        "--provider",
+        provider,
+        "--log",
+        target_log,
+    ]
+
+
+def opencode_plugin_source(
+    log_path: Path,
+    python_executable: str | None = None,
+) -> str:
+    return opencode_plugin_source_for_arguments(
+        hook_command_arguments("opencode", log_path, python_executable)
+    )
+
+
+def _read_opencode_plugin_source(
+    plugin_path: Path,
+) -> tuple[str, tuple[int, int]] | None:
+    try:
+        return read_private_text_with_identity(
+            plugin_path,
+            tighten=False,
+            max_bytes=32 * 1024,
+        )
+    except FileNotFoundError:
+        return None
+
+
+def install_opencode_plugin(
+    log_path: Path | None = None,
+    plugin_path: Path | None = None,
+    dry_run: bool = False,
+    python_executable: str | None = None,
+) -> InstallResult:
+    """Install only SidePulse's global OpenCode plugin, without touching config."""
+    plugin = plugin_path or default_opencode_plugin_path()
+    target_log = (log_path or detect_log_path("opencode")).expanduser()
+    source = opencode_plugin_source(target_log, python_executable)
+    if dry_run and not plugin.parent.exists():
+        current = None
+        plugin_leaf = None
+    else:
+        _prepare_install_parent(plugin)
+        plugin_leaf = _validate_install_leaf(plugin, max_bytes=32 * 1024)
+        current = None if plugin_leaf.contents is None else plugin_leaf.contents.decode("utf-8")
+    if current is not None and current != source and managed_opencode_plugin_log_path(current) is None:
+        raise OSError(f"refusing to replace unowned OpenCode plugin: {plugin}")
+    changed = current != source
+    if changed and not dry_run:
+        if plugin_leaf is None:
+            raise OSError("OpenCode plugin validation was not retained")
+        _transactional_provider_publish(
+            config_leaf=plugin_leaf,
+            target_log=target_log,
+            writes={plugin: source},
+            backup_config=False,
+        )
+    elif not dry_run:
+        _prepare_install_parent(target_log)
+        log_leaf = _validate_install_marker(target_log)
+        with PrivateWriteTransaction() as transaction:
+            transaction.ensure_empty_file(
+                target_log,
+                expected_identity=log_leaf.identity,
+                expected_parent_identity=log_leaf.parent_identity,
+            )
+    return InstallResult("opencode", plugin, target_log, changed, None, dry_run)
+
+
+def uninstall_opencode_plugin(
+    log_path: Path | None = None,
+    plugin_path: Path | None = None,
+    dry_run: bool = False,
+) -> InstallResult:
+    """Remove only an exact SidePulse-managed OpenCode plugin file."""
+    plugin = plugin_path or default_opencode_plugin_path()
+    target_log = (log_path or detect_log_path("opencode")).expanduser()
+    read_result = _read_opencode_plugin_source(plugin)
+    if read_result is None:
+        return InstallResult("opencode", plugin, target_log, False, None, dry_run)
+    current, expected_identity = read_result
+    if managed_opencode_plugin_log_path(current) is None:
+        raise OSError(f"refusing to remove unowned OpenCode plugin: {plugin}")
+    if not dry_run:
+        if not unlink_private_file_if_unchanged(plugin, expected_identity=expected_identity):
+            return InstallResult("opencode", plugin, target_log, False, None, dry_run)
+    return InstallResult("opencode", plugin, target_log, True, None, dry_run)
 
 
 def uninstall_codex_hooks(
@@ -559,7 +1751,7 @@ def uninstall_codex_hooks(
 ) -> InstallResult:
     config = config_path or Path.home() / ".codex" / "config.toml"
     target_log = (log_path or detect_log_path("codex")).expanduser()
-    original = config.read_text() if config.exists() else ""
+    original = _read_optional_text(config, tighten=not dry_run)
 
     text = strip_managed_block(original)
     text = remove_codex_hook_blocks_for_log(text, target_log)
@@ -568,9 +1760,8 @@ def uninstall_codex_hooks(
 
     backup = None
     if changed and not dry_run:
-        config.parent.mkdir(parents=True, exist_ok=True)
         backup = backup_file(config)
-        config.write_text(new_text)
+        _private_config_write(config, new_text)
 
     return InstallResult("codex", config, target_log, changed, backup, dry_run)
 
@@ -583,8 +1774,9 @@ def uninstall_claude_hooks(
     config = config_path or Path.home() / ".claude" / "settings.json"
     target_log = (log_path or detect_log_path("claude")).expanduser()
 
-    if config.exists():
-        data = json.loads(config.read_text())
+    original_text = _read_optional_text(config, tighten=not dry_run)
+    if original_text:
+        data = json.loads(original_text)
     else:
         data = {}
 
@@ -608,9 +1800,8 @@ def uninstall_claude_hooks(
     changed = json.dumps(data, sort_keys=True) != original
     backup = None
     if changed and not dry_run:
-        config.parent.mkdir(parents=True, exist_ok=True)
         backup = backup_file(config)
-        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+        _private_config_write(config, json.dumps(data, indent=2, sort_keys=False) + "\n")
 
     return InstallResult("claude", config, target_log, changed, backup, dry_run)
 
@@ -622,7 +1813,7 @@ def uninstall_grok_hooks(
 ) -> InstallResult:
     config = config_path or default_grok_hook_config_path()
     target_log = (log_path or detect_log_path("grok")).expanduser()
-    data = read_json_config(config)
+    data = read_json_config(config, tighten=not dry_run)
 
     original = json.dumps(data, sort_keys=True)
     hooks = data.get("hooks")
@@ -644,13 +1835,13 @@ def uninstall_grok_hooks(
     changed = json.dumps(data, sort_keys=True) != original
     backup = None
     if changed and not dry_run:
-        config.parent.mkdir(parents=True, exist_ok=True)
         backup = backup_file(config)
         if data:
-            config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+            _private_config_write(config, json.dumps(data, indent=2, sort_keys=False) + "\n")
         else:
             try:
-                config.unlink()
+                if _existing_regular_kind(config) is not None:
+                    config.unlink()
             except FileNotFoundError:
                 pass
 
@@ -664,7 +1855,7 @@ def uninstall_devin_hooks(
 ) -> InstallResult:
     config = config_path or default_devin_config_path()
     target_log = (log_path or detect_log_path("devin")).expanduser()
-    data = read_json_config(config)
+    data = read_json_config(config, tighten=not dry_run)
 
     original = json.dumps(data, sort_keys=True)
     hooks = data.get("hooks")
@@ -686,9 +1877,8 @@ def uninstall_devin_hooks(
     changed = json.dumps(data, sort_keys=True) != original
     backup = None
     if changed and not dry_run:
-        config.parent.mkdir(parents=True, exist_ok=True)
         backup = backup_file(config)
-        config.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+        _private_config_write(config, json.dumps(data, indent=2, sort_keys=False) + "\n")
 
     return InstallResult("devin", config, target_log, changed, backup, dry_run)
 
@@ -701,6 +1891,7 @@ INSTALLERS = {
     "cursor": install_cursor_hooks,
     "hermes": install_hermes_hooks,
     "openclaw": install_openclaw_hooks,
+    "opencode": install_opencode_plugin,
 }
 
 UNINSTALLERS = {
@@ -711,6 +1902,7 @@ UNINSTALLERS = {
     "cursor": uninstall_cursor_hooks,
     "hermes": uninstall_hermes_hooks,
     "openclaw": uninstall_openclaw_hooks,
+    "opencode": uninstall_opencode_plugin,
 }
 
 
@@ -754,10 +1946,12 @@ def hook_command(
     return command
 
 
-def read_json_config(config: Path) -> dict[str, Any]:
-    if not config.exists():
+def read_json_config(config: Path, *, tighten: bool = True) -> dict[str, Any]:
+    try:
+        text = read_private_text(config, tighten=tighten)
+    except FileNotFoundError:
         return {}
-    data = json.loads(config.read_text())
+    data = json.loads(text)
     return data if isinstance(data, dict) else {}
 
 
@@ -1126,12 +2320,93 @@ def ensure_codex_hooks_feature(text: str) -> str:
 
 
 def backup_file(path: Path) -> Path | None:
-    if not path.exists():
+    try:
+        contents = read_private_bytes(path)
+    except FileNotFoundError:
         return None
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup = path.with_name(f"{path.name}.bak.{stamp}")
-    backup.write_bytes(path.read_bytes())
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    backup = path.with_name(
+        f"{path.name}.bak.{stamp}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}"
+    )
+    atomic_private_write(backup, contents)
+    enforce_retention(
+        path.parent,
+        RetentionPolicy(
+            max_files=BACKUP_MAX_FILES,
+            patterns=(f"{path.name}.bak.*",),
+            recursive=False,
+        ),
+    )
     return backup
+
+
+def _ensure_hook_log(path: Path) -> None:
+    ensure_private_file(path)
+
+
+def _private_config_write(path: Path, text: str) -> None:
+    atomic_private_write(path, text)
+
+
+def _existing_directory_kind(path: Path) -> os.stat_result | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) & 0o022
+    ):
+        raise OSError(f"refusing non-directory hook path: {path}")
+    return info
+
+
+def _existing_regular_kind(path: Path) -> os.stat_result | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) & 0o022
+    ):
+        raise OSError(f"refusing non-regular hook path: {path}")
+    return info
+
+
+def _remove_owned_tree(path: Path) -> None:
+    info = _existing_directory_kind(path)
+    if info is None:
+        return
+    directories: list[Path] = []
+    files: list[Path] = []
+    for base, names, filenames in os.walk(path, followlinks=False):
+        directory = Path(base)
+        directories.append(directory)
+        for name in names:
+            child = directory / name
+            child_info = child.lstat()
+            if stat.S_ISLNK(child_info.st_mode) or not stat.S_ISDIR(
+                child_info.st_mode
+            ) or child_info.st_uid != os.getuid() or stat.S_IMODE(child_info.st_mode) & 0o022:
+                raise OSError(f"refusing unexpected hook directory entry: {child}")
+        for name in filenames:
+            child = directory / name
+            child_info = child.lstat()
+            if stat.S_ISLNK(child_info.st_mode) or not stat.S_ISREG(
+                child_info.st_mode
+            ) or child_info.st_nlink != 1 or child_info.st_uid != os.getuid():
+                raise OSError(f"refusing unexpected hook file entry: {child}")
+            files.append(child)
+    for file_path in files:
+        file_path.unlink()
+    for directory in reversed(directories):
+        directory.rmdir()
 
 
 def _ensure_trailing_newline(text: str) -> str:

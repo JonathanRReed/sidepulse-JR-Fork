@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import csv
 import html
+import io
 import json
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .models import AgentStatus, HookEvent
+from .private_io import (
+    append_private_text,
+    atomic_private_write,
+    read_private_text,
+)
 from .providers import default_state_dir
 
 STATUS_AUDIT_LOG_NAME = "event-status.jsonl"
@@ -43,21 +50,24 @@ def append_status_audit_record(
 ) -> None:
     target = path or default_status_audit_log_path()
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    status_audit_record(event, status),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                + "\n"
+        append_private_text(
+            target,
+            json.dumps(
+                status_audit_record(event, status),
+                ensure_ascii=False,
+                separators=(",", ":"),
             )
+            + "\n",
+        )
+        compact_jsonl_file(target)
     except OSError:
         pass
 
 
 def status_audit_record(event: HookEvent, status: AgentStatus | None) -> dict[str, str]:
+    message = ""
+    if event.event_name == "Notification":
+        message = event.message or raw_message(event.raw)
     return {
         "audited_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "logged_at": event.logged_at.isoformat(),
@@ -71,13 +81,13 @@ def status_audit_record(event: HookEvent, status: AgentStatus | None) -> dict[st
         "agent_id": event.status_key,
         "cwd": event.cwd or "",
         "tool_name": event.tool_name or "",
-        "message": truncate_preview(event.message or raw_message(event.raw), MESSAGE_PREVIEW_LIMIT),
-        "raw_preview": truncate_preview(json_preview(event.raw), RAW_PREVIEW_LIMIT),
+        "message": truncate_preview(message, MESSAGE_PREVIEW_LIMIT),
+        "raw_preview": "",
     }
 
 
 def raw_message(raw: dict[str, Any]) -> str:
-    for key in ("message", "last_assistant_message", "prompt"):
+    for key in ("message", "last_assistant_message"):
         value = raw.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -101,7 +111,7 @@ def truncate_preview(text: str, limit: int) -> str:
 def read_status_audit_records(path: Path | None = None) -> list[dict[str, str]]:
     source = path or default_status_audit_log_path()
     try:
-        lines = source.read_text(encoding="utf-8").splitlines()
+        lines = read_private_text(source).splitlines()
     except OSError:
         return []
 
@@ -122,11 +132,11 @@ def export_status_audit_csv(
     source: Path | None = None,
 ) -> int:
     records = read_status_audit_records(source)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=AUDIT_COLUMNS)
-        writer.writeheader()
-        writer.writerows(records)
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=AUDIT_COLUMNS)
+    writer.writeheader()
+    writer.writerows(records)
+    atomic_private_write(destination, output.getvalue())
     return len(records)
 
 
@@ -136,10 +146,10 @@ def export_status_audit_html(
     source: Path | None = None,
 ) -> int:
     records = read_status_audit_records(source)
-    destination.parent.mkdir(parents=True, exist_ok=True)
     body = "\n".join(table_row(record) for record in records)
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    destination.write_text(
+    atomic_private_write(
+        destination,
         "\n".join(
             [
                 "<!doctype html>",
@@ -165,7 +175,6 @@ def export_status_audit_html(
             ]
         )
         + "\n",
-        encoding="utf-8",
     )
     return len(records)
 
@@ -196,13 +205,21 @@ def trim_oversized_logs(state_dir: Path) -> int:
         return 0
     for path in candidates:
         try:
-            if path.stat().st_size <= TRIM_THRESHOLD_BYTES:
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
                 continue
-            lines = path.read_text(errors="replace").splitlines(keepends=True)
-            scratch = path.with_suffix(".jsonl.tmp")
-            scratch.write_text("".join(lines[-TRIM_KEEP_LINES:]))
-            scratch.replace(path)
-            trimmed += 1
+            if compact_jsonl_file(path):
+                trimmed += 1
         except OSError:
             continue
     return trimmed
+
+
+def compact_jsonl_file(path: Path) -> bool:
+    """Atomically bound one active JSONL file to its newest useful tail."""
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size <= TRIM_THRESHOLD_BYTES:
+        return False
+    lines = read_private_text(path, errors="replace").splitlines(keepends=True)
+    atomic_private_write(path, "".join(lines[-TRIM_KEEP_LINES:]))
+    return True

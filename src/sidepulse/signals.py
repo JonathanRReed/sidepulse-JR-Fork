@@ -79,6 +79,7 @@ class SignalStyle:
     pattern: str
     speed_seconds: float
     intensity: float
+    finite_repetitions: int | None = None
 
     def normalized(self) -> SignalStyle:
         return replace(
@@ -87,6 +88,12 @@ class SignalStyle:
             pattern=self.pattern if self.pattern in SIGNAL_PATTERNS else PATTERN_BREATHE,
             speed_seconds=max(MIN_SPEED_SECONDS, min(MAX_SPEED_SECONDS, float(self.speed_seconds))),
             intensity=max(MIN_INTENSITY, min(MAX_INTENSITY, float(self.intensity))),
+            finite_repetitions=(
+                self.finite_repetitions
+                if type(self.finite_repetitions) is int
+                and 1 <= self.finite_repetitions <= 2
+                else None
+            ),
         )
 
     def to_dict(self) -> dict:
@@ -110,6 +117,7 @@ class SignalStyle:
                 pattern=str(raw.get("pattern", fallback.pattern)),
                 speed_seconds=float(raw.get("speed_seconds", fallback.speed_seconds)),
                 intensity=float(raw.get("intensity", fallback.intensity)),
+                finite_repetitions=fallback.finite_repetitions,
             ).normalized()
         except (TypeError, ValueError):
             return fallback
@@ -131,7 +139,13 @@ DEFAULT_SIGNAL_STYLES: dict[str, SignalStyle] = {
     # that agent's identity color when several are running -- without
     # this, a completion was invisible whenever another agent's
     # WORKING state outranked it in the aggregate.
-    SIGNAL_COMPLETION: SignalStyle("#00FF66", PATTERN_SWEEP, 0.8, 1.0),
+    SIGNAL_COMPLETION: SignalStyle(
+        "#00FF66",
+        PATTERN_SWEEP,
+        0.8,
+        1.0,
+        finite_repetitions=2,
+    ),
     # Quota threshold crossed: a double-tap in caution amber (or the
     # provider's own color at fire time) -- a nudge, not an alarm.
     SIGNAL_QUOTA: SignalStyle("#FFB020", PATTERN_DOUBLE_BLINK, 0.9, 1.0),

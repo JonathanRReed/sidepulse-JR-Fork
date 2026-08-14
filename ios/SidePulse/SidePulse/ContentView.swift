@@ -132,7 +132,7 @@ struct ContentView: View {
         } catch {
             var push = pushBase
             push.writeStatus = .failed
-            push.errorMessage = error.localizedDescription
+            push.errorMessage = "Write failed"
             model.recordReceivedPush(push)
         }
     }
@@ -176,7 +176,7 @@ private struct HeaderPanel: View {
                 Button {
                     getToken()
                 } label: {
-                    Label(model.pushToken.isEmpty ? "Get Push Token" : "Show Push Token", systemImage: "key.horizontal")
+                    Label(model.pushToken.isEmpty ? "Get Push Token" : "Push Notifications Ready", systemImage: "key.horizontal")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -393,16 +393,8 @@ private struct TokenSheet: View {
                         Text("No token yet")
                             .foregroundStyle(.secondary)
                     } else {
-                        Text(model.pushToken)
-                            .font(.system(.footnote, design: .monospaced))
-                            .textSelection(.enabled)
-
-                        Button {
-                            UIPasteboard.general.string = model.pushToken
-                            model.lastMessage = "Copied push token"
-                        } label: {
-                            Label("Copy Token", systemImage: "doc.on.doc")
-                        }
+                        Label("Token stored securely", systemImage: "checkmark.shield")
+                            .foregroundStyle(.secondary)
                     }
 
                     Button {
@@ -468,6 +460,7 @@ private struct FolderSetupSheet: View {
 
 private struct SettingsView: View {
     @ObservedObject var model: AppModel
+    @State private var sharedSecretDraft = ""
     let requestPushToken: () -> Void
     let showFolderPicker: () -> Void
 
@@ -484,16 +477,8 @@ private struct SettingsView: View {
                     Text("No token yet")
                         .foregroundStyle(.secondary)
                 } else {
-                    Text(model.pushToken)
-                        .font(.system(.footnote, design: .monospaced))
-                        .textSelection(.enabled)
-
-                    Button {
-                        UIPasteboard.general.string = model.pushToken
-                        model.lastMessage = "Copied push token"
-                    } label: {
-                        Label("Copy Token", systemImage: "doc.on.doc")
-                    }
+                    Label("Token stored securely", systemImage: "checkmark.shield")
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -513,9 +498,21 @@ private struct SettingsView: View {
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
 
-                SecureField("Shared secret", text: $model.sharedSecret)
+                SecureField("Shared secret", text: $sharedSecretDraft)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .onSubmit {
+                        saveSharedSecret()
+                    }
+
+                Button {
+                    saveSharedSecret()
+                } label: {
+                    Label(
+                        model.sharedSecret.isEmpty ? "Save Shared Secret" : "Update Shared Secret",
+                        systemImage: "lock.shield"
+                    )
+                }
 
                 if let endpoint = model.pushEndpointURL {
                     Text(endpoint)
@@ -592,6 +589,14 @@ private struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
+        .onAppear {
+            sharedSecretDraft = model.sharedSecret
+        }
+    }
+
+    private func saveSharedSecret() {
+        model.saveSharedSecret(sharedSecretDraft)
+        sharedSecretDraft = model.sharedSecret
     }
 
     private func writeLocalTest() {

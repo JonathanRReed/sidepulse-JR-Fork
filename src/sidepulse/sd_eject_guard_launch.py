@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .providers import default_state_dir
+from .trusted_tools import trusted_system_tool
 
 SD_EJECT_GUARD_LABEL = "io.sidepulse.sdejectguard"
 SD_EJECT_GUARD_FILENAME = f"{SD_EJECT_GUARD_LABEL}.plist"
@@ -476,7 +477,7 @@ def compile_sd_eject_guard(source_path: Path, binary_path: Path) -> None:
     tmp_binary = binary_path.with_name(f"{binary_path.name}.tmp")
     subprocess.run(
         [
-            "clang",
+            str(trusted_system_tool("clang")),
             "-O2",
             "-o",
             str(tmp_binary),
@@ -498,9 +499,10 @@ def restart_sd_eject_guard(
 ) -> None:
     domain = launch_domain(scope)
     bootout_sd_eject_guard(plist_path, scope)
-    subprocess.run(["launchctl", "bootstrap", domain, str(plist_path)], check=True)
+    launchctl = str(trusted_system_tool("launchctl"))
+    subprocess.run([launchctl, "bootstrap", domain, str(plist_path)], check=True)
     subprocess.run(
-        ["launchctl", "kickstart", "-k", f"{domain}/{SD_EJECT_GUARD_LABEL}"],
+        [launchctl, "kickstart", "-k", f"{domain}/{SD_EJECT_GUARD_LABEL}"],
         check=False,
     )
 
@@ -510,7 +512,12 @@ def bootout_sd_eject_guard(
     scope: ResolvedSdEjectGuardScope,
 ) -> None:
     subprocess.run(
-        ["launchctl", "bootout", launch_domain(scope), str(plist_path)],
+        [
+            str(trusted_system_tool("launchctl")),
+            "bootout",
+            launch_domain(scope),
+            str(plist_path),
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,

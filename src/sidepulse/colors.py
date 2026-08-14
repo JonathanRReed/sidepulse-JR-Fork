@@ -16,6 +16,7 @@ this is a self-contained concern: given a set of active agent statuses and a
 from __future__ import annotations
 
 import hashlib
+import math
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -35,6 +36,8 @@ from .led_status import (
     LedDisplayState,
     apply_brightness,
     display_state_for_mode,
+    display_state_for_projection,
+    failure_signal_program,
     normalize_brightness,
     program_for_display_state,
     scale_hex_brightness,
@@ -56,6 +59,9 @@ _STATE_TO_MODE_KEY: dict[LedDisplayState, str] = {
     LedDisplayState.WORKING: MODE_WORKING,
     LedDisplayState.DONE: MODE_DONE,
     LedDisplayState.ASK: MODE_ASK,
+    # Reuse the existing configurable blocked/error color slot while
+    # keeping failure distinct from actionable Ask semantics.
+    LedDisplayState.FAILED: MODE_ASK,
 }
 
 _MODE_KEY_TO_COLOR_KWARG: dict[str, str] = {
@@ -225,14 +231,10 @@ ROUND_ROBIN_STAGGER_FRACTION = 0.12
 # it happens to be," indistinguishable from an agent that's simply idle.
 DEFAULT_URGENCY_ALERT_ENABLED = True
 
-# The attention takeover: with the urgency alert on, ANY multi-agent
-# program with a Waiting-for-Input/Blocked agent opens each loop with a
-# full-bar double hard-flash in the Ask color at full ceiling. A per-slot
-# color swap alone is not an alert -- it pulses at the same rhythm and
-# brightness as every working neighbor, and the Ask color can literally
-# coincide with another agent's identity color (#FF3A00 is both the Ask
-# default AND Codex's brand color). No steady pulse can be confused with
-# a double flash of the whole bar; the temporal signature IS the alarm.
+# Attention keeps two separate programs: a persistent static spatial anchor
+# and an optional finite arrival that precedes it with at most two full-bar
+# taps. The pure renderer defaults to the base so refresh or reconnection
+# cannot invent an arrival episode; the later episode owner must request it.
 ATTENTION_FLASH_MS = 240
 ATTENTION_FLASH_GAP_MS = 140
 ATTENTION_REST_MS = 900
@@ -479,6 +481,53 @@ def normalize_cycle_speed(value: object) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return DEFAULT_CYCLE_SPEED_SECONDS
     return max(MIN_CYCLE_SPEED_SECONDS, min(MAX_CYCLE_SPEED_SECONDS, float(value)))
+
+
+def _normalized_relay_traversal_ms(traversal_seconds: float) -> int:
+    candidate = traversal_seconds
+    if (
+        not isinstance(candidate, (int, float))
+        or isinstance(candidate, bool)
+        or not math.isfinite(float(candidate))
+        or float(candidate) <= 0.0
+    ):
+        candidate = MIN_CYCLE_SPEED_SECONDS
+    return int(normalize_cycle_speed(candidate) * 1000)
+
+
+def relay_step_ms(traversal_seconds: float, led_count: int) -> int:
+    """Return one relay step from a full-line traversal duration."""
+    traversal_ms = _normalized_relay_traversal_ms(traversal_seconds)
+    return max(1, traversal_ms // max(1, int(led_count)))
+
+
+def relay_phase_index(
+    elapsed_seconds: float,
+    traversal_seconds: float,
+    led_count: int,
+) -> int:
+    """Map controller-owned elapsed time to this surface's relay index."""
+    count = max(0, int(led_count))
+    if count == 0:
+        return 0
+    elapsed = float(elapsed_seconds)
+    if not math.isfinite(elapsed) or elapsed <= 0.0:
+        elapsed = 0.0
+    traversal_ms = _normalized_relay_traversal_ms(traversal_seconds)
+    # Controller callers subtract two monotonic timestamps. A mathematically
+    # exact boundary such as 100.8 - 100.0 may arrive as 799.999999ms, so
+    # quantize to the DSL's millisecond clock before selecting the phase.
+    elapsed_within_traversal = round(elapsed * 1000) % traversal_ms
+    return (elapsed_within_traversal * count) // traversal_ms
+
+
+def relay_led_order(led_count: int, start_index: int) -> tuple[int, ...]:
+    """Rotate physical LED indices so delay zero starts at ``start_index``."""
+    count = max(0, int(led_count))
+    if count == 0:
+        return ()
+    start = int(start_index) % count
+    return tuple((start + offset) % count for offset in range(count))
 
 
 def _default_mode_animation() -> dict[str, str]:
@@ -997,6 +1046,10 @@ def _display_color_for_agent(agent: _ActiveAgent, settings: ColorSettings) -> st
     return agent.color
 
 
+def _is_static_agent_state(state: LedDisplayState) -> bool:
+    return state in {LedDisplayState.DONE, LedDisplayState.FAILED}
+
+
 def _cycle_program(
     agents: list[_ActiveAgent],
     *,
@@ -1023,7 +1076,7 @@ def _cycle_program(
     lines: list[str] = [f"off {settle_ms}ms cosine"]
     for agent in agents:
         color = _display_color_for_agent(agent, settings)
-        if agent.state == LedDisplayState.DONE:
+        if _is_static_agent_state(agent.state):
             lines.append(f"{color} {duration_ms}ms cosine")
             continue
         _floor, ceiling = settings.fade_range(_STATE_TO_MODE_KEY[agent.state])
@@ -1064,7 +1117,7 @@ def _round_robin_program(
     for index in range(led_count):
         agent = agents[index % len(agents)]
         color = _display_color_for_agent(agent, settings)
-        if agent.state == LedDisplayState.DONE:
+        if _is_static_agent_state(agent.state):
             reset_segments.append(f"{index}:{color} {settle_ms}ms cosine")
             pulse_segments.append(f"{index}:{color} {settle_ms}ms cosine")
             continue
@@ -1085,6 +1138,7 @@ def _relay_program(
     led_count: int,
     brightness: float,
     settings: ColorSettings,
+    relay_elapsed_seconds: float = 0.0,
 ) -> str:
     """A baton pass: exactly one LED flares to its agent's peak color at a
     time, in a chase around the ring, while every other LED holds a soft
@@ -1093,26 +1147,35 @@ def _relay_program(
     stagger instead of a small one -- Round-Robin reads as one synchronized
     wave breathing together; Relay reads as a single spotlight visiting each
     agent in turn before moving on."""
+    if led_count <= 0:
+        return ""
     if len(agents) == 1:
         agent = agents[0]
         return _single_agent_program(
             agent.color, agent.state, led_count=led_count, brightness=brightness, settings=settings
         )
 
-    duration_ms = max(1, int(settings.effective_speed_seconds(BLEND_MODE_RELAY) * 1000))
-    # The firmware caps every duration/delay at 65535 ms and a parse
-    # error blinks the whole device red -- the full stagger below peaks
-    # at (led_count - 1) * duration_ms, so cap the per-turn duration to
-    # keep the largest delay legal even at the slowest user speed.
-    duration_ms = min(duration_ms, 65535 // max(1, led_count - 1))
-    settle_ms = settle_duration_ms(duration_ms)
+    traversal_seconds = settings.effective_speed_seconds(BLEND_MODE_RELAY)
+    step_ms = relay_step_ms(traversal_seconds, led_count)
+    start_index = relay_phase_index(
+        relay_elapsed_seconds,
+        traversal_seconds,
+        led_count,
+    )
+    settle_ms = settle_duration_ms(step_ms)
+    all_static = all(_is_static_agent_state(agent.state) for agent in agents)
+    led_order = (
+        tuple(range(led_count))
+        if all_static
+        else relay_led_order(led_count, start_index)
+    )
 
     reset_segments: list[str] = []
     pulse_segments: list[str] = []
-    for index in range(led_count):
+    for turn, index in enumerate(led_order):
         agent = agents[index % len(agents)]
         color = _display_color_for_agent(agent, settings)
-        if agent.state == LedDisplayState.DONE:
+        if _is_static_agent_state(agent.state):
             reset_segments.append(f"{index}:{color} {settle_ms}ms cosine")
             pulse_segments.append(f"{index}:{color} {settle_ms}ms cosine")
             continue
@@ -1121,9 +1184,9 @@ def _relay_program(
         peak_color = color if ceiling >= 1.0 else scale_hex_brightness(color, ceiling)
         # Full stagger -- one LED's entire turn elapses before the next
         # one's delay expires, so only one LED is ever mid-flare.
-        delay = index * duration_ms
+        delay = turn * step_ms
         reset_segments.append(f"{index}:{floor_color} {settle_ms}ms cosine")
-        pulse_segments.append(f"{index}:{peak_color} {duration_ms}ms pulse {delay}ms")
+        pulse_segments.append(f"{index}:{peak_color} {step_ms}ms pulse {delay}ms")
 
     program_lines = ["; ".join(reset_segments), "; ".join(pulse_segments), "repeat"]
     return apply_brightness("\n".join(program_lines), brightness)
@@ -1213,15 +1276,15 @@ _SEGMENT_DURATION_MS_BY_STATE: dict[LedDisplayState, int] = {
     LedDisplayState.ASK: 1600,
     LedDisplayState.WORKING: 760,
 }
-# DONE has no natural duration of its own to scale a settle time against
-# (it's a static hold, not a breathing cycle) -- use the cheapest settle
-# the adaptive helper allows.
-_DONE_SETTLE_MS = settle_duration_ms(0)
+# DONE and FAILED have no natural duration of their own to scale a settle
+# time against. Both are static holds, not breathing cycles, so use the
+# cheapest settle the adaptive helper allows.
+_STATIC_SETTLE_MS = settle_duration_ms(0)
 
 
 def _segment_for_agent(led_index: int, agent: _ActiveAgent, settings: ColorSettings) -> str:
-    if agent.state == LedDisplayState.DONE:
-        return f"{led_index}:{agent.color} {_DONE_SETTLE_MS}ms cosine"
+    if _is_static_agent_state(agent.state):
+        return f"{led_index}:{agent.color} {_STATIC_SETTLE_MS}ms cosine"
     mode_key = _STATE_TO_MODE_KEY[agent.state]
     _floor, ceiling = settings.fade_range(mode_key)
     peak_color = agent.color if ceiling >= 1.0 else scale_hex_brightness(agent.color, ceiling)
@@ -1241,11 +1304,11 @@ def _segment_for_agent(led_index: int, agent: _ActiveAgent, settings: ColorSetti
 
 def _reset_segment_for_agent(led_index: int, agent: _ActiveAgent, settings: ColorSettings) -> str:
     mode_key = _STATE_TO_MODE_KEY[agent.state]
-    if agent.state == LedDisplayState.DONE or settings.animation_style(mode_key) == ANIMATION_STYLE_SOLID:
+    if _is_static_agent_state(agent.state) or settings.animation_style(mode_key) == ANIMATION_STYLE_SOLID:
         # Not pulsing -- assign directly, no floor to settle to first.
         settle_ms = (
-            _DONE_SETTLE_MS
-            if agent.state == LedDisplayState.DONE
+            _STATIC_SETTLE_MS
+            if _is_static_agent_state(agent.state)
             else settle_duration_ms(_SEGMENT_DURATION_MS_BY_STATE[agent.state])
         )
         return f"{led_index}:{agent.color} {settle_ms}ms cosine"
@@ -1262,6 +1325,8 @@ def program_for_snapshot(
     colors: ColorSettings | None = None,
     brightness: float = 255,
     fallback_mode: AgentMode = AgentMode.IDLE_READY,
+    relay_elapsed_seconds: float = 0.0,
+    include_attention_arrival: bool = False,
 ) -> tuple[LedDisplayState, str]:
     """Render an LED program for the full set of active agent statuses.
 
@@ -1294,6 +1359,8 @@ def program_for_snapshot(
         )
         return state, program
 
+    agents = _active_agents(statuses, settings)
+
     if settings.blend_mode == BLEND_MODE_CLASSIC:
         aggregate_mode = max(statuses, key=lambda status: -status.priority).mode
         state = display_state_for_mode(aggregate_mode)
@@ -1308,16 +1375,37 @@ def program_for_snapshot(
             done_celebrate=settings.done_celebration_enabled,
             **_fade_kwargs_for_all_modes(settings),
         )
-        return state, program
+        attention = _attention_motion_programs(
+            program,
+            agents,
+            led_count=led_count,
+            settings=settings,
+            brightness=brightness,
+        )
+        return state, _selected_attention_program(
+            attention,
+            include_arrival=include_attention_arrival,
+        )
 
-    agents = _active_agents(statuses, settings)
+    if settings.blend_mode == BLEND_MODE_RELAY and led_count <= 0:
+        return _representative_state(agents), ""
 
     if len(agents) == 1:
         agent = agents[0]
         program = _single_agent_program(
             agent.color, agent.state, led_count=led_count, brightness=brightness, settings=settings
         )
-        return agent.state, program
+        attention = _attention_motion_programs(
+            program,
+            agents,
+            led_count=led_count,
+            settings=settings,
+            brightness=brightness,
+        )
+        return agent.state, _selected_attention_program(
+            attention,
+            include_arrival=include_attention_arrival,
+        )
 
     state = _representative_state(agents)
     if settings.blend_mode == BLEND_MODE_COLOR:
@@ -1327,10 +1415,287 @@ def program_for_snapshot(
     elif settings.blend_mode == BLEND_MODE_SPATIAL:
         program = _spatial_split_program(agents, led_count=led_count, brightness=brightness, settings=settings)
     elif settings.blend_mode == BLEND_MODE_RELAY:
-        program = _relay_program(agents, led_count=led_count, brightness=brightness, settings=settings)
+        program = _relay_program(
+            agents,
+            led_count=led_count,
+            brightness=brightness,
+            settings=settings,
+            relay_elapsed_seconds=relay_elapsed_seconds,
+        )
     else:  # Default / BLEND_MODE_ROUND_ROBIN
         program = _round_robin_program(agents, led_count=led_count, brightness=brightness, settings=settings)
-    return state, _with_attention_takeover(program, agents, settings=settings, brightness=brightness)
+    attention = _attention_motion_programs(
+        program,
+        agents,
+        led_count=led_count,
+        settings=settings,
+        brightness=brightness,
+    )
+    return state, _selected_attention_program(
+        attention,
+        include_arrival=include_attention_arrival,
+    )
+
+
+def program_for_projection(
+    projection,
+    *,
+    active_signal=None,
+    led_count: int = 8,
+    colors: ColorSettings | None = None,
+    brightness: float = 255,
+    relay_elapsed_seconds: float = 0.0,
+    include_attention_arrival: bool = False,
+) -> tuple[LedDisplayState, str]:
+    """Render only semantics already decided by ``AttentionProjection``."""
+    from .attention import LifecycleMode
+
+    settings = colors or ColorSettings.defaults()
+    brightness = normalize_brightness(brightness)
+    state = display_state_for_projection(projection, active_signal)
+    if active_signal is not None:
+        return state, failure_signal_program(
+            settings.mode_color(MODE_ASK),
+            active_signal,
+            brightness=brightness,
+            led_count=led_count,
+        )
+
+    rows = tuple(projection.visible_rows)
+    if not rows:
+        return state, program_for_display_state(
+            state,
+            led_count=led_count,
+            brightness=brightness,
+            idle_color=settings.mode_color(MODE_IDLE),
+            working_color=settings.mode_color(MODE_WORKING),
+            done_color=settings.mode_color(MODE_DONE),
+            ask_color=settings.mode_color(MODE_ASK),
+            done_celebrate=settings.done_celebration_enabled,
+            **_fade_kwargs_for_all_modes(settings),
+        )
+
+    ordered = sorted(rows, key=lambda row: _stable_agent_sort_key(row.source_status))
+    identity: dict[str, str] = {}
+    if len(ordered) > 1:
+        identity = identity_colors_for_agents(
+            [row.agent_id for row in ordered],
+            groups=identity_groups_for_statuses(
+                [row.source_status for row in ordered], settings
+            ),
+        )
+    state_by_lifecycle = {
+        LifecycleMode.IDLE: LedDisplayState.IDLE,
+        LifecycleMode.ACTIVE: LedDisplayState.WORKING,
+        LifecycleMode.WAITING: LedDisplayState.ASK,
+        LifecycleMode.COMPLETED_RECENTLY: LedDisplayState.DONE,
+        LifecycleMode.FAILED_VISIBLE: LedDisplayState.FAILED,
+        LifecycleMode.UNKNOWN: LedDisplayState.IDLE,
+    }
+    weight_by_lifecycle = {
+        LifecycleMode.WAITING: 7,
+        LifecycleMode.ACTIVE: 6,
+        LifecycleMode.COMPLETED_RECENTLY: 5,
+        LifecycleMode.FAILED_VISIBLE: 4,
+        LifecycleMode.IDLE: 1,
+        LifecycleMode.UNKNOWN: 1,
+    }
+    agents = [
+        _ActiveAgent(
+            provider=row.provider,
+            color=(
+                settings.session_color(row.agent_id)
+                or identity.get(row.agent_id)
+                or settings.agent_color(row.provider)
+            ),
+            state=state_by_lifecycle[row.lifecycle_mode],
+            weight=weight_by_lifecycle[row.lifecycle_mode],
+        )
+        for row in ordered
+    ]
+    if settings.blend_mode == BLEND_MODE_CLASSIC:
+        program = program_for_display_state(
+            state,
+            led_count=led_count,
+            brightness=brightness,
+            idle_color=settings.mode_color(MODE_IDLE),
+            working_color=settings.mode_color(MODE_WORKING),
+            done_color=settings.mode_color(MODE_DONE),
+            ask_color=settings.mode_color(MODE_ASK),
+            done_celebrate=settings.done_celebration_enabled,
+            **_fade_kwargs_for_all_modes(settings),
+        )
+        attention = _attention_motion_programs(
+            program,
+            agents,
+            led_count=led_count,
+            settings=settings,
+            brightness=brightness,
+        )
+        return state, _selected_attention_program(
+            attention,
+            include_arrival=include_attention_arrival,
+        )
+    if settings.blend_mode == BLEND_MODE_RELAY and led_count <= 0:
+        return _representative_state(agents), ""
+    if len(agents) == 1:
+        agent = agents[0]
+        program = _single_agent_program(
+            agent.color,
+            agent.state,
+            led_count=led_count,
+            brightness=brightness,
+            settings=settings,
+        )
+        attention = _attention_motion_programs(
+            program,
+            agents,
+            led_count=led_count,
+            settings=settings,
+            brightness=brightness,
+        )
+        return agent.state, _selected_attention_program(
+            attention,
+            include_arrival=include_attention_arrival,
+        )
+    if settings.blend_mode == BLEND_MODE_COLOR:
+        program = _color_blend_program(
+            agents, led_count=led_count, brightness=brightness, settings=settings
+        )
+    elif settings.blend_mode == BLEND_MODE_CYCLE:
+        program = _cycle_program(
+            agents, led_count=led_count, brightness=brightness, settings=settings
+        )
+    elif settings.blend_mode == BLEND_MODE_SPATIAL:
+        program = _spatial_split_program(
+            agents, led_count=led_count, brightness=brightness, settings=settings
+        )
+    elif settings.blend_mode == BLEND_MODE_RELAY:
+        program = _relay_program(
+            agents,
+            led_count=led_count,
+            brightness=brightness,
+            settings=settings,
+            relay_elapsed_seconds=relay_elapsed_seconds,
+        )
+    else:
+        program = _round_robin_program(
+            agents, led_count=led_count, brightness=brightness, settings=settings
+        )
+    attention = _attention_motion_programs(
+        program,
+        agents,
+        led_count=led_count,
+        settings=settings,
+        brightness=brightness,
+    )
+    return _representative_state(agents), _selected_attention_program(
+        attention,
+        include_arrival=include_attention_arrival,
+    )
+
+
+@dataclass(frozen=True)
+class AttentionMotionPrograms:
+    """Persistent attention truth and its optional one-shot arrival cue."""
+
+    base_program: str
+    arrival_program: str
+
+
+def _selected_attention_program(
+    programs: AttentionMotionPrograms,
+    *,
+    include_arrival: bool,
+) -> str:
+    return programs.arrival_program if include_arrival else programs.base_program
+
+
+def compose_attention_arrival(
+    base_program: str,
+    *,
+    attention_color: str,
+    brightness: float = 255,
+) -> AttentionMotionPrograms:
+    """Compose at most two finite taps before an already-static anchor."""
+    if any(line.strip() == "repeat" for line in base_program.splitlines()):
+        raise ValueError("attention base program must be finite")
+    if not base_program:
+        return AttentionMotionPrograms(base_program="", arrival_program="")
+
+    flash = apply_brightness(
+        f"{normalize_hex(attention_color, ASK_AMBER)} {ATTENTION_FLASH_MS}ms",
+        brightness,
+    )
+    double = [flash, f"off {ATTENTION_FLASH_GAP_MS}ms", flash, f"off {ATTENTION_REST_MS}ms"]
+    single = [flash, f"off {ATTENTION_REST_MS}ms"]
+    for preamble in (double, single):
+        candidate = "\n".join([*preamble, base_program])
+        if len(candidate.splitlines()) <= MAX_LED_LINES and len(candidate.encode("utf-8")) <= MAX_LED_BYTES:
+            return AttentionMotionPrograms(
+                base_program=base_program,
+                arrival_program=candidate,
+            )
+    return AttentionMotionPrograms(
+        base_program=base_program,
+        arrival_program=base_program,
+    )
+
+
+def _attention_spatial_anchor_program(
+    agents: list[_ActiveAgent],
+    *,
+    led_count: int,
+    settings: ColorSettings,
+    brightness: float,
+) -> str:
+    count = max(0, int(led_count))
+    if count == 0:
+        return ""
+
+    visible = agents
+    if len(visible) > count:
+        ranked_indices = sorted(
+            range(len(visible)),
+            key=lambda index: (-visible[index].weight, index),
+        )[:count]
+        selected = set(ranked_indices)
+        visible = [agent for index, agent in enumerate(visible) if index in selected]
+
+    segments: list[str] = []
+    led_index = 0
+    for agent, block_count in _spatial_split_blocks(visible, count):
+        color = _peak_color_for_agent_with_alert(agent, settings)
+        for _ in range(block_count):
+            segments.append(f"{led_index}:{color} {_STATIC_SETTLE_MS}ms cosine")
+            led_index += 1
+    return apply_brightness("; ".join(segments), brightness)
+
+
+def _attention_motion_programs(
+    program: str,
+    agents: list[_ActiveAgent],
+    *,
+    led_count: int,
+    settings: ColorSettings,
+    brightness: float,
+) -> AttentionMotionPrograms:
+    if not settings.round_robin_urgency_alert:
+        return AttentionMotionPrograms(program, program)
+    if not any(agent.state == LedDisplayState.ASK for agent in agents):
+        return AttentionMotionPrograms(program, program)
+
+    base_program = _attention_spatial_anchor_program(
+        agents,
+        led_count=led_count,
+        settings=settings,
+        brightness=brightness,
+    )
+    return compose_attention_arrival(
+        base_program,
+        attention_color=settings.mode_color(MODE_ASK),
+        brightness=brightness,
+    )
 
 
 def _with_attention_takeover(
@@ -1340,33 +1705,20 @@ def _with_attention_takeover(
     settings: ColorSettings,
     brightness: float,
 ) -> str:
-    """Prepends the full-bar double-flash preamble (see ATTENTION_FLASH_MS)
-    when the urgency alert is on and any agent is Waiting/Blocked. Applied
-    to every multi-agent blend -- an urgent agent must interrupt whatever
-    show is playing, not wait its turn in it. Single-agent and Classic
-    paths already hard-blink on Ask and need no takeover.
-
-    Programs also drive real SidePulse hardware, so the result must stay
-    inside the controller's 20-line / 512-byte limits: if the full
-    preamble doesn't fit, a single flash is tried; if even that doesn't
-    fit, the program is returned unchanged rather than truncated."""
+    """Compatibility wrapper for finite attention-arrival composition."""
     if not settings.round_robin_urgency_alert:
         return program
     if not any(agent.state == LedDisplayState.ASK for agent in agents):
         return program
-    ask = settings.mode_color(MODE_ASK)
-    flash = apply_brightness(f"{ask} {ATTENTION_FLASH_MS}ms", brightness)
-    double = [flash, f"off {ATTENTION_FLASH_GAP_MS}ms", flash, f"off {ATTENTION_REST_MS}ms"]
-    single = [flash, f"off {ATTENTION_REST_MS}ms"]
-    for preamble in (double, single):
-        candidate = "\n".join([*preamble, program])
-        if len(candidate.splitlines()) <= MAX_LED_LINES and len(candidate.encode("utf-8")) <= MAX_LED_BYTES:
-            return candidate
-    return program
+    return compose_attention_arrival(
+        program,
+        attention_color=settings.mode_color(MODE_ASK),
+        brightness=brightness,
+    ).arrival_program
 
 
 def _peak_color_for_agent(agent: _ActiveAgent, settings: ColorSettings) -> str:
-    if agent.state == LedDisplayState.DONE:
+    if _is_static_agent_state(agent.state):
         return agent.color
     _floor, ceiling = settings.fade_range(_STATE_TO_MODE_KEY[agent.state])
     return agent.color if ceiling >= 1.0 else scale_hex_brightness(agent.color, ceiling)
@@ -1378,7 +1730,7 @@ def _peak_color_for_agent_with_alert(agent: _ActiveAgent, settings: ColorSetting
     modes so the static preview matches what program_for_snapshot() would
     actually render."""
     color = _display_color_for_agent(agent, settings)
-    if agent.state == LedDisplayState.DONE:
+    if _is_static_agent_state(agent.state):
         return color
     _floor, ceiling = settings.fade_range(_STATE_TO_MODE_KEY[agent.state])
     return color if ceiling >= 1.0 else scale_hex_brightness(color, ceiling)

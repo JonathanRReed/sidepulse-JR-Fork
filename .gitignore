@@ -9,3 +9,8 @@ build/
 dist/
 .superpowers/
 uv.lock
+
+# Local scratch: reference clones and build candidates (498MB)
+work/reference-sources/
+work/final-candidate-build/
+work/final-candidate-dist/

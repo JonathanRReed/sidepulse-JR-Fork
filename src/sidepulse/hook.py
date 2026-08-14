@@ -6,11 +6,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .audit import append_status_audit_record
-from .collector import StatusMetadata, status_from_event, title_from_event
-from .ipc import send_hook_event
+from . import audit
+from .ipc import ProviderRefreshHint, send_refresh_hint
 from .origin import annotate_payload_with_origin
-from .providers import detect_log_path, infer_provider_from_payload, parse_log_line
+from .private_io import append_private_text, redact_event_payload
+from .provider_adapters import (
+    InertProviderRecord,
+    NormalizedProviderRecord,
+    minimize_hook_event,
+    normalized_provider_record_to_payload,
+    provider_facts_for_record,
+)
+from .providers import (
+    NegotiatedProviderSource,
+    detect_log_path,
+    infer_provider_from_payload,
+    negotiated_provider_sources,
+    parse_log_line,
+)
 
 
 def format_hook_payload(
@@ -43,9 +56,12 @@ def format_hook_payload(
 
 def write_hook_line(log_path: Path, line: dict[str, Any]) -> None:
     log_path = log_path.expanduser()
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(line, separators=(",", ":"), ensure_ascii=False) + "\n")
+    safe_line = redact_event_payload(line)
+    append_private_text(
+        log_path,
+        json.dumps(safe_line, separators=(",", ":"), ensure_ascii=False) + "\n",
+    )
+    audit.compact_jsonl_file(log_path)
 
 
 def write_hook_payload(provider: str, log_path: Path, payload_text: str) -> None:
@@ -82,18 +98,77 @@ def infer_provider_from_hook_line(provider: str, line: dict[str, Any]) -> str:
     return provider
 
 
-def write_hook_status_audit(provider: str, line: dict[str, Any]) -> None:
-    try:
-        record = parse_log_line(
-            provider,
-            json.dumps(line, separators=(",", ":"), ensure_ascii=False),
-        )
-        if record is None:
-            return
-        metadata = StatusMetadata(cwd=record.cwd, title=title_from_event(record))
-        append_status_audit_record(record, status_from_event(record, metadata))
-    except Exception:
-        pass
+def write_hook_status_audit(
+    _record: NormalizedProviderRecord | InertProviderRecord,
+) -> None:
+    """Compatibility no-op until history consumes canonical semantic events."""
+
+
+def _hook_source(provider: str) -> NegotiatedProviderSource | None:
+    return next(
+        (
+            source
+            for source in negotiated_provider_sources()
+            if source.source_key.provider_id == provider
+            and source.source_key.adapter_id == "hooks"
+            and source.source_key.capability_id == "live_agent_events"
+            and source.observation_invocation_allowed
+        ),
+        None,
+    )
+
+
+def _normalized_hook_record(
+    provider: str,
+    line: dict[str, Any],
+) -> NormalizedProviderRecord | InertProviderRecord | None:
+    source = _hook_source(provider)
+    if source is None:
+        return None
+    parsed = parse_log_line(
+        provider,
+        json.dumps(line, separators=(",", ":"), ensure_ascii=False),
+    )
+    if parsed is None:
+        return None
+    return minimize_hook_event(
+        parsed,
+        source_key=source.source_key,
+        contract=source.contract,
+        observation_authority=source.registration.observation_authority,
+    )
+
+
+def write_normalized_hook_record(
+    log_path: Path,
+    record: NormalizedProviderRecord | InertProviderRecord,
+) -> None:
+    payload = normalized_provider_record_to_payload(record)
+    append_private_text(
+        log_path.expanduser(),
+        json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n",
+    )
+    audit.compact_jsonl_file(log_path.expanduser())
+
+
+def _refresh_hint_for_record(
+    provider: str,
+    record: NormalizedProviderRecord | InertProviderRecord,
+) -> ProviderRefreshHint | None:
+    source = _hook_source(provider)
+    if source is None or source.source_key != record.source_key:
+        return None
+    event_token = (
+        record.event_token
+        if type(record) is NormalizedProviderRecord
+        else provider_facts_for_record(
+            record,
+            contract=source.contract,
+            observation_authority=source.registration.observation_authority,
+            observed_at_epoch=record.occurred_at_epoch,
+        ).watermark.event_token
+    )
+    return ProviderRefreshHint(record.source_key, event_token)
 
 
 def hook_log_main(provider: str, log_path: Path) -> int:
@@ -103,9 +178,21 @@ def hook_log_main(provider: str, log_path: Path) -> int:
             log_path,
             sys.stdin.read(),
         )
-        send_hook_event(actual_provider, line)
-        write_hook_line(actual_log_path, line)
-        write_hook_status_audit(actual_provider, line)
+        record = _normalized_hook_record(actual_provider, line)
+        if record is None:
+            return 0
+        write_normalized_hook_record(actual_log_path, record)
+        hint = _refresh_hint_for_record(actual_provider, record)
+        if hint is not None:
+            send_refresh_hint(hint)
+        write_hook_status_audit(record)
     except Exception:
         return 0
+    finally:
+        if provider == "cursor":
+            try:
+                sys.stdout.write("{}\n")
+                sys.stdout.flush()
+            except Exception:
+                pass
     return 0

@@ -4,13 +4,31 @@ import json
 import os
 import re
 import shlex
+import stat
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .capacity_types import SourceKey
 from .models import HookEvent, parse_datetime
 from .origin import origin_label_from_payload
+from .private_io import read_private_text
+from .provider_contracts import (
+    AdapterIdentifier,
+    CapabilityAuthority,
+    CapabilityIdentifier,
+    ContractValidationError,
+    NegotiatedCapability,
+    NegotiatedProviderContract,
+    ProviderIdentifier,
+    SchemaVersion,
+    SourceInstanceIdentifier,
+    negotiate_provider_contract,
+    provider_contract_document,
+)
+from .provider_facts import ObservationAuthority
 
 try:
     import tomllib
@@ -95,8 +113,8 @@ CURSOR_EVENTS = (
 )
 
 # Hermes Agent's native plugin-hook event names (snake_case, declared under
-# the hooks: block of ~/.hermes/config.yaml). No explicit turn-end event
-# exists; staleness timeouts cover the gap after on_session_end.
+# the hooks: block of ~/.hermes/config.yaml). Turn outcome, session teardown,
+# and provider-attempt errors remain distinct at the adapter boundary.
 HERMES_EVENTS = (
     "on_session_start",
     "pre_llm_call",
@@ -105,6 +123,8 @@ HERMES_EVENTS = (
     "subagent_start",
     "subagent_stop",
     "on_session_end",
+    "on_session_finalize",
+    "api_request_error",
 )
 
 # OpenClaw hooks are in-gateway JS handlers, not shell commands -- the
@@ -117,6 +137,192 @@ OPENCLAW_EVENTS = (
     "Stop",
     "SessionEnd",
 )
+
+# The OpenCode global plugin bridge emits only canonical SidePulse event names.
+# Native OpenCode events remain inside the installed bridge.
+OPENCODE_EVENTS = (
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PermissionRequest",
+    "Notification",
+    "PreCompact",
+    "PostCompact",
+    "Stop",
+    "StopFailure",
+    "SessionEnd",
+)
+
+OPENCODE_PLUGIN_MARKER = "sidepulse-opencode-plugin-v1"
+_OPENCODE_PLUGIN_MAX_SOURCE_BYTES = 32 * 1024
+
+
+def _valid_opencode_hook_arguments(
+    arguments: object,
+) -> tuple[str, ...] | None:
+    if not isinstance(arguments, list) or len(arguments) not in (6, 7):
+        return None
+    if not all(
+        isinstance(argument, str)
+        and argument
+        and argument.isascii()
+        and not any(ord(char) < 32 for char in argument)
+        for argument in arguments
+    ):
+        return None
+    package_hook_entry = str(Path(__file__).with_name("hook_entry.py").resolve())
+    executable_trusted = False
+    if Path(arguments[0]).is_absolute():
+        try:
+            executable_trusted = Path(arguments[0]).resolve() == Path(sys.executable).resolve()
+        except OSError:
+            executable_trusted = False
+    python_shape = (
+        len(arguments) == 6
+        and Path(arguments[0]).is_absolute()
+        and executable_trusted
+        and arguments[1] == package_hook_entry
+        and arguments[2:5] == ["--provider", "opencode", "--log"]
+    )
+    frozen_shape = (
+        len(arguments) == 7
+        and Path(arguments[0]).is_absolute()
+        and executable_trusted
+        and arguments[1:3] == ["agent-monitor", "hook-log"]
+        and arguments[3:6] == ["--provider", "opencode", "--log"]
+    )
+    if not (python_shape or frozen_shape):
+        return None
+    if len(arguments[-1]) > 4096 or "\x00" in arguments[-1]:
+        return None
+    return tuple(arguments)
+
+
+def opencode_plugin_source_for_arguments(hook_arguments: list[str] | tuple[str, ...]) -> str:
+    """Build the dependency-free, content-free OpenCode event bridge."""
+    arguments = _valid_opencode_hook_arguments(list(hook_arguments))
+    if arguments is None:
+        raise ValueError("invalid OpenCode hook arguments")
+    encoded_arguments = json.dumps(arguments, separators=(",", ":"))
+    return f'''// {OPENCODE_PLUGIN_MARKER}
+const SIDEPULSE_HOOK_ARGS = Object.freeze({encoded_arguments});
+const SIDEPULSE_MAX_ID_LENGTH = 128;
+const SIDEPULSE_MAX_PAYLOAD_BYTES = 1024;
+
+function opaqueIdentifier(value) {{
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= SIDEPULSE_MAX_ID_LENGTH
+    && /^[A-Za-z0-9._:-]+$/.test(value)
+    && !/^(?:sk|token|secret|api[_-]?key)[._:-]/i.test(value)
+    ? value : undefined;
+}}
+
+function boundedSequence(value) {{
+  return Number.isSafeInteger(value) && value >= 0 && value <= 1000000000
+    ? value
+    : undefined;
+}}
+
+function boundedTimestamp(value) {{
+  return typeof value === "string"
+    && value.length <= 64
+    && /^\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}}:\\d{{2}}(?:\\.\\d{{1,9}})?Z$/.test(value)
+    ? value
+    : undefined;
+}}
+
+function eventName(event) {{
+  return event && typeof event.type === "string" ? event.type : undefined;
+}}
+
+function canonicalEvent(event) {{
+  const name = eventName(event);
+  if (name === "session.status") {{
+    return event.properties?.status?.type === "active" || event.properties?.status?.type === "busy" ? "UserPromptSubmit" : undefined;
+  }}
+  return {{
+    "session.created": "SessionStart",
+    "session.idle": "Stop",
+    "session.error": "StopFailure",
+    "permission.asked": "PermissionRequest",
+    "permission.replied": "PostToolUse",
+    "question.asked": "Notification",
+    "question.replied": "PostToolUse",
+    "question.rejected": "PostToolUse",
+    "tool.execute.before": "PreToolUse",
+    "tool.execute.after": "PostToolUse",
+    "session.compacting": "PreCompact",
+    "session.compact.before": "PreCompact",
+    "session.compacted": "PostCompact",
+    "session.compact.after": "PostCompact",
+  }}[name];
+}}
+
+function payloadFor(event) {{
+  if (!event || typeof event !== "object") return undefined;
+  const hookEventName = canonicalEvent(event);
+  if (!hookEventName) return undefined;
+  const payload = {{ hook_event_name: hookEventName }};
+  const properties = event.properties;
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) return undefined;
+  const sessionId = opaqueIdentifier(properties.sessionID ?? properties.sessionId);
+  const workId = opaqueIdentifier(properties.workID ?? properties.workId);
+  const requestId = opaqueIdentifier(properties.requestID ?? properties.requestId);
+  if ((properties.sessionID ?? properties.sessionId) !== undefined && !sessionId) return undefined;
+  if ((properties.workID ?? properties.workId) !== undefined && !workId) return undefined;
+  if ((properties.requestID ?? properties.requestId) !== undefined && !requestId) return undefined;
+  const sequence = boundedSequence(properties.sequence);
+  const timestamp = boundedTimestamp(properties.timestamp);
+  if (sessionId) payload.session_id = sessionId;
+  if (workId) payload.work_id = workId;
+  if (requestId) payload.request_id = requestId;
+  if (sequence !== undefined) payload.sequence = sequence;
+  if (timestamp) payload.timestamp = timestamp;
+  if (hookEventName === "Notification") payload.notification_kind = "input_required";
+  const encoded = JSON.stringify(payload);
+  return encoded.length <= SIDEPULSE_MAX_PAYLOAD_BYTES ? encoded : undefined;
+}}
+
+function forward(encodedPayload) {{
+  try {{
+    const child = Bun.spawn(SIDEPULSE_HOOK_ARGS, {{ stdin: "pipe", stdout: "ignore", stderr: "ignore" }});
+    child.stdin.write(encodedPayload);
+    child.stdin.end();
+    child.unref?.();
+  }} catch {{}}
+}}
+
+const SidePulsePlugin = {{
+  event: async ({{ event }}) => {{
+    const payload = payloadFor(event);
+    if (payload) forward(payload);
+  }},
+}};
+
+export default SidePulsePlugin;
+'''
+
+
+def managed_opencode_plugin_log_path(text: str) -> Path | None:
+    marker = f"// {OPENCODE_PLUGIN_MARKER}\nconst SIDEPULSE_HOOK_ARGS = Object.freeze("
+    if not text.startswith(marker):
+        return None
+    end = text.find(");\n", len(marker))
+    if end < 0:
+        return None
+    try:
+        arguments = json.loads(text[len(marker):end])
+    except json.JSONDecodeError:
+        return None
+    valid_arguments = _valid_opencode_hook_arguments(arguments)
+    if valid_arguments is None:
+        return None
+    if text != opencode_plugin_source_for_arguments(valid_arguments):
+        return None
+    return Path(valid_arguments[-1])
 
 
 @dataclass(frozen=True)
@@ -147,6 +353,83 @@ class ProviderSpec:
     config_kind: str
     config_path: Callable[[Path | None], Path]
     detector: Callable[[Path | None], ProviderConfig]
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSourceRegistration:
+    provider_id: ProviderIdentifier
+    adapter_id: AdapterIdentifier
+    source_instance_id: SourceInstanceIdentifier
+    observation_authority: ObservationAuthority
+    capability_versions: tuple[
+        tuple[CapabilityIdentifier, tuple[SchemaVersion, ...]], ...
+    ]
+
+    def __post_init__(self) -> None:
+        if not (
+            type(self.provider_id) is ProviderIdentifier
+            and type(self.adapter_id) is AdapterIdentifier
+            and type(self.source_instance_id) is SourceInstanceIdentifier
+            and type(self.observation_authority) is ObservationAuthority
+            and type(self.capability_versions) is tuple
+            and self.capability_versions
+        ):
+            raise ContractValidationError("invalid provider source registration")
+        for row in self.capability_versions:
+            if not (
+                type(row) is tuple
+                and len(row) == 2
+                and type(row[0]) is CapabilityIdentifier
+                and type(row[1]) is tuple
+                and row[1]
+                and all(type(version) is SchemaVersion for version in row[1])
+            ):
+                raise ContractValidationError("invalid provider source registration")
+        capability_ids = tuple(row[0] for row in self.capability_versions)
+        if len(capability_ids) != len(set(capability_ids)):
+            raise ContractValidationError("duplicate registered capability")
+
+
+@dataclass(frozen=True, slots=True)
+class NegotiatedProviderSource:
+    source_key: SourceKey
+    registration: ProviderSourceRegistration
+    contract: NegotiatedProviderContract
+    declared_capability_id: CapabilityIdentifier
+    declared_capability_version: SchemaVersion
+    negotiated_capability: NegotiatedCapability | None
+
+    def __post_init__(self) -> None:
+        if not (
+            type(self.source_key) is SourceKey
+            and type(self.registration) is ProviderSourceRegistration
+            and type(self.contract) is NegotiatedProviderContract
+            and type(self.declared_capability_id) is CapabilityIdentifier
+            and type(self.declared_capability_version) is SchemaVersion
+            and (
+                self.negotiated_capability is None
+                or type(self.negotiated_capability) is NegotiatedCapability
+            )
+        ):
+            raise ContractValidationError("invalid negotiated provider source")
+        expected_key = SourceKey(
+            self.registration.provider_id.value,
+            self.registration.adapter_id.value,
+            self.registration.source_instance_id.value,
+            self.declared_capability_id.value,
+        )
+        if self.source_key != expected_key:
+            raise ContractValidationError("invalid negotiated provider source")
+
+    @property
+    def observation_invocation_allowed(self) -> bool:
+        """Whether this exact capability row is eligible for read invocation."""
+        return (
+            self.negotiated_capability is not None
+            and self.negotiated_capability.authority
+            in {CapabilityAuthority.DISCOVERY, CapabilityAuthority.OBSERVATION}
+            and self.contract.observation_invocation_allowed
+        )
 
 
 def default_state_dir(home: Path | None = None) -> Path:
@@ -481,6 +764,39 @@ def detect_openclaw_config(home: Path | None = None) -> ProviderConfig:
     )
 
 
+def default_opencode_plugin_path(home: Path | None = None) -> Path:
+    base = home or Path.home()
+    return base / ".config" / "opencode" / "plugins" / "sidepulse.js"
+
+
+def detect_opencode_plugin(home: Path | None = None) -> ProviderConfig:
+    """Recognize only the exact SidePulse-managed OpenCode global plugin."""
+    plugin_path = default_opencode_plugin_path(home)
+    try:
+        info = plugin_path.lstat()
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise OSError(f"refusing non-regular OpenCode plugin: {plugin_path}")
+        if info.st_size > _OPENCODE_PLUGIN_MAX_SOURCE_BYTES:
+            raise OSError(f"OpenCode plugin exceeds private read limit: {plugin_path}")
+        text = read_private_text(
+            plugin_path,
+            tighten=False,
+            max_bytes=_OPENCODE_PLUGIN_MAX_SOURCE_BYTES,
+        )
+        log_path = managed_opencode_plugin_log_path(text)
+    except (FileNotFoundError, OSError, UnicodeError):
+        log_path = None
+    installed = log_path is not None
+    return ProviderConfig(
+        "opencode",
+        plugin_path,
+        installed,
+        installed,
+        OPENCODE_EVENTS if installed else (),
+        (log_path,) if log_path is not None else (),
+    )
+
+
 PROVIDER_SPECS = (
     ProviderSpec("codex", "Codex", CODEX_EVENTS, "codex-toml", default_codex_config_path, detect_codex_config),
     ProviderSpec("claude", "Claude", CLAUDE_EVENTS, "claude-json", default_claude_config_path, detect_claude_config),
@@ -491,9 +807,230 @@ PROVIDER_SPECS = (
     ProviderSpec(
         "openclaw", "OpenClaw", OPENCLAW_EVENTS, "openclaw-handler", default_openclaw_config_path, detect_openclaw_config
     ),
+    ProviderSpec(
+        "opencode", "OpenCode", OPENCODE_EVENTS, "opencode-plugin", default_opencode_plugin_path, detect_opencode_plugin
+    ),
 )
 PROVIDER_REGISTRY = {spec.provider: spec for spec in PROVIDER_SPECS}
 HOOK_PROVIDERS = tuple(PROVIDER_REGISTRY)
+
+_PROVIDER_SOURCE_REGISTRATIONS = (
+    ProviderSourceRegistration(
+        ProviderIdentifier("codex"),
+        AdapterIdentifier("hooks"),
+        SourceInstanceIdentifier("global"),
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("live_agent_events"),
+                (SchemaVersion(1, 0), SchemaVersion(1, 1)),
+            ),
+            (
+                CapabilityIdentifier("actionable_requests"),
+                (SchemaVersion(1, 0),),
+            ),
+        ),
+    ),
+    ProviderSourceRegistration(
+        ProviderIdentifier("codex"),
+        AdapterIdentifier("transcripts"),
+        SourceInstanceIdentifier("local"),
+        ObservationAuthority.FALLBACK_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("transcript_usage"),
+                (SchemaVersion(1, 0),),
+            ),
+        ),
+    ),
+    ProviderSourceRegistration(
+        ProviderIdentifier("codex"),
+        AdapterIdentifier("quota"),
+        SourceInstanceIdentifier("local"),
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("remote_quota_windows"),
+                (SchemaVersion(1, 0),),
+            ),
+        ),
+    ),
+    ProviderSourceRegistration(
+        ProviderIdentifier("claude"),
+        AdapterIdentifier("hooks"),
+        SourceInstanceIdentifier("global"),
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("live_agent_events"),
+                (SchemaVersion(1, 0), SchemaVersion(1, 1)),
+            ),
+            (
+                CapabilityIdentifier("actionable_requests"),
+                (SchemaVersion(1, 0),),
+            ),
+        ),
+    ),
+    ProviderSourceRegistration(
+        ProviderIdentifier("claude"),
+        AdapterIdentifier("transcripts"),
+        SourceInstanceIdentifier("local"),
+        ObservationAuthority.FALLBACK_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("transcript_usage"),
+                (SchemaVersion(1, 0),),
+            ),
+        ),
+    ),
+    ProviderSourceRegistration(
+        ProviderIdentifier("devin"),
+        AdapterIdentifier("hooks"),
+        SourceInstanceIdentifier("global"),
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("live_agent_events"),
+                (SchemaVersion(1, 0), SchemaVersion(1, 1)),
+            ),
+            (
+                CapabilityIdentifier("actionable_requests"),
+                (SchemaVersion(1, 0),),
+            ),
+        ),
+    ),
+    ProviderSourceRegistration(
+        ProviderIdentifier("grok"),
+        AdapterIdentifier("hooks"),
+        SourceInstanceIdentifier("global"),
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("live_agent_events"),
+                (SchemaVersion(1, 0), SchemaVersion(1, 1)),
+            ),
+            (
+                CapabilityIdentifier("actionable_requests"),
+                (SchemaVersion(1, 0),),
+            ),
+        ),
+    ),
+    ProviderSourceRegistration(
+        ProviderIdentifier("cursor"),
+        AdapterIdentifier("hooks"),
+        SourceInstanceIdentifier("global"),
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("live_agent_events"),
+                (SchemaVersion(1, 0), SchemaVersion(1, 1)),
+            ),
+        ),
+    ),
+    ProviderSourceRegistration(
+        ProviderIdentifier("hermes"),
+        AdapterIdentifier("hooks"),
+        SourceInstanceIdentifier("global"),
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("live_agent_events"),
+                (SchemaVersion(1, 0), SchemaVersion(1, 1)),
+            ),
+        ),
+    ),
+    ProviderSourceRegistration(
+        ProviderIdentifier("openclaw"),
+        AdapterIdentifier("hooks"),
+        SourceInstanceIdentifier("global"),
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("live_agent_events"),
+                (SchemaVersion(1, 0), SchemaVersion(1, 1)),
+            ),
+        ),
+    ),
+    ProviderSourceRegistration(
+        ProviderIdentifier("opencode"),
+        AdapterIdentifier("hooks"),
+        SourceInstanceIdentifier("global"),
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("live_agent_events"),
+                (SchemaVersion(1, 0), SchemaVersion(1, 1)),
+            ),
+            (
+                CapabilityIdentifier("actionable_requests"),
+                (SchemaVersion(1, 0),),
+            ),
+        ),
+    ),
+)
+
+
+def provider_source_registrations() -> tuple[ProviderSourceRegistration, ...]:
+    """Return the immutable, import-time first-party source declarations."""
+    return _PROVIDER_SOURCE_REGISTRATIONS
+
+
+def provider_capacity_source_registrations() -> tuple[ProviderSourceRegistration, ...]:
+    """Return only exact provider sources that declare capacity observation."""
+    capacity_capability = CapabilityIdentifier("remote_quota_windows")
+    return tuple(
+        registration
+        for registration in _PROVIDER_SOURCE_REGISTRATIONS
+        if any(
+            capability_id == capacity_capability
+            for capability_id, _versions in registration.capability_versions
+        )
+    )
+
+
+def negotiated_provider_sources() -> tuple[NegotiatedProviderSource, ...]:
+    """Negotiate one visible canonical row per declared read capability."""
+    rows: list[NegotiatedProviderSource] = []
+    for registration in _PROVIDER_SOURCE_REGISTRATIONS:
+        contract = negotiate_provider_contract(provider_contract_document(registration))
+        negotiated_by_id = {
+            capability.identifier: capability
+            for capability in (
+                *contract.discovery_capabilities,
+                *contract.observation_capabilities,
+            )
+        }
+        for capability_id, versions in registration.capability_versions:
+            rows.append(
+                NegotiatedProviderSource(
+                    source_key=SourceKey(
+                        registration.provider_id.value,
+                        registration.adapter_id.value,
+                        registration.source_instance_id.value,
+                        capability_id.value,
+                    ),
+                    registration=registration,
+                    contract=contract,
+                    declared_capability_id=capability_id,
+                    declared_capability_version=max(versions),
+                    negotiated_capability=negotiated_by_id.get(capability_id),
+                )
+            )
+    return tuple(rows)
+
+
+def sources_with_capability(
+    sources: tuple[NegotiatedProviderSource, ...],
+    capability_id: CapabilityIdentifier,
+) -> tuple[NegotiatedProviderSource, ...]:
+    """Return exact capability rows that passed read-side negotiation."""
+    return tuple(
+        source
+        for source in sources
+        if source.declared_capability_id == capability_id
+        and source.observation_invocation_allowed
+    )
+
 # The CANONICAL event vocabulary -- what everything normalizes TO. Cursor
 # and Hermes register their own native names in their configs (their spec
 # .events tuples), but those must never enter this set: canonical_event_name
@@ -502,7 +1039,14 @@ HOOK_PROVIDERS = tuple(PROVIDER_REGISTRY)
 KNOWN_EVENTS = tuple(
     dict.fromkeys(
         event
-        for events in (CODEX_EVENTS, CLAUDE_EVENTS, GROK_EVENTS, DEVIN_EVENTS, OPENCLAW_EVENTS)
+        for events in (
+            CODEX_EVENTS,
+            CLAUDE_EVENTS,
+            GROK_EVENTS,
+            DEVIN_EVENTS,
+            OPENCLAW_EVENTS,
+            OPENCODE_EVENTS,
+        )
         for event in events
     )
 )
@@ -634,7 +1178,9 @@ def canonical_event_name(value: Any) -> str | None:
             "post_tool_call": "PostToolUse",
             "pre_llm_call": "UserPromptSubmit",
             "on_session_start": "SessionStart",
-            "on_session_end": "SessionEnd",
+            "on_session_end": "HermesTurnEnd",
+            "on_session_finalize": "SessionFinalize",
+            "api_request_error": "ApiRequestError",
         }
     )
     return aliases.get(normalized)

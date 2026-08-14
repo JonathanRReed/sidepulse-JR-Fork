@@ -26,6 +26,7 @@ class LedDisplayState(str, Enum):
     WORKING = "working"
     DONE = "done"
     ASK = "ask"
+    FAILED = "failed"
 
 
 LED_STATE_LABELS: dict[LedDisplayState, str] = {
@@ -33,6 +34,7 @@ LED_STATE_LABELS: dict[LedDisplayState, str] = {
     LedDisplayState.WORKING: "Working",
     LedDisplayState.DONE: "Done",
     LedDisplayState.ASK: "Ask",
+    LedDisplayState.FAILED: "Failed",
 }
 
 
@@ -45,6 +47,7 @@ IDLE_DIM = "#020204"
 # nagging light; one long 3.6s breath reads as patient.
 LOW_BATTERY_RED = "#E01010"
 LOW_BATTERY_BREATH_MS = 3600
+LED_REASSERT_SECONDS = 60.0
 DEVICE_LED_COUNTS = {
     "sidepulsedot": 2,
     "sidepulsepro": 8,
@@ -378,6 +381,11 @@ def program_for_display_state(
         if done_celebrate:
             return apply_brightness(_done_celebration_program(done_color, led_count), brightness)
         return apply_brightness(done_color, brightness)
+    if state == LedDisplayState.FAILED:
+        # Failure stays visible after its finite two-pulse cue without
+        # becoming the persistent Ask animation. The existing configurable
+        # blocked/error color is the base; only the temporal signature differs.
+        return apply_brightness(ask_color, brightness)
     if state == LedDisplayState.WORKING:
         return apply_brightness(
             _render_full_strip(
@@ -391,6 +399,55 @@ def program_for_display_state(
             brightness,
         )
     raise ValueError(f"Unknown LED display state: {state}")
+
+
+def display_state_for_projection(projection, active_signal=None) -> LedDisplayState:
+    """Map shared projection semantics to one renderer state."""
+    from .attention import LifecycleMode, SignalKind
+
+    if active_signal is not None and active_signal.signal.kind is SignalKind.FAILURE:
+        return LedDisplayState.FAILED
+    return {
+        LifecycleMode.IDLE: LedDisplayState.IDLE,
+        LifecycleMode.ACTIVE: LedDisplayState.WORKING,
+        LifecycleMode.WAITING: LedDisplayState.ASK,
+        LifecycleMode.COMPLETED_RECENTLY: LedDisplayState.DONE,
+        LifecycleMode.FAILED_VISIBLE: LedDisplayState.FAILED,
+        LifecycleMode.UNKNOWN: LedDisplayState.IDLE,
+    }[projection.lifecycle_mode]
+
+
+def failure_signal_program(
+    color: str,
+    active_signal,
+    *,
+    brightness: float = 255,
+    led_count: int = 8,
+) -> str:
+    """Render the active failure's exact finite cycles, then steady failure."""
+    from .signals import PATTERN_DOUBLE_BLINK, SignalStyle
+
+    repetitions = min(2, max(1, int(active_signal.signal.repetitions)))
+    cycle_seconds = max(
+        0.001,
+        (active_signal.ends_at - active_signal.started_at) / repetitions,
+    )
+    style = SignalStyle(
+        color,
+        PATTERN_DOUBLE_BLINK,
+        cycle_seconds,
+        1.0,
+        finite_repetitions=repetitions,
+    ).normalized()
+    cycle_ms = max(1, round(style.speed_seconds * 1000.0))
+    flash_ms = max(1, round(cycle_ms * 17 / 30))
+    gap_ms = max(1, cycle_ms - flash_ms)
+    cycle = (
+        f"{style.color} {flash_ms}ms cosine\n"
+        f"off {gap_ms}ms cosine"
+    )
+    body = "\n".join([cycle] * repetitions + [style.color])
+    return apply_brightness(body, normalize_brightness(brightness) * style.intensity)
 
 
 def rolling_program(color: str, *, led_count: int = 8, floor: float = 0.0) -> str:
@@ -434,6 +491,7 @@ def write_mode_to_leds(
         device_path=target,
         file_name=file_name,
         dry_run=dry_run,
+        preserve_existing_inode=not dry_run,
     )
     return LedStatusWrite(
         state=state,
@@ -629,6 +687,15 @@ def style_to_program(
         )
     else:  # pragma: no cover - normalized() forbids this
         body = hex_color
+    if style.finite_repetitions is not None and any(
+        line.strip() == "repeat" for line in body.splitlines()
+    ):
+        body = "\n".join(
+            [
+                *(line for line in body.splitlines() if line.strip() != "repeat"),
+                hex_color,
+            ]
+        )
     return apply_brightness(body, effective)
 
 
@@ -668,6 +735,7 @@ class AgentLedController:
         file_name: str = DEFAULT_FILE_NAME,
         dry_run: bool = False,
         error_retry_seconds: float = 10.0,
+        reassert_after_seconds: float = LED_REASSERT_SECONDS,
         brightness: float = 255,
         channel_gains: tuple[float, float, float] = NEUTRAL_CHANNEL_GAINS,
     ) -> None:
@@ -675,6 +743,7 @@ class AgentLedController:
         self.file_name = file_name
         self.dry_run = dry_run
         self.error_retry_seconds = error_retry_seconds
+        self.reassert_after_seconds = max(1.0, float(reassert_after_seconds))
         self.brightness = normalize_brightness(brightness)
         # Per-channel gain correction for this physical device's own LED
         # die response -- applied only to what actually gets written here,
@@ -685,6 +754,7 @@ class AgentLedController:
         self.last_brightness: int | None = None
         self.last_channel_gains: tuple[float, float, float] | None = None
         self.last_program: str | None = None
+        self.last_program_identity: object | None = None
         self.last_error: str | None = None
         self.last_target: Path | None = None
         self.last_attempt_monotonic = 0.0
@@ -694,6 +764,7 @@ class AgentLedController:
         self.last_brightness = None
         self.last_channel_gains = None
         self.last_program = None
+        self.last_program_identity = None
         self.last_error = None
         self.last_target = None
         self.last_attempt_monotonic = 0.0
@@ -706,7 +777,11 @@ class AgentLedController:
         unchanged = (
             state == self.last_state and brightness == self.last_brightness and gains == self.last_channel_gains
         )
-        if unchanged and self.last_error is None:
+        if (
+            unchanged
+            and self.last_error is None
+            and now - self.last_attempt_monotonic < self.reassert_after_seconds
+        ):
             return LedStatusWrite(
                 state=state,
                 target=self.last_target,
@@ -762,6 +837,7 @@ class AgentLedController:
         colors: ColorSettings,
         *,
         fallback_mode: AgentMode = AgentMode.IDLE_READY,
+        relay_elapsed_seconds: float = 0.0,
     ) -> LedStatusWrite:
         """Multi-agent-aware sibling of ``sync_mode``.
 
@@ -783,6 +859,7 @@ class AgentLedController:
             colors=colors,
             brightness=brightness,
             fallback_mode=fallback_mode,
+            relay_elapsed_seconds=relay_elapsed_seconds,
         )
         # Applied before the dedup check below (not after) so both the
         # comparison and self.last_program reflect the exact bytes actually
@@ -793,21 +870,70 @@ class AgentLedController:
         program = apply_channel_gain_to_program(program, self.channel_gains)
         return self._write_deduped_program(state, program)
 
-    def sync_program(self, program: str, state: LedDisplayState) -> LedStatusWrite:
+    def sync_projection(
+        self,
+        projection,
+        colors: ColorSettings,
+        *,
+        active_signal=None,
+        relay_elapsed_seconds: float = 0.0,
+    ) -> LedStatusWrite:
+        """Projection-aware renderer used by every live controller surface."""
+        from .colors import program_for_projection
+
+        target = resolve_target_path(device_path=self.device_path, file_name=self.file_name)
+        state, program = program_for_projection(
+            projection,
+            active_signal=active_signal,
+            led_count=led_count_for_target(target),
+            colors=colors,
+            brightness=normalize_brightness(self.brightness),
+            relay_elapsed_seconds=relay_elapsed_seconds,
+        )
+        program = apply_resting_glow_to_program(program, getattr(self, "resting_glow", 0.0))
+        program = apply_channel_gain_to_program(program, self.channel_gains)
+        return self._write_deduped_program(state, program)
+
+    def sync_program(
+        self,
+        program: str,
+        state: LedDisplayState,
+        *,
+        dedupe_token: object | None = None,
+    ) -> LedStatusWrite:
         """Writes a pre-rendered program through the same gain/dedup/retry
         path sync_snapshot uses -- for displays that aren't derived from
         agent statuses at all (e.g. the low-battery reminder)."""
         program = apply_resting_glow_to_program(program, getattr(self, "resting_glow", 0.0))
         program = apply_channel_gain_to_program(program, self.channel_gains)
-        return self._write_deduped_program(state, program)
+        return self._write_deduped_program(
+            state,
+            program,
+            dedupe_token=dedupe_token,
+        )
 
-    def _write_deduped_program(self, state: LedDisplayState, program: str) -> LedStatusWrite:
+    def _write_deduped_program(
+        self,
+        state: LedDisplayState,
+        program: str,
+        *,
+        dedupe_token: object | None = None,
+    ) -> LedStatusWrite:
         now = time.monotonic()
+        identity = (
+            ("token", dedupe_token)
+            if dedupe_token is not None
+            else ("program", program)
+        )
 
-        if program == self.last_program and self.last_error is None:
+        if (
+            identity == self.last_program_identity
+            and self.last_error is None
+            and now - self.last_attempt_monotonic < self.reassert_after_seconds
+        ):
             return LedStatusWrite(state=state, target=self.last_target, program="", changed=False)
         if (
-            program == self.last_program
+            identity == self.last_program_identity
             and self.last_error is not None
             and now - self.last_attempt_monotonic < self.error_retry_seconds
         ):
@@ -826,10 +952,12 @@ class AgentLedController:
                 device_path=self.device_path,
                 file_name=self.file_name,
                 dry_run=self.dry_run,
+                preserve_existing_inode=not self.dry_run,
             )
         except (DeviceWriteError, OSError) as exc:
             self.last_state = state
             self.last_program = program
+            self.last_program_identity = identity
             self.last_error = str(exc)
             return LedStatusWrite(
                 state=state,
@@ -841,6 +969,7 @@ class AgentLedController:
 
         self.last_state = state
         self.last_program = program
+        self.last_program_identity = identity
         self.last_error = None
         self.last_target = written_target
         return LedStatusWrite(state=state, target=written_target, program=program, changed=True)

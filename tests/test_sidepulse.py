@@ -3,20 +3,25 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
+from contextlib import ExitStack
+from dataclasses import replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from sidepulse import cli as cli_module
 from sidepulse import collector as collector_module
 from sidepulse import colors as colors_module
+from sidepulse.agent_browser_window import AgentBrowserActionPayload
 from sidepulse.audit import (
     append_status_audit_record,
     export_status_audit_csv,
@@ -30,6 +35,7 @@ from sidepulse.battery import (
     parse_ioreg_battery_plist,
     program_for_battery,
 )
+from sidepulse.capacity_types import SourceKey
 from sidepulse.cli import build_parser, visible_watch_statuses
 from sidepulse.collector import (
     AgentMonitor,
@@ -74,6 +80,8 @@ from sidepulse.install import (
     install_grok_hooks,
     install_hermes_hooks,
     install_openclaw_hooks,
+    install_opencode_plugin,
+    opencode_plugin_source,
     uninstall_claude_hooks,
     uninstall_codex_hooks,
     uninstall_cursor_hooks,
@@ -81,9 +89,15 @@ from sidepulse.install import (
     uninstall_grok_hooks,
     uninstall_hermes_hooks,
     uninstall_openclaw_hooks,
+    uninstall_opencode_plugin,
     update_codex_trusted_hashes,
 )
-from sidepulse.ipc import HookEventServer, send_hook_event
+from sidepulse.ipc import (
+    HookEventServer,
+    ProviderRefreshHint,
+    send_hook_event,
+    send_refresh_hint,
+)
 from sidepulse.keep_awake import KeepAwakeController, status_file_for_target
 from sidepulse.led_status import (
     ANIMATION_STYLE_BLINK,
@@ -106,8 +120,43 @@ from sidepulse.lid_sleep import (
     run_sudo_pmset_disablesleep,
     sleep_helper_sudoers_rule,
 )
+from sidepulse.mailbox import MailboxSectionKind
 from sidepulse.models import AgentMode, AgentStatus, AggregateStatus
+from sidepulse.navigation_policy import (
+    NavigationCandidate,
+    OperatorActionKind,
+    resolve_navigation,
+)
+from sidepulse.operator_accessibility import status_item_accessibility
+from sidepulse.operator_history_store import OperatorHistoryState
+from sidepulse.operator_state import BootIdentifier, ClockSample, empty_operator_state
 from sidepulse.origin import ProcessInfo, origin_from_processes
+from sidepulse.presentation_policy import (
+    FiniteCue,
+    GlanceOverrideReason,
+    GlanceSemantic,
+    ResolvedGlance,
+    SemanticGlyph,
+)
+from sidepulse.provider_facts import (
+    EventToken,
+    NextActor,
+    ObservationAuthority,
+    ProviderFactBatch,
+    ProviderRequestFact,
+    ProviderRequestState,
+    ProviderWatermark,
+    ProviderWorkFact,
+    RequestIdentifier,
+    RequestKey,
+    RequestKind,
+    SourceFreshness,
+    SourceHealth,
+    WatermarkBasis,
+    WorkIdentifier,
+    WorkKey,
+    WorkLifecycle,
+)
 from sidepulse.providers import (
     DEVIN_EVENTS,
     HOOK_PROVIDERS,
@@ -137,6 +186,7 @@ from sidepulse.session_actions import (
     SESSION_OPEN_APP,
     SESSION_OPEN_TERMINAL,
     SESSION_OPEN_VSCODE,
+    activate_navigation_resolution,
     default_session_open_action,
     provider_session_opener_providers,
     session_deep_link,
@@ -188,12 +238,374 @@ class FakeProcess:
 class AgentMonitorTests(unittest.TestCase):
     def test_provider_registry_includes_devin_as_first_class_provider(self) -> None:
         self.assertEqual(
-            HOOK_PROVIDERS, ("codex", "claude", "devin", "grok", "cursor", "hermes", "openclaw")
+            HOOK_PROVIDERS,
+            ("codex", "claude", "devin", "grok", "cursor", "hermes", "openclaw", "opencode"),
         )
         self.assertEqual(provider_spec("devin").label, "Devin")
         self.assertEqual(provider_spec("devin").config_kind, "devin-json")
         self.assertEqual(provider_spec("devin").events, DEVIN_EVENTS)
         self.assertIs(PROVIDER_REGISTRY["devin"], provider_spec("devin"))
+        self.assertEqual(provider_spec("opencode").label, "OpenCode")
+        self.assertEqual(
+            provider_spec("opencode").events,
+            (
+                "SessionStart",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "PostToolUseFailure",
+                "PermissionRequest",
+                "Notification",
+                "PreCompact",
+                "PostCompact",
+                "Stop",
+                "StopFailure",
+                "SessionEnd",
+            ),
+        )
+
+    def test_opencode_global_plugin_detector_reports_only_the_expected_plugin_file(self) -> None:
+        from sidepulse.providers import default_opencode_plugin_path, detect_opencode_plugin
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            plugin_path = home / ".config" / "opencode" / "plugins" / "sidepulse.js"
+
+            self.assertEqual(default_opencode_plugin_path(home), plugin_path)
+            absent = detect_opencode_plugin(home)
+            self.assertEqual(absent.provider, "opencode")
+            self.assertEqual(absent.config_path, plugin_path)
+            self.assertFalse(absent.exists)
+            self.assertFalse(absent.hooks_enabled)
+            self.assertEqual(absent.hook_events, ())
+            self.assertEqual(absent.log_paths, ())
+
+            plugin_path.parent.mkdir(parents=True)
+            plugin_path.write_text("export const plugin = {}\n")
+
+            detected = detect_opencode_plugin(home)
+            self.assertFalse(detected.exists)
+            self.assertFalse(detected.hooks_enabled)
+            self.assertEqual(detected.hook_events, ())
+            self.assertEqual(detected.log_paths, ())
+
+    def test_opencode_detector_requires_exact_managed_plugin_source(self) -> None:
+        from sidepulse.providers import default_opencode_plugin_path, detect_opencode_plugin
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            plugin_path = default_opencode_plugin_path(home)
+            target_log = home / ".local" / "state" / "sidepulse" / "opencode.jsonl"
+
+            self.assertFalse(detect_opencode_plugin(home).exists)
+
+            plugin_path.parent.mkdir(parents=True)
+            plugin_path.write_text("export default { event: () => {} };\n")
+            self.assertFalse(detect_opencode_plugin(home).exists)
+
+            plugin_path.write_text(opencode_plugin_source(target_log, python_executable=sys.executable))
+            detected = detect_opencode_plugin(home)
+            self.assertTrue(detected.exists)
+            self.assertTrue(detected.hooks_enabled)
+            self.assertEqual(detected.log_paths, (target_log,))
+
+            plugin_path.write_text(plugin_path.read_text() + "// arbitrary edit\n")
+            self.assertFalse(detect_opencode_plugin(home).exists)
+
+            plugin_path.write_text(
+                "// sidepulse-opencode-plugin-v1\n"
+                "const SIDEPULSE_HOOK_ARGS = Object.freeze([]);\n"
+            )
+            self.assertFalse(detect_opencode_plugin(home).exists)
+
+    def test_opencode_plugin_installer_is_private_idempotent_and_preserves_config(self) -> None:
+        from sidepulse.providers import detect_opencode_plugin
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            plugin_path = home / ".config" / "opencode" / "plugins" / "sidepulse.js"
+            config_path = home / ".config" / "opencode" / "opencode.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text('{"unrelated": {"keep": true}}\n')
+            preserved_config = config_path.read_text()
+            target_log = home / "logs" / "opencode.jsonl"
+
+            dry_run = install_opencode_plugin(
+                target_log,
+                plugin_path=plugin_path,
+                dry_run=True,
+                python_executable=sys.executable,
+            )
+            self.assertTrue(dry_run.changed)
+            self.assertTrue(dry_run.dry_run)
+            self.assertFalse(plugin_path.exists())
+
+            installed = install_opencode_plugin(
+                target_log,
+                plugin_path=plugin_path,
+                python_executable=sys.executable,
+            )
+            self.assertTrue(installed.changed)
+            self.assertEqual(stat.S_IMODE(plugin_path.stat().st_mode), 0o600)
+            self.assertEqual(config_path.read_text(), preserved_config)
+            self.assertTrue(detect_opencode_plugin(home).hooks_enabled)
+
+            already_installed = install_opencode_plugin(
+                target_log,
+                plugin_path=plugin_path,
+                python_executable=sys.executable,
+            )
+            self.assertFalse(already_installed.changed)
+
+            old_log = home / "logs" / "old-opencode.jsonl"
+            plugin_path.write_text(opencode_plugin_source(old_log, python_executable=sys.executable))
+            replaced = install_opencode_plugin(
+                target_log,
+                plugin_path=plugin_path,
+                python_executable=sys.executable,
+            )
+            self.assertTrue(replaced.changed)
+            self.assertEqual(detect_opencode_plugin(home).log_paths, (target_log,))
+
+            uninstalled = uninstall_opencode_plugin(target_log, plugin_path=plugin_path)
+            self.assertTrue(uninstalled.changed)
+            self.assertFalse(plugin_path.exists())
+            self.assertEqual(config_path.read_text(), preserved_config)
+
+    def test_opencode_plugin_install_and_uninstall_refuse_unowned_or_linked_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            target_log = base / "logs" / "opencode.jsonl"
+            plugin_path = base / "plugins" / "sidepulse.js"
+            plugin_path.parent.mkdir()
+            plugin_path.write_text("export default { event: () => {} };\n")
+
+            with self.assertRaises(OSError):
+                install_opencode_plugin(target_log, plugin_path=plugin_path, python_executable=sys.executable)
+            with self.assertRaises(OSError):
+                uninstall_opencode_plugin(target_log, plugin_path=plugin_path)
+            self.assertIn("event", plugin_path.read_text())
+
+            plugin_path.unlink()
+            outside = base / "outside.js"
+            outside.write_text("outside remains\n")
+            plugin_path.symlink_to(outside)
+            with self.assertRaises(OSError):
+                install_opencode_plugin(target_log, plugin_path=plugin_path, python_executable=sys.executable)
+            self.assertEqual(outside.read_text(), "outside remains\n")
+
+            plugin_path.unlink()
+            linked_parent = base / "linked-plugins"
+            outside_parent = base / "outside-parent"
+            outside_parent.mkdir()
+            linked_parent.symlink_to(outside_parent, target_is_directory=True)
+            with self.assertRaises(OSError):
+                install_opencode_plugin(
+                    target_log,
+                    plugin_path=linked_parent / "sidepulse.js",
+                    python_executable=sys.executable,
+                )
+
+    def test_opencode_plugin_rejects_forged_managed_source_arguments(self) -> None:
+        from sidepulse.providers import default_opencode_plugin_path, detect_opencode_plugin
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            plugin_path = default_opencode_plugin_path(home)
+            plugin_path.parent.mkdir(parents=True)
+            target_log = home / "logs" / "opencode.jsonl"
+            source = opencode_plugin_source(target_log, python_executable=sys.executable)
+
+            for forged in (
+                source.replace(sys.executable, "/tmp/forged-executable", 1),
+                source.replace(
+                    "const SIDEPULSE_HOOK_ARGS = Object.freeze([",
+                    'const SIDEPULSE_HOOK_ARGS = Object.freeze(["/tmp/forged-prefix",',
+                    1,
+                ),
+            ):
+                plugin_path.write_text(forged)
+                self.assertFalse(detect_opencode_plugin(home).exists)
+                with self.assertRaises(OSError):
+                    install_opencode_plugin(target_log, plugin_path=plugin_path, python_executable=sys.executable)
+                with self.assertRaises(OSError):
+                    uninstall_opencode_plugin(target_log, plugin_path=plugin_path)
+
+    def test_opencode_install_rejects_an_untrusted_generation_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_path = Path(tmp) / "plugins" / "sidepulse.js"
+            with self.assertRaises(ValueError):
+                install_opencode_plugin(
+                    Path(tmp) / "opencode.jsonl",
+                    plugin_path=plugin_path,
+                    python_executable="/bin/echo",
+                )
+            self.assertFalse(plugin_path.exists())
+
+    def test_opencode_uninstall_uses_held_parent_when_parent_path_swaps(self) -> None:
+        from sidepulse import install as install_module
+        from sidepulse import private_io
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            target_log = base / "logs" / "opencode.jsonl"
+            plugin_path = base / "plugins" / "sidepulse.js"
+            install_opencode_plugin(target_log, plugin_path=plugin_path, python_executable=sys.executable)
+            outside = base / "outside"
+            outside.mkdir()
+            marker = outside / "marker"
+            marker.write_text("outside remains")
+            held_parent = base / "held-plugins"
+            managed_source = install_module._read_opencode_plugin_source(plugin_path)
+            self.assertIsNotNone(managed_source)
+            original_require_leaf = private_io._require_private_leaf
+            calls = 0
+
+            def swap_parent(*args):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    plugin_path.parent.rename(held_parent)
+                    plugin_path.parent.symlink_to(outside, target_is_directory=True)
+                return original_require_leaf(*args)
+
+            with (
+                patch("sidepulse.install._read_opencode_plugin_source", return_value=managed_source),
+                patch("sidepulse.private_io._require_private_leaf", side_effect=swap_parent),
+            ):
+                result = uninstall_opencode_plugin(target_log, plugin_path=plugin_path)
+
+            self.assertTrue(result.changed)
+            self.assertFalse((held_parent / "sidepulse.js").exists())
+            self.assertTrue(plugin_path.parent.is_symlink())
+            self.assertEqual(marker.read_text(), "outside remains")
+
+    def test_opencode_uninstall_preserves_leaf_replaced_after_ownership_check(self) -> None:
+        from sidepulse import install as install_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            plugin_path = base / "plugins" / "sidepulse.js"
+            target_log = base / "opencode.jsonl"
+            install_opencode_plugin(target_log, plugin_path=plugin_path, python_executable=sys.executable)
+            replacement = "replacement remains\n"
+            real_unlink = install_module.unlink_private_file_if_unchanged
+
+            def replace_then_unlink(path, *, expected_identity):
+                path.unlink()
+                path.write_text(replacement)
+                return real_unlink(path, expected_identity=expected_identity)
+
+            with patch("sidepulse.install.unlink_private_file_if_unchanged", side_effect=replace_then_unlink):
+                result = uninstall_opencode_plugin(target_log, plugin_path=plugin_path)
+
+            self.assertFalse(result.changed)
+            self.assertEqual(plugin_path.read_text(), replacement)
+
+    def test_opencode_uninstall_preserves_leaf_swapped_between_source_and_identity(self) -> None:
+        from sidepulse import install as install_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            plugin_path = base / "plugins" / "sidepulse.js"
+            target_log = base / "opencode.jsonl"
+            install_opencode_plugin(target_log, plugin_path=plugin_path, python_executable=sys.executable)
+            replacement = "replacement remains\n"
+            real_read = install_module._read_opencode_plugin_source
+
+            def read_then_swap(path):
+                result = real_read(path)
+                path.unlink()
+                path.write_text(replacement)
+                return result
+
+            with patch("sidepulse.install._read_opencode_plugin_source", side_effect=read_then_swap):
+                result = uninstall_opencode_plugin(target_log, plugin_path=plugin_path)
+
+            self.assertFalse(result.changed)
+            self.assertEqual(plugin_path.read_text(), replacement)
+
+    def test_opencode_plugin_forwards_only_bounded_canonical_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            plugin_path = base / "sidepulse.js"
+            capture_path = base / "opencode.jsonl"
+            capture_hook = base / "capture-hook"
+            capture_hook.write_text(
+                "#!" + sys.executable + "\n"
+                "import json\n"
+                "import sys\n"
+                f"with open({str(capture_path)!r}, 'a', encoding='utf-8') as capture:\n"
+                "    capture.write(json.dumps({'args': sys.argv[1:], 'payload': json.loads(sys.stdin.read())}) + '\\n')\n"
+            )
+            capture_hook.chmod(0o700)
+            plugin_path.write_text(
+                opencode_plugin_source(capture_path, python_executable=sys.executable)
+            )
+            runner_path = base / "runner.mjs"
+            runner_path.write_text(
+                """
+const { default: plugin } = await import(\"./sidepulse.js\");
+const base = {
+  properties: {
+    sessionID: \"session-opaque\",
+    workID: \"work-opaque\",
+    requestID: \"request-opaque\",
+    sequence: 7,
+    timestamp: \"2026-08-13T12:00:00Z\",
+  },
+  message: \"secret prompt text\",
+  path: \"/private/project\",
+  arguments: { token: \"secret-token\" },
+  error: \"secret provider error\",
+};
+for (const event of [
+  { ...base, type: \"session.created\" },
+  { ...base, type: \"session.status\", properties: { ...base.properties, status: { type: \"busy\" } } },
+  { ...base, type: \"permission.asked\" },
+  { ...base, type: \"permission.replied\" },
+  { ...base, type: \"question.asked\" },
+  { ...base, type: \"question.replied\" },
+  { ...base, type: \"question.rejected\" },
+  { ...base, type: \"tool.execute.before\" },
+  { ...base, type: \"tool.execute.after\" },
+  { ...base, type: \"session.compacting\" },
+  { ...base, type: \"session.compacted\" },
+  { ...base, type: \"session.idle\" },
+  { ...base, type: \"session.error\" },
+  { type: \"session.created\", sessionID: \"top-level-private-copy\" },
+  { type: \"session.created\", properties: { sessionID: \"a\".repeat(129) } },
+  { type: \"session.created\", properties: { sessionID: \"/private/project\" } },
+  { type: \"session.created\", properties: { sessionID: \"token_sk_live_123\" } },
+  { type: \"session.created\", properties: { sessionID: \"control\\nvalue\" } },
+  { type: \"session.created\", properties: { sessionID: \"café\" } },
+]) {
+  await plugin.event({ event });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+""".strip()
+                + "\n"
+            )
+
+            result = subprocess.run(
+                ["bun", str(runner_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if capture_path.exists() and len(capture_path.read_text().splitlines()) == 13:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(capture_path.exists())
+            received = [json.loads(line) for line in capture_path.read_text().splitlines()]
+            self.assertEqual(len(received), 13)
+
+            for entry in received:
+                self.assertLessEqual(len(json.dumps(entry)), 1024)
+                self.assertNotIn("secret", json.dumps(entry))
 
     def test_detect_devin_config_reads_global_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -658,6 +1070,8 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(export_status_audit_html(html_path, source=log), 1)
             self.assertIn("hook_event,status", csv_path.read_text())
             self.assertIn("SidePulse Agent Debug Log", html_path.read_text())
+            self.assertEqual(stat.S_IMODE(csv_path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(html_path.stat().st_mode), 0o600)
 
     def test_hook_event_server_receives_socket_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -774,7 +1188,16 @@ class AgentMonitorTests(unittest.TestCase):
             snapshot = monitor.snapshot()
             self.assertEqual(replayed, 1)
             self.assertEqual(snapshot.aggregate.mode, AgentMode.WORKING)
-            self.assertIn("startup replay", snapshot.statuses[0].display_name)
+            status = snapshot.statuses[0]
+            expected_key = WorkKey(
+                SourceKey("codex", "hooks", "global", "live_agent_events"),
+                WorkIdentifier(session_id),
+            )
+            self.assertEqual(status.work_key, expected_key)
+            self.assertEqual(status.agent_id, f"codex:session:{session_id}")
+            self.assertEqual(status.display_name, f"Codex {session_id}")
+            self.assertIsNone(status.cwd)
+            self.assertNotIn("startup replay", status.display_name)
 
     def test_status_bar_session_menu_title_is_task_and_project(self) -> None:
         try:
@@ -948,20 +1371,344 @@ class AgentMonitorTests(unittest.TestCase):
         )
 
     def test_virtual_screen_bar_frame_rate_contract(self) -> None:
-        # 30fps base (the ~90ms smoothing makes it visually identical to
-        # 60 for glow motion, at half the WASM+draw cost), dropping to a
-        # low idle rate after a second of identical frames.
+        # Active animation must no longer be bottlenecked by the previous
+        # 30fps paint / 15Hz WASM pipeline. Static output has no repeating
+        # frame driver and hidden output is paused by the render policy.
         try:
             from sidepulse import virtual_device
         except (ImportError, SystemExit) as exc:
             self.skipTest(str(exc))
 
-        self.assertEqual(virtual_device.FRAME_RATE, 30.0)
-        self.assertAlmostEqual(virtual_device.FRAME_INTERVAL, 1.0 / 30.0)
-        self.assertLess(virtual_device.IDLE_FRAME_RATE, virtual_device.FRAME_RATE)
-        self.assertLessEqual(
-            virtual_device.TARGET_SAMPLE_INTERVAL_VIEW_CONTRACT, 1.0 / 10.0
+        self.assertGreaterEqual(virtual_device.FRAME_RATE, 60.0)
+        self.assertAlmostEqual(
+            virtual_device.FRAME_INTERVAL, 1.0 / virtual_device.FRAME_RATE
         )
+        self.assertLess(virtual_device.IDLE_FRAME_RATE, virtual_device.FRAME_RATE)
+        self.assertAlmostEqual(
+            virtual_device.TARGET_SAMPLE_INTERVAL_VIEW_CONTRACT,
+            virtual_device.FRAME_INTERVAL,
+        )
+
+    def test_screen_bar_sampling_interval_follows_selected_cadence(self) -> None:
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(
+            ((0, 0), (220.0, 37.0))
+        )
+        view.setRenderFps_(60.0)
+        self.assertAlmostEqual(view._target_sample_interval, 1.0 / 60.0)
+        view.setRenderFps_(10.0)
+        self.assertAlmostEqual(view._target_sample_interval, 1.0 / 10.0)
+
+    def test_screen_bar_new_program_promotes_cadence_immediately(self) -> None:
+        try:
+            from sidepulse import virtual_device
+            from sidepulse.render_policy import RenderEnvironment
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        class View:
+            current_program = "old"
+
+            def setProgram_startedAt_(self, program, _started_at):
+                self.current_program = program
+
+            def setRenderFps_(self, _fps):
+                pass
+
+        device = virtual_device.VirtualStatusDevice.alloc().init()
+        published = []
+        device.window = SimpleNamespace(isVisible=lambda: True)
+        device.view = View()
+        device._frame_interval_current = 1.0 / virtual_device.IDLE_FRAME_RATE
+        device.show = lambda: None
+        device._runtime_environment = lambda **_kwargs: RenderEnvironment(visible=True)
+        device.set_presentation_schedule_reconciler(published.append)
+        device.set_program("new")
+
+        self.assertTrue(device._animation_active)
+        self.assertTrue(published[-1].animation_active)
+        self.assertEqual(device._frame_interval_current, virtual_device.FRAME_INTERVAL)
+        self.assertIsNone(device.timer)
+
+    def test_screen_bar_frame_callback_never_promotes_cadence(self) -> None:
+        try:
+            from sidepulse import virtual_device
+            from sidepulse.render_policy import RenderEnvironment
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        class View:
+            def setPresentationColors_(self, _colors):
+                pass
+
+            def setNeedsDisplay_(self, _value):
+                pass
+
+            def setRenderFps_(self, _fps):
+                pass
+
+        intervals = []
+        device = virtual_device.VirtualStatusDevice.alloc().init()
+        device.window = SimpleNamespace(isVisible=lambda: True)
+        device.view = View()
+        device.timer = object()
+        device._animation_active = False
+        device._last_marked_colors = ((0, 0, 0, 0),) * virtual_device.LED_COUNT
+        device._frame_interval_current = 1.0 / virtual_device.IDLE_FRAME_RATE
+        device._last_reposition_at = time.monotonic()
+        device._runtime_environment = lambda **_kwargs: RenderEnvironment(visible=True)
+
+        def install(interval):
+            intervals.append(interval)
+            device._frame_interval_current = interval
+
+        device._install_frame_timer = install
+        device.redraw_(None)
+
+        self.assertFalse(device._animation_active)
+        self.assertEqual(intervals, [])
+
+    def test_screen_bar_power_observers_are_removed_when_hidden(self) -> None:
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        class Center:
+            def __init__(self):
+                self.added = []
+                self.removed = []
+
+            def addObserver_selector_name_object_(
+                self, observer, selector, name, obj
+            ):
+                self.added.append((observer, selector, name, obj))
+
+            def removeObserver_name_object_(self, observer, name, obj):
+                self.removed.append((observer, name, obj))
+
+        center = Center()
+
+        class Workspace:
+            @staticmethod
+            def sharedWorkspace():
+                return SimpleNamespace(notificationCenter=lambda: center)
+
+        device = virtual_device.VirtualStatusDevice.alloc().init()
+        with patch.object(virtual_device, "NSWorkspace", Workspace):
+            device._install_power_observers()
+            device.hide()
+
+        self.assertEqual(len(center.added), 2)
+        self.assertEqual(len(center.removed), 2)
+        self.assertFalse(device._power_observers_installed)
+
+    def test_visible_screen_bar_pauses_for_sleep_and_promotes_on_wake(self) -> None:
+        try:
+            from sidepulse import virtual_device
+            from sidepulse.render_policy import RenderEnvironment
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        class Timer:
+            def __init__(self):
+                self.invalidated = False
+
+            def invalidate(self):
+                self.invalidated = True
+
+        class View:
+            def __init__(self):
+                self.sample_fps = []
+
+            def setRenderFps_(self, fps):
+                self.sample_fps.append(fps)
+
+        device = virtual_device.VirtualStatusDevice.alloc().init()
+        original_timer = Timer()
+        view = View()
+        published = []
+        device.window = SimpleNamespace(isVisible=lambda: True)
+        device.view = view
+        device.timer = original_timer
+        device._frame_interval_current = virtual_device.FRAME_INTERVAL
+        device._runtime_environment = lambda **_kwargs: RenderEnvironment(
+            visible=True,
+            display_asleep=device._display_asleep,
+        )
+
+        device.set_presentation_schedule_reconciler(published.append)
+
+        # Both notification selectors must share one injected transition
+        # path so direct lifecycle calls and workspace events cannot drift.
+        self.assertTrue(hasattr(device, "_set_display_asleep"))
+        device.screenDidSleep_(None)
+        self.assertTrue(original_timer.invalidated)
+        self.assertIsNone(device.timer)
+        self.assertIsNone(device._frame_interval_current)
+        self.assertEqual(view.sample_fps[-1], 0.0)
+
+        device.screenDidWake_(None)
+        self.assertTrue(device._animation_active)
+        self.assertTrue(published[-1].animation_active)
+        self.assertEqual(device._frame_interval_current, virtual_device.FRAME_INTERVAL)
+        self.assertEqual(view.sample_fps[-1], virtual_device.FRAME_RATE)
+        self.assertIsNone(device.timer)
+
+    def test_screen_bar_identical_quantized_frame_is_not_repainted(self) -> None:
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        paints = []
+
+        class View:
+            def _colors_for_draw(self):
+                return [(0.2, 0.4, 0.8, 1.0)] * virtual_device.LED_COUNT
+
+            def setNeedsDisplay_(self, value):
+                paints.append(value)
+
+            def setRenderFps_(self, _fps):
+                pass
+
+        device = virtual_device.VirtualStatusDevice.alloc().init()
+        device.view = View()
+        device.timer = object()
+        device._frame_interval_current = virtual_device.FRAME_INTERVAL
+        device._reposition_tick = 0
+        device.redraw_(None)
+        device.redraw_(None)
+
+        self.assertEqual(paints, [True])
+
+    def test_screen_bar_riser_uses_two_native_gradient_draws(self) -> None:
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        gradient_draws = []
+        fallback_fills = []
+
+        class Gradient:
+            def drawInRect_angle_(self, rect, angle):
+                gradient_draws.append((rect, angle))
+
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(
+            ((0, 0), (220.0, 37.0))
+        )
+        with (
+            patch.object(
+                virtual_device,
+                "native_riser_gradients",
+                return_value=(Gradient(), Gradient()),
+            ),
+            patch.object(
+                virtual_device,
+                "fill_rect_with_cg",
+                side_effect=lambda *args: fallback_fills.append(args),
+            ),
+        ):
+            view._draw_wing_riser(
+                None, (1.0, 0.2, 0.1, 1.0), 0.0, 6.0, 37.0
+            )
+
+        self.assertEqual(len(gradient_draws), 2)
+        self.assertEqual(fallback_fills, [])
+
+    def test_screen_bar_riser_fallback_stays_below_old_fill_count(self) -> None:
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        fallback_fills = []
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(
+            ((0, 0), (220.0, 37.0))
+        )
+        with (
+            patch.object(
+                virtual_device,
+                "native_riser_gradients",
+                side_effect=RuntimeError("native gradient unavailable"),
+            ),
+            patch.object(
+                virtual_device,
+                "fill_rect_with_cg",
+                side_effect=lambda *args: fallback_fills.append(args),
+            ),
+        ):
+            view._draw_wing_riser(
+                None, (1.0, 0.2, 0.1, 1.0), 0.0, 6.0, 37.0
+            )
+
+        self.assertLessEqual(len(fallback_fills), 24)
+        self.assertLess(len(fallback_fills), 96)
+
+    def test_screen_bar_gradient_cache_reuses_changing_smoothed_colors(self) -> None:
+        try:
+            from sidepulse import virtual_device
+        except (ImportError, SystemExit) as exc:
+            self.skipTest(str(exc))
+
+        class Gradient:
+            allocations = 0
+
+            @classmethod
+            def alloc(cls):
+                cls.allocations += 1
+                return cls()
+
+            def initWithColors_atLocations_colorSpace_(
+                self, _colors, _locations, _color_space
+            ):
+                return self
+
+            def drawInRect_angle_(self, _rect, _angle):
+                pass
+
+        frames = 120
+        builder_calls = 0
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(
+            ((0, 0), (220.0, 37.0))
+        )
+        cache = view._riser_gradient_cache
+        original_get_or_build = cache.get_or_build
+
+        def counting_get_or_build(key, builder):
+            def counted_builder():
+                nonlocal builder_calls
+                builder_calls += 1
+                return builder()
+
+            return original_get_or_build(key, counted_builder)
+
+        cache.get_or_build = counting_get_or_build
+        with patch.object(virtual_device, "NSGradient", Gradient):
+            for index in range(frames):
+                phase = index / (frames - 1)
+                edge_color = (
+                    0.35 + 0.08 * phase,
+                    0.42 + 0.04 * phase,
+                    0.80 - 0.06 * phase,
+                    0.70 + 0.10 * phase,
+                )
+                view._draw_wing_riser(
+                    None, edge_color, 0.0, 6.0, 37.0, outer_on_left=True
+                )
+                view._draw_wing_riser(
+                    None, edge_color, 214.0, 220.0, 37.0, outer_on_left=False
+                )
+
+        self.assertEqual(builder_calls, 16)
+        self.assertEqual(Gradient.allocations, 32)
+        self.assertLess(Gradient.allocations, frames * 2)
 
     def test_compact_mode_keeps_the_same_frame_as_normal_mode(self) -> None:
         # Alcove compatibility changes drawing style, not position -- an
@@ -1746,7 +2493,8 @@ class AgentMonitorTests(unittest.TestCase):
         by_title = {item.title(): item for item in items if item.title()}
         titles = [item.title() for item in items if item.title()]
 
-        self.assertLess(titles.index("Agents"), titles.index("Devices"))
+        mailbox_title = next(title for title in titles if title.startswith("Agent Mailbox"))
+        self.assertLess(titles.index(mailbox_title), titles.index("Devices"))
         self.assertIn("Keep Awake With Lid Closed", by_title)
         # The policy choices live in a submenu now -- one dropdown row
         # for the whole concern, not four.
@@ -1792,20 +2540,22 @@ class AgentMonitorTests(unittest.TestCase):
         )
 
         menu = status_bar.build_menu(snapshot, status_bar.STATE_IDLE, target)
-        items = [
-            menu.itemAtIndex_(index).title()
-            for index in range(menu.numberOfItems())
-            if menu.itemAtIndex_(index).title()
+        items = [menu.itemAtIndex_(index) for index in range(menu.numberOfItems())]
+        mailbox = next(item for item in items if item.title().startswith("Agent Mailbox"))
+        self.assertEqual(
+            mailbox.title(),
+            "Agent Mailbox · 0 active · 0 need you · 0 ready",
+        )
+        recent = next(
+            mailbox.submenu().itemAtIndex_(index).submenu()
+            for index in range(mailbox.submenu().numberOfItems())
+            if mailbox.submenu().itemAtIndex_(index).title() == "Recent"
+        )
+        recent_titles = [
+            recent.itemAtIndex_(index).title()
+            for index in range(recent.numberOfItems())
         ]
-
-        self.assertNotIn("No recent sessions", items)
-        # native_session_menu_title() is intentionally mode-free -- mode is
-        # conveyed by the row's icon (session_row_icon_for_status), not text
-        # -- per test_status_bar_native_session_row_uses_task_title, which
-        # explicitly asserts "Working" never appears in a row title. This
-        # just confirms the stale session renders as a real row using that
-        # same, already-tested title format, not "Working  Codex abc".
-        self.assertIn(status_bar.native_session_menu_title(status), items)
+        self.assertIn(status_bar.native_session_menu_title(status), recent_titles)
 
     def test_lid_animation_program_uses_device_brightness(self) -> None:
         try:
@@ -1874,7 +2624,7 @@ class AgentMonitorTests(unittest.TestCase):
                 # assert across the full control map.
                 target.ensure_all_settings_panes()
 
-        self.assertEqual(window.title(), "SidePulse Agent Monitor Settings")
+        self.assertEqual(window.title(), "SidePulse Settings: Profile")
         self.assertIn("debug_log_status", target.settings_fields)
         self.assertIn("devin_session_opener", target.settings_fields)
         self.assertIn("closed_animation_program", target.settings_fields)
@@ -2456,7 +3206,9 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertEqual(canonical_event_name("stop"), "Stop")
         self.assertEqual(canonical_event_name("pre_tool_call"), "PreToolUse")
         self.assertEqual(canonical_event_name("pre_llm_call"), "UserPromptSubmit")
-        self.assertEqual(canonical_event_name("on_session_end"), "SessionEnd")
+        self.assertEqual(canonical_event_name("on_session_end"), "HermesTurnEnd")
+        self.assertEqual(canonical_event_name("on_session_finalize"), "SessionFinalize")
+        self.assertEqual(canonical_event_name("api_request_error"), "ApiRequestError")
         # ...and the native names themselves never pollute the canonical
         # set (a member of KNOWN_EVENTS passes through verbatim, so a
         # native name here would leak through ingest un-normalized).
@@ -3002,7 +3754,7 @@ class AgentMonitorTests(unittest.TestCase):
                 changed=True,
                 backup_path=None,
             )
-            for provider in ("cursor", "hermes", "openclaw")
+            for provider in ("cursor", "hermes", "openclaw", "opencode")
         )
         with (
             patch.object(
@@ -3024,7 +3776,16 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(
             [call.args[0] for call in install.call_args_list],
-            ["codex", "claude", "devin", "grok", "cursor", "hermes", "openclaw"],
+            [
+                "codex",
+                "claude",
+                "devin",
+                "grok",
+                "cursor",
+                "hermes",
+                "openclaw",
+                "opencode",
+            ],
         )
         guard.assert_called_once_with(scope="auto", dry_run=False)
         launch.assert_called_once_with(start=True)
@@ -3951,15 +4712,23 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertTrue(launch_agent_installed(plist))
 
     def test_frozen_status_bar_launch_agent_uses_sidepulse_executable(self) -> None:
-        with patch("sidepulse.status_bar_launch.sys.frozen", True, create=True):
-            plist = build_launch_agent_plist(
-                stdout_path=Path("/tmp/sidepulse.out.log"),
-                stderr_path=Path("/tmp/sidepulse.err.log"),
-            )
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "SidePulse.app" / "Contents" / "MacOS" / "SidePulse"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"frozen")
+            executable.chmod(0o755)
+            with (
+                patch("sidepulse.status_bar_launch.sys.frozen", True, create=True),
+                patch("sidepulse.status_bar_launch.sys.executable", str(executable)),
+            ):
+                plist = build_launch_agent_plist(
+                    stdout_path=Path("/tmp/sidepulse.out.log"),
+                    stderr_path=Path("/tmp/sidepulse.err.log"),
+                )
 
         self.assertEqual(
             plist["ProgramArguments"],
-            [sys.executable, "status-bar", "start", "--foreground"],
+            [str(executable), "status-bar", "start", "--foreground"],
         )
 
     def test_frozen_hook_command_uses_internal_cli(self) -> None:
@@ -3994,7 +4763,7 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertTrue(target.exists())
             self.assertFalse(legacy.exists())
             run.assert_called_once()
-            self.assertEqual(run.call_args.args[0][0:2], ["launchctl", "bootout"])
+            self.assertEqual(run.call_args.args[0][0:2], ["/bin/launchctl", "bootout"])
 
     def test_sd_eject_guard_plist_shapes_for_user_and_system_scopes(self) -> None:
         for scope in ("user", "system"):
@@ -4089,7 +4858,7 @@ class AgentMonitorTests(unittest.TestCase):
 
             def fake_run(command, *args, **kwargs):
                 calls.append(command)
-                if command[0] == "clang":
+                if Path(command[0]).name == "clang":
                     Path(command[3]).write_bytes(b"binary")
                 return subprocess.CompletedProcess(command, 0)
 
@@ -4110,9 +4879,9 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertTrue(result.started)
             self.assertTrue(user_paths.binary_path.exists())
             self.assertTrue(user_paths.plist_path.exists())
-            self.assertEqual(calls[0][0:4], ["clang", "-O2", "-o", str(user_paths.binary_path.with_name("sd_eject_guard.tmp"))])
+            self.assertEqual(calls[0][0:4], ["/usr/bin/clang", "-O2", "-o", str(user_paths.binary_path.with_name("sd_eject_guard.tmp"))])
             self.assertIn("-framework", calls[0])
-            self.assertIn(["launchctl", "bootstrap", "gui/501", str(user_paths.plist_path)], calls)
+            self.assertIn(["/bin/launchctl", "bootstrap", "gui/501", str(user_paths.plist_path)], calls)
 
     def test_sd_eject_guard_install_removes_legacy_binary_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4138,7 +4907,7 @@ class AgentMonitorTests(unittest.TestCase):
             legacy.write_bytes(b"legacy")
 
             def fake_run(command, *args, **kwargs):
-                if command[0] == "clang":
+                if Path(command[0]).name == "clang":
                     Path(command[3]).write_bytes(b"binary")
                 return subprocess.CompletedProcess(command, 0)
 
@@ -4181,7 +4950,7 @@ class AgentMonitorTests(unittest.TestCase):
             system_paths.plist_path.write_bytes(b"old")
 
             def fake_run(command, *args, **kwargs):
-                if command[0] == "clang":
+                if Path(command[0]).name == "clang":
                     Path(command[3]).write_bytes(b"binary")
                 return subprocess.CompletedProcess(command, 0)
 
@@ -4239,7 +5008,7 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertFalse(results[1].stopped)
             self.assertIn("missing permissions", results[1].skipped or "")
             run.assert_called_once()
-            self.assertEqual(run.call_args.args[0][0:3], ["launchctl", "bootout", "gui/501"])
+            self.assertEqual(run.call_args.args[0][0:3], ["/bin/launchctl", "bootout", "gui/501"])
 
     def test_sd_eject_guard_uninstall_removes_plist_binary_and_legacy_binary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4285,7 +5054,7 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertFalse(paths.binary_path.exists())
             self.assertFalse(legacy.exists())
             run.assert_called_once()
-            self.assertEqual(run.call_args.args[0][0:3], ["launchctl", "bootout", "gui/501"])
+            self.assertEqual(run.call_args.args[0][0:3], ["/bin/launchctl", "bootout", "gui/501"])
 
     def test_sd_eject_guard_system_scope_requires_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4333,7 +5102,7 @@ class AgentMonitorTests(unittest.TestCase):
 
             def fake_run(command, *args, **kwargs):
                 calls.append(command)
-                if command[0] == "clang":
+                if Path(command[0]).name == "clang":
                     Path(command[3]).write_bytes(b"binary")
                 return subprocess.CompletedProcess(command, 0)
 
@@ -4354,7 +5123,7 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(result.cleanup_removed, user_paths.plist_path)
             self.assertFalse(user_paths.plist_path.exists())
             self.assertTrue(system_paths.plist_path.exists())
-            self.assertIn(["launchctl", "bootstrap", "system", str(system_paths.plist_path)], calls)
+            self.assertIn(["/bin/launchctl", "bootstrap", "system", str(system_paths.plist_path)], calls)
             chown.assert_any_call(system_paths.binary_path, 0, 0)
             chown.assert_any_call(system_paths.plist_path, 0, 0)
 
@@ -5039,6 +5808,417 @@ class AgentMonitorTests(unittest.TestCase):
 
             self.assertEqual(snapshot.aggregate.mode, AgentMode.COMPLETED)
             self.assertEqual(snapshot.statuses[0].event_name, "Stop")
+
+    def test_codex_usage_limit_task_complete_is_a_failed_terminal_without_raw_error_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "019f179b-7fdc-7eb0-a3af-1ca3eb128eee"
+            path = root / f"rollout-2026-06-30T01-18-14-{session_id}.jsonl"
+            now = datetime.now(timezone.utc).isoformat()
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": now,
+                                "type": "turn_context",
+                                "payload": {"cwd": "/tmp/project"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": now,
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "function_call",
+                                    "name": "exec_command",
+                                    "call_id": "call-1",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": now,
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "task_complete",
+                                    "error": {
+                                        "message": "usage_limit_exceeded",
+                                    },
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n"
+            )
+
+            monitor = AgentMonitor(
+                sources=(SourceSpec("codex-transcripts", root),),
+                stale_after_seconds=3600,
+            )
+            snapshot = monitor.snapshot()
+
+            self.assertEqual(snapshot.aggregate.mode, AgentMode.BLOCKED_ERROR)
+            self.assertEqual(snapshot.statuses[0].event_name, "StopFailure")
+            self.assertIsNone(snapshot.statuses[0].tool_name)
+            self.assertIsNone(snapshot.statuses[0].message)
+            self.assertEqual(snapshot.operator_state.requests, ())
+            terminal = tuple(collector_module.iter_codex_transcript_file(path))[-1]
+            self.assertNotIn("error", terminal.raw)
+            self.assertNotIn("usage_limit_exceeded", json.dumps(terminal.raw))
+
+    def test_authoritative_codex_stop_outranks_later_usage_limit_fallback(self) -> None:
+        from sidepulse.models import HookEvent
+
+        now = datetime.now(timezone.utc)
+        session_id = "019f179b-7fdc-7eb0-a3af-1ca3eb128eee"
+        monitor = LiveAgentMonitor(stale_after_seconds=3600)
+        monitor.ingest_record(
+            HookEvent(
+                provider="codex",
+                logged_at=now,
+                event_name="Stop",
+                raw={
+                    "hook_event_name": "Stop",
+                    "session_id": session_id,
+                    "event_id": "authoritative-stop",
+                },
+                session_id=session_id,
+            )
+        )
+        fallback = collector_module.codex_transcript_event(
+            {
+                "type": "task_complete",
+                "error": {"message": "usage_limit_exceeded"},
+            },
+            session_id=session_id,
+            turn_id=None,
+            cwd=None,
+            timestamp=now + timedelta(seconds=1),
+            path=Path("/tmp/rollout-019f179b-7fdc-7eb0-a3af-1ca3eb128eee.jsonl"),
+        )
+        self.assertIsNotNone(fallback)
+        monitor.ingest_record(fallback)
+
+        snapshot = monitor.snapshot()
+
+        self.assertEqual(snapshot.aggregate.mode, AgentMode.COMPLETED)
+        self.assertEqual(snapshot.statuses[0].event_name, "Stop")
+        self.assertEqual(snapshot.operator_state.requests, ())
+
+    def test_later_codex_usage_limit_fallback_supersedes_earlier_fallback_stop(self) -> None:
+        now = datetime.now(timezone.utc)
+        session_id = "019f179b-7fdc-7eb0-a3af-1ca3eb128eee"
+        monitor = LiveAgentMonitor(stale_after_seconds=3600)
+        completed = collector_module.codex_transcript_event(
+            {"type": "task_complete"},
+            session_id=session_id,
+            turn_id=None,
+            cwd=None,
+            timestamp=now,
+            path=Path("/tmp/rollout-019f179b-7fdc-7eb0-a3af-1ca3eb128eee.jsonl"),
+        )
+        exhausted = collector_module.codex_transcript_event(
+            {
+                "type": "task_complete",
+                "error": {"code": "usage_limit_exceeded"},
+            },
+            session_id=session_id,
+            turn_id=None,
+            cwd=None,
+            timestamp=now + timedelta(seconds=1),
+            path=Path("/tmp/rollout-019f179b-7fdc-7eb0-a3af-1ca3eb128eee.jsonl"),
+        )
+        self.assertIsNotNone(completed)
+        self.assertIsNotNone(exhausted)
+        monitor.ingest_record(completed)
+        monitor.ingest_record(exhausted)
+
+        snapshot = monitor.snapshot()
+
+        self.assertEqual(snapshot.aggregate.mode, AgentMode.BLOCKED_ERROR)
+        self.assertEqual(snapshot.statuses[0].event_name, "StopFailure")
+        self.assertEqual(snapshot.operator_state.requests, ())
+        self.assertEqual(
+            monitor._compatibility_statuses_by_agent_id["codex:session:" + session_id].event_name,
+            "StopFailure",
+        )
+
+    def test_older_codex_fallback_stop_cannot_regress_newer_usage_limit_terminal(self) -> None:
+        now = datetime.now(timezone.utc)
+        session_id = "019f179b-7fdc-7eb0-a3af-1ca3eb128eee"
+        monitor = LiveAgentMonitor(stale_after_seconds=3600)
+        exhausted = collector_module.codex_transcript_event(
+            {
+                "type": "task_complete",
+                "error": {"code": "usage_limit_exceeded"},
+            },
+            session_id=session_id,
+            turn_id=None,
+            cwd=None,
+            timestamp=now + timedelta(seconds=2),
+            path=Path("/tmp/rollout-019f179b-7fdc-7eb0-a3af-1ca3eb128eee.jsonl"),
+        )
+        completed = collector_module.codex_transcript_event(
+            {"type": "task_complete"},
+            session_id=session_id,
+            turn_id=None,
+            cwd=None,
+            timestamp=now + timedelta(seconds=1),
+            path=Path("/tmp/rollout-019f179b-7fdc-7eb0-a3af-1ca3eb128eee.jsonl"),
+        )
+        self.assertIsNotNone(exhausted)
+        self.assertIsNotNone(completed)
+        monitor.ingest_record(exhausted)
+        monitor.ingest_record(completed)
+
+        snapshot = monitor.snapshot()
+        work_key = snapshot.operator_state.works[0].key
+
+        self.assertEqual(snapshot.aggregate.mode, AgentMode.BLOCKED_ERROR)
+        self.assertEqual(snapshot.statuses[0].event_name, "StopFailure")
+        self.assertEqual(
+            monitor._compatibility_statuses_by_agent_id["codex:session:" + session_id].event_name,
+            "StopFailure",
+        )
+        self.assertEqual(
+            monitor._status_overlays_by_work_key[work_key].status.event_name,
+            "StopFailure",
+        )
+
+    def test_codex_usage_limit_fallback_closes_older_direct_active_work(self) -> None:
+        from sidepulse.models import HookEvent
+
+        now = datetime.now(timezone.utc)
+        session_id = "019f179b-7fdc-7eb0-a3af-1ca3eb128eee"
+        monitor = LiveAgentMonitor(stale_after_seconds=3600)
+        monitor.ingest_record(
+            HookEvent(
+                provider="codex",
+                logged_at=now,
+                event_name="PreToolUse",
+                raw={
+                    "hook_event_name": "PreToolUse",
+                    "session_id": session_id,
+                    "event_id": "direct-active",
+                },
+                session_id=session_id,
+            )
+        )
+        exhausted = collector_module.codex_transcript_event(
+            {
+                "type": "task_complete",
+                "error": {"code": "usage_limit_exceeded"},
+            },
+            session_id=session_id,
+            turn_id=None,
+            cwd=None,
+            timestamp=now + timedelta(seconds=1),
+            path=Path("/tmp/rollout-019f179b-7fdc-7eb0-a3af-1ca3eb128eee.jsonl"),
+        )
+        self.assertIsNotNone(exhausted)
+        monitor.ingest_record(exhausted)
+
+        snapshot = monitor.snapshot()
+        work = snapshot.operator_state.works[0]
+
+        self.assertEqual(work.lifecycle.value, "failed")
+        self.assertEqual(work.next_actor.value, "none")
+        self.assertEqual(work.request_keys, ())
+        self.assertEqual(snapshot.statuses[0].event_name, "StopFailure")
+
+    def test_forged_codex_fallback_stop_failure_cannot_close_direct_active_work(self) -> None:
+        from sidepulse.models import HookEvent
+
+        now = datetime.now(timezone.utc)
+        session_id = "019f179b-7fdc-7eb0-a3af-1ca3eb128eee"
+        monitor = LiveAgentMonitor(stale_after_seconds=3600)
+        monitor.ingest_record(
+            HookEvent(
+                provider="codex",
+                logged_at=now,
+                event_name="PreToolUse",
+                raw={
+                    "hook_event_name": "PreToolUse",
+                    "session_id": session_id,
+                    "event_id": "direct-active",
+                },
+                session_id=session_id,
+            )
+        )
+        monitor.ingest_record(
+            HookEvent(
+                provider="codex",
+                logged_at=now + timedelta(seconds=1),
+                event_name="StopFailure",
+                raw={
+                    "hook_event_name": "StopFailure",
+                    "session_id": session_id,
+                    "event_id": "forged-fallback",
+                    "source": "codex-transcripts",
+                },
+                session_id=session_id,
+            )
+        )
+
+        snapshot = monitor.snapshot()
+        work = snapshot.operator_state.works[0]
+
+        self.assertEqual(work.lifecycle.value, "active")
+        self.assertEqual(work.next_actor.value, "provider")
+        self.assertEqual(snapshot.statuses[0].event_name, "PreToolUse")
+
+    def test_classified_codex_usage_limit_terminal_removes_direct_request(self) -> None:
+        from sidepulse.models import HookEvent
+
+        now = datetime.now(timezone.utc)
+        session_id = "019f179b-7fdc-7eb0-a3af-1ca3eb128eee"
+        monitor = LiveAgentMonitor(stale_after_seconds=3600)
+        monitor.ingest_record(
+            HookEvent(
+                provider="codex",
+                logged_at=now,
+                event_name="PermissionRequest",
+                raw={
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": session_id,
+                    "request_id": "request:usage-limit",
+                    "event_id": "direct-request",
+                },
+                session_id=session_id,
+            )
+        )
+        exhausted = collector_module.codex_transcript_event(
+            {
+                "type": "task_complete",
+                "error": {"code": "usage_limit_exceeded"},
+            },
+            session_id=session_id,
+            turn_id=None,
+            cwd=None,
+            timestamp=now + timedelta(seconds=1),
+            path=Path("/tmp/rollout-019f179b-7fdc-7eb0-a3af-1ca3eb128eee.jsonl"),
+        )
+        self.assertIsNotNone(exhausted)
+        monitor.ingest_record(exhausted)
+
+        snapshot = monitor.snapshot()
+        work = snapshot.operator_state.works[0]
+
+        self.assertEqual(work.lifecycle.value, "failed")
+        self.assertEqual(work.request_keys, ())
+        self.assertEqual(snapshot.operator_state.requests, ())
+        self.assertEqual(snapshot.statuses[0].event_name, "StopFailure")
+
+    def test_older_codex_usage_limit_fallback_cannot_close_newer_direct_active_work(self) -> None:
+        from sidepulse.models import HookEvent
+
+        now = datetime.now(timezone.utc)
+        session_id = "019f179b-7fdc-7eb0-a3af-1ca3eb128eee"
+        monitor = LiveAgentMonitor(stale_after_seconds=3600)
+        monitor.ingest_record(
+            HookEvent(
+                provider="codex",
+                logged_at=now + timedelta(seconds=2),
+                event_name="PreToolUse",
+                raw={
+                    "hook_event_name": "PreToolUse",
+                    "session_id": session_id,
+                    "event_id": "newer-direct-active",
+                },
+                session_id=session_id,
+            )
+        )
+        exhausted = collector_module.codex_transcript_event(
+            {
+                "type": "task_complete",
+                "error": {"code": "usage_limit_exceeded"},
+            },
+            session_id=session_id,
+            turn_id=None,
+            cwd=None,
+            timestamp=now + timedelta(seconds=1),
+            path=Path("/tmp/rollout-019f179b-7fdc-7eb0-a3af-1ca3eb128eee.jsonl"),
+        )
+        self.assertIsNotNone(exhausted)
+        monitor.ingest_record(exhausted)
+
+        snapshot = monitor.snapshot()
+        work = snapshot.operator_state.works[0]
+
+        self.assertEqual(work.lifecycle.value, "active")
+        self.assertEqual(work.next_actor.value, "provider")
+        self.assertEqual(snapshot.statuses[0].event_name, "PreToolUse")
+
+    def test_codex_usage_limit_transcript_mtime_does_not_resurrect_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "019f179b-7fdc-7eb0-a3af-1ca3eb128eee"
+            path = root / f"rollout-2026-06-30T01-18-14-{session_id}.jsonl"
+            terminal_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+            path.write_text(
+                json.dumps(
+                    {
+                        "timestamp": terminal_at.isoformat(),
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "error": {"code": "usage_limit_exceeded"},
+                        },
+                    }
+                )
+                + "\n"
+            )
+            monitor = AgentMonitor(
+                sources=(SourceSpec("codex-transcripts", root),),
+                stale_after_seconds=3600,
+            )
+
+            first = monitor.snapshot()
+            os.utime(path, None)
+            second = monitor.snapshot()
+
+            self.assertEqual(first.aggregate.mode, AgentMode.BLOCKED_ERROR)
+            self.assertEqual(second.aggregate.mode, AgentMode.BLOCKED_ERROR)
+            self.assertEqual(second.statuses[0].event_name, "StopFailure")
+            self.assertEqual(second.operator_state.requests, ())
+
+    def test_codex_usage_limit_fallback_rejects_free_form_error_text(self) -> None:
+        timestamp = datetime.now(timezone.utc)
+        event = collector_module.codex_transcript_event(
+            {
+                "type": "task_complete",
+                "error": {"message": "You have reached your usage limit."},
+            },
+            session_id="019f179b-7fdc-7eb0-a3af-1ca3eb128eee",
+            turn_id=None,
+            cwd=None,
+            timestamp=timestamp,
+            path=Path("/tmp/rollout-019f179b-7fdc-7eb0-a3af-1ca3eb128eee.jsonl"),
+        )
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.event_name, "Stop")
+        self.assertNotIn("error", event.raw)
+
+    def test_codex_usage_limit_fallback_accepts_exact_structured_code(self) -> None:
+        event = collector_module.codex_transcript_event(
+            {
+                "type": "task_complete",
+                "error": {"code": "usage_limit_exceeded"},
+            },
+            session_id="019f179b-7fdc-7eb0-a3af-1ca3eb128eee",
+            turn_id=None,
+            cwd=None,
+            timestamp=datetime.now(timezone.utc),
+            path=Path("/tmp/rollout-019f179b-7fdc-7eb0-a3af-1ca3eb128eee.jsonl"),
+        )
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.event_name, "StopFailure")
+        self.assertNotIn("error", event.raw)
 
     def test_claude_transcript_fallback_marks_tool_calls_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5773,6 +6953,79 @@ team id YOUR_TEAM_ID, push key '/path/to/AuthKey_YOUR_KEY_ID.p8'
         self.assertEqual(session_resume_command(status), command)
         self.assertEqual(session_open_target(status, SESSION_OPEN_TERMINAL), ("terminal", command))
 
+    def test_session_action_terminal_refuses_missing_cwd_session_and_unknown_provider(self) -> None:
+        def status_for(
+            provider: str,
+            *,
+            session_id: str | None = "session-01",
+            cwd: str | None = "/tmp/project",
+        ) -> AgentStatus:
+            return AgentStatus(
+                provider=provider,
+                agent_id=f"{provider}:session:test",
+                display_name=f"{provider.title()} test",
+                mode=AgentMode.WORKING,
+                updated_at=datetime.now(timezone.utc),
+                event_name="PreToolUse",
+                session_id=session_id,
+                cwd=cwd,
+            )
+
+        self.assertIsNone(session_resume_command(status_for("codex", cwd=None)))
+        self.assertIsNone(session_open_target(status_for("codex", cwd=None), SESSION_OPEN_TERMINAL))
+        self.assertIsNone(session_resume_command(status_for("codex", session_id=None)))
+        self.assertIsNone(session_resume_command(status_for("unknown")))
+
+    def test_session_action_never_constructs_shell_target_from_display_label(self) -> None:
+        status = AgentStatus(
+            provider="codex",
+            agent_id="codex:session:safe",
+            display_name="../../tmp/other && open /Applications/Calculator.app",
+            mode=AgentMode.WORKING,
+            updated_at=datetime.now(timezone.utc),
+            event_name="PreToolUse",
+            session_id="session-01",
+            cwd="/tmp/project",
+        )
+
+        self.assertEqual(
+            session_resume_command(status),
+            "cd /tmp/project && codex resume session-01",
+        )
+
+    def test_session_action_stale_generation_never_calls_an_opener(self) -> None:
+        work_key = WorkKey(
+            SourceKey("codex", "hooks", "local:01", "live_agent_events"),
+            WorkIdentifier("work:01"),
+        )
+        candidate = NavigationCandidate(
+            work_key=work_key,
+            source_generation=8,
+            action_id="open:primary",
+            target_kind="url",
+            target_value="codex://threads/session-01",
+            source_freshness=SourceFreshness.FRESH,
+            navigation_authority=True,
+        )
+        resolution = resolve_navigation(
+            work_key,
+            "open:primary",
+            (candidate,),
+            expected_source_generation=7,
+        )
+        open_url = MagicMock()
+        open_terminal = MagicMock()
+
+        activated = activate_navigation_resolution(
+            resolution,
+            open_url=open_url,
+            open_terminal_command=open_terminal,
+        )
+
+        self.assertFalse(activated)
+        open_url.assert_not_called()
+        open_terminal.assert_not_called()
+
     def test_session_opener_providers_follow_hook_registry(self) -> None:
         self.assertEqual(provider_session_opener_providers(), HOOK_PROVIDERS)
 
@@ -5892,7 +7145,11 @@ class ColorSettingsTests(unittest.TestCase):
         self.assertIn(peak, program)
 
     def test_classic_blend_mode_matches_program_for_display_state_exactly(self) -> None:
-        settings = ColorSettings.defaults().with_blend_mode(BLEND_MODE_CLASSIC)
+        settings = (
+            ColorSettings.defaults()
+            .with_blend_mode(BLEND_MODE_CLASSIC)
+            .with_round_robin_urgency_alert(False)
+        )
         fade_kwargs = {
             "idle_floor": colors_module.DEFAULT_FADE_FLOOR,
             "idle_ceiling": colors_module.DEFAULT_FADE_CEILING,
@@ -5929,6 +7186,7 @@ class ColorSettingsTests(unittest.TestCase):
         settings = (
             ColorSettings.defaults()
             .with_blend_mode(BLEND_MODE_CLASSIC)
+            .with_round_robin_urgency_alert(False)
         )
         for key in colors_module.FADE_MODE_KEYS:
             settings = settings.with_fade_floor(key, 0.0).with_fade_ceiling(key, 1.0)
@@ -6088,6 +7346,7 @@ class ColorSettingsTests(unittest.TestCase):
     def test_spatial_split_reset_segment_uses_each_agents_own_floor(self) -> None:
         settings = (
             ColorSettings.defaults()
+            .with_round_robin_urgency_alert(False)
             .with_fade_floor(colors_module.MODE_ASK, 0.0)
             .with_fade_floor(colors_module.MODE_WORKING, 0.2)
         )
@@ -6234,27 +7493,33 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         blends = [a.blend_mode for a in applied]
         self.assertEqual(len(blends), len(set(blends)))
 
-    def test_attention_takeover_double_flashes_when_any_agent_asks(self) -> None:
-        # A per-slot color swap is not an alert: it pulses at the same
-        # rhythm/brightness as working neighbors, and the Ask color can
-        # coincide with an agent's identity color. The takeover opens
-        # every loop with a full-bar double hard-flash instead.
+    def test_attention_arrival_double_taps_once_then_holds_static_anchor(self) -> None:
         settings = ColorSettings.defaults()
         statuses = (
             _status("claude", AgentMode.WAITING_FOR_INPUT),
             _status("codex", AgentMode.WORKING),
             _status("devin", AgentMode.WORKING),
         )
-        _state, program = colors_module.program_for_snapshot(
+        _state, base = colors_module.program_for_snapshot(
             statuses, led_count=8, colors=settings, brightness=255
         )
-        lines = program.splitlines()
+        _state, arrival = colors_module.program_for_snapshot(
+            statuses,
+            led_count=8,
+            colors=settings,
+            brightness=255,
+            include_attention_arrival=True,
+        )
+        lines = arrival.splitlines()
         ask = settings.mode_color(colors_module.MODE_ASK)
         self.assertEqual(lines[0], f"{ask} {colors_module.ATTENTION_FLASH_MS}ms")
         self.assertEqual(lines[1], f"off {colors_module.ATTENTION_FLASH_GAP_MS}ms")
         self.assertEqual(lines[2], f"{ask} {colors_module.ATTENTION_FLASH_MS}ms")
+        self.assertNotIn("repeat", base)
+        self.assertNotIn("repeat", arrival)
+        self.assertTrue(arrival.endswith(base))
         self.assertLessEqual(len(lines), 20)
-        self.assertLessEqual(len(program.encode("utf-8")), 512)
+        self.assertLessEqual(len(arrival.encode("utf-8")), 512)
 
     def test_attention_takeover_absent_without_an_asker_or_when_disabled(self) -> None:
         working = (_status("codex", AgentMode.WORKING), _status("devin", AgentMode.WORKING))
@@ -6336,7 +7601,11 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         self.assertEqual(rr_program, spatial_program)
 
     def test_round_robin_assigns_every_led_exactly_once(self) -> None:
-        settings = ColorSettings.defaults().with_blend_mode(BLEND_MODE_ROUND_ROBIN)
+        settings = (
+            ColorSettings.defaults()
+            .with_blend_mode(BLEND_MODE_ROUND_ROBIN)
+            .with_round_robin_urgency_alert(False)
+        )
         statuses = (
             _status("codex", AgentMode.WORKING),
             _status("claude", AgentMode.BLOCKED_ERROR),
@@ -6361,7 +7630,11 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         self.assertIn(BLEND_MODE_RELAY, BLEND_MODE_CHOICES)
 
     def test_relay_assigns_every_led_exactly_once(self) -> None:
-        settings = ColorSettings.defaults().with_blend_mode(BLEND_MODE_RELAY)
+        settings = (
+            ColorSettings.defaults()
+            .with_blend_mode(BLEND_MODE_RELAY)
+            .with_round_robin_urgency_alert(False)
+        )
         statuses = (
             _status("codex", AgentMode.WORKING),
             _status("claude", AgentMode.BLOCKED_ERROR),
@@ -6403,7 +7676,9 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         )
         _, program = program_for_snapshot(statuses, led_count=4, colors=settings)
         pulse_line = program.splitlines()[1]
-        duration_ms = int(settings.effective_speed_seconds(BLEND_MODE_RELAY) * 1000)
+        # Hand-derived: the configured 1.6-second full traversal divided
+        # across four LEDs is one 400ms turn per LED.
+        duration_ms = 400
         delays = []
         for segment in pulse_line.split("; "):
             # "<index>:<color> <duration>ms pulse <delay>ms"
@@ -6475,7 +7750,7 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         settings_rr = ColorSettings.defaults().with_blend_mode(BLEND_MODE_ROUND_ROBIN)
         settings_spatial = ColorSettings.defaults().with_blend_mode(BLEND_MODE_SPATIAL)
         statuses = (
-            _status("codex", AgentMode.BLOCKED_ERROR),
+            _status("codex", AgentMode.WORKING),
             _status("claude", AgentMode.WORKING),
             _status("devin", AgentMode.IDLE_READY),
         )
@@ -6773,21 +8048,27 @@ class SpeedOverrideAndUrgencyAlertTests(unittest.TestCase):
         )
         self.assertIn(claude_own_color, program)
 
-    def test_urgency_alert_adds_takeover_but_never_recolors_spatial_split(self) -> None:
-        # Spatial Split still signals WHO is urgent via block size -- the
-        # per-slot alert color swap stays scoped to Round-Robin/Cycle, so
-        # the body colors are identical with the toggle on or off. But the
-        # attention takeover (the full-bar flash preamble) applies to every
-        # blend mode: block size alone was confirmed unmissable by nobody.
+    def test_urgency_alert_adds_finite_arrival_then_static_spatial_anchor(self) -> None:
         settings_on = ColorSettings.defaults().with_blend_mode(BLEND_MODE_SPATIAL)
         settings_off = settings_on.with_round_robin_urgency_alert(False)
         statuses = (_status("codex", AgentMode.WORKING), _status("claude", AgentMode.BLOCKED_ERROR))
-        _, program_on = program_for_snapshot(statuses, led_count=8, colors=settings_on)
+        _, base = program_for_snapshot(statuses, led_count=8, colors=settings_on)
+        _, arrival = program_for_snapshot(
+            statuses,
+            led_count=8,
+            colors=settings_on,
+            include_attention_arrival=True,
+        )
         _, program_off = program_for_snapshot(statuses, led_count=8, colors=settings_off)
-        self.assertEqual(_program_body(program_on), _program_body(program_off))
-        self.assertNotEqual(program_on, program_off)
         ask = colors_module.ColorSettings.defaults().mode_color(colors_module.MODE_ASK)
-        self.assertTrue(program_on.startswith(f"{ask} {colors_module.ATTENTION_FLASH_MS}ms"))
+        self.assertEqual(
+            arrival.splitlines().count(f"{ask} {colors_module.ATTENTION_FLASH_MS}ms"),
+            2,
+        )
+        self.assertNotIn("repeat", base)
+        self.assertNotIn("repeat", arrival)
+        self.assertTrue(arrival.endswith(base))
+        self.assertIn("repeat", program_off)
 
 
 class AnimationStyleTests(unittest.TestCase):
@@ -6975,6 +8256,28 @@ class AgentLedControllerSnapshotTests(unittest.TestCase):
 
             result = controller.sync_snapshot((), settings, fallback_mode=AgentMode.BLOCKED_ERROR)
             self.assertEqual(result.state, LedDisplayState.ASK)
+
+    def test_unchanged_program_is_periodically_reasserted_after_firmware_timeout(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            device_dir = Path(tmp) / "SidePulseDot"
+            device_dir.mkdir()
+            (device_dir / "LEDS.LED").touch()
+            clock = [10.0]
+            controller = AgentLedController(
+                device_path=device_dir,
+                reassert_after_seconds=60.0,
+            )
+            settings = ColorSettings.defaults()
+            statuses = (_status("codex", AgentMode.WORKING),)
+
+            with patch("sidepulse.led_status.time.monotonic", side_effect=lambda: clock[0]):
+                self.assertTrue(controller.sync_snapshot(statuses, settings).changed)
+                clock[0] = 69.999
+                self.assertFalse(controller.sync_snapshot(statuses, settings).changed)
+                clock[0] = 70.0
+                self.assertTrue(controller.sync_snapshot(statuses, settings).changed)
 
 
 class ChannelGainCalibrationTests(unittest.TestCase):
@@ -7949,8 +9252,12 @@ class ClosedLidGracePeriodTests(unittest.TestCase):
         controller = status_bar.StatusBarController.alloc().init()
         controller.settings = controller.settings.with_closed_lid_grace_minutes(2.0)
         # Disabled so update() doesn't try to spawn a real caffeinate
-        # process -- only set_grace_seconds()'s propagation is under test.
+        # process. Disable the unrelated lid and hardware integrations too:
+        # this test only covers set_grace_seconds() propagation and must not
+        # select or poke a real /Volumes target.
         controller.keep_awake.set_enabled(False)
+        controller.sync_closed_lid_awake = lambda: None
+        controller.leds_enabled = False
         controller.sync_keep_awake(AgentMode.IDLE_READY)
         self.assertEqual(controller.keep_awake.grace_seconds, 120.0)
 
@@ -8004,7 +9311,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         controller.popoverDidClose_(None)
         self.assertEqual(refreshes, [True])
 
-    def test_brightness_watcher_resyncs_only_on_a_real_change(self) -> None:
+    def test_brightness_result_resyncs_only_on_a_real_change(self) -> None:
         # Auto-brightness used to re-evaluate only when an agent state
         # change triggered an LED write -- dimming the screen during a
         # steady state changed nothing. The watcher must (a) do nothing
@@ -8019,26 +9326,17 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         controller.settings = controller.settings.with_device_auto_brightness(
             status_bar.VIRTUAL_DEVICE_ID, True, name="Screen Bar"
         )
-        readings = iter([100, 101, 140])
-        with patch.object(status_bar.display_brightness, "auto_led_brightness", lambda: next(readings)):
-            controller.pollScreenBrightness_(None)  # first sample: record only
-            self.assertEqual(controller.last_watched_brightness, 100)
-            self.assertEqual(refreshes, [])
-            controller.pollScreenBrightness_(None)  # +1: jitter, ignored
-            self.assertEqual(controller.last_watched_brightness, 101)
-            self.assertEqual(refreshes, [])
-            controller.pollScreenBrightness_(None)  # +39: real change
-            self.assertEqual(controller.last_watched_brightness, 140)
-            self.assertEqual(refreshes, [True])
+        for reading in (100, 101, 140):
+            controller._apply_display_environment_result(
+                status_bar.DisplayEnvironmentResult(
+                    brightness=reading,
+                    active_focus_ids=None,
+                    accessibility_preferences=None,
+                )
+            )
 
-        no_auto = status_bar.StatusBarController.alloc().init()
-        no_auto.refresh_ = lambda _sender: self.fail("refresh must not fire with no auto devices")
-        with patch.object(
-            status_bar.display_brightness,
-            "auto_led_brightness",
-            side_effect=AssertionError("must not even sample with no auto devices"),
-        ):
-            no_auto.pollScreenBrightness_(None)
+        self.assertEqual(controller.last_watched_brightness, 140)
+        self.assertEqual(refreshes, [True])
 
     def test_settings_window_panes_have_no_overlapping_cards(self) -> None:
         # Regression guard for the bug class originally reported here (a
@@ -8316,6 +9614,426 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         self.controller.refresh_(None)  # must not raise
 
 
+class Task9HistorySettingsCompositionTests(unittest.TestCase):
+    """Rendered native contract for the one gated History settings pane."""
+
+    MANIFEST = (
+        "day_key",
+        "timezone_offset_minutes",
+        "provider_id",
+        "started",
+        "needs_user",
+        "completed",
+        "failed",
+        "acknowledged",
+        "active_duration_bands",
+        "attention_wait_bands",
+        "primary_count",
+        "worker_count",
+        "source_recoveries",
+        "device_recoveries",
+        "coverage",
+        "sample_count",
+    )
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.controller.operator_history_store.path = (
+            Path(self._tmp.name) / "operator-history.json"
+        )
+
+    @staticmethod
+    def _descendants(view):
+        for child in view.subviews():
+            yield child
+            yield from Task9HistorySettingsCompositionTests._descendants(child)
+
+    def _build_history(self):
+        self.controller.show_settings_window()
+        self.controller.select_settings_pane("history")
+        self.controller.settings_window.contentView().layoutSubtreeIfNeeded()
+        return self.controller.settings_panes["history"]
+
+    def _day(self, *, coverage="complete"):
+        from sidepulse.operator_history import HistoryCoverage, OperatorHistoryDay
+        from sidepulse.provider_contracts import ProviderIdentifier
+
+        return OperatorHistoryDay(
+            datetime.now().date().isoformat(),
+            0,
+            ProviderIdentifier("codex"),
+            1,
+            1,
+            1,
+            0,
+            1,
+            (1, 0, 0, 0),
+            (0, 1, 0, 0),
+            1,
+            2,
+            0,
+            0,
+            HistoryCoverage(coverage),
+            4,
+        )
+
+    def test_history_is_one_lazy_sidebar_pane_with_off_default_and_title_restore(self) -> None:
+        self.assertEqual(self.controller.settings.operator_history_retention_days, 0)
+        self.controller.show_settings_window()
+        self.assertNotIn("history", self.controller.settings_panes)
+        self.assertEqual(
+            [label for key, label in self.status_bar.SETTINGS_SIDEBAR_ITEMS if key == "history"],
+            ["History"],
+        )
+
+        self.controller.select_settings_pane("history")
+        self.assertIn("history", self.controller.settings_panes)
+        self.assertEqual(self.controller.settings_window.title(), "SidePulse Settings: History")
+        controls = self.controller.settings_fields["history_retention_controls"]
+        self.assertEqual(tuple(controls), (0, 7, 30, 90))
+        self.assertTrue(all(control.accessibilityRole() == "AXRadioButton" for control in controls.values()))
+        self.assertEqual(controls[0].state(), 1)
+
+        self.controller.settings_window.performClose_(None)
+        self.controller.show_settings_window()
+        self.assertEqual(self.controller.current_settings_pane, "history")
+        self.assertEqual(self.controller.settings_window.title(), "SidePulse Settings: History")
+
+    def test_history_discloses_exact_fields_before_opt_in_and_supports_three_ranges(self) -> None:
+        self._build_history()
+        preview = self.controller.settings_fields["history_retention_disclosure"].stringValue()
+        manifest = self.controller.settings_fields["history_field_manifest"].stringValue()
+        self.assertIn("Before enabling", preview)
+        self.assertIn("derived metadata only", preview)
+        self.assertIn("does not store prompts", preview.casefold())
+        self.assertEqual(tuple(part.strip() for part in manifest.split(",")), self.MANIFEST)
+
+        controls = self.controller.settings_fields["history_range_controls"]
+        self.assertEqual(tuple(controls), (1, 7, 30))
+        self.assertEqual(
+            tuple(control.title() for control in controls.values()),
+            ("Day", "7 Day", "30 Day"),
+        )
+        self.assertEqual(
+            self.controller.settings_fields["history_retention_group"].accessibilityRole(),
+            "AXRadioGroup",
+        )
+        self.assertEqual(
+            self.controller.settings_fields["history_range_group"].accessibilityRole(),
+            "AXRadioGroup",
+        )
+
+    def test_history_projection_mutates_stable_labels_for_no_observation_and_partial(self) -> None:
+        self._build_history()
+        summary = self.controller.settings_fields["history_summary"]
+        health = self.controller.settings_fields["history_health"]
+        identity = id(summary)
+        self.assertIn("No operator history was observed", summary.stringValue())
+        self.assertEqual(health.stringValue(), "No Observation")
+
+        self.controller.operator_history_store.state = OperatorHistoryState(
+            (self._day(coverage="partial"),)
+        )
+        self.controller.operator_history_range_days = 1
+        self.controller.refresh_operator_history_projection()
+        self.assertEqual(id(self.controller.settings_fields["history_summary"]), identity)
+        self.assertEqual(health.stringValue(), "Partial observation")
+        self.assertIn("Observed", summary.stringValue())
+
+    def test_history_restore_never_paints_clean_empty_before_degraded_health(self) -> None:
+        for index, mode in enumerate(("corrupt", "unavailable")):
+            with self.subTest(mode=mode):
+                controller = (
+                    self.controller
+                    if index == 0
+                    else self.status_bar.StatusBarController.alloc().init()
+                )
+                path = Path(self._tmp.name) / mode / "operator-history.json"
+                path.parent.mkdir()
+                if mode == "corrupt":
+                    path.write_text("not-json", encoding="utf-8")
+                else:
+                    path.mkdir()
+                controller.settings = dataclass_replace(
+                    controller.settings,
+                    operator_history_retention_days=7,
+                )
+                controller.operator_history_store.path = path
+                accepted = []
+                controller.performSelectorOnMainThread_withObject_waitUntilDone_ = (
+                    lambda selector, payload, _wait: (
+                        accepted.append((selector, payload))
+                        if selector == "applyOperatorHistoryRestore:"
+                        else None
+                    )
+                )
+
+                controller.show_settings_window()
+                controller.select_settings_pane("history")
+                health = controller.settings_fields["history_health"]
+                summary = controller.settings_fields["history_summary"]
+                self.assertEqual(health.stringValue(), "History loading")
+                self.assertNotIn("No Observation", health.stringValue())
+                self.assertIn("being restored", summary.stringValue())
+
+                deadline = time.monotonic() + 2.0
+                while not accepted:
+                    if time.monotonic() >= deadline:
+                        self.fail(f"{mode} history restore did not publish")
+                    time.sleep(0.001)
+                selector, payload = accepted.pop()
+                self.assertEqual(selector, "applyOperatorHistoryRestore:")
+                controller.applyOperatorHistoryRestore_(payload)
+                self.assertEqual(health.stringValue(), "History unavailable")
+                self.assertEqual(
+                    summary.stringValue(),
+                    "Operator history could not be restored.",
+                )
+
+    def test_history_exports_are_separate_local_json_actions_and_legacy_audit_is_absent(self) -> None:
+        pane = self._build_history()
+        buttons = self.controller.settings_buttons
+        self.assertEqual(buttons["export_history"].title(), "Export History")
+        self.assertEqual(buttons["export_diagnostics"].title(), "Export Diagnostics")
+        self.assertIsNot(buttons["export_history"], buttons["export_diagnostics"])
+        preview = self.controller.settings_fields["history_export_preview"].stringValue()
+        self.assertIn("sidepulse-history.json", preview)
+        self.assertIn("sidepulse-diagnostics.json", preview)
+        self.assertIn("local file", preview)
+        for field in (
+            "app_version",
+            "build_trust",
+            "provider_health_counts",
+            "delivery_disposition_counts",
+            "device_health_counts",
+            "history_health",
+        ):
+            self.assertIn(field, preview)
+        rendered_titles = [
+            str(view.title())
+            for view in (pane, *self._descendants(pane))
+            if hasattr(view, "title") and str(view.title())
+        ]
+        self.assertNotIn("Export CSV", rendered_titles)
+        self.assertNotIn("Export HTML", rendered_titles)
+
+    def test_clear_history_requires_confirmation_and_failure_stays_generic_and_visible(self) -> None:
+        self._build_history()
+        self.controller.operator_history_store.state = OperatorHistoryState(
+            (self._day(),)
+        )
+        self.controller.confirmClearOperatorHistory_ = MagicMock(return_value=False)
+        self.controller.clearOperatorHistory_(None)
+        self.assertEqual(len(self.controller.operator_history_store.state.rows), 1)
+
+        self.controller.confirmClearOperatorHistory_.return_value = True
+        real_clear = self.controller.operator_history_store.clear
+        self.controller.operator_history_store.clear = MagicMock(
+            side_effect=OSError("/private/path and secret")
+        )
+        self.controller.clearOperatorHistory_(None)
+        status = self.controller.settings_fields["history_operation_status"]
+        self.assertEqual(status.stringValue(), "History could not be cleared.")
+        self.assertEqual(status.accessibilityRole(), "AXStaticText")
+        self.assertEqual(len(self.controller.operator_history_store.state.rows), 1)
+
+        self.controller.operator_history_store.clear = real_clear
+        self.controller.clearOperatorHistory_(None)
+        self.assertEqual(self.controller.operator_history_store.state.rows, ())
+        self.assertEqual(status.stringValue(), "History cleared.")
+        self.assertIn(
+            "No operator history was observed",
+            self.controller.settings_fields["history_summary"].stringValue(),
+        )
+
+    def test_semantic_reel_is_memory_only_product_copy_capped_at_fifty(self) -> None:
+        self._build_history()
+        for index in range(70):
+            self.controller.append_operator_history_reel("Agent became active", index)
+        self.assertEqual(len(self.controller.operator_history_reel), 50)
+        reel = self.controller.settings_fields["history_semantic_reel"].stringValue()
+        self.assertEqual(len(reel.splitlines()), 50)
+        self.assertNotIn("session", reel.casefold())
+        self.assertNotIn("path", reel.casefold())
+
+        from sidepulse.operator_export import HistoryExportV1, encode_history_export
+
+        payload = encode_history_export(
+            HistoryExportV1(time.time(), 7, self.controller.operator_history_store.state.rows)
+        )
+        self.assertNotIn(b"Agent became active", payload)
+
+    def test_local_acknowledge_and_resume_reach_content_free_history_export(self) -> None:
+        snapshot = CanonicalAgentBrowserIntegrationTests._canonical_snapshot(1)
+        state = snapshot.operator_state
+        request = state.requests[0]
+        original_phase = request.phase
+        self.controller.current_operator_state = state
+        self.controller.last_snapshot = snapshot
+        self.controller.operator_triage_saver = lambda _state: None
+        self.controller.settings = dataclass_replace(
+            self.controller.settings,
+            operator_history_retention_days=7,
+        )
+        self.controller.operator_history_store.retention_days = 7
+        work_key = state.works[0].key
+
+        acknowledge = AgentBrowserActionPayload(
+            work_key,
+            state.generation,
+            OperatorActionKind.ACKNOWLEDGE,
+        )
+        self.assertTrue(self.controller.performAgentBrowserPayload_(acknowledge))
+        deadline = time.monotonic() + 2.0
+        while not (
+            self.controller.operator_history_store.state.rows
+            and self.controller.operator_history_store.state.rows[0].acknowledged == 1
+        ):
+            if time.monotonic() >= deadline:
+                self.fail("local acknowledgement did not reach operator history")
+            time.sleep(0.001)
+
+        resume = AgentBrowserActionPayload(
+            work_key,
+            state.generation,
+            OperatorActionKind.RESUME_ESCALATION,
+        )
+        self.assertTrue(self.controller.performAgentBrowserPayload_(resume))
+        deadline = time.monotonic() + 2.0
+        while self.controller.operator_history_store.state.rows[0].sample_count < 2:
+            if time.monotonic() >= deadline:
+                self.fail("local escalation resume did not reach operator history")
+            time.sleep(0.001)
+
+        export_path = Path(self._tmp.name) / "sidepulse-history.json"
+        with patch(
+            "sidepulse.status_bar.choose_operator_export_path",
+            return_value=export_path,
+        ):
+            self.controller.exportOperatorHistory_(None)
+        document = json.loads(export_path.read_text(encoding="utf-8"))
+        self.assertEqual(document["days"][0]["acknowledged"], 1)
+        self.assertEqual(document["days"][0]["sample_count"], 2)
+        serialized = export_path.read_text(encoding="utf-8")
+        self.assertNotIn(request.key.request_id.value, serialized)
+        self.assertNotIn(work_key.work_id.value, serialized)
+        self.assertNotIn(state.works[0].safe_label, serialized)
+        self.assertEqual(self.controller.current_operator_state.requests[0].phase, original_phase)
+        self.assertEqual(self.controller.local_triage_state.acknowledgements, ())
+        self.assertEqual(
+            self.controller.operator_history_reel[-2:],
+            (
+                "Request acknowledged locally",
+                "Request escalation resumed",
+            ),
+        )
+
+    def test_retention_worker_generation_fence_preserves_focus_and_unsaved_range(self) -> None:
+        self._build_history()
+        first_responder = self.controller.settings_fields["history_range_controls"][30]
+        self.controller.settings_window.makeFirstResponder_(first_responder)
+        self.controller.operator_history_range_days = 30
+        accepted = []
+        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = (
+            lambda selector, payload, _wait: (
+                accepted.append((selector, payload))
+                if selector == "applyOperatorHistoryRetentionResult:"
+                else None
+            )
+        )
+
+        self.controller.start_operator_history_retention_change(7)
+        deadline = time.monotonic() + 2.0
+        while not accepted:
+            if time.monotonic() >= deadline:
+                self.fail("first retention worker did not publish")
+            time.sleep(0.001)
+        stale = accepted.pop()[1]
+        self.controller.start_operator_history_retention_change(30)
+        deadline = time.monotonic() + 2.0
+        while not accepted:
+            if time.monotonic() >= deadline:
+                self.fail("second retention worker did not publish")
+            time.sleep(0.001)
+        current = accepted.pop()[1]
+        self.controller.applyOperatorHistoryRetentionResult_(stale)
+        self.assertEqual(self.controller.settings.operator_history_retention_days, 0)
+        self.controller.applyOperatorHistoryRetentionResult_(current)
+        self.assertEqual(self.controller.settings.operator_history_retention_days, 30)
+        self.assertEqual(self.controller.operator_history_range_days, 30)
+        self.assertIs(self.controller.settings_window.firstResponder(), first_responder)
+
+        for retention in (90, 0, 7):
+            self.controller.start_operator_history_retention_change(retention)
+            deadline = time.monotonic() + 2.0
+            while not accepted:
+                if time.monotonic() >= deadline:
+                    self.fail(f"{retention}-day retention worker did not publish")
+                time.sleep(0.001)
+            self.controller.applyOperatorHistoryRetentionResult_(accepted.pop()[1])
+            self.assertEqual(
+                self.controller.settings.operator_history_retention_days,
+                retention,
+            )
+
+    def test_retention_worker_prunes_the_latest_locked_state_without_losing_a_row(self) -> None:
+        day = self._day()
+        self.controller.operator_history_store.retention_days = 30
+        self.controller.operator_history_store.state = OperatorHistoryState((day,))
+        accepted = []
+        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = (
+            lambda selector, payload, _wait: accepted.append((selector, payload))
+        )
+
+        with self.controller._operator_history_lock:
+            self.controller.start_operator_history_retention_change(7)
+            self.assertTrue(self.controller.operator_history_store.add_rows((day,)))
+
+        deadline = time.monotonic() + 2.0
+        while not accepted:
+            if time.monotonic() >= deadline:
+                self.fail("retention worker did not publish")
+            time.sleep(0.001)
+        selector, payload = accepted.pop()
+        self.assertEqual(selector, "applyOperatorHistoryRetentionResult:")
+        self.controller.applyOperatorHistoryRetentionResult_(payload)
+
+        retained = self.controller.operator_history_store.state.rows
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0].started, 2)
+        self.assertEqual(retained[0].sample_count, 8)
+
+    def test_history_reflows_at_two_hundred_percent_with_keyboard_visual_order(self) -> None:
+        from AppKit import NSUserInterfaceLayoutOrientationVertical
+
+        self.controller.semantic_text_scale_percent = 200
+        pane = self._build_history()
+        pane.layoutSubtreeIfNeeded()
+        manifest = self.controller.settings_fields["history_field_manifest"]
+        disclosure = self.controller.settings_fields["history_retention_disclosure"]
+        self.assertFalse(manifest.usesSingleLineMode())
+        self.assertFalse(disclosure.usesSingleLineMode())
+        self.assertGreaterEqual(manifest.font().pointSize(), 22.0)
+        order = self.controller.settings_fields["history_keyboard_order"]
+        self.assertEqual(order[0].title(), "Off")
+        self.assertEqual(order[-1].title(), "Clear History")
+        self.assertTrue(all(control.acceptsFirstResponder() for control in order))
+        self.assertTrue(
+            all(
+                current.nextKeyView() is following
+                for current, following in zip(
+                    order,
+                    (*order[1:], order[0]),
+                    strict=True,
+                )
+            )
+        )
+        self.assertEqual(
+            self.controller.settings_fields["history_retention_group"].orientation(),
+            NSUserInterfaceLayoutOrientationVertical,
+        )
+
+
 class ScreenBarSettingsTakeEffectImmediatelyTests(unittest.TestCase):
     """Regression guard: toggling a Screen Bar geometry/drawing setting
     (Alcove compatibility, wraps-menu-bar) must reposition the Screen Bar
@@ -8440,6 +10158,29 @@ class TranscriptFallbackTests(unittest.TestCase):
         self.assertEqual(self.controller.monitor.statuses_by_key, before)
         self.assertEqual(fake.calls, 2)
 
+    def test_typed_hook_hint_reconciles_the_persisted_source_then_refreshes(self) -> None:
+        hint = ProviderRefreshHint(
+            SourceKey("codex", "hooks", "global", "live_agent_events"),
+            EventToken("event:typed-live-update"),
+        )
+        log_path = Path("/private/sidepulse/codex.jsonl")
+
+        with (
+            patch(
+                "sidepulse.status_bar.detect_log_path",
+                return_value=log_path,
+            ),
+            patch.object(
+                self.controller.monitor,
+                "reconcile_refresh_hint",
+            ) as reconcile,
+            patch.object(self.controller, "schedule_event_refresh") as schedule,
+        ):
+            self.controller.handle_hook_event_message(hint)
+
+        reconcile.assert_called_once_with(hint, log_path=log_path)
+        schedule.assert_called_once_with()
+
 
 class SignalEngineTests(unittest.TestCase):
     def test_default_styles_render_the_pre_engine_programs_byte_for_byte(self) -> None:
@@ -8523,11 +10264,6 @@ class SignalStyleCardTests(unittest.TestCase):
         self.controller.show_settings_window()
         self.controller.ensure_all_settings_panes()
 
-    def tearDown(self) -> None:
-        timer = getattr(self.controller, "signal_preview_timer", None)
-        if timer is not None:
-            timer.invalidate()
-
     def test_every_signal_gets_a_full_style_card(self) -> None:
         from sidepulse import signals
 
@@ -8551,7 +10287,9 @@ class SignalStyleCardTests(unittest.TestCase):
     def test_speed_slider_saves_the_style_and_updates_the_preview(self) -> None:
         slider = self.controller.settings_fields.get("signal_speed:calendar")
         slider.setDoubleValue_(4.2)
-        self.controller.setSignalSpeed_(slider)
+        with patch.object(self.controller, "refresh_") as refresh:
+            self.controller.setSignalSpeed_(slider)
+        refresh.assert_called_once_with(None)
         self.assertAlmostEqual(
             self.controller.settings.signal_style("calendar").speed_seconds, 4.2, places=5
         )
@@ -8676,32 +10414,36 @@ class EscalationControllerTests(unittest.TestCase):
 
     def test_soft_asks_never_escalate(self) -> None:
         # A finished turn that merely ENDED with a question must not ramp
-        # toward a chime -- only tracked requests (PermissionRequest,
-        # actionable notifications, errors) escalate.
+        # toward a chime -- only tracked live requests (PermissionRequest
+        # and actionable notifications) escalate.
         soft = (_status("codex", AgentMode.WAITING_FOR_INPUT, event_name="Stop"),)
         self.controller.track_ask_blocked(soft)
         self.assertIsNone(self.controller.ask_blocked_since)
 
-    def test_blocked_episode_tracking_and_flash_timer_lifecycle(self) -> None:
+    def test_blocked_episode_tracking_keeps_stage_two_static_and_nonblank(self) -> None:
         asking = (_status("codex", AgentMode.WAITING_FOR_INPUT),)
         self.controller.track_ask_blocked(asking)
         self.assertIsNotNone(self.controller.ask_blocked_since)
-        started = self.controller.ask_blocked_since
-        # Staying blocked keeps the ORIGINAL episode start.
+        # A terminal failure ends the live-request episode.
         self.controller.track_ask_blocked((_status("codex", AgentMode.BLOCKED_ERROR),))
-        self.assertEqual(self.controller.ask_blocked_since, started)
+        self.assertIsNone(self.controller.ask_blocked_since)
 
-        # Age the episode past stage 2: the menu-bar flash timer starts.
+        # Age the episode past stage 2: attention stays semantic and static.
         self.controller.ask_blocked_by_agent = {"codex": time.monotonic() - 200.0}
         self.controller.ask_blocked_since = time.monotonic() - 200.0
-        self.controller.apply_escalation()
+        self.controller.status_item = MagicMock()
+        button = self.controller.status_item.button.return_value
+        with patch.object(self.status_bar, "NSTimer") as timer_api:
+            self.controller.apply_escalation()
         self.assertGreaterEqual(self.controller.current_escalation_stage(), 2)
-        self.assertIsNotNone(self.controller.escalation_flash_timer)
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.assert_not_called()
+        self.assertNotIn(call(""), button.setTitle_.call_args_list)
+        self.assertFalse(hasattr(self.controller, "escalationFlashTick_"))
 
-        # Any non-ask state ends the episode and stops the flash.
+        # Any non-ask state ends the episode without a blank intermediate frame.
         self.controller.track_ask_blocked((_status("codex", AgentMode.WORKING),))
         self.assertIsNone(self.controller.ask_blocked_since)
-        self.assertIsNone(self.controller.escalation_flash_timer)
+        self.assertNotIn(call(""), button.setTitle_.call_args_list)
 
     def test_escalation_follows_the_oldest_current_ask_per_agent(self) -> None:
         # Agent A blocked for ages, agent B just asked; answering A must
@@ -8784,6 +10526,963 @@ class HardeningTests(unittest.TestCase):
             self.assertEqual(len(small.read_text().splitlines()), 3)
 
 
+class PrivateStateSecurityTests(unittest.TestCase):
+    @staticmethod
+    def _mode(path: Path) -> int:
+        import stat
+
+        return stat.S_IMODE(path.lstat().st_mode)
+
+    def test_audit_omits_prompt_fallback_and_raw_event_copy(self) -> None:
+        from sidepulse.audit import status_audit_record
+
+        prompt_event = parse_log_line(
+            "claude",
+            json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "private-session",
+                    "prompt": "private prompt body",
+                    "authorization": "Bearer private-token",
+                    "logged_at": "2026-08-12T12:00:00Z",
+                }
+            ),
+        )
+        self.assertIsNotNone(prompt_event)
+        prompt_record = status_audit_record(prompt_event, None)
+        self.assertEqual(prompt_record["message"], "")
+        self.assertEqual(prompt_record["raw_preview"], "")
+
+        notification = parse_log_line(
+            "claude",
+            json.dumps(
+                {
+                    "hook_event_name": "Notification",
+                    "session_id": "ask-session",
+                    "notification_type": "idle_prompt",
+                    "message": "Claude is waiting for your input",
+                    "logged_at": "2026-08-12T12:01:00Z",
+                }
+            ),
+        )
+        self.assertIsNotNone(notification)
+        notification_record = status_audit_record(notification, None)
+        self.assertEqual(
+            notification_record["message"],
+            "Claude is waiting for your input",
+        )
+        self.assertEqual(notification_record["raw_preview"], "")
+
+        assistant_body = parse_log_line(
+            "claude",
+            json.dumps(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": "completion-session",
+                    "last_assistant_message": "private assistant response",
+                    "logged_at": "2026-08-12T12:02:00Z",
+                }
+            ),
+        )
+        self.assertIsNotNone(assistant_body)
+        assistant_record = status_audit_record(assistant_body, None)
+        self.assertEqual(assistant_record["message"], "")
+        self.assertEqual(assistant_record["raw_preview"], "")
+
+    def test_sensitive_entrypoints_create_owner_only_files(self) -> None:
+        from sidepulse import usage_stats
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            previous = os.umask(0)
+            try:
+                settings_path = base / "settings" / "settings.json"
+                save_settings(
+                    AgentMonitorSettings().with_escalation_webhook_url(
+                        "https://private.example/hook"
+                    ),
+                    settings_path,
+                )
+
+                hook_path = base / "hooks" / "codex.jsonl"
+                write_hook_payload(
+                    "codex",
+                    hook_path,
+                    json.dumps(
+                        {
+                            "hook_event_name": "Stop",
+                            "session_id": "codex-session",
+                            "last_assistant_message": "private response",
+                            "authorization": "Bearer private-token",
+                        }
+                    ),
+                )
+                hook_obj = json.loads(hook_path.read_text())
+                event = hook_obj["event"]
+                self.assertEqual(event["hook_event_name"], "Stop")
+                self.assertEqual(event["session_id"], "codex-session")
+                self.assertEqual(event["authorization"], "[REDACTED]")
+                self.assertEqual(event["last_assistant_message"], "[REDACTED]")
+
+                audit_path = base / "audit" / "event-status.jsonl"
+                parsed = parse_log_line("codex", json.dumps(hook_obj))
+                self.assertIsNotNone(parsed)
+                append_status_audit_record(parsed, None, path=audit_path)
+
+                latest_path = base / "state" / "latest.json"
+                monitor = LiveAgentMonitor(latest_state_path=latest_path)
+                live_event = parse_log_line(
+                    "claude",
+                    json.dumps(
+                        {
+                            "hook_event_name": "PreToolUse",
+                            "session_id": "claude-session",
+                            "tool_name": "Bash",
+                            "logged_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    ),
+                )
+                self.assertIsNotNone(live_event)
+                monitor.ingest_record(live_event)
+
+                cache_path = base / "usage" / "usage-cache.json"
+                usage_stats.scan_usage(
+                    base / "missing-claude-root",
+                    cache_path,
+                    codex_root=base / "missing-codex-root",
+                )
+            finally:
+                os.umask(previous)
+
+            for directory in (
+                settings_path.parent,
+                hook_path.parent,
+                audit_path.parent,
+                latest_path.parent,
+                cache_path.parent,
+            ):
+                self.assertEqual(self._mode(directory), 0o700, directory)
+            for path in (
+                settings_path,
+                hook_path,
+                audit_path,
+                latest_path,
+                cache_path,
+            ):
+                self.assertEqual(self._mode(path), 0o600, path)
+
+    def test_atomic_state_entrypoints_refuse_preplanted_symlink_targets(self) -> None:
+        from sidepulse import usage_stats
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            outside = base / "outside.json"
+            outside.write_text("outside stays unchanged")
+
+            settings_link = base / "settings.json"
+            settings_link.symlink_to(outside)
+            with self.assertRaises(OSError):
+                save_settings(AgentMonitorSettings(), settings_link)
+            self.assertTrue(settings_link.is_symlink())
+
+            latest_link = base / "latest.json"
+            latest_link.symlink_to(outside)
+            monitor = LiveAgentMonitor(latest_state_path=latest_link)
+            event = parse_log_line(
+                "claude",
+                json.dumps(
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "session_id": "session",
+                        "tool_name": "Bash",
+                        "logged_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ),
+            )
+            self.assertIsNotNone(event)
+            monitor.ingest_record(event)
+            self.assertTrue(latest_link.is_symlink())
+            self.assertTrue(monitor._latest_state_dirty)
+            self.assertEqual(monitor._latest_state_written_at, 0.0)
+
+            cache_link = base / "usage-cache.json"
+            cache_link.symlink_to(outside)
+            usage_stats.scan_usage(base / "missing", cache_link)
+            self.assertTrue(cache_link.is_symlink())
+            self.assertEqual(outside.read_text(), "outside stays unchanged")
+
+    def test_sensitive_state_reads_refuse_preplanted_symlinks(self) -> None:
+        from sidepulse import usage_stats
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            external_settings = base / "external-settings.json"
+            external_settings.write_text(
+                json.dumps(AgentMonitorSettings().with_setup_screen_completed(True).to_dict())
+            )
+            settings_link = base / "settings.json"
+            settings_link.symlink_to(external_settings)
+            self.assertEqual(load_settings(settings_link), AgentMonitorSettings())
+            self.assertTrue(settings_link.is_symlink())
+
+            external_latest = base / "external-latest.json"
+            external_latest.write_text(
+                json.dumps(
+                    {
+                        "updated_at": "2026-08-12T12:00:00Z",
+                        "statuses": [
+                            {
+                                "provider": "claude",
+                                "agent_id": "claude:session:external",
+                                "display_name": "external private task",
+                                "mode": "working",
+                                "updated_at": "2026-08-12T12:00:00Z",
+                                "event_name": "PreToolUse",
+                                "session_id": "external",
+                            }
+                        ]
+                    }
+                )
+            )
+            latest_link = base / "latest.json"
+            latest_link.symlink_to(external_latest)
+            external_work_key = WorkKey(
+                SourceKey("claude", "hooks", "global", "live_agent_events"),
+                WorkIdentifier("external"),
+            )
+            direct_snapshot = LiveAgentMonitor(
+                latest_state_path=external_latest,
+                restore_work_keys=(external_work_key,),
+            ).snapshot()
+            self.assertEqual(
+                tuple(status.work_key for status in direct_snapshot.stale_statuses),
+                (external_work_key,),
+            )
+            monitor = LiveAgentMonitor(
+                latest_state_path=latest_link,
+                restore_work_keys=(external_work_key,),
+            )
+            snapshot = monitor.snapshot()
+            self.assertEqual(snapshot.statuses, ())
+            self.assertEqual(snapshot.stale_statuses, ())
+            self.assertIsNotNone(snapshot.operator_state)
+            self.assertEqual(snapshot.operator_state.works, ())
+            self.assertTrue(latest_link.is_symlink())
+
+            external_cache = base / "external-cache.json"
+            external_cache.write_text(
+                json.dumps(
+                    {
+                        "version": usage_stats.CACHE_VERSION,
+                        "files": {},
+                        "sessions": [],
+                        "models": [],
+                        "dedupes": [],
+                        "dedupe_secret": "00" * 32,
+                    }
+                )
+            )
+            self.assertEqual(usage_stats._load_cache(external_cache)["files"], {})
+            cache_link = base / "usage-cache.json"
+            cache_link.symlink_to(external_cache)
+            self.assertEqual(usage_stats._load_cache(cache_link), {})
+            self.assertTrue(cache_link.is_symlink())
+
+    def test_existing_owned_state_reads_tighten_their_directories(self) -> None:
+        from sidepulse import usage_stats
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            settings_dir = base / "settings-state"
+            latest_dir = base / "latest-state"
+            cache_dir = base / "usage-state"
+            for directory in (settings_dir, latest_dir, cache_dir):
+                directory.mkdir(mode=0o777)
+                directory.chmod(0o777)
+
+            settings_path = settings_dir / "settings.json"
+            expected_settings = AgentMonitorSettings().with_setup_screen_completed(True)
+            settings_path.write_text(json.dumps(expected_settings.to_dict()))
+            self.assertEqual(load_settings(settings_path), expected_settings)
+
+            latest_path = latest_dir / "latest.json"
+            latest_path.write_text(
+                json.dumps(
+                    {
+                        "updated_at": "2026-08-12T12:00:00Z",
+                        "statuses": [
+                            {
+                                "provider": "claude",
+                                "agent_id": "claude:session:owned",
+                                "display_name": "owned state",
+                                "mode": "working",
+                                "updated_at": "2026-08-12T12:00:00Z",
+                                "event_name": "PreToolUse",
+                                "session_id": "owned",
+                            }
+                        ]
+                    }
+                )
+            )
+            expected_work_key = WorkKey(
+                SourceKey("claude", "hooks", "global", "live_agent_events"),
+                WorkIdentifier("owned"),
+            )
+            monitor = LiveAgentMonitor(
+                latest_state_path=latest_path,
+                restore_work_keys=(expected_work_key,),
+            )
+            snapshot = monitor.snapshot()
+            self.assertEqual(snapshot.statuses, ())
+            self.assertEqual(len(snapshot.stale_statuses), 1)
+            restored = snapshot.stale_statuses[0]
+            self.assertEqual(restored.work_key, expected_work_key)
+            self.assertEqual(restored.agent_id, "claude:session:owned")
+            self.assertEqual(restored.display_name, "Claude owned")
+            self.assertEqual(restored.mode, AgentMode.WORKING)
+            self.assertEqual(snapshot.operator_events, ())
+            self.assertIsNotNone(snapshot.operator_state)
+            self.assertEqual(
+                snapshot.operator_state.works[0].source_freshness,
+                SourceFreshness.RESTORED,
+            )
+
+            cache_path = cache_dir / "usage-cache.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": usage_stats.CACHE_VERSION,
+                        "files": {},
+                        "sessions": [],
+                        "models": [],
+                        "dedupes": [],
+                        "dedupe_secret": "00" * 32,
+                    }
+                )
+            )
+            self.assertEqual(usage_stats._load_cache(cache_path)["files"], {})
+
+            for directory in (settings_dir, latest_dir, cache_dir):
+                self.assertEqual(self._mode(directory), 0o700, directory)
+            for path in (settings_path, latest_path, cache_path):
+                self.assertEqual(self._mode(path), 0o600, path)
+
+    def test_corrupt_settings_recovery_is_private_and_keeps_first_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            base.chmod(0o777)
+            path = base / "settings.json"
+            path.write_text("{broken", encoding="utf-8")
+            path.chmod(0o644)
+
+            self.assertEqual(load_settings(path), AgentMonitorSettings())
+            backup = base / "settings.json.corrupt"
+            self.assertEqual(backup.read_text(), "{broken")
+            self.assertEqual(self._mode(base), 0o700)
+            self.assertEqual(self._mode(backup), 0o600)
+
+            path.write_text("[]", encoding="utf-8")
+            load_settings(path)
+            self.assertEqual(backup.read_text(), "{broken")
+            self.assertFalse(path.exists())
+
+    def test_redacted_hook_lines_still_classify_asks_completions_and_grok(self) -> None:
+        from sidepulse.hook import write_hook_line
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            claude_log = base / "claude.jsonl"
+            write_hook_payload(
+                "claude",
+                claude_log,
+                json.dumps(
+                    {
+                        "hook_event_name": "Notification",
+                        "session_id": "ask-session",
+                        "notification_type": "idle_prompt",
+                        "message": "Claude is waiting for your input",
+                        "prompt": "private prompt",
+                        "tool_input": {"command": "private command"},
+                    }
+                ),
+            )
+            ask_line = json.loads(claude_log.read_text())
+            self.assertEqual(ask_line["prompt"], "[REDACTED]")
+            self.assertEqual(ask_line["tool_input"], "[REDACTED]")
+            ask = parse_log_line("claude", json.dumps(ask_line))
+            self.assertIsNotNone(ask)
+            ask_status = collector_module.status_from_event(ask)
+            self.assertIsNotNone(ask_status)
+            self.assertEqual(ask_status.mode, AgentMode.WAITING_FOR_INPUT)
+
+            grok_log = base / "grok.jsonl"
+            payload = json.dumps(
+                {
+                    "hookEventName": "notification",
+                    "sessionId": "grok-session",
+                    "workspaceRoot": "/tmp/project",
+                    "transcriptPath": "/Users/person/.grok/sessions/private/updates.jsonl",
+                    "notificationType": "idle_prompt",
+                    "message": "Turn complete",
+                    "authorization": "Bearer private",
+                }
+            )
+            with patch("sidepulse.hook.detect_log_path", return_value=grok_log):
+                provider, routed_path, line = routed_hook_payload(
+                    "claude", claude_log, payload
+                )
+            write_hook_line(routed_path, line)
+
+            self.assertEqual(provider, "grok")
+            stored = json.loads(grok_log.read_text())
+            self.assertEqual(stored["transcriptPath"], "[REDACTED]")
+            self.assertEqual(stored["authorization"], "[REDACTED]")
+            completed = parse_log_line("grok", json.dumps(stored))
+            self.assertIsNotNone(completed)
+            completed_status = collector_module.status_from_event(completed)
+            self.assertIsNotNone(completed_status)
+            self.assertEqual(completed_status.mode, AgentMode.COMPLETED)
+
+    def test_hook_log_main_redacts_before_ipc_storage_and_audit_fanout(self) -> None:
+        import io
+
+        from sidepulse.hook import hook_log_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "claude.jsonl"
+            payload = json.dumps(
+                {
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": "fanout-session",
+                    "request_id": "permission:fanout",
+                    "message": "Claude is waiting for your input",
+                    "prompt": "private prompt body",
+                    "tool_input": {"command": "private command"},
+                    "authorization": "Bearer private-token",
+                }
+            )
+            observations = []
+
+            def observe_hint(hint):
+                observations.append(("hint", log.read_text(), hint))
+                return True
+
+            def observe_audit(record):
+                observations.append(("audit", log.read_text(), record))
+
+            with (
+                patch("sidepulse.hook.sys.stdin", io.StringIO(payload)),
+                patch(
+                    "sidepulse.hook.send_refresh_hint",
+                    side_effect=observe_hint,
+                ),
+                patch(
+                    "sidepulse.hook.write_hook_status_audit",
+                    side_effect=observe_audit,
+                ),
+            ):
+                self.assertEqual(hook_log_main("claude", log), 0)
+
+            stored = json.loads(log.read_text())
+            self.assertEqual([stage for stage, _text, _value in observations], ["hint", "audit"])
+            self.assertTrue(all(json.loads(text) == stored for _stage, text, _value in observations))
+            self.assertEqual(stored["record_kind"], "normalized")
+            self.assertEqual(stored["provider_id"], "claude")
+            self.assertEqual(stored["provider_work_id"], "fanout-session")
+            self.assertEqual(stored["provider_request_id"], "permission:fanout")
+            hint = observations[0][2]
+            self.assertIsInstance(hint, ProviderRefreshHint)
+            self.assertEqual(
+                hint.source_key,
+                SourceKey("claude", "hooks", "global", "live_agent_events"),
+            )
+            self.assertEqual(hint.event_token.value, stored["event_token"])
+            serialized = json.dumps(stored, sort_keys=True)
+            for forbidden in (
+                "Claude is waiting for your input",
+                "private prompt body",
+                "private command",
+                "private-token",
+                "message",
+                "prompt",
+                "tool_input",
+                "authorization",
+            ):
+                self.assertNotIn(forbidden, serialized)
+            self.assertNotIn("private", repr(observations[1][2]).lower())
+
+    def test_cursor_hook_main_persists_only_opaque_identity_and_returns_json(self) -> None:
+        import io
+
+        from sidepulse.hook import hook_log_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "cursor.jsonl"
+            output = io.StringIO()
+            payload = json.dumps(
+                {
+                    "conversation_id": "2db7c731-6f6c-4a60-b92c-6c7af563341f",
+                    "generation_id": "5a65e8d5-cd1f-4a4a-883b-dd5d17dc7862",
+                    "model": "claude-4-sonnet",
+                    "model_id": "claude-4-sonnet",
+                    "model_params": [{"id": "temperature", "value": "0.2"}],
+                    "hook_event_name": "stop",
+                    "cursor_version": "1.7.8",
+                    "workspace_roots": [
+                        "/Users/private-company/alpha",
+                        "/Users/private-company/beta",
+                    ],
+                    "user_email": "private-account@example.test",
+                    "transcript_path": "/Users/private-company/cursor.jsonl",
+                    "status": "completed",
+                    "loop_count": 0,
+                }
+            )
+            with (
+                patch("sidepulse.hook.sys.stdin", io.StringIO(payload)),
+                patch("sidepulse.hook.sys.stdout", output),
+                patch("sidepulse.hook.send_refresh_hint", return_value=True),
+            ):
+                self.assertEqual(hook_log_main("cursor", log), 0)
+
+            stored = json.loads(log.read_text())
+            self.assertEqual(output.getvalue(), "{}\n")
+            self.assertEqual(stored["provider_id"], "cursor")
+            self.assertEqual(stored["event_name"], "stop")
+            self.assertEqual(
+                stored["provider_work_id"],
+                "27ce7b1041ec353270cba707d3b4a7128b13160e7097b1b35aba6b61bace5a14",
+            )
+            serialized = json.dumps(stored, sort_keys=True)
+            for forbidden in (
+                "2db7c731-6f6c-4a60-b92c-6c7af563341f",
+                "/Users/private-company/alpha",
+                "/Users/private-company/beta",
+                "private-account@example.test",
+                "/Users/private-company/cursor.jsonl",
+                "workspace_roots",
+            ):
+                self.assertNotIn(forbidden, serialized)
+
+    def test_hermes_hook_main_preserves_typed_turn_outcome_without_raw_copy(self) -> None:
+        import io
+
+        from sidepulse.hook import hook_log_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "hermes.jsonl"
+            payload = json.dumps(
+                {
+                    "hook_event_name": "on_session_end",
+                    "tool_name": None,
+                    "tool_input": None,
+                    "session_id": "sess_abc123",
+                    "cwd": "/Users/private-company/hermes",
+                    "extra": {
+                        "task_id": "task-private-01",
+                        "turn_id": "turn_abc123",
+                        "completed": False,
+                        "failed": True,
+                        "interrupted": False,
+                        "turn_exit_reason": "provider_error",
+                        "model": "claude-sonnet-4-6",
+                        "platform": "cli",
+                    },
+                }
+            )
+            with (
+                patch("sidepulse.hook.sys.stdin", io.StringIO(payload)),
+                patch("sidepulse.hook.send_refresh_hint", return_value=True),
+            ):
+                self.assertEqual(hook_log_main("hermes", log), 0)
+
+            stored = json.loads(log.read_text())
+            self.assertEqual(stored["provider_id"], "hermes")
+            self.assertEqual(stored["provider_work_id"], "sess_abc123")
+            self.assertEqual(stored["event_name"], "stop_failure")
+            serialized = json.dumps(stored, sort_keys=True)
+            for forbidden in (
+                "/Users/private-company/hermes",
+                "task-private-01",
+                "provider_error",
+                "claude-sonnet-4-6",
+                "extra",
+            ):
+                self.assertNotIn(forbidden, serialized)
+
+    def test_active_hook_append_compacts_tail_and_skips_symlinked_jsonl(self) -> None:
+        from sidepulse import audit
+        from sidepulse.hook import write_hook_line
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            active = base / "active.jsonl"
+            active.write_text("".join(f'{{"n":{index}}}\n' for index in range(6)))
+            with (
+                patch.object(audit, "TRIM_THRESHOLD_BYTES", 1),
+                patch.object(audit, "TRIM_KEEP_LINES", 3),
+            ):
+                write_hook_line(active, {"n": 6})
+            self.assertEqual(
+                [json.loads(line)["n"] for line in active.read_text().splitlines()],
+                [4, 5, 6],
+            )
+            self.assertEqual(self._mode(active), 0o600)
+
+            outside = base / "outside.jsonl"
+            outside.write_text('{"secret":"outside"}\n')
+            symlink_state = base / "symlink-state"
+            symlink_state.mkdir()
+            linked = symlink_state / "linked.jsonl"
+            linked.symlink_to(outside)
+            with patch.object(audit, "TRIM_THRESHOLD_BYTES", 1):
+                self.assertEqual(audit.trim_oversized_logs(symlink_state), 0)
+            self.assertTrue(linked.is_symlink())
+            self.assertEqual(outside.read_text(), '{"secret":"outside"}\n')
+
+    def test_socket_is_private_before_listen_and_remains_functional(self) -> None:
+        import socket as socket_module
+
+        real_socket = socket_module.socket
+        listen_modes = []
+
+        class TrackingSocket:
+            def __init__(self, *args, **kwargs):
+                self.inner = real_socket(*args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+            def listen(self, backlog):
+                listen_modes.append(self._test_path and self._mode(self._test_path))
+                return self.inner.listen(backlog)
+
+            def _mode(self, path):
+                return PrivateStateSecurityTests._mode(path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            socket_path = Path(tmp) / "state" / "events.sock"
+            received = []
+            hint = ProviderRefreshHint(
+                SourceKey("claude", "hooks", "global", "live_agent_events"),
+                EventToken("event:socket-session"),
+            )
+
+            def factory(*args, **kwargs):
+                wrapped = TrackingSocket(*args, **kwargs)
+                wrapped._test_path = socket_path
+                return wrapped
+
+            server = HookEventServer(
+                received.append,
+                socket_path=socket_path,
+            )
+            with patch("sidepulse.ipc.socket.socket", side_effect=factory):
+                server.start()
+            try:
+                self.assertEqual(listen_modes, [0o600])
+                self.assertEqual(self._mode(socket_path.parent), 0o700)
+                self.assertFalse(
+                    send_hook_event(
+                        "claude",
+                        {"hook_event_name": "Stop", "session_id": "socket-session"},
+                        socket_path=socket_path,
+                        timeout=0.5,
+                    )
+                )
+                self.assertTrue(
+                    send_refresh_hint(
+                        hint,
+                        socket_path=socket_path,
+                        timeout=0.5,
+                    )
+                )
+                deadline = time.time() + 1
+                while not received and time.time() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(received, [hint])
+            finally:
+                server.stop()
+
+    def test_ipc_refuses_symlink_socket_and_does_not_unlink_swapped_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            outside = base / "outside"
+            outside.write_text("outside")
+            socket_path = base / "events.sock"
+            socket_path.symlink_to(outside)
+            server = HookEventServer(lambda _provider, _line: None, socket_path=socket_path)
+            with self.assertRaises(OSError):
+                server.start()
+            self.assertTrue(socket_path.is_symlink())
+
+            socket_path.unlink()
+            server.start()
+            socket_path.unlink()
+            socket_path.symlink_to(outside)
+            server.stop()
+            self.assertTrue(socket_path.is_symlink())
+            self.assertEqual(outside.read_text(), "outside")
+
+    def test_openclaw_installer_round_trip_is_private_and_backups_are_bounded(self) -> None:
+        from sidepulse.install import BACKUP_MAX_FILES, backup_file
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "openclaw.json"
+            log = base / "logs" / "openclaw.jsonl"
+            original = {"gateway": {"port": 18789}, "unknown": {"keep": True}}
+            config.write_text(json.dumps(original))
+            config.chmod(0o644)
+
+            result = install_openclaw_hooks(log, config, python_executable="python3")
+            handler_dir = base / "hooks" / "sidepulse-status"
+            self.assertTrue(result.changed)
+            self.assertEqual(json.loads(config.read_text())["unknown"], {"keep": True})
+            self.assertEqual(result.backup_path.read_text(), json.dumps(original))
+            preserved_config = result.backup_path.read_text()
+            unrelated_nested = base / "unrelated-provider-state"
+            unrelated_nested.mkdir(mode=0o755)
+            unrelated_nested.chmod(0o755)
+            for directory in (base, log.parent, handler_dir):
+                self.assertEqual(self._mode(directory), 0o700, directory)
+            for path in (
+                config,
+                result.backup_path,
+                log,
+                handler_dir / "handler.ts",
+                handler_dir / "HOOK.md",
+            ):
+                self.assertEqual(self._mode(path), 0o600, path)
+
+            for index in range(BACKUP_MAX_FILES + 3):
+                config.write_text(str(index))
+                backup_file(config)
+            backups = sorted(base.glob("openclaw.json.bak.*"))
+            self.assertEqual(len(backups), BACKUP_MAX_FILES)
+            self.assertTrue(all(self._mode(path) == 0o600 for path in backups))
+            self.assertEqual(self._mode(unrelated_nested), 0o755)
+
+            config.write_text(json.dumps(json.loads(preserved_config)))
+            install_openclaw_hooks(log, config, python_executable="python3")
+            uninstall_openclaw_hooks(log, config)
+            self.assertEqual(json.loads(config.read_text())["unknown"], {"keep": True})
+
+    def test_openclaw_install_and_uninstall_refuse_symlink_hook_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "openclaw.json"
+            log = base / "openclaw.jsonl"
+            original = {"gateway": {"port": 18789}}
+            config.write_text(json.dumps(original))
+            outside = base / "outside-hooks"
+            outside.mkdir()
+            marker = outside / "marker.txt"
+            marker.write_text("outside remains")
+            hook_parent = base / "hooks"
+            hook_parent.mkdir()
+            hook_dir = hook_parent / "sidepulse-status"
+            hook_dir.symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaises(OSError):
+                install_openclaw_hooks(log, config, python_executable="python3")
+            self.assertEqual(json.loads(config.read_text()), original)
+            self.assertTrue(hook_dir.is_symlink())
+            self.assertEqual(marker.read_text(), "outside remains")
+
+            managed = {
+                "gateway": {"port": 18789},
+                "hooks": {
+                    "internal": {
+                        "enabled": True,
+                        "entries": {"sidepulse-status": {"enabled": True}},
+                    }
+                },
+            }
+            config.write_text(json.dumps(managed))
+            with self.assertRaises(OSError):
+                uninstall_openclaw_hooks(log, config)
+            self.assertEqual(json.loads(config.read_text()), managed)
+            self.assertTrue(hook_dir.is_symlink())
+            self.assertEqual(marker.read_text(), "outside remains")
+
+    def test_ipc_clients_refuse_symlink_redirect_to_live_socket(self) -> None:
+        from sidepulse.ipc import another_instance_alive
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            real_socket_path = base / "real" / "events.sock"
+            received = []
+            server = HookEventServer(
+                lambda provider, line: received.append((provider, line)),
+                socket_path=real_socket_path,
+            )
+            server.start()
+            try:
+                redirected = base / "redirected.sock"
+                redirected.symlink_to(real_socket_path)
+                self.assertFalse(another_instance_alive(redirected))
+                self.assertFalse(
+                    send_hook_event(
+                        "claude",
+                        {"hook_event_name": "Stop", "session_id": "redirected"},
+                        socket_path=redirected,
+                        timeout=0.2,
+                    )
+                )
+                time.sleep(0.05)
+                self.assertEqual(received, [])
+                self.assertTrue(redirected.is_symlink())
+            finally:
+                server.stop()
+
+    def test_ipc_clients_require_same_uid_peer_credentials(self) -> None:
+        import threading
+
+        from sidepulse.ipc import another_instance_alive
+
+        with tempfile.TemporaryDirectory() as tmp:
+            socket_path = Path(tmp) / "events.sock"
+            received = []
+            server = HookEventServer(
+                lambda provider, line: received.append((provider, line)),
+                socket_path=socket_path,
+            )
+            server.start()
+            effective_uid = os.geteuid()
+
+            def peer_uid(_connection):
+                if threading.current_thread() is threading.main_thread():
+                    return effective_uid + 1
+                return effective_uid
+
+            try:
+                with patch(
+                    "sidepulse.ipc.peer_effective_uid",
+                    create=True,
+                    side_effect=peer_uid,
+                ):
+                    self.assertFalse(
+                        send_hook_event(
+                            "claude",
+                            {"hook_event_name": "Stop", "session_id": "wrong-uid"},
+                            socket_path=socket_path,
+                            timeout=0.5,
+                        )
+                    )
+                    self.assertFalse(another_instance_alive(socket_path))
+                    time.sleep(0.05)
+                self.assertEqual(received, [])
+            finally:
+                server.stop()
+
+    def test_ipc_clients_fail_closed_when_peer_credentials_are_unavailable(
+        self,
+    ) -> None:
+        from sidepulse.ipc import another_instance_alive
+
+        with tempfile.TemporaryDirectory() as tmp:
+            socket_path = Path(tmp) / "events.sock"
+            received = []
+            server = HookEventServer(
+                lambda provider, line: received.append((provider, line)),
+                socket_path=socket_path,
+            )
+            server.start()
+            try:
+                with patch(
+                    "sidepulse.ipc.peer_effective_uid",
+                    create=True,
+                    side_effect=OSError("peer credentials unavailable"),
+                ):
+                    self.assertFalse(
+                        send_hook_event(
+                            "claude",
+                            {"hook_event_name": "Stop", "session_id": "no-creds"},
+                            socket_path=socket_path,
+                            timeout=0.5,
+                        )
+                    )
+                    self.assertFalse(another_instance_alive(socket_path))
+                    time.sleep(0.05)
+                self.assertEqual(received, [])
+            finally:
+                server.stop()
+
+    def test_ipc_server_requires_same_uid_and_readable_peer_credentials(self) -> None:
+        effective_uid = os.geteuid()
+        for server_peer in (effective_uid + 1, OSError("unreadable peer")):
+            with self.subTest(server_peer=server_peer):
+                with tempfile.TemporaryDirectory() as tmp:
+                    socket_path = Path(tmp) / "events.sock"
+                    received = []
+                    hint = ProviderRefreshHint(
+                        SourceKey("claude", "hooks", "global", "live_agent_events"),
+                        EventToken("event:server-peer-check"),
+                    )
+
+                    def server_peer_uid(_connection):
+                        if isinstance(server_peer, BaseException):
+                            raise server_peer
+                        return server_peer
+
+                    server = HookEventServer(
+                        received.append,
+                        socket_path=socket_path,
+                        peer_uid_reader=server_peer_uid,
+                    )
+                    server.start()
+
+                    try:
+                        with patch(
+                            "sidepulse.ipc.peer_effective_uid",
+                            return_value=effective_uid,
+                        ):
+                            self.assertTrue(
+                                send_refresh_hint(
+                                    hint,
+                                    socket_path=socket_path,
+                                    timeout=0.5,
+                                )
+                            )
+                            time.sleep(0.05)
+                        self.assertEqual(received, [])
+                    finally:
+                        server.stop()
+
+    def test_ipc_server_rejects_unsupported_provider_before_dispatch(self) -> None:
+        import socket as socket_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            socket_path = Path(tmp) / "events.sock"
+            received = []
+            server = HookEventServer(
+                lambda provider, line: received.append((provider, line)),
+                socket_path=socket_path,
+            )
+            server.start()
+            try:
+                client = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+                try:
+                    client.settimeout(0.5)
+                    client.connect(str(socket_path))
+                    client.sendall(
+                        json.dumps(
+                            {
+                                "provider": "unsupported-provider",
+                                "line": {"hook_event_name": "Stop"},
+                            }
+                        ).encode("utf-8")
+                    )
+                    client.shutdown(socket_module.SHUT_WR)
+                finally:
+                    client.close()
+                time.sleep(0.05)
+                self.assertEqual(received, [])
+            finally:
+                server.stop()
+
+
 class AskInboxAndActionsTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_controller(self)
@@ -8808,7 +11507,7 @@ class AskInboxAndActionsTests(unittest.TestCase):
             idle_visible_seconds=60.0,
         )
         asks = self.status_bar.ask_statuses(snapshot)
-        self.assertEqual({status.provider for status in asks}, {"claude", "devin"})
+        self.assertEqual({status.provider for status in asks}, {"claude"})
 
     def test_badge_counts_two_or_more_asks(self) -> None:
         self.controller.set_status(self.status_bar.STATE_ASK, ask_count=2)
@@ -8892,6 +11591,7 @@ class AskInboxAndActionsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             AgentMonitorSettings().with_focus_profile_rule("x", "Disco")
 
+
     def test_timebox_owns_the_timer_fill_and_drains(self) -> None:
         device = self.status_bar.StatusBarDevice(
             device_id="SidePulsePro",
@@ -8916,6 +11616,169 @@ class AskInboxAndActionsTests(unittest.TestCase):
         self.assertEqual(
             self.controller.active_led_display_kind_for_device(device, None),
             self.status_bar.LED_DISPLAY_AGENT,
+        )
+
+
+class CompletionBatchControllerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.controller.settings = (
+            self.controller.settings.with_completion_notification_enabled(True)
+        )
+        self.notifications: list[str] = []
+        self.webhooks: list[dict] = []
+        self.controller.post_completion_notification = (
+            lambda status: self.notifications.append(status.agent_id)
+        )
+        self.controller.post_webhook = self.webhooks.append
+
+    def _enable_webhooks(self) -> None:
+        self.controller.settings = self.controller.settings.with_webhook_event(
+            "completion", True
+        )
+
+    def _transition(self, *providers: str, reverse: bool = False) -> None:
+        working = [_status(provider, AgentMode.WORKING) for provider in providers]
+        completed = [_status(provider, AgentMode.COMPLETED) for provider in providers]
+        if reverse:
+            working.reverse()
+            completed.reverse()
+        self.controller.track_completions(tuple(working))
+        self.controller.track_completions(tuple(completed))
+
+    def test_notification_delivers_when_visual_sweep_is_disabled(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_completion_sweep_enabled(False)
+        )
+
+        self._transition("codex")
+
+        self.assertEqual(self.notifications, ["codex"])
+        self.assertEqual(self.controller.completion_sweep_until, 0.0)
+
+    def test_webhook_delivers_when_visual_sweep_is_disabled(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_completion_sweep_enabled(False)
+        )
+        self._enable_webhooks()
+
+        self._transition("codex")
+
+        self.assertEqual(
+            [payload["provider"] for payload in self.webhooks],
+            ["codex"],
+        )
+        self.assertEqual(self.controller.completion_sweep_until, 0.0)
+
+    def test_two_same_poll_completions_reach_both_delivery_channels(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_completion_sweep_enabled(False)
+        )
+        self._enable_webhooks()
+
+        self._transition("codex", "claude", reverse=True)
+
+        self.assertEqual(self.notifications, ["claude", "codex"])
+        self.assertEqual(
+            [payload["provider"] for payload in self.webhooks],
+            ["claude", "codex"],
+        )
+
+    def test_notification_failure_does_not_stop_batch_or_webhooks(self) -> None:
+        attempted: list[str] = []
+
+        def notify(status) -> None:
+            attempted.append(status.agent_id)
+            if status.agent_id == "claude":
+                raise RuntimeError("notification failed")
+
+        self.controller.post_completion_notification = notify
+        self.controller.settings = (
+            self.controller.settings.with_completion_sweep_enabled(False)
+        )
+        self._enable_webhooks()
+
+        self._transition("codex", "claude", reverse=True)
+
+        self.assertEqual(attempted, ["claude", "codex"])
+        self.assertEqual(
+            [payload["provider"] for payload in self.webhooks],
+            ["claude", "codex"],
+        )
+
+    def test_webhook_failure_does_not_stop_batch_or_notifications(self) -> None:
+        attempted: list[str] = []
+
+        def webhook(payload) -> None:
+            attempted.append(payload["provider"])
+            if payload["provider"] == "claude":
+                raise RuntimeError("webhook failed")
+
+        self.controller.post_webhook = webhook
+        self.controller.settings = (
+            self.controller.settings.with_completion_sweep_enabled(False)
+        )
+        self._enable_webhooks()
+
+        self._transition("codex", "claude", reverse=True)
+
+        self.assertEqual(attempted, ["claude", "codex"])
+        self.assertEqual(self.notifications, ["claude", "codex"])
+
+    def test_visual_selection_is_stable_without_reducing_delivery_batch(self) -> None:
+        self.controller.settings = self.controller.settings.with_colors(
+            self.controller.settings.colors.with_session_color("claude", "#112233")
+        )
+        self._enable_webhooks()
+
+        self._transition("codex", "claude", reverse=True)
+
+        self.assertEqual(self.controller.completion_sweep_color, "#112233")
+        self.assertEqual(self.notifications, ["claude", "codex"])
+        self.assertEqual(len(self.webhooks), 2)
+
+    def test_last_modes_advance_when_every_channel_is_disabled(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_completion_sweep_enabled(False)
+            .with_completion_notification_enabled(False)
+        )
+
+        self._transition("codex")
+
+        self.assertEqual(
+            self.controller.last_agent_modes,
+            {"codex": AgentMode.COMPLETED},
+        )
+        self.assertEqual(self.notifications, [])
+        self.assertEqual(self.webhooks, [])
+        self.assertEqual(self.controller.all_clear_until, 0.0)
+
+    def test_fresh_completion_plus_stale_working_row_delivers_once(self) -> None:
+        now = datetime.now(timezone.utc)
+        completed = _status("codex", AgentMode.COMPLETED, when=now)
+        stale_working = AgentStatus(
+            provider="codex",
+            agent_id="codex",
+            display_name="Codex",
+            mode=AgentMode.WORKING,
+            updated_at=now - timedelta(seconds=10),
+            event_name="PreToolUse",
+            stale=True,
+        )
+        combined_poll = (completed, stale_working)
+        self.controller.last_agent_modes = {"codex": AgentMode.WORKING}
+
+        self.controller.track_completions(combined_poll)
+        self.controller.track_completions(combined_poll)
+
+        self.assertEqual(self.notifications, ["codex"])
+        self.assertEqual(
+            self.controller.last_agent_modes,
+            {"codex": AgentMode.COMPLETED},
+        )
+        self.assertGreater(
+            self.controller.all_clear_until,
+            self.controller.completion_sweep_until,
         )
 
 
@@ -9140,6 +12003,8 @@ class SubagentAndPhantomAskTests(unittest.TestCase):
         self.assertEqual(status_bar.ask_statuses(snapshot), [])
 
     def test_menu_groups_running_subagents_under_their_parent(self) -> None:
+        from dataclasses import replace
+
         from sidepulse import status_bar
         from sidepulse.settings import AgentMonitorSettings
 
@@ -9153,9 +12018,15 @@ class SubagentAndPhantomAskTests(unittest.TestCase):
         finished = self._status(
             "claude:agent:done1", AgentMode.COMPLETED, session_id="s1"
         )
+        stale_duplicate = replace(
+            self._status(
+                "claude:agent:w0", AgentMode.COMPLETED, session_id="s1"
+            ),
+            stale=True,
+        )
         snapshot = SimpleNamespace(
-            statuses=[main, finished, *workers],
-            stale_statuses=[],
+            statuses=[main, *workers],
+            stale_statuses=[replace(finished, stale=True), stale_duplicate],
             collected_at=datetime.now(timezone.utc),
         )
         target = SimpleNamespace(
@@ -9164,22 +12035,35 @@ class SubagentAndPhantomAskTests(unittest.TestCase):
             status_bar_devices=list,
         )
         menu = status_bar.build_menu(snapshot, status_bar.STATE_WORKING, target)
+        mailbox = menu.itemAtIndex_(0)
+        in_progress = next(
+            mailbox.submenu().itemAtIndex_(index).submenu()
+            for index in range(mailbox.submenu().numberOfItems())
+            if mailbox.submenu().itemAtIndex_(index).title() == "In Progress"
+        )
         rows = [
-            (menu.itemAtIndex_(index).title(), menu.itemAtIndex_(index).indentationLevel())
-            for index in range(menu.numberOfItems())
+            (
+                in_progress.itemAtIndex_(index).title(),
+                in_progress.itemAtIndex_(index).indentationLevel(),
+            )
+            for index in range(in_progress.numberOfItems())
         ]
         indented = [title for title, level in rows if level == 1]
-        # ONE rollup row carries all five running workers in a submenu;
-        # the finished one is gone entirely.
+        # One rollup row carries all workers in a bounded submenu.
         self.assertEqual(len(indented), 1, rows)
-        self.assertIn("5 workers", indented[0])
-        self.assertFalse(any("done1" in title for title, _level in rows))
+        self.assertIn("6 workers", indented[0])
         rollup_item = next(
-            menu.itemAtIndex_(index)
-            for index in range(menu.numberOfItems())
-            if menu.itemAtIndex_(index).indentationLevel() == 1
+            in_progress.itemAtIndex_(index)
+            for index in range(in_progress.numberOfItems())
+            if in_progress.itemAtIndex_(index).indentationLevel() == 1
         )
-        self.assertEqual(rollup_item.submenu().numberOfItems(), 5)
+        self.assertEqual(rollup_item.submenu().numberOfItems(), 6)
+        self.assertTrue(
+            any(
+                "done1" in rollup_item.submenu().itemAtIndex_(index).title()
+                for index in range(rollup_item.submenu().numberOfItems())
+            )
+        )
         # No sub-agent appears as a TOP-LEVEL row.
         top_level_subs = [
             title for title, level in rows if level == 0 and "claude:agent:" in title
@@ -9269,19 +12153,2471 @@ class UsageGraphRangeTests(unittest.TestCase):
     def test_range_validation_and_round_trip(self) -> None:
         from sidepulse.settings import AgentMonitorSettings, load_settings, save_settings
 
-        configured = AgentMonitorSettings().with_usage_graph_days(365)
+        configured = (
+            AgentMonitorSettings()
+            .with_usage_graph_days(365)
+            .with_usage_display_mode("sessions")
+            .with_usage_graph_providers(("claude",))
+        )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
             save_settings(configured, path)
-            self.assertEqual(load_settings(path).usage_graph_days, 365)
+            restored = load_settings(path)
+            self.assertEqual(restored.usage_graph_days, 365)
+            self.assertEqual(restored.usage_display_mode, "sessions")
+            self.assertEqual(restored.usage_graph_providers, ("claude",))
         with self.assertRaises(ValueError):
             AgentMonitorSettings().with_usage_graph_days(14)
+        with self.assertRaises(ValueError):
+            AgentMonitorSettings().with_usage_graph_providers(())
 
     def test_daily_buckets_scale_to_a_year(self) -> None:
         from sidepulse import usage_stats
 
         buckets = usage_stats.daily_buckets([], days=365)
         self.assertEqual(len(buckets), 365)
+
+    def test_range_model_includes_yesterday_and_uses_one_shared_metric(self) -> None:
+        from datetime import datetime, timedelta
+
+        from sidepulse import usage_stats
+
+        now = datetime(2026, 8, 13, 12, 0, 0)
+        yesterday = (now - timedelta(days=1)).timestamp()
+        records = [
+            ("claude", "c1", "sonnet", yesterday, 100, 20, 10, 30, "c1"),
+            ("codex", "x1", "codex", yesterday, 200, 50, 0, 25, "x1"),
+        ]
+
+        model = usage_stats.usage_graph_model(
+            records,
+            days=365,
+            metric="tokens",
+            provider_ids=("claude", "codex"),
+            now=now,
+        )
+
+        self.assertEqual(model["metric"], "tokens")
+        self.assertEqual(model["period_label"], "Last 365 days")
+        self.assertEqual(tuple(series["provider_id"] for series in model["series"]), ("claude", "codex"))
+        self.assertEqual(sum(model["series"][0]["values"]), 160)
+        self.assertEqual(sum(model["series"][1]["values"]), 275)
+        self.assertGreater(usage_stats.nice_usage_scale(275), 275)
+
+
+class ProviderAwareUsageRefreshTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+        from sidepulse.capacity_refresh import (
+            CapacityRefreshCoordinator,
+            RefreshFailureKind,
+            RefreshSourceKey,
+            RefreshSourceRegistration,
+        )
+        from sidepulse.capacity_types import SourceKey
+        from sidepulse.refresh_policy import ProviderRefreshState, mark_refresh_started
+
+        run_loop_patch = patch.object(self.status_bar, "NSRunLoop", create=True)
+        self.capacity_run_loop_type = run_loop_patch.start()
+        self.addCleanup(run_loop_patch.stop)
+        self.ProviderRefreshState = ProviderRefreshState
+        self.RefreshFailureKind = RefreshFailureKind
+        self.mark_refresh_started = mark_refresh_started
+        # This class exercises the reusable supported-source machinery with a
+        # synthetic second source. Production advertises only the implemented
+        # Codex source; Claude consumer-plan capacity is explicitly unsupported.
+        if "claude" not in self.controller._capacity_refresh_keys_by_provider:
+            self.controller._capacity_refresh_keys_by_provider = {
+                **self.controller._capacity_refresh_keys_by_provider,
+                "claude": RefreshSourceKey(
+                    SourceKey(
+                        "claude",
+                        "quota",
+                        "test-only",
+                        "remote_quota_windows",
+                    ),
+                    "plan",
+                    None,
+                ),
+            }
+        self.controller._capacity_refresh_coordinator = CapacityRefreshCoordinator(
+            tuple(
+                RefreshSourceRegistration(
+                    key=refresh_key,
+                    enabled=True,
+                    supported=True,
+                )
+                for refresh_key in self.controller._capacity_refresh_keys_by_provider.values()
+            )
+        )
+        self.controller._usage_provider_states = {
+            provider_id: ProviderRefreshState(source_key=refresh_key.source)
+            for provider_id, refresh_key in (
+                self.controller._capacity_refresh_keys_by_provider.items()
+            )
+        }
+        self.controller.settings = dataclass_replace(
+            self.controller.settings,
+            claude_plan_limits_enabled=True,
+        )
+
+    def _source(self, provider_id):
+        return self._refresh_key(provider_id).source
+
+    def _transcript_source(self, provider_id):
+        return self.status_bar.TRANSCRIPT_SOURCE_KEYS_BY_PROVIDER[provider_id]
+
+    def _refresh_key(self, provider_id):
+        return self.controller._capacity_refresh_keys_by_provider[provider_id]
+
+    def _capacity_refresh_state(self, provider_id, *, now):
+        refresh_key = self._refresh_key(provider_id)
+        return next(
+            row
+            for row in self.controller._capacity_refresh_coordinator.snapshot_state(
+                now
+            ).sources
+            if row.key == refresh_key
+        )
+
+    def _requests(self, **generations):
+        return {
+            self._source(provider_id): generation
+            for provider_id, generation in generations.items()
+        }
+
+    def _results(self, **results):
+        return {
+            self._source(provider_id): result
+            for provider_id, result in results.items()
+        }
+
+    def _failures(self, **failures):
+        return {
+            self._source(provider_id): failure
+            for provider_id, failure in failures.items()
+        }
+
+    def _prime_refreshes(self, *provider_ids, completed_at=None):
+        from sidepulse.capacity_refresh import RefreshCause, RefreshDecisionKind
+
+        completed_at = (
+            time.monotonic() if completed_at is None else float(completed_at)
+        )
+        states = getattr(self.controller, "_usage_provider_states", {})
+        requests = {}
+        for provider_id in provider_ids:
+            refresh_key = self._refresh_key(provider_id)
+            decision = self.controller._capacity_refresh_coordinator.request_refresh(
+                refresh_key,
+                RefreshCause.AUTOMATIC,
+                max(0.0, completed_at - 1.0),
+            )
+            self.assertIs(decision.kind, RefreshDecisionKind.START)
+            generation = decision.generation
+            self.assertIsNotNone(generation)
+            self.controller._capacity_refresh_coordinator.register_started(
+                refresh_key,
+                generation,
+                completed_at + 29.0,
+            )
+            states[provider_id] = self.mark_refresh_started(
+                states.get(provider_id, self._state(provider_id)),
+                generation=generation,
+            )
+            self.controller._capacity_refresh_deadline_timers[refresh_key] = MagicMock()
+            requests[self._source(provider_id)] = generation
+        self.controller._usage_provider_states = states
+        return requests
+
+    def _prime_transcript_refreshes(self, *provider_ids):
+        states = self.controller._usage_transcript_states
+        requests = {}
+        for provider_id in provider_ids:
+            source_key = self._transcript_source(provider_id)
+            state = self.mark_refresh_started(states[source_key])
+            states[source_key] = state
+            requests[source_key] = state.generation
+        self.controller._usage_transcript_states = states
+        return requests
+
+    def _state(self, provider_id, **changes):
+        values = {
+            "source_key": self._refresh_key(provider_id).source,
+            "enabled": True,
+            "visible": True,
+        }
+        values.update(changes)
+        return self.ProviderRefreshState(**values)
+
+    def _result(self, provider_id, percent, *, minutes=300, summary=None):
+        return {
+            "provider_id": provider_id,
+            "title": provider_id.title(),
+            "windows": [
+                {
+                    "label": "primary",
+                    "used_percent": percent,
+                    "window_minutes": minutes,
+                }
+            ],
+            "summary_text": summary,
+            "detail_text": None,
+            "day_bars": [],
+            "hourly": [],
+        }
+
+    def _capacity_observation(self, provider_id, remaining, observed_at):
+        from sidepulse.capacity_types import (
+            CapacitySourceHealth,
+            CapacityUnit,
+            CapacityValue,
+            ObservationState,
+            QuotaEffect,
+            QuotaHorizon,
+            QuotaLaneKey,
+            QuotaLaneObservation,
+            ResetFact,
+            ResetState,
+            SourceHealthKind,
+        )
+
+        source = self._source(provider_id)
+        health = CapacitySourceHealth(
+            source,
+            SourceHealthKind.HEALTHY,
+            observed_at,
+            observed_at,
+            None,
+            None,
+            False,
+        )
+        return QuotaLaneObservation(
+            QuotaLaneKey(
+                source,
+                "all",
+                "plan",
+                None,
+                "session",
+                QuotaEffect.ALL_WORKLOADS,
+            ),
+            "Session window",
+            QuotaHorizon.SHORT,
+            CapacityValue(
+                CapacityUnit.PERCENT_REMAINING,
+                remaining,
+                (
+                    ObservationState.OBSERVED_ZERO
+                    if remaining == 0.0
+                    else ObservationState.OBSERVED
+                ),
+            ),
+            ResetFact(ResetState.UNKNOWN, None, 300.0, observed_at),
+            observed_at,
+            health,
+            None,
+        )
+
+    def _reset_result(
+        self,
+        provider_id,
+        percent,
+        reset_epoch,
+        *,
+        minutes=300,
+        partial=False,
+        source_text=None,
+    ):
+        result = self._result(provider_id, percent, minutes=minutes)
+        result["windows"][0]["resets_at"] = reset_epoch
+        result["partial"] = partial
+        result["source_text"] = source_text
+        return result
+
+    def _started_states(self, *, generation=1, completed_at=None):
+        self.assertEqual(generation, 1)
+        self._prime_refreshes(
+            "codex",
+            "claude",
+            completed_at=completed_at,
+        )
+        return self.controller._usage_provider_states
+
+    def test_settings_usage_copy_keeps_codex_windows_semantic(self) -> None:
+        pane, _fields = self.status_bar._build_profile_pane(self.controller)
+
+        def descendants(view):
+            for child in view.subviews():
+                yield child
+                yield from descendants(child)
+
+        rendered = []
+        for view in (pane, *descendants(pane)):
+            if hasattr(view, "stringValue"):
+                rendered.append(str(view.stringValue()))
+            tooltip = view.toolTip() if hasattr(view, "toolTip") else None
+            if tooltip:
+                rendered.append(str(tooltip))
+        codex_copy = [text for text in rendered if "codex" in text.lower()]
+
+        self.assertIn("Show Codex rate-limit percent", codex_copy)
+        self.assertTrue(codex_copy)
+        self.assertFalse(
+            any("weekly" in text.lower() for text in codex_copy),
+            codex_copy,
+        )
+
+    def test_settings_capacity_copy_requires_a_supported_source(self) -> None:
+        pane, _fields = self.status_bar._build_profile_pane(self.controller)
+
+        def descendants(view):
+            for child in view.subviews():
+                yield child
+                yield from descendants(child)
+
+        rendered = []
+        for view in (pane, *descendants(pane)):
+            if hasattr(view, "stringValue"):
+                rendered.append(str(view.stringValue()))
+            tooltip = view.toolTip() if hasattr(view, "toolTip") else None
+            if tooltip:
+                rendered.append(str(tooltip))
+
+        capacity_copy = [
+            text for text in rendered if "consumer plan capacity" in text.lower()
+        ]
+        self.assertTrue(capacity_copy)
+        self.assertTrue(
+            any("not supported" in text.lower() for text in rendered),
+            rendered,
+        )
+        self.assertTrue(
+            any("lifecycle and local transcript activity still work" in text.lower() for text in rendered),
+            rendered,
+        )
+
+    def test_controller_initializes_bounded_capacity_timer_state(self) -> None:
+        self.assertIsNone(self.controller._capacity_reset_timer)
+        self.assertIsNone(self.controller._capacity_countdown_timer)
+        self.assertIsNone(self.controller._capacity_reset_plan.deadline)
+        self.assertEqual(self.controller._capacity_reset_plan.provider_ids, ())
+        self.assertIsNone(self.controller._capacity_reset_retry_deadline)
+        self.assertIsNone(self.controller._capacity_countdown_deadline)
+        self.assertEqual(self.controller._attempted_capacity_boundary_keys, ())
+
+    def test_controller_initializes_exact_registry_scoped_refresh_authority(self) -> None:
+        from sidepulse.capacity_refresh import RefreshStatusKind
+
+        source_states = self.controller._capacity_refresh_coordinator.snapshot_state(
+            100.0
+        ).sources
+
+        self.assertEqual(len(source_states), 2)
+        self.assertEqual(
+            {row.key.source for row in source_states},
+            {self._source("codex"), self._source("claude")},
+        )
+        self.assertTrue(
+            all(row.key.pool == "plan" for row in source_states)
+        )
+        self.assertTrue(
+            all(row.key.account_discriminator is None for row in source_states)
+        )
+        self.assertTrue(
+            all(row.status is RefreshStatusKind.IDLE for row in source_states)
+        )
+        self.assertEqual(self.controller._capacity_refresh_deadline_timers, {})
+
+    def test_menu_open_enqueues_exact_source_without_executing_source_work(self) -> None:
+        now = time.monotonic()
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex", last_success_at=now),
+            "claude": self._state("claude"),
+        }
+
+        with (
+            patch.object(self.controller, "request_usage_refresh") as request,
+            patch("sidepulse.status_bar.usage_stats.scan_usage") as scan,
+            patch("sidepulse.status_bar.usage_stats.codex_rate_limits") as codex,
+            patch("sidepulse.status_bar.claude_quota.fetch_windows") as claude,
+        ):
+            self.controller.menuWillOpen_(None)
+
+        request.assert_called_once_with(
+            (
+                self._transcript_source("codex"),
+                self._transcript_source("claude"),
+            ),
+            reason="menu-open",
+        )
+        scan.assert_not_called()
+        codex.assert_not_called()
+        claude.assert_not_called()
+
+    def test_request_registers_independent_exact_deadlines_before_worker_launch(self) -> None:
+        timer_api = MagicMock()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.side_effect = (
+            MagicMock(),
+            MagicMock(),
+        )
+        source_keys = (self._source("codex"), self._source("claude"))
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=100.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+            patch("sidepulse.status_bar.threading.Thread") as thread_type,
+        ):
+            started = self.controller.request_usage_refresh(
+                source_keys,
+                reason="menu-open",
+            )
+
+        self.assertEqual(started, source_keys)
+        authority = {
+            row.key.source: row
+            for row in self.controller._capacity_refresh_coordinator.snapshot_state(
+                100.0
+            ).sources
+        }
+        self.assertEqual(authority[source_keys[0]].generation, 1)
+        self.assertEqual(authority[source_keys[1]].generation, 1)
+        self.assertEqual(authority[source_keys[0]].deadline, 130.0)
+        self.assertEqual(authority[source_keys[1]].deadline, 130.0)
+        self.assertTrue(authority[source_keys[0]].in_flight)
+        self.assertTrue(authority[source_keys[1]].in_flight)
+        self.assertEqual(
+            set(self.controller._capacity_refresh_deadline_timers),
+            {self._refresh_key("codex"), self._refresh_key("claude")},
+        )
+        thread_type.assert_called_once()
+        requests = thread_type.call_args.kwargs["args"][0]
+        self.assertEqual(requests, {source_keys[0]: 1, source_keys[1]: 1})
+
+    def test_disabled_exact_source_starts_no_worker_and_owns_no_timer(self) -> None:
+        from sidepulse.capacity_refresh import (
+            CapacityRefreshCoordinator,
+            RefreshSourceRegistration,
+        )
+
+        codex_key = self._refresh_key("codex")
+        claude_key = self._refresh_key("claude")
+        self.controller._capacity_refresh_coordinator = CapacityRefreshCoordinator(
+            (
+                RefreshSourceRegistration(codex_key, False, True),
+                RefreshSourceRegistration(claude_key, True, True),
+            )
+        )
+
+        with (
+            patch.object(self.status_bar, "NSTimer") as timer_api,
+            patch("sidepulse.status_bar.threading.Thread") as thread_type,
+        ):
+            started = self.controller.request_usage_refresh(
+                (self._source("codex"),),
+                reason="menu-open",
+            )
+
+        self.assertEqual(started, ())
+        self.assertEqual(self.controller._capacity_refresh_deadline_timers, {})
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.assert_not_called()
+        thread_type.assert_not_called()
+
+    def test_exact_deadline_times_out_only_its_source(self) -> None:
+        from sidepulse.capacity_refresh import RefreshFailureKind, RefreshStatusKind
+
+        codex_timer = MagicMock()
+        claude_timer = MagicMock()
+        timer_api = MagicMock()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.side_effect = (
+            codex_timer,
+            claude_timer,
+        )
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=100.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+            patch("sidepulse.status_bar.threading.Thread"),
+        ):
+            self.controller.request_usage_refresh(
+                (self._source("codex"), self._source("claude")),
+                reason="menu-open",
+            )
+        codex_timer.userInfo.return_value = (self._refresh_key("codex"), 1)
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=130.0),
+            patch.object(self.controller, "schedule_capacity_timers"),
+        ):
+            self.controller.capacityRefreshDeadline_(codex_timer)
+
+        states = {
+            row.key: row
+            for row in self.controller._capacity_refresh_coordinator.snapshot_state(
+                130.0
+            ).sources
+        }
+        codex = states[self._refresh_key("codex")]
+        claude = states[self._refresh_key("claude")]
+        self.assertIs(codex.status, RefreshStatusKind.COOLDOWN)
+        self.assertIs(codex.last_failure, RefreshFailureKind.TIMED_OUT)
+        self.assertFalse(codex.in_flight)
+        self.assertTrue(claude.in_flight)
+        self.assertEqual(claude.deadline, 130.0)
+        self.assertNotIn(
+            self._refresh_key("codex"),
+            self.controller._capacity_refresh_deadline_timers,
+        )
+        self.assertIs(
+            self.controller._capacity_refresh_deadline_timers[
+                self._refresh_key("claude")
+            ],
+            claude_timer,
+        )
+
+    def test_late_timed_out_generation_cannot_overwrite_newer_success(self) -> None:
+        first_timer = MagicMock()
+        second_timer = MagicMock()
+        timer_api = MagicMock()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.side_effect = (
+            first_timer,
+            second_timer,
+        )
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=100.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+            patch("sidepulse.status_bar.threading.Thread"),
+        ):
+            self.controller.request_usage_refresh((self._source("codex"),))
+        first_timer.userInfo.return_value = (self._refresh_key("codex"), 1)
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=130.0),
+            patch.object(self.controller, "schedule_capacity_timers"),
+        ):
+            self.controller.capacityRefreshDeadline_(first_timer)
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=145.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+            patch("sidepulse.status_bar.threading.Thread") as thread_type,
+        ):
+            self.controller.request_usage_refresh((self._source("codex"),))
+        newest_requests = thread_type.call_args.kwargs["args"][0]
+        with patch.object(self.status_bar.time, "monotonic", return_value=146.0):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": newest_requests,
+                    "results": self._results(codex=self._result("codex", 20)),
+                    "failures": {},
+                }
+            )
+        current = self.controller._usage_provider_models["codex"]
+
+        with patch.object(self.status_bar.time, "monotonic", return_value=147.0):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": self._requests(codex=1),
+                    "results": self._results(codex=self._result("codex", 99)),
+                    "failures": {},
+                }
+            )
+
+        self.assertIs(self.controller._usage_provider_models["codex"], current)
+        self.assertEqual(current.windows[0].percent_used, 20.0)
+
+    def test_last_known_good_keeps_original_observation_time_after_failure(self) -> None:
+        requests = self._prime_refreshes("codex", completed_at=100.0)
+        observation = self._capacity_observation("codex", 80.0, 1_000.0)
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=100.0),
+            patch.object(self.status_bar.time, "time", return_value=1_000.0),
+            patch.object(self.controller, "schedule_capacity_timers"),
+        ):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": self._results(
+                        codex={
+                            "title": "Codex",
+                            "capacity_observations": (observation,),
+                        }
+                    ),
+                    "failures": {},
+                }
+            )
+
+        requests = self._prime_refreshes("codex", completed_at=200.0)
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=200.0),
+            patch.object(self.status_bar.time, "time", return_value=2_000.0),
+        ):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": {},
+                    "failures": self._failures(
+                        codex=self.RefreshFailureKind.SOURCE_UNAVAILABLE
+                    ),
+                }
+            )
+
+        state = self._capacity_refresh_state("codex", now=200.0)
+        self.assertTrue(state.has_last_known_good)
+        self.assertEqual(state.last_known_good.observed_at, 1_000.0)
+        self.assertEqual(state.last_known_good.lanes[0].observed_at, 1_000.0)
+
+    def test_opening_settings_requests_stale_or_missing_usage_through_planner(self) -> None:
+        now = time.monotonic()
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex", last_success_at=now),
+            "claude": self._state("claude"),
+        }
+        self.controller.settings_window = MagicMock()
+
+        with (
+            patch.object(self.controller, "request_usage_refresh") as request,
+            patch("sidepulse.status_bar.NSApp"),
+        ):
+            self.controller.show_settings_window()
+
+        request.assert_called_once_with(
+            (
+                self._transcript_source("codex"),
+                self._transcript_source("claude"),
+            )
+        )
+
+    def test_menu_open_requests_only_stale_or_missing_visible_providers(self) -> None:
+        now = time.monotonic()
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex", last_success_at=now),
+            "claude": self._state("claude"),
+        }
+
+        with patch.object(self.controller, "request_usage_refresh") as request:
+            self.controller.menuWillOpen_(None)
+
+        request.assert_called_once_with(
+            (
+                self._transcript_source("codex"),
+                self._transcript_source("claude"),
+            ),
+            reason="menu-open",
+        )
+
+    def test_two_rapid_menu_opens_coalesce_in_flight_provider_work(self) -> None:
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex"),
+            "claude": self._state("claude"),
+        }
+
+        with patch("sidepulse.status_bar.threading.Thread") as thread_type:
+            self.controller.menuWillOpen_(None)
+            self.controller.menuWillOpen_(None)
+
+        self.assertEqual(thread_type.call_count, 1)
+        thread_type.return_value.start.assert_called_once_with()
+        self.assertTrue(self.controller._usage_provider_states["codex"].in_flight)
+        self.assertFalse(self.controller._usage_provider_states["claude"].in_flight)
+        self.assertTrue(
+            self.controller._usage_transcript_states[
+                self._transcript_source("codex")
+            ].in_flight
+        )
+        self.assertTrue(
+            self.controller._usage_transcript_states[
+                self._transcript_source("claude")
+            ].in_flight
+        )
+
+    def test_claude_local_usage_stays_eligible_when_plan_limits_are_disabled(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_claude_plan_limits_enabled(False)
+        )
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex"),
+            "claude": self._state("claude"),
+        }
+
+        with patch.object(self.controller, "request_usage_refresh") as request:
+            self.controller.menuWillOpen_(None)
+
+        request.assert_called_once_with(
+            (
+                self._transcript_source("codex"),
+                self._transcript_source("claude"),
+                self._source("codex"),
+            ),
+            reason="menu-open",
+        )
+
+    def test_disabled_plan_limits_skip_network_but_publish_local_claude_usage(self) -> None:
+        from sidepulse import usage_stats
+
+        self.controller.settings = (
+            self.controller.settings.with_claude_plan_limits_enabled(False)
+        )
+        totals = usage_stats.UsageTotals()
+        totals.sessions.add("s1")
+        totals.input_tokens = 123
+        published = []
+        with (
+            patch("sidepulse.status_bar.usage_stats.scan_usage", return_value=totals),
+            patch("sidepulse.status_bar.claude_quota.fetch_windows") as fetch,
+            patch.object(
+                self.controller,
+                "performSelectorOnMainThread_withObject_waitUntilDone_",
+                side_effect=lambda _selector, payload, _wait: published.append(payload),
+            ),
+        ):
+            self.controller._usage_refresh_worker(
+                {self._transcript_source("claude"): 1}
+            )
+
+        fetch.assert_not_called()
+        self.assertIn(self._transcript_source("claude"), published[0]["results"])
+        self.assertIn(
+            "1 session",
+            published[0]["results"][self._transcript_source("claude")][
+                "summary_text"
+            ],
+        )
+
+    def test_disabling_codex_percent_clears_old_windows_after_successful_refresh(self) -> None:
+        from sidepulse import usage_stats
+        from sidepulse.usage_view import build_provider_usage_view
+
+        now = time.monotonic()
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex", last_success_at=now),
+            "claude": self._state("claude", last_success_at=now),
+        }
+        self.controller._usage_provider_models = {
+            "codex": build_provider_usage_view(
+                "codex",
+                "Codex",
+                ({"used_percent": 81, "window_minutes": 300},),
+                last_success_at=now,
+                now=now,
+                summary_text="Codex today: old local summary",
+            )
+        }
+        menu_item = self.status_bar.build_usage_menu_item(self.controller)
+        menu_label = self.controller._usage_menu_labels["codex"]
+        settings_label = MagicMock()
+        self.controller.settings_fields = {"profile_codex_label": settings_label}
+        totals = usage_stats.UsageTotals()
+        totals.codex_sessions.add("codex-session")
+        totals.sessions.add("codex-session")
+        totals.codex_tokens = 2_000_000
+        sender = MagicMock()
+        sender.state.return_value = 0
+
+        def inline_thread(*, target, args, daemon):
+            del daemon
+            return SimpleNamespace(start=lambda: target(*args))
+
+        with (
+            patch("sidepulse.status_bar.usage_stats.scan_usage", return_value=totals),
+            patch(
+                "sidepulse.status_bar.usage_stats.cached_codex_rate_limits",
+                return_value={
+                    "primary": {"used_percent": 82, "window_minutes": 300}
+                },
+            ),
+            patch(
+                "sidepulse.status_bar.threading.Thread",
+                side_effect=inline_thread,
+            ),
+            patch.object(
+                self.controller,
+                "performSelectorOnMainThread_withObject_waitUntilDone_",
+                side_effect=lambda _selector, payload, _wait: (
+                    self.controller.applyUsageSummary_(payload)
+                ),
+            ),
+        ):
+            self.controller.toggleCodexPercent_(sender)
+
+        model = self.controller._usage_provider_models["codex"]
+        self.assertFalse(self.controller.settings.codex_percent_enabled)
+        self.assertEqual(model.windows, ())
+        self.assertIn(
+            "Codex, last 7 days: 1 session · 2M processed tokens",
+            model.menu_line,
+        )
+        self.assertNotIn("81%", model.menu_line)
+        self.assertNotIn("82%", model.settings_text)
+        self.assertEqual(menu_label.stringValue(), model.menu_line)
+        settings_label.setStringValue_.assert_called_with(model.settings_text)
+        self.assertIs(self.controller._usage_menu_item, menu_item)
+
+    def test_disabling_claude_plan_limits_clears_old_windows_after_successful_refresh(self) -> None:
+        from sidepulse import usage_stats
+        from sidepulse.usage_view import build_provider_usage_view
+
+        now = time.monotonic()
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex", last_success_at=now),
+            "claude": self._state("claude", last_success_at=now),
+        }
+        self.controller._usage_provider_models = {
+            "claude": build_provider_usage_view(
+                "claude",
+                "Claude",
+                ({"utilization": 71, "window_minutes": 300},),
+                last_success_at=now,
+                now=now,
+                summary_text="Claude today: old local summary",
+            )
+        }
+        menu_item = self.status_bar.build_usage_menu_item(self.controller)
+        menu_label = self.controller._usage_menu_labels["claude"]
+        settings_label = MagicMock()
+        self.controller.settings_fields = {"profile_plan_label": settings_label}
+        totals = usage_stats.UsageTotals()
+        totals.sessions.add("claude-session")
+        totals.input_tokens = 123
+        totals.output_tokens = 7
+        sender = MagicMock()
+        sender.state.return_value = 0
+
+        def inline_thread(*, target, args, daemon):
+            del daemon
+            return SimpleNamespace(start=lambda: target(*args))
+
+        with (
+            patch("sidepulse.status_bar.usage_stats.scan_usage", return_value=totals),
+            patch("sidepulse.status_bar.claude_quota.fetch_windows") as fetch,
+            patch(
+                "sidepulse.status_bar.threading.Thread",
+                side_effect=inline_thread,
+            ),
+            patch.object(
+                self.controller,
+                "performSelectorOnMainThread_withObject_waitUntilDone_",
+                side_effect=lambda _selector, payload, _wait: (
+                    self.controller.applyUsageSummary_(payload)
+                ),
+            ),
+            patch.object(self.controller, "refresh_"),
+        ):
+            self.controller.toggleClaudePlanLimits_(sender)
+
+        model = self.controller._usage_provider_models["claude"]
+        self.assertFalse(self.controller.settings.claude_plan_limits_enabled)
+        fetch.assert_not_called()
+        self.assertEqual(model.windows, ())
+        self.assertIn("Claude, last 7 days: 1 session · 130 tokens", model.menu_line)
+        self.assertNotIn("71%", model.menu_line)
+        self.assertNotIn("71%", model.settings_text)
+        self.assertEqual(menu_label.stringValue(), model.menu_line)
+        settings_label.setStringValue_.assert_called_with(model.settings_text)
+        self.assertIs(self.controller._usage_menu_item, menu_item)
+
+    def test_claude_plan_setting_uses_exact_source_invalidation(self) -> None:
+        sender = MagicMock()
+        sender.state.return_value = 0
+
+        with (
+            patch.object(self.status_bar, "save_settings"),
+            patch.object(self.controller, "invalidate_usage_providers") as invalidate,
+            patch.object(self.controller, "maybe_refresh_usage_summary") as refresh_usage,
+            patch.object(self.controller, "refresh_"),
+        ):
+            self.controller.toggleClaudePlanLimits_(sender)
+
+        invalidate.assert_called_once_with(("claude",))
+        refresh_usage.assert_called_once_with()
+
+    def test_one_provider_failure_keeps_other_success_and_last_known_good(self) -> None:
+        from sidepulse.usage_view import build_provider_usage_view
+
+        requests = self._prime_refreshes("codex", "claude")
+        old_claude = build_provider_usage_view(
+            "claude",
+            "Claude",
+            ({"label": "five_hour", "utilization": 31, "window_minutes": 300},),
+            last_success_at=500.0,
+            now=500.0,
+        )
+        self.controller._usage_provider_models = {"claude": old_claude}
+
+        self.controller.applyUsageSummary_(
+            {
+                "requests": requests,
+                "results": self._results(codex=self._result("codex", 22)),
+                "failures": self._failures(
+                    claude=self.RefreshFailureKind.SOURCE_UNAVAILABLE
+                ),
+            }
+        )
+
+        codex = self.controller._usage_provider_models["codex"]
+        claude = self.controller._usage_provider_models["claude"]
+        self.assertEqual(codex.windows[0].percent_used, 22.0)
+        self.assertEqual(claude.windows[0].percent_used, 31.0)
+        self.assertIn("Capacity source unavailable", claude.menu_line)
+        self.assertEqual(
+            self.controller._usage_provider_states["codex"].consecutive_failures, 0
+        )
+        self.assertEqual(
+            self.controller._usage_provider_states["claude"].consecutive_failures, 1
+        )
+
+    def test_failed_last_known_good_keeps_remaining_but_clears_reset_timers(self) -> None:
+        from sidepulse.capacity_types import ResetState
+        from sidepulse.usage_view import build_provider_usage_view
+
+        requests = self._prime_refreshes("claude", completed_at=1_000.0)
+        self.controller._usage_provider_models = {
+            "claude": build_provider_usage_view(
+                "claude",
+                "Claude",
+                (
+                    {
+                        "label": "five_hour",
+                        "utilization": 37,
+                        "window_minutes": 300,
+                        "resets_at": 1_040.0,
+                    },
+                ),
+                last_success_at=600.0,
+                now=600.0,
+                reset_now=1_000.0,
+            )
+        }
+        timer_api = MagicMock()
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=1_000.0),
+            patch.object(self.status_bar.time, "time", return_value=1_000.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+        ):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": {},
+                    "failures": self._failures(
+                        claude=self.RefreshFailureKind.SOURCE_UNAVAILABLE
+                    ),
+                }
+            )
+
+        window = self.controller._usage_provider_models["claude"].windows[0]
+        self.assertEqual(window.percent_remaining, 63.0)
+        self.assertIs(window.reset_state, ResetState.STALE)
+        self.assertFalse(window.reset_known)
+        schedule = (
+            timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
+        )
+        reset_calls = [
+            call
+            for call in schedule.call_args_list
+            if call.args[2] in {"capacityResetBoundary:", "capacityCountdown:"}
+        ]
+        self.assertEqual(reset_calls, [])
+
+    def test_unscoped_source_generation_keeps_remaining_but_disputes_reset(self) -> None:
+        from sidepulse.capacity_types import (
+            CapacitySourceHealth,
+            CapacityUnit,
+            CapacityValue,
+            ObservationState,
+            QuotaEffect,
+            QuotaHorizon,
+            QuotaLaneKey,
+            QuotaLaneObservation,
+            ResetFact,
+            ResetState,
+            SourceHealthKind,
+        )
+
+        source = self._source("codex")
+        lane_key = QuotaLaneKey(
+            source,
+            "all",
+            "plan",
+            None,
+            "session",
+            QuotaEffect.ALL_WORKLOADS,
+        )
+
+        def observation(remaining, observed_at):
+            health = CapacitySourceHealth(
+                source,
+                SourceHealthKind.HEALTHY,
+                observed_at,
+                observed_at,
+                None,
+                None,
+                False,
+            )
+            return QuotaLaneObservation(
+                lane_key,
+                "Session window",
+                QuotaHorizon.SHORT,
+                CapacityValue(
+                    CapacityUnit.PERCENT_REMAINING,
+                    remaining,
+                    ObservationState.OBSERVED,
+                ),
+                ResetFact(ResetState.FUTURE, 1_200.0, 300.0, observed_at),
+                observed_at,
+                health,
+                None,
+            )
+
+        requests = self._prime_refreshes("codex", completed_at=1_000.0)
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=1_000.0),
+            patch.object(self.status_bar.time, "time", return_value=1_000.0),
+            patch.object(self.controller, "schedule_capacity_timers"),
+        ):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": self._results(
+                        codex={
+                            "title": "Codex",
+                            "capacity_observations": (observation(80.0, 1_000.0),),
+                            "source_generation": 7,
+                        }
+                    ),
+                    "failures": {},
+                }
+            )
+
+        requests = self._prime_refreshes("codex", completed_at=1_100.0)
+        timer_api = MagicMock()
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=1_100.0),
+            patch.object(self.status_bar.time, "time", return_value=1_100.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+        ):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": self._results(
+                        codex={
+                            "title": "Codex",
+                            "capacity_observations": (observation(70.0, 1_100.0),),
+                            "source_generation": 8,
+                        }
+                    ),
+                    "failures": {},
+                }
+            )
+
+        window = self.controller._usage_provider_models["codex"].windows[0]
+        self.assertEqual(window.percent_remaining, 70.0)
+        self.assertIs(window.reset_state, ResetState.DISPUTED)
+        self.assertFalse(window.reset_known)
+        continuity = self.controller._capacity_reset_continuity[lane_key]
+        self.assertIsNone(continuity.confirmed)
+        self.assertIsNone(continuity.pending)
+        schedule = (
+            timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
+        )
+        reset_calls = [
+            call
+            for call in schedule.call_args_list
+            if call.args[2] in {"capacityResetBoundary:", "capacityCountdown:"}
+        ]
+        self.assertEqual(reset_calls, [])
+
+    def test_failed_provider_backs_off_and_success_resets_failures(self) -> None:
+        requests = self._prime_refreshes("claude", completed_at=100.0)
+        with patch.object(self.status_bar.time, "monotonic", return_value=100.0):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": {},
+                    "failures": self._failures(
+                        claude=self.RefreshFailureKind.SOURCE_UNAVAILABLE
+                    ),
+                }
+            )
+        failed = self.controller._usage_provider_states["claude"]
+        self.assertEqual(failed.consecutive_failures, 1)
+        self.assertEqual(failed.retry_not_before, 115.0)
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=101.0),
+            patch("sidepulse.status_bar.threading.Thread") as thread_type,
+        ):
+            queued = self.controller.request_usage_refresh(
+                (self._source("claude"),),
+                reason="manual",
+            )
+            self.controller.menuDidClose_(None)
+            duplicate = self.controller.request_usage_refresh(
+                (self._source("claude"),),
+                reason="manual",
+            )
+        self.assertEqual(queued, ())
+        self.assertEqual(duplicate, ())
+        thread_type.assert_not_called()
+        self.assertTrue(
+            self._capacity_refresh_state("claude", now=102.0).queued_manual
+        )
+
+        timer_api = MagicMock()
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=115.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+            patch("sidepulse.status_bar.threading.Thread") as thread_type,
+        ):
+            started = self.controller.request_usage_refresh(
+                (self._source("claude"),)
+            )
+        self.assertEqual(started, (self._source("claude"),))
+        requests = thread_type.call_args.kwargs["args"][0]
+        with patch.object(self.status_bar.time, "monotonic", return_value=116.0):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": self._results(
+                        claude=self._result("claude", 44)
+                    ),
+                    "failures": {},
+                }
+            )
+
+        recovered = self.controller._usage_provider_states["claude"]
+        self.assertEqual(recovered.consecutive_failures, 0)
+        self.assertEqual(recovered.retry_not_before, 0.0)
+        self.assertIsNone(recovered.error_text)
+
+    def test_queued_manual_refresh_starts_once_at_cooldown_boundary(self) -> None:
+        requests = self._prime_refreshes("claude", completed_at=100.0)
+        with patch.object(self.status_bar.time, "monotonic", return_value=100.0):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": {},
+                    "failures": self._failures(
+                        claude=self.RefreshFailureKind.SOURCE_UNAVAILABLE
+                    ),
+                }
+            )
+
+        retry_timer = MagicMock()
+        retry_timer.userInfo.return_value = self._refresh_key("claude")
+        timer_api = MagicMock()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.return_value = retry_timer
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=101.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+            patch("sidepulse.status_bar.threading.Thread") as thread_type,
+        ):
+            first = self.controller.request_usage_refresh(
+                (self._source("claude"),),
+                reason="manual",
+            )
+            self.controller.menuDidClose_(None)
+            duplicate = self.controller.request_usage_refresh(
+                (self._source("claude"),),
+                reason="manual",
+            )
+
+        self.assertEqual(first, ())
+        self.assertEqual(duplicate, ())
+        thread_type.assert_not_called()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.assert_called_once_with(
+            14.0,
+            self.controller,
+            "capacityRefreshRetry:",
+            self._refresh_key("claude"),
+            False,
+        )
+
+        deadline_timer = MagicMock()
+        deadline_api = MagicMock()
+        deadline_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.return_value = deadline_timer
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=115.0),
+            patch.object(self.status_bar, "NSTimer", deadline_api),
+            patch("sidepulse.status_bar.threading.Thread") as thread_type,
+        ):
+            self.controller.capacityRefreshRetry_(retry_timer)
+            self.controller.capacityRefreshRetry_(retry_timer)
+
+        thread_type.assert_called_once()
+        self.assertEqual(
+            thread_type.call_args.kwargs["args"][0],
+            {self._source("claude"): 2},
+        )
+        state = self._capacity_refresh_state("claude", now=115.0)
+        self.assertTrue(state.in_flight)
+        self.assertFalse(state.queued_manual)
+        self.assertNotIn(
+            self._refresh_key("claude"),
+            self.controller._capacity_refresh_retry_timers,
+        )
+
+    def test_obsolete_worker_generation_cannot_publish(self) -> None:
+        from sidepulse.usage_view import build_provider_usage_view
+
+        requests = self._prime_refreshes("codex", completed_at=800.0)
+        with patch.object(self.status_bar.time, "monotonic", return_value=800.0):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": self._results(
+                        codex=self._result("codex", 10)
+                    ),
+                    "failures": {},
+                }
+            )
+        self._prime_refreshes("codex", completed_at=900.0)
+        current = build_provider_usage_view(
+            "codex",
+            "Codex",
+            ({"used_percent": 10, "window_minutes": 300},),
+            last_success_at=900.0,
+            now=900.0,
+        )
+        self.controller._usage_provider_models = {"codex": current}
+
+        with patch.object(self.status_bar.time, "monotonic", return_value=900.0):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": self._requests(codex=1),
+                    "results": self._results(
+                        codex=self._result("codex", 99)
+                    ),
+                    "failures": {},
+                }
+            )
+
+        self.assertIs(self.controller._usage_provider_models["codex"], current)
+        self.assertTrue(self.controller._usage_provider_states["codex"].in_flight)
+
+    def test_one_local_scan_serves_same_batch_codex_and_claude_refresh(self) -> None:
+        from sidepulse import usage_stats
+
+        totals = usage_stats.UsageTotals()
+        published = []
+        with (
+            patch("sidepulse.status_bar.usage_stats.scan_usage", return_value=totals) as scan,
+            patch(
+                "sidepulse.status_bar.usage_stats.cached_codex_rate_limits",
+                return_value={
+                    "primary": {"used_percent": 20, "window_minutes": 300}
+                },
+            ),
+            patch(
+                "sidepulse.status_bar.claude_quota.fetch_windows",
+                return_value=[
+                    {"label": "5-hour", "utilization": 30, "window_minutes": 300}
+                ],
+            ),
+            patch.object(
+                self.controller,
+                "performSelectorOnMainThread_withObject_waitUntilDone_",
+                side_effect=lambda _selector, payload, _wait: published.append(payload),
+            ),
+        ):
+            self.controller._usage_refresh_worker(
+                {
+                    self._transcript_source("codex"): 1,
+                    self._transcript_source("claude"): 1,
+                    self._source("codex"): 1,
+                    self._source("claude"): 1,
+                }
+            )
+
+        scan.assert_called_once()
+        self.assertEqual(len(published), 4)
+        self.assertEqual(
+            {
+                source_key
+                for payload in published
+                for source_key in payload["results"]
+            },
+            {
+                self._transcript_source("codex"),
+                self._transcript_source("claude"),
+                self._source("codex"),
+                self._source("claude"),
+            },
+        )
+
+    def test_hung_source_cannot_block_sibling_publication(self) -> None:
+        import threading
+
+        from sidepulse import usage_stats
+
+        totals = usage_stats.UsageTotals()
+        codex_entered = threading.Event()
+        release_codex = threading.Event()
+        claude_published = threading.Event()
+        published = []
+
+        def hung_codex(_totals):
+            codex_entered.set()
+            release_codex.wait(2.0)
+            return {"primary": {"used_percent": 20, "window_minutes": 300}}
+
+        def publish(_selector, payload, _wait):
+            published.append(payload)
+            if self._source("claude") in payload["requests"]:
+                claude_published.set()
+
+        with (
+            patch("sidepulse.status_bar.usage_stats.scan_usage", return_value=totals),
+            patch(
+                "sidepulse.status_bar.usage_stats.cached_codex_rate_limits",
+                side_effect=hung_codex,
+            ),
+            patch(
+                "sidepulse.status_bar.claude_quota.fetch_windows",
+                return_value=[
+                    {"label": "5-hour", "utilization": 30, "window_minutes": 300}
+                ],
+            ),
+            patch.object(
+                self.controller,
+                "performSelectorOnMainThread_withObject_waitUntilDone_",
+                side_effect=publish,
+            ),
+        ):
+            batch = threading.Thread(
+                target=self.controller._usage_refresh_worker,
+                args=(self._requests(codex=1, claude=1),),
+                daemon=True,
+            )
+            batch.start()
+            self.assertTrue(codex_entered.wait(1.0))
+            self.assertTrue(claude_published.wait(1.0))
+            self.assertTrue(batch.is_alive())
+            self.assertFalse(
+                any(self._source("codex") in payload["requests"] for payload in published)
+            )
+            release_codex.set()
+            batch.join(1.0)
+
+        self.assertFalse(batch.is_alive())
+        self.assertTrue(
+            any(self._source("claude") in payload["requests"] for payload in published)
+        )
+
+    def test_scan_failure_isolated_from_supported_remote_capacity_and_keeps_local_lkg(
+        self,
+    ) -> None:
+        from sidepulse.usage_view import build_provider_usage_view
+
+        requests = self._prime_refreshes("codex", "claude")
+        self.controller._usage_provider_models = {
+            "codex": build_provider_usage_view(
+                "codex",
+                "Codex",
+                ({"used_percent": 10, "window_minutes": 300},),
+                last_success_at=700.0,
+                now=700.0,
+                summary_text="Codex today: 2 sessions · 1M tokens",
+            ),
+            "claude": build_provider_usage_view(
+                "claude",
+                "Claude",
+                ({"utilization": 15, "window_minutes": 300},),
+                last_success_at=700.0,
+                now=700.0,
+                summary_text="2 sessions · 3M tokens",
+                detail_text="100 in · 20 cached · 30 out",
+            ),
+        }
+        old_day_bars = [{"label": "08/12", "claude_cost": 4.0, "codex_tokens": 5}]
+        old_hourly = [1, 2, 3]
+        self.controller.usage_day_bars = old_day_bars
+        self.controller.usage_hourly = old_hourly
+        published = []
+        with (
+            patch(
+                "sidepulse.status_bar.usage_stats.scan_usage",
+                side_effect=OSError("scan broke"),
+            ),
+            patch(
+                "sidepulse.status_bar.usage_stats.cached_codex_rate_limits",
+                return_value={
+                    "primary": {"used_percent": 22, "window_minutes": 300}
+                },
+            ) as codex_limits,
+            patch(
+                "sidepulse.status_bar.claude_quota.fetch_windows",
+                return_value=[
+                    {"label": "5-hour", "utilization": 33, "window_minutes": 300}
+                ],
+            ) as claude_limits,
+            patch.object(
+                self.controller,
+                "performSelectorOnMainThread_withObject_waitUntilDone_",
+                side_effect=lambda _selector, payload, _wait: published.append(payload),
+            ),
+        ):
+            self.controller._usage_refresh_worker(
+                requests
+            )
+
+        codex_limits.assert_called_once()
+        claude_limits.assert_called_once_with()
+        self.assertEqual(len(published), 2)
+        by_source = {
+            next(iter(payload["requests"])): payload for payload in published
+        }
+        self.assertEqual(
+            by_source[self._source("codex")]["failures"],
+            {},
+        )
+        self.assertEqual(by_source[self._source("claude")]["failures"], {})
+        self.assertTrue(
+            all(
+                payload["shared_error"] is None
+                for payload in published
+            )
+        )
+
+        for payload in published:
+            self.controller.applyUsageSummary_(payload)
+
+        codex = self.controller._usage_provider_models["codex"]
+        claude = self.controller._usage_provider_models["claude"]
+        self.assertEqual(codex.windows[0].percent_used, 22.0)
+        self.assertEqual(claude.windows[0].percent_used, 33.0)
+        self.assertIn("Codex today: 2 sessions", codex.settings_text)
+        self.assertIn("2 sessions · 3M tokens", claude.settings_text)
+        self.assertEqual(
+            self.controller._usage_provider_states["codex"].consecutive_failures, 0
+        )
+        self.assertEqual(
+            self.controller._usage_provider_states["claude"].consecutive_failures, 0
+        )
+        self.assertIs(self.controller.usage_day_bars, old_day_bars)
+        self.assertIs(self.controller.usage_hourly, old_hourly)
+
+    def test_usage_refresh_worker_publishes_provider_local_coverage_without_paths(
+        self,
+    ) -> None:
+        from sidepulse import usage_stats
+
+        totals = usage_stats.UsageTotals()
+        totals.sessions.add("claude-session")
+        totals.input_tokens = 120
+        totals.source_coverage = {
+            "claude": usage_stats.UsageSourceCoverage(
+                provider_id="claude",
+                status=usage_stats.UsageSourceStatus.PARTIAL,
+                root_present=True,
+                root_walked=True,
+                files_discovered=18,
+                files_read=17,
+                cache_hits=0,
+                malformed_lines=0,
+                unreadable_files=1,
+                skipped_symlinks=0,
+                duplicate_physical_files=0,
+            ),
+            "codex": usage_stats.UsageSourceCoverage(
+                provider_id="codex",
+                status=usage_stats.UsageSourceStatus.OK,
+                root_present=True,
+                root_walked=True,
+                files_discovered=4,
+                files_read=1,
+                cache_hits=3,
+                malformed_lines=0,
+                unreadable_files=0,
+                skipped_symlinks=0,
+                duplicate_physical_files=0,
+            ),
+        }
+        published = []
+
+        with (
+            patch("sidepulse.status_bar.usage_stats.scan_usage", return_value=totals),
+            patch(
+                "sidepulse.status_bar.usage_stats.cached_codex_rate_limits",
+                return_value={
+                    "primary": {"used_percent": 22, "window_minutes": 300}
+                },
+            ),
+            patch(
+                "sidepulse.status_bar.claude_quota.fetch_windows",
+                return_value=[
+                    {"label": "5-hour", "utilization": 33, "window_minutes": 300}
+                ],
+            ),
+            patch.object(
+                self.controller,
+                "performSelectorOnMainThread_withObject_waitUntilDone_",
+                side_effect=lambda _selector, payload, _wait: published.append(payload),
+            ),
+        ):
+            self.controller._usage_refresh_worker(
+                {
+                    self._transcript_source("codex"): 1,
+                    self._transcript_source("claude"): 1,
+                    self._source("codex"): 1,
+                    self._source("claude"): 1,
+                }
+            )
+
+        payloads = {
+            next(iter(payload["requests"])): payload
+            for payload in published
+        }
+        claude_payload = payloads[self._transcript_source("claude")]
+        codex_payload = payloads[self._transcript_source("codex")]
+        self.assertEqual(
+            claude_payload["results"][self._transcript_source("claude")][
+                "source_text"
+            ],
+            "Local transcripts · 18 files · partial",
+        )
+        self.assertTrue(
+            claude_payload["results"][self._transcript_source("claude")][
+                "partial"
+            ]
+        )
+        self.assertEqual(
+            codex_payload["results"][self._transcript_source("codex")][
+                "source_text"
+            ],
+            "Local transcripts · 4 files",
+        )
+        self.assertFalse(
+            codex_payload["results"][self._transcript_source("codex")][
+                "partial"
+            ]
+        )
+        self.assertNotIn(
+            "/",
+            claude_payload["results"][self._transcript_source("claude")][
+                "source_text"
+            ],
+        )
+        self.assertNotIn(
+            "/",
+            codex_payload["results"][self._transcript_source("codex")][
+                "source_text"
+            ],
+        )
+
+        requests = self._prime_refreshes("codex", "claude")
+        requests.update(self._prime_transcript_refreshes("codex", "claude"))
+        for payload in published:
+            source_key = next(iter(payload["requests"]))
+            payload["requests"] = {
+                source_key: requests[source_key]
+            }
+            self.controller.applyUsageSummary_(payload)
+
+        claude_model = self.controller._usage_provider_models["claude"]
+        codex_model = self.controller._usage_provider_models["codex"]
+        self.assertEqual(claude_model.windows[0].percent_used, 33.0)
+        self.assertFalse(claude_model.stale)
+        self.assertTrue(claude_model.partial)
+        self.assertEqual(
+            claude_model.source_text,
+            "Local transcripts · 18 files · partial",
+        )
+        self.assertEqual(codex_model.windows[0].percent_used, 22.0)
+        self.assertFalse(codex_model.partial)
+
+    def test_codex_adapter_failure_publishes_new_local_coverage_and_keeps_old_window(
+        self,
+    ) -> None:
+        from sidepulse import usage_stats
+        from sidepulse.usage_view import build_provider_usage_view
+
+        totals = usage_stats.UsageTotals()
+        totals.codex_sessions.add("codex-session")
+        totals.sessions.add("codex-session")
+        totals.codex_tokens = 2_000_000
+        totals.source_coverage = {
+            "codex": usage_stats.UsageSourceCoverage(
+                provider_id="codex",
+                status=usage_stats.UsageSourceStatus.PARTIAL,
+                root_present=True,
+                root_walked=True,
+                files_discovered=9,
+                files_read=8,
+                cache_hits=0,
+                malformed_lines=0,
+                unreadable_files=1,
+                skipped_symlinks=0,
+                duplicate_physical_files=0,
+            )
+        }
+        requests = self._prime_refreshes("codex")
+        requests.update(self._prime_transcript_refreshes("codex"))
+        self.controller._usage_provider_models = {
+            "codex": build_provider_usage_view(
+                "codex",
+                "Codex",
+                ({"used_percent": 12, "window_minutes": 300},),
+                last_success_at=700.0,
+                now=700.0,
+                source_text="Local transcripts · 1 file",
+            )
+        }
+        published = []
+        with (
+            patch("sidepulse.status_bar.usage_stats.scan_usage", return_value=totals),
+            patch(
+                "sidepulse.status_bar.usage_stats.cached_codex_rate_limits",
+                side_effect=OSError(
+                    "Bearer secret-token /Users/person/private-capacity.json"
+                ),
+            ),
+            patch.object(
+                self.controller,
+                "performSelectorOnMainThread_withObject_waitUntilDone_",
+                side_effect=lambda _selector, payload, _wait: published.append(payload),
+            ),
+        ):
+            self.controller._usage_refresh_worker(requests)
+
+        for payload in published:
+            self.controller.applyUsageSummary_(payload)
+
+        model = self.controller._usage_provider_models["codex"]
+        self.assertEqual(model.windows[0].percent_used, 12.0)
+        self.assertTrue(model.stale)
+        self.assertTrue(model.partial)
+        self.assertEqual(
+            model.source_text,
+            "Local transcripts · 9 files · partial",
+        )
+        self.assertIn(
+            "Codex, last 7 days: 1 session · 2M processed tokens",
+            model.settings_text,
+        )
+        self.assertIn("Capacity source unavailable", model.settings_text)
+        self.assertNotIn("secret-token", model.settings_text)
+        self.assertNotIn("/Users", model.settings_text)
+
+    def test_apply_updates_existing_menu_card_without_swapping_menu(self) -> None:
+        requests = self._prime_refreshes("codex", "claude")
+        item = self.status_bar.build_usage_menu_item(self.controller)
+        hosted_view = item.view()
+        codex_label = self.controller._usage_menu_labels["codex"]
+        self.controller.status_item = MagicMock()
+        self.controller.status_menu_open = True
+
+        self.controller.applyUsageSummary_(
+            {
+                "requests": requests,
+                "results": self._results(
+                    codex=self._result("codex", 25),
+                    claude=self._result("claude", 40),
+                ),
+                "failures": {},
+            }
+        )
+
+        self.assertIs(item.view(), hosted_view)
+        self.assertIs(self.controller._usage_menu_item, item)
+        self.assertEqual(
+            codex_label.stringValue(),
+            "Codex · 5h 75% left",
+        )
+        self.controller.status_item.setMenu_.assert_not_called()
+
+    def test_settings_and_rebuilt_menu_use_the_latest_shared_models(self) -> None:
+        codex_label = MagicMock()
+        claude_label = MagicMock()
+        self.controller.settings_fields = {
+            "profile_codex_label": codex_label,
+            "profile_plan_label": claude_label,
+        }
+        requests = self._prime_refreshes("codex", "claude")
+        self.controller.applyUsageSummary_(
+            {
+                "requests": requests,
+                "results": self._results(
+                    codex=self._result("codex", 55),
+                    claude=self._result("claude", 65),
+                ),
+                "failures": {},
+            }
+        )
+
+        codex_model = self.controller._usage_provider_models["codex"]
+        claude_model = self.controller._usage_provider_models["claude"]
+        codex_label.setStringValue_.assert_called_with(codex_model.settings_text)
+        claude_label.setStringValue_.assert_called_with(claude_model.settings_text)
+
+        rebuilt = self.status_bar.build_usage_menu_item(self.controller)
+        self.assertEqual(
+            self.controller._usage_menu_labels["codex"].stringValue(),
+            "Codex · 5h 45% left",
+        )
+        self.assertEqual(
+            self.controller._usage_menu_labels["claude"].stringValue(),
+            "Claude · 5h 35% left",
+        )
+        self.assertIs(self.controller._usage_menu_item, rebuilt)
+
+    def test_capacity_card_renders_remaining_reset_age_and_source_in_place(self) -> None:
+        requests = self._prime_refreshes("codex", "claude", completed_at=500.0)
+        item = self.status_bar.build_usage_menu_item(self.controller)
+        hosted_view = item.view()
+        header = self.controller._usage_menu_header
+        codex_primary = self.controller._usage_menu_labels["codex"]
+        codex_secondary = self.controller._usage_menu_secondary_labels["codex"]
+        self.controller.status_item = MagicMock()
+        self.controller.status_menu_open = True
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=500.0),
+            patch.object(self.status_bar.time, "time", return_value=1_000.0),
+            patch.object(self.controller, "schedule_capacity_timers"),
+        ):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": self._results(
+                        codex=self._reset_result(
+                            "codex",
+                            62,
+                            4_600.0,
+                            partial=True,
+                            source_text=(
+                                "18 files · /Users/person/.codex/sessions · 1 unreadable"
+                            ),
+                        ),
+                        claude=self._reset_result("claude", 25, 1_120.0),
+                    ),
+                    "failures": {},
+                }
+            )
+
+        self.assertIs(item.view(), hosted_view)
+        self.assertEqual(header.stringValue(), "Capacity")
+        self.assertEqual(codex_primary.stringValue(), "Codex · 5h 38% left")
+        self.assertEqual(
+            codex_secondary.stringValue(),
+            "resets in 1h · updated just now · partial · 18 files · 1 unreadable",
+        )
+        self.assertNotIn("/Users", codex_secondary.stringValue())
+        self.controller.status_item.setMenu_.assert_not_called()
+
+    def test_capacity_reset_only_window_never_displays_fake_zero_percent(self) -> None:
+        from sidepulse.usage_view import build_provider_usage_view
+
+        self.controller._usage_provider_models = {
+            "codex": build_provider_usage_view(
+                "codex",
+                "Codex",
+                (
+                    {
+                        "label": "5-hour",
+                        "used_percent": "unknown",
+                        "window_minutes": 300,
+                        "resets_at": 1_120.0,
+                    },
+                ),
+                last_success_at=500.0,
+                now=500.0,
+                reset_now=1_000.0,
+            )
+        }
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=500.0),
+            patch.object(self.status_bar.time, "time", return_value=1_000.0),
+        ):
+            self.status_bar.build_usage_menu_item(self.controller)
+
+        primary = self.controller._usage_menu_labels["codex"].stringValue()
+        secondary = self.controller._usage_menu_secondary_labels["codex"].stringValue()
+        self.assertEqual(primary, "Codex · 5h")
+        self.assertIn("resets in 2m", secondary)
+        self.assertNotIn("0%", primary)
+        self.assertNotIn("0%", secondary)
+
+    def test_apply_uses_monotonic_freshness_and_epoch_reset_clocks(self) -> None:
+        requests = self._prime_refreshes("codex", completed_at=500.0)
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=500.0),
+            patch.object(self.status_bar.time, "time", return_value=1_800_000_000.0),
+            patch.object(self.controller, "schedule_capacity_timers"),
+        ):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": self._results(
+                        codex=self._reset_result(
+                            "codex", 20, 1_800_000_120.0
+                        )
+                    ),
+                    "failures": {},
+                }
+            )
+
+        model = self.controller._usage_provider_models["codex"]
+        self.assertEqual(model.last_success_at, 500.0)
+        self.assertFalse(model.stale)
+        self.assertEqual(model.windows[0].reset_epoch, 1_800_000_120.0)
+        self.assertEqual(model.windows[0].reset_text(1_800_000_000.0), "in 2m")
+
+    def test_apply_schedules_one_earliest_grouped_reset_timer(self) -> None:
+        timer = MagicMock()
+        timer_api = MagicMock()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.return_value = timer
+        requests = self._prime_refreshes("codex", "claude", completed_at=500.0)
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=500.0),
+            patch.object(self.status_bar.time, "time", return_value=1_000.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+        ):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": self._results(
+                        codex=self._reset_result("codex", 20, 1_040.0),
+                        claude=self._reset_result("claude", 30, 1_040.0),
+                    ),
+                    "failures": {},
+                }
+            )
+
+        schedule = timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
+        reset_calls = [call for call in schedule.call_args_list if call.args[2] == "capacityResetBoundary:"]
+        self.assertEqual(len(reset_calls), 1)
+        self.assertEqual(reset_calls[0].args[0], 42.0)
+        self.assertIs(self.controller._capacity_reset_timer, timer)
+        self.assertEqual(
+            self.controller._capacity_reset_plan.provider_ids,
+            ("codex", "claude"),
+        )
+
+    def test_capacity_reset_timer_uses_earliest_window_across_all_providers(self) -> None:
+        from sidepulse.usage_view import build_provider_usage_view
+
+        timer_api = MagicMock()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.side_effect = (
+            MagicMock(),
+            MagicMock(),
+        )
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex", last_success_at=500.0),
+            "claude": self._state("claude", last_success_at=500.0),
+        }
+        self.controller._usage_provider_models = {
+            "codex": build_provider_usage_view(
+                "codex",
+                "Codex",
+                (
+                    {"label": "primary", "used_percent": 20, "resets_at": 1_100.0},
+                    {"label": "weekly", "used_percent": 30, "resets_at": 1_040.0},
+                ),
+                last_success_at=500.0,
+                now=500.0,
+                reset_now=1_000.0,
+            ),
+            "claude": build_provider_usage_view(
+                "claude",
+                "Claude",
+                ({"label": "5-hour", "utilization": 40, "resets_at": 1_080.0},),
+                last_success_at=500.0,
+                now=500.0,
+                reset_now=1_000.0,
+            ),
+        }
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=500.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+        ):
+            self.controller.schedule_capacity_timers(epoch_now=1_000.0)
+
+        self.assertEqual(self.controller._capacity_reset_plan.provider_ids, ("codex",))
+        self.assertEqual(
+            self.controller._capacity_reset_plan.boundary_keys,
+            (
+                "codex|quota|local|remote_quota_windows|legacy:1|unspecified|"
+                "unspecified|unspecified|all_workloads",
+            ),
+        )
+        self.assertEqual(self.controller._capacity_reset_plan.deadline, 1_042.0)
+
+    def test_normal_refresh_due_first_suppresses_reset_boundary_timer(self) -> None:
+        from sidepulse.usage_view import build_provider_usage_view
+
+        timer_api = MagicMock()
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex", last_success_at=100.0)
+        }
+        self.controller._usage_provider_models = {
+            "codex": build_provider_usage_view(
+                "codex",
+                "Codex",
+                ({"used_percent": 20, "resets_at": 1_040.0},),
+                last_success_at=100.0,
+                now=100.0,
+                reset_now=1_000.0,
+            )
+        }
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=500.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+        ):
+            self.controller.schedule_capacity_timers(epoch_now=1_000.0)
+
+        selectors = [
+            call.args[2]
+            for call in timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.call_args_list
+        ]
+        self.assertNotIn("capacityResetBoundary:", selectors)
+        self.assertIsNone(self.controller._capacity_reset_timer)
+
+    def test_unchanged_capacity_plan_keeps_existing_timer_identity(self) -> None:
+        from sidepulse.usage_view import build_provider_usage_view
+
+        self.controller.status_menu_open = True
+        reset_timer = MagicMock()
+        countdown_timer = MagicMock()
+        timer_api = MagicMock()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.side_effect = (
+            reset_timer,
+            countdown_timer,
+        )
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex", last_success_at=500.0)
+        }
+        self.controller._usage_provider_models = {
+            "codex": build_provider_usage_view(
+                "codex",
+                "Codex",
+                ({"used_percent": 20, "resets_at": 1_130.0},),
+                last_success_at=500.0,
+                now=500.0,
+                reset_now=1_000.0,
+            )
+        }
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=500.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+        ):
+            self.controller.schedule_capacity_timers(epoch_now=1_000.0)
+            self.controller.schedule_capacity_timers(epoch_now=1_000.0)
+
+        self.assertEqual(
+            timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.call_count,
+            2,
+        )
+        self.assertIs(self.controller._capacity_reset_timer, reset_timer)
+        self.assertIs(self.controller._capacity_countdown_timer, countdown_timer)
+
+    def test_capacity_timers_join_common_run_loop_modes_for_open_menu_updates(
+        self,
+    ) -> None:
+        from sidepulse.usage_view import build_provider_usage_view
+
+        self.controller.status_menu_open = True
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex", last_success_at=500.0)
+        }
+        self.controller._usage_provider_models = {
+            "codex": build_provider_usage_view(
+                "codex",
+                "Codex",
+                ({"used_percent": 20, "resets_at": 1_200.0},),
+                last_success_at=500.0,
+                now=500.0,
+                reset_now=1_000.0,
+            )
+        }
+        reset_timer = MagicMock()
+        countdown_timer = MagicMock()
+        timer_api = MagicMock()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.side_effect = (
+            reset_timer,
+            countdown_timer,
+        )
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=500.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+        ):
+            self.controller.schedule_capacity_timers(epoch_now=1_000.0)
+
+        add_timer = (
+            self.capacity_run_loop_type.currentRunLoop.return_value.addTimer_forMode_
+        )
+        self.assertEqual(add_timer.call_count, 2)
+        self.assertEqual(
+            [call.args[0] for call in add_timer.call_args_list],
+            [reset_timer, countdown_timer],
+        )
+        reset_timer.invalidate.assert_not_called()
+        countdown_timer.invalidate.assert_not_called()
+
+    def test_exact_twenty_four_hour_countdown_schedules_the_branch_transition(self) -> None:
+        from sidepulse.usage_view import build_provider_usage_view
+
+        self.controller.status_menu_open = True
+        timer_api = MagicMock()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.side_effect = (
+            MagicMock(),
+            MagicMock(),
+        )
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex", last_success_at=500.0)
+        }
+        self.controller._usage_provider_models = {
+            "codex": build_provider_usage_view(
+                "codex",
+                "Codex",
+                ({"used_percent": 20, "resets_at": 87_400.0},),
+                last_success_at=500.0,
+                now=500.0,
+                reset_now=1_000.0,
+            )
+        }
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=500.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+        ):
+            self.controller.schedule_capacity_timers(epoch_now=1_000.0)
+
+        countdown_calls = [
+            call
+            for call in timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.call_args_list
+            if call.args[2] == "capacityCountdown:"
+        ]
+        self.assertEqual(len(countdown_calls), 1)
+        self.assertEqual(countdown_calls[0].args[0], 60.0)
+
+    def test_reset_callback_records_keys_before_requesting_grouped_providers(self) -> None:
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex", last_success_at=500.0),
+            "claude": self._state("claude", last_success_at=500.0),
+        }
+        self.controller._capacity_reset_plan = SimpleNamespace(
+            deadline=1_000.0,
+            provider_ids=("codex", "claude"),
+            boundary_keys=("codex|primary|998", "claude|primary|998"),
+        )
+        self.controller._capacity_reset_timer = MagicMock()
+        observed = []
+
+        def request(provider_ids, *, reason=None):
+            observed.append(
+                (
+                    provider_ids,
+                    reason,
+                    tuple(self.controller._attempted_capacity_boundary_keys),
+                )
+            )
+            return provider_ids
+
+        with (
+            patch.object(self.status_bar.time, "time", return_value=1_000.0),
+            patch.object(self.controller, "request_usage_refresh", side_effect=request),
+            patch.object(self.controller, "schedule_capacity_timers"),
+        ):
+            self.controller.capacityResetBoundary_(self.controller._capacity_reset_timer)
+
+        self.assertEqual(
+            observed,
+            [
+                (
+                    (self._source("codex"),),
+                    "reset-boundary",
+                    ("codex|primary|998", "claude|primary|998"),
+                )
+            ],
+        )
+
+    def test_partial_grouped_reset_request_rolls_back_all_new_semantic_keys(self) -> None:
+        timer = MagicMock()
+        self.controller._capacity_reset_timer = timer
+        self.controller._capacity_reset_plan = SimpleNamespace(
+            deadline=1_000.0,
+            provider_ids=("codex", "claude"),
+            boundary_keys=(
+                "codex|primary|998",
+                "codex|secondary|998",
+                "claude|primary|998",
+            ),
+        )
+        self.controller._attempted_capacity_boundary_keys = ("older",)
+        attempts_seen_during_request = []
+
+        def partially_blocked_request(provider_ids, *, reason=None):
+            del provider_ids, reason
+            attempts_seen_during_request.append(
+                tuple(self.controller._attempted_capacity_boundary_keys)
+            )
+            return (self._source("claude"),)
+
+        with (
+            patch.object(self.status_bar.time, "time", return_value=1_000.0),
+            patch.object(
+                self.controller,
+                "request_usage_refresh",
+                side_effect=partially_blocked_request,
+            ),
+            patch.object(self.controller, "schedule_capacity_timers"),
+        ):
+            self.controller.capacityResetBoundary_(timer)
+
+        self.assertEqual(
+            attempts_seen_during_request,
+            [
+                (
+                    "older",
+                    "codex|primary|998",
+                    "codex|secondary|998",
+                    "claude|primary|998",
+                )
+            ],
+        )
+        self.assertEqual(self.controller._attempted_capacity_boundary_keys, ("older",))
+
+    def test_early_reset_callback_reconciles_without_requesting_provider_work(self) -> None:
+        timer = MagicMock()
+        self.controller._capacity_reset_timer = timer
+        self.controller._capacity_reset_plan = SimpleNamespace(
+            deadline=1_042.0,
+            provider_ids=("codex",),
+            boundary_keys=("codex|primary|1040",),
+        )
+
+        with (
+            patch.object(self.status_bar.time, "time", return_value=1_020.0),
+            patch.object(self.controller, "request_usage_refresh") as request,
+            patch.object(self.controller, "schedule_capacity_timers") as schedule,
+        ):
+            self.controller.capacityResetBoundary_(timer)
+
+        request.assert_not_called()
+        schedule.assert_called_once_with(epoch_now=1_020.0)
+        self.assertEqual(self.controller._attempted_capacity_boundary_keys, ())
+
+    def test_late_reset_callback_reconciles_changed_windows_before_requesting(self) -> None:
+        from sidepulse.usage_view import build_provider_usage_view
+
+        timer = MagicMock()
+        self.controller._capacity_reset_timer = timer
+        self.controller._capacity_reset_plan = SimpleNamespace(
+            deadline=1_042.0,
+            provider_ids=("codex",),
+            boundary_keys=("codex|primary|1040",),
+        )
+        self.controller._usage_provider_models = {
+            "codex": build_provider_usage_view(
+                "codex",
+                "Codex",
+                ({"label": "primary", "used_percent": 20, "resets_at": 1_100.0},),
+                last_success_at=500.0,
+                now=500.0,
+                reset_now=1_000.0,
+            )
+        }
+
+        with (
+            patch.object(self.status_bar.time, "time", return_value=1_050.0),
+            patch.object(self.controller, "request_usage_refresh") as request,
+            patch.object(self.controller, "schedule_capacity_timers") as schedule,
+        ):
+            self.controller.capacityResetBoundary_(timer)
+
+        request.assert_not_called()
+        schedule.assert_called_once_with(epoch_now=1_050.0)
+        self.assertEqual(self.controller._attempted_capacity_boundary_keys, ())
+
+    def test_backoff_blocked_reset_request_keeps_one_concrete_retry_timer(self) -> None:
+        from sidepulse.usage_view import build_provider_usage_view
+
+        timer = MagicMock()
+        retry_timer = MagicMock()
+        timer_api = MagicMock()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.return_value = retry_timer
+        self.controller._capacity_reset_timer = timer
+        self.controller._capacity_reset_plan = SimpleNamespace(
+            deadline=1_000.0,
+            provider_ids=("codex",),
+            boundary_keys=("codex|primary|998",),
+        )
+        self.controller._attempted_capacity_boundary_keys = ("older",)
+        self.controller._usage_provider_states = {
+            "codex": self._state(
+                "codex",
+                last_success_at=450.0,
+                retry_not_before=530.0,
+            )
+        }
+        self.controller._usage_provider_models = {
+            "codex": build_provider_usage_view(
+                "codex",
+                "Codex",
+                ({"label": "primary", "used_percent": 20, "resets_at": 998.0},),
+                last_success_at=450.0,
+                now=450.0,
+                reset_now=990.0,
+            )
+        }
+
+        with (
+            patch.object(self.status_bar.time, "time", return_value=1_000.0),
+            patch.object(self.status_bar.time, "monotonic", return_value=500.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+            patch.object(self.controller, "request_usage_refresh") as request,
+        ):
+            self.controller.capacityResetBoundary_(timer)
+
+        request.assert_not_called()
+        self.assertEqual(self.controller._attempted_capacity_boundary_keys, ("older",))
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.assert_called_once_with(
+            30.0,
+            self.controller,
+            "capacityResetBoundary:",
+            None,
+            False,
+        )
+        self.assertIs(self.controller._capacity_reset_timer, retry_timer)
+        self.assertEqual(self.controller._capacity_reset_plan.deadline, 1_000.0)
+
+        with patch.object(self.status_bar.time, "monotonic", return_value=501.0):
+            self.controller.schedule_capacity_timers(epoch_now=1_001.0)
+
+        retry_timer.invalidate.assert_not_called()
+        self.assertIs(self.controller._capacity_reset_timer, retry_timer)
+
+        self.controller.invalidate_usage_providers(("codex",))
+
+        retry_timer.invalidate.assert_called_once_with()
+        self.assertIsNone(self.controller._capacity_reset_timer)
+        self.assertIsNone(self.controller._capacity_reset_retry_deadline)
+        self.assertEqual(
+            self.controller._usage_provider_states["codex"].generation,
+            1,
+        )
+
+    def test_controller_capacity_attempt_state_stays_capped_at_64(self) -> None:
+        timer = MagicMock()
+        self.controller._capacity_reset_timer = timer
+        self.controller._capacity_reset_plan = SimpleNamespace(
+            deadline=1_000.0,
+            provider_ids=("codex",),
+            boundary_keys=("new",),
+        )
+        self.controller._attempted_capacity_boundary_keys = tuple(
+            f"old-{index:02d}" for index in range(64)
+        )
+
+        with (
+            patch.object(self.status_bar.time, "time", return_value=1_000.0),
+            patch.object(
+                self.controller,
+                "request_usage_refresh",
+                return_value=(self._source("codex"),),
+            ),
+            patch.object(self.controller, "schedule_capacity_timers"),
+        ):
+            self.controller.capacityResetBoundary_(timer)
+
+        self.assertEqual(len(self.controller._attempted_capacity_boundary_keys), 64)
+        self.assertNotIn("old-00", self.controller._attempted_capacity_boundary_keys)
+        self.assertEqual(self.controller._attempted_capacity_boundary_keys[-1], "new")
+
+    def test_countdown_callback_only_mutates_existing_labels_and_reschedules(self) -> None:
+        from sidepulse.usage_view import build_provider_usage_view
+
+        self.controller._usage_provider_states = {
+            "codex": self._state("codex", last_success_at=500.0)
+        }
+        self.controller._usage_provider_models = {
+            "codex": build_provider_usage_view(
+                "codex",
+                "Codex",
+                (
+                    {
+                        "used_percent": 20,
+                        "window_minutes": 300,
+                        "resets_at": 1_130.0,
+                    },
+                ),
+                last_success_at=500.0,
+                now=500.0,
+                reset_now=1_000.0,
+            )
+        }
+        item = self.status_bar.build_usage_menu_item(self.controller)
+        secondary = self.controller._usage_menu_secondary_labels["codex"]
+        timer = MagicMock()
+        self.controller._capacity_countdown_timer = timer
+        before = secondary.stringValue()
+
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=510.0),
+            patch.object(self.status_bar.time, "time", return_value=1_010.0),
+            patch.object(self.controller, "_usage_refresh_worker") as worker,
+            patch("sidepulse.status_bar.usage_stats.scan_usage") as scan,
+            patch("sidepulse.status_bar.usage_stats.codex_rate_limits") as codex,
+            patch("sidepulse.status_bar.claude_quota.fetch_windows") as claude,
+            patch.object(self.controller, "schedule_capacity_timers") as schedule,
+        ):
+            self.controller.capacityCountdown_(timer)
+
+        self.assertIs(self.controller._usage_menu_item, item)
+        self.assertNotEqual(secondary.stringValue(), before)
+        self.assertIn("resets in 2m", secondary.stringValue())
+        worker.assert_not_called()
+        scan.assert_not_called()
+        codex.assert_not_called()
+        claude.assert_not_called()
+        schedule.assert_called_once_with(epoch_now=1_010.0)
+
+    def test_invalidation_clears_capacity_timers_models_and_attempts(self) -> None:
+        from sidepulse.usage_view import build_provider_usage_view
+
+        reset_timer = MagicMock()
+        countdown_timer = MagicMock()
+        self.controller._capacity_reset_timer = reset_timer
+        self.controller._capacity_countdown_timer = countdown_timer
+        self.controller._capacity_reset_plan = object()
+        self.controller._capacity_reset_retry_deadline = 530.0
+        self.controller._capacity_countdown_deadline = 1_100.0
+        self.controller._attempted_capacity_boundary_keys = ("old",)
+        self.controller._usage_provider_models = {
+            "codex": build_provider_usage_view(
+                "codex",
+                "Codex",
+                ({"used_percent": 20, "resets_at": 1_100.0},),
+                last_success_at=500.0,
+                now=500.0,
+                reset_now=1_000.0,
+            )
+        }
+
+        self.controller.invalidate_usage_providers(("codex",))
+
+        reset_timer.invalidate.assert_called_once_with()
+        countdown_timer.invalidate.assert_called_once_with()
+        self.assertIsNone(self.controller._capacity_reset_timer)
+        self.assertIsNone(self.controller._capacity_countdown_timer)
+        self.assertIsNone(self.controller._capacity_reset_retry_deadline)
+        self.assertEqual(self.controller._attempted_capacity_boundary_keys, ())
+        self.assertNotIn("codex", self.controller._usage_provider_models)
+
+    def test_settings_invalidation_reseeds_only_exact_source_and_replans_once(
+        self,
+    ) -> None:
+        requests = self._prime_refreshes("codex", completed_at=100.0)
+        with patch.object(self.status_bar.time, "monotonic", return_value=100.0):
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": {},
+                    "failures": self._failures(
+                        codex=self.RefreshFailureKind.SOURCE_UNAVAILABLE
+                    ),
+                }
+            )
+        retry_timer = MagicMock()
+        retry_timer.userInfo.return_value = self._refresh_key("codex")
+        self.controller._capacity_refresh_retry_timers[
+            self._refresh_key("codex")
+        ] = retry_timer
+        stale_deadline_timer = MagicMock()
+        self.controller._capacity_refresh_deadline_timers[
+            self._refresh_key("codex")
+        ] = stale_deadline_timer
+        claude_requests = self._prime_refreshes("claude", completed_at=101.0)
+        claude_deadline_timer = self.controller._capacity_refresh_deadline_timers[
+            self._refresh_key("claude")
+        ]
+
+        with patch.object(self.status_bar.time, "monotonic", return_value=102.0):
+            self.controller.invalidate_usage_providers(("codex",))
+
+        codex = self._capacity_refresh_state("codex", now=102.0)
+        claude = self._capacity_refresh_state("claude", now=102.0)
+        self.assertEqual(codex.generation, 2)
+        self.assertFalse(codex.in_flight)
+        self.assertIsNone(codex.retry_at)
+        self.assertFalse(codex.queued_manual)
+        self.assertEqual(claude.generation, claude_requests[self._source("claude")])
+        self.assertTrue(claude.in_flight)
+        retry_timer.invalidate.assert_called_once_with()
+        stale_deadline_timer.invalidate.assert_called_once_with()
+        self.assertNotIn(
+            self._refresh_key("codex"),
+            self.controller._capacity_refresh_retry_timers,
+        )
+        self.assertNotIn(
+            self._refresh_key("codex"),
+            self.controller._capacity_refresh_deadline_timers,
+        )
+        self.assertIs(
+            self.controller._capacity_refresh_deadline_timers[
+                self._refresh_key("claude")
+            ],
+            claude_deadline_timer,
+        )
+        self.controller._usage_transcript_states = {
+            source_key: dataclass_replace(state, last_success_at=102.0)
+            for source_key, state in (
+                self.controller._usage_transcript_states.items()
+            )
+        }
+
+        timer_api = MagicMock()
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=102.0),
+            patch.object(self.status_bar, "NSTimer", timer_api),
+            patch("sidepulse.status_bar.threading.Thread") as thread_type,
+        ):
+            self.controller.maybe_refresh_usage_summary()
+            self.controller.maybe_refresh_usage_summary()
+
+        thread_type.assert_called_once()
+        self.assertEqual(
+            thread_type.call_args.kwargs["args"][0],
+            {self._source("codex"): 3},
+        )
+        self.assertTrue(self._capacity_refresh_state("codex", now=102.0).in_flight)
+
+    def test_termination_invalidates_capacity_timers_and_clears_attempts(self) -> None:
+        reset_timer = MagicMock()
+        countdown_timer = MagicMock()
+        deadline_timer = MagicMock()
+        retry_timer = MagicMock()
+        self.controller._capacity_reset_timer = reset_timer
+        self.controller._capacity_countdown_timer = countdown_timer
+        self.controller._capacity_refresh_deadline_timers = {
+            self._refresh_key("codex"): deadline_timer
+        }
+        self.controller._capacity_refresh_retry_timers = {
+            self._refresh_key("claude"): retry_timer
+        }
+        self.controller._capacity_reset_retry_deadline = 530.0
+        self.controller._attempted_capacity_boundary_keys = tuple(
+            f"key-{index}" for index in range(64)
+        )
+        self.controller.monitor = None
+        self.controller.closed_lid_awake = MagicMock()
+        self.controller.keep_awake = MagicMock()
+
+        with patch.object(self.controller, "stop_event_server"):
+            self.controller.applicationWillTerminate_(None)
+
+        reset_timer.invalidate.assert_called_once_with()
+        countdown_timer.invalidate.assert_called_once_with()
+        deadline_timer.invalidate.assert_called_once_with()
+        retry_timer.invalidate.assert_called_once_with()
+        self.assertEqual(self.controller._capacity_refresh_deadline_timers, {})
+        self.assertEqual(self.controller._capacity_refresh_retry_timers, {})
+        self.assertIsNone(self.controller._capacity_reset_retry_deadline)
+        self.assertEqual(self.controller._attempted_capacity_boundary_keys, ())
 
 
 class ClickToAnswerTests(unittest.TestCase):
@@ -9300,26 +14636,380 @@ class ClickToAnswerTests(unittest.TestCase):
         )
 
     def test_click_targets_oldest_ask_and_disarms_when_clear(self) -> None:
-        from types import SimpleNamespace as NS
+        from dataclasses import replace
 
         self.assertIsNone(self.controller.screen_bar_click_status())
         newer, older = self._ask("claude:session:new"), self._ask("claude:session:old")
-        self.controller.last_snapshot = NS(statuses=[newer, older])
-        self.controller.ask_blocked_by_agent = {
-            "claude:session:old": 10.0,
-            "claude:session:new": 99.0,
-        }
+        older = replace(older, updated_at=newer.updated_at - timedelta(seconds=10))
+        self.controller.current_attention_projection = self.status_bar.projection_for_statuses(
+            (newer, older), self.controller.settings
+        )
         target = self.controller.screen_bar_click_status()
         self.assertEqual(target.agent_id, "claude:session:old")
-        self.controller.last_snapshot = NS(statuses=[])
+        self.controller.current_attention_projection = self.status_bar.projection_for_statuses(
+            (), self.controller.settings
+        )
         self.assertIsNone(self.controller.screen_bar_click_status())
+
+    def test_click_target_follows_oldest_live_episode_not_latest_status_timestamp(self) -> None:
+        from dataclasses import replace
+
+        older = self._ask("claude:session:old")
+        newer = self._ask("claude:session:new")
+        older = replace(older, updated_at=newer.updated_at + timedelta(seconds=5))
+        self.controller.current_attention_projection = self.status_bar.projection_for_statuses(
+            (older, newer), self.controller.settings
+        )
+        now = time.monotonic()
+        self.controller.ask_blocked_by_agent = {
+            older.agent_id: now - 30.0,
+            newer.agent_id: now - 5.0,
+        }
+
+        target = self.controller.screen_bar_click_status()
+
+        self.assertIsNotNone(target)
+        self.assertEqual(target.agent_id, older.agent_id)
 
     def test_subagent_asks_never_arm_the_bar(self) -> None:
-        from types import SimpleNamespace as NS
-
         worker = self._ask("claude:agent:w1")
-        self.controller.last_snapshot = NS(statuses=[worker])
+        self.controller.current_attention_projection = self.status_bar.projection_for_statuses(
+            (worker,), self.controller.settings
+        )
         self.assertIsNone(self.controller.screen_bar_click_status())
+
+
+class FailureSignalProjectionContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def _snapshot(self, *statuses):
+        return collector_module.snapshot_from_statuses(
+            statuses,
+            sources=(),
+            collected_at=datetime.now(timezone.utc),
+            stale_after_seconds=3600.0,
+            tool_running_timeout_seconds=0.0,
+            completed_visible_seconds=3600.0,
+            idle_visible_seconds=3600.0,
+        )
+
+    def _failure(self):
+        return AgentStatus(
+            provider="claude",
+            agent_id="claude:agent:worker",
+            display_name="Claude worker",
+            mode=AgentMode.BLOCKED_ERROR,
+            updated_at=datetime.now(timezone.utc),
+            event_name="PostToolUseFailure",
+            session_id="main",
+        )
+
+    def _permission(self):
+        return AgentStatus(
+            provider="codex",
+            agent_id="codex:session:main",
+            display_name="Codex main",
+            mode=AgentMode.WAITING_FOR_INPUT,
+            updated_at=datetime.now(timezone.utc),
+            event_name="PermissionRequest",
+            session_id="main",
+        )
+
+    def _device(self, provider: str):
+        device = self.status_bar.StatusBarDevice(
+            device_id="Dot",
+            name="SidePulse Dot",
+            root=Path("/Volumes/Dot"),
+            target=Path("/Volumes/Dot/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        self.controller.settings = AgentMonitorSettings(
+            devices=(
+                DeviceDisplaySetting(
+                    device_id="Dot", name="SidePulse Dot", path="/Volumes/Dot"
+                ),
+            )
+        ).with_device_provider_pin("Dot", provider)
+        return device
+
+    def test_stopped_worker_failure_projection_contract_across_every_surface(self) -> None:
+        from sidepulse.attention import LifecycleMode
+
+        self.controller.update_attention_projection(self._snapshot(), now=10.0)
+        projection = self.controller.update_attention_projection(
+            self._snapshot(self._failure()),
+            now=11.0,
+        )
+        active = self.controller.active_failure_signal(now=11.0)
+        device = self._device("claude")
+
+        self.assertEqual(projection.lifecycle_mode, LifecycleMode.FAILED_VISIBLE)
+        self.assertEqual(
+            self.status_bar.state_for_projection(projection),
+            self.status_bar.STATE_FAILED,
+        )
+        self.assertEqual(self.status_bar.ask_statuses(projection), [])
+        self.assertIsNotNone(active)
+        with patch.object(self.status_bar.time, "monotonic", return_value=11.0):
+            self.assertEqual(
+                self.controller.active_led_display_kind_for_device(device, None),
+                self.status_bar.LED_DISPLAY_FAILURE,
+            )
+        self.assertEqual(
+            self.controller.virtual_display_state(projection, active),
+            LedDisplayState.FAILED,
+        )
+        pinned = self.controller.projected_rows_for_device(projection, device)
+        self.assertEqual(tuple(row.agent_id for row in pinned), ("claude:agent:worker",))
+        self.assertIsNone(self.controller.screen_bar_click_status())
+        self.controller.track_ask_blocked(projection)
+        self.assertIsNone(self.controller.ask_blocked_since)
+
+        state, program = colors_module.program_for_projection(
+            projection,
+            active_signal=active,
+            colors=self.controller.settings.colors,
+        )
+        self.assertEqual(state, LedDisplayState.FAILED)
+        self.assertNotIn("repeat", program)
+        self.assertEqual(len(program.splitlines()), 5)
+        timed_lines = [line for line in program.splitlines() if line.endswith("cosine")]
+        timed_duration_ms = sum(
+            int(line.split()[-2].removesuffix("ms")) for line in timed_lines
+        )
+        self.assertEqual(timed_duration_ms, 1800)
+        self.assertEqual(program.splitlines()[-1], self.controller.settings.colors.mode_color("ask"))
+        self.assertEqual(
+            sum(self.controller.settings.colors.mode_color("ask") in line for line in program.splitlines()),
+            3,
+        )
+
+    def test_live_permission_projection_contract_preempts_failure_and_routes_click_and_escalation(self) -> None:
+        self.controller.update_attention_projection(self._snapshot(), now=10.0)
+        failure_snapshot = self._snapshot(self._failure())
+        self.controller.update_attention_projection(failure_snapshot, now=11.0)
+        self.assertIsNotNone(self.controller.active_failure_signal(now=11.1))
+
+        permission = self._permission()
+        projection = self.controller.update_attention_projection(
+            self._snapshot(permission),
+            now=11.2,
+        )
+        device = self._device("codex")
+
+        self.assertEqual(
+            self.status_bar.state_for_projection(projection), self.status_bar.STATE_ASK
+        )
+        self.assertEqual(len(self.status_bar.ask_statuses(projection)), 1)
+        self.assertIsNone(self.controller.active_failure_signal(now=11.2))
+        self.assertEqual(
+            self.controller.active_led_display_kind_for_device(device, None),
+            self.status_bar.LED_DISPLAY_AGENT,
+        )
+        self.assertEqual(
+            self.controller.virtual_display_state(projection, None),
+            LedDisplayState.ASK,
+        )
+        self.assertEqual(
+            tuple(
+                row.agent_id
+                for row in self.controller.projected_rows_for_device(projection, device)
+            ),
+            (permission.agent_id,),
+        )
+        self.assertEqual(self.controller.screen_bar_click_status().agent_id, permission.agent_id)
+        self.controller.track_ask_blocked(projection)
+        self.assertIsNotNone(self.controller.ask_blocked_since)
+
+        restored = self.controller.update_attention_projection(failure_snapshot, now=12.0)
+        self.assertEqual(self.status_bar.ask_statuses(restored), [])
+        self.assertIsNone(self.controller.active_failure_signal(now=12.0))
+
+    def test_failure_signal_deadline_schedules_one_explicit_refresh(self) -> None:
+        timer = MagicMock()
+        timer_api = MagicMock()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.return_value = timer
+        self.controller.update_attention_projection(self._snapshot(), now=10.0)
+
+        with patch.object(
+            self.status_bar,
+            "NSTimer",
+            timer_api,
+        ):
+            self.controller.update_attention_projection(
+                self._snapshot(self._failure()),
+                now=11.0,
+            )
+
+        schedule = timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
+        schedule.assert_called_once()
+        self.assertAlmostEqual(schedule.call_args.args[0], 1.8)
+        self.assertEqual(schedule.call_args.args[2], "failureSignalExpired:")
+        self.assertFalse(schedule.call_args.args[4])
+
+        with patch.object(self.controller, "refresh_") as refresh:
+            self.controller.failureSignalExpired_(timer)
+        refresh.assert_called_once_with(None)
+
+    def test_early_failure_timer_keeps_cue_and_reschedules_remaining_lease(self) -> None:
+        first_timer = MagicMock()
+        replacement_timer = MagicMock()
+        timer_api = MagicMock()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.side_effect = (
+            first_timer,
+            replacement_timer,
+        )
+        self.controller.update_attention_projection(self._snapshot(), now=10.0)
+        with patch.object(self.status_bar, "NSTimer", timer_api):
+            self.controller.update_attention_projection(
+                self._snapshot(self._failure()),
+                now=11.0,
+            )
+            schedule = (
+                timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
+            )
+            schedule.reset_mock()
+            with (
+                patch.object(self.status_bar.time, "monotonic", return_value=11.5),
+                patch.object(self.controller, "refresh_") as refresh,
+            ):
+                self.controller.failureSignalExpired_(first_timer)
+
+        active = self.controller.active_failure_signal(now=11.5)
+        self.assertIsNotNone(active)
+        self.assertEqual(active.ends_at, 12.8)
+        schedule.assert_called_once()
+        self.assertAlmostEqual(schedule.call_args.args[0], 1.3)
+        self.assertIs(self.controller.failure_signal_timer, replacement_timer)
+        refresh.assert_called_once_with(None)
+
+    def test_late_failure_timer_starts_pending_cue_and_schedules_full_lease(self) -> None:
+        from dataclasses import replace
+
+        first_timer = MagicMock()
+        pending_timer = MagicMock()
+        timer_api = MagicMock()
+        timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.side_effect = (
+            first_timer,
+            pending_timer,
+        )
+        first_failure = self._failure()
+        second_failure = replace(
+            first_failure,
+            agent_id="claude:agent:second-worker",
+        )
+        self.controller.update_attention_projection(self._snapshot(), now=10.0)
+        with patch.object(self.status_bar, "NSTimer", timer_api):
+            self.controller.update_attention_projection(
+                self._snapshot(first_failure, second_failure),
+                now=11.0,
+            )
+            schedule = (
+                timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
+            )
+            schedule.reset_mock()
+            with (
+                patch.object(self.status_bar.time, "monotonic", return_value=13.0),
+                patch.object(self.controller, "refresh_") as refresh,
+            ):
+                self.controller.failureSignalExpired_(first_timer)
+
+        active = self.controller.active_failure_signal(now=13.0)
+        self.assertIsNotNone(active)
+        self.assertEqual(active.signal.source_agent_id, second_failure.agent_id)
+        self.assertEqual(active.started_at, 13.0)
+        self.assertEqual(active.ends_at, 14.8)
+        schedule.assert_called_once()
+        self.assertAlmostEqual(schedule.call_args.args[0], 1.8)
+        self.assertIs(self.controller.failure_signal_timer, pending_timer)
+        refresh.assert_called_once_with(None)
+
+    def test_failed_rows_do_not_crash_multi_agent_projection_blend_modes(self) -> None:
+        from sidepulse.attention import AttentionProjection, LifecycleMode, ProjectedAgentRow
+
+        now = datetime.now(timezone.utc)
+        working = AgentStatus(
+            provider="codex",
+            agent_id="codex:session:main",
+            display_name="Codex main",
+            mode=AgentMode.WORKING,
+            updated_at=now,
+            event_name="Working",
+        )
+        failed = AgentStatus(
+            provider="claude",
+            agent_id="claude:agent:worker",
+            display_name="Claude worker",
+            mode=AgentMode.BLOCKED_ERROR,
+            updated_at=now,
+            event_name="PostToolUseFailure",
+            session_id="main",
+        )
+        projection = AttentionProjection(
+            lifecycle_mode=LifecycleMode.ACTIVE,
+            actionable_attention=(),
+            visible_rows=(
+                ProjectedAgentRow(
+                    agent_id=working.agent_id,
+                    provider=working.provider,
+                    display_name=working.display_name,
+                    lifecycle_mode=LifecycleMode.ACTIVE,
+                    actionable=False,
+                    is_subagent=False,
+                    updated_at=working.updated_at,
+                    source_status=working,
+                ),
+                ProjectedAgentRow(
+                    agent_id=failed.agent_id,
+                    provider=failed.provider,
+                    display_name=failed.display_name,
+                    lifecycle_mode=LifecycleMode.FAILED_VISIBLE,
+                    actionable=False,
+                    is_subagent=False,
+                    updated_at=failed.updated_at,
+                    source_status=failed,
+                ),
+            ),
+            transient_signals=(),
+            dominant_provider="codex",
+            click_target_agent_id=None,
+        )
+
+        for mode in colors_module.BLEND_MODE_CHOICES:
+            for led_count in (2, 8):
+                settings = (
+                    self.controller.settings.colors.with_blend_mode(mode)
+                    .with_session_color(failed.agent_id, "#123456")
+                )
+                state, program = colors_module.program_for_projection(
+                    projection,
+                    colors=settings,
+                    led_count=led_count,
+                )
+                label = f"{mode}/{led_count}"
+                self.assertEqual(state, LedDisplayState.WORKING, label)
+                self.assertTrue(program, label)
+                self.assertLessEqual(len(program.splitlines()), 20, label)
+                self.assertLessEqual(len(program.encode()), 512, label)
+                if mode in {
+                    colors_module.BLEND_MODE_CYCLE,
+                    colors_module.BLEND_MODE_RELAY,
+                    colors_module.BLEND_MODE_ROUND_ROBIN,
+                    colors_module.BLEND_MODE_SPATIAL,
+                }:
+                    failure_segments = [
+                        segment
+                        for line in program.splitlines()
+                        for segment in line.split("; ")
+                        if "#123456" in segment
+                    ]
+                    self.assertTrue(failure_segments, label)
+                    self.assertTrue(
+                        all("pulse" not in segment for segment in failure_segments),
+                        label,
+                    )
 
 
 class QuotaRunwayTests(unittest.TestCase):
@@ -9336,18 +15026,14 @@ class QuotaRunwayTests(unittest.TestCase):
         lit = [seg for seg in program.split(";") if "#000000" not in seg]
         self.assertEqual(len(lit), 4)
 
-    def test_runway_state_picks_worst_window_and_brand(self) -> None:
+    def test_runway_state_refuses_legacy_raw_percentages(self) -> None:
         self.controller.quota_last_percents = {
             "Claude weekly": 30.0,
             "Codex weekly": 80.0,
         }
-        state = self.controller.quota_runway_state()
-        self.assertAlmostEqual(state[0], 0.2)
-        self.assertEqual(state[1], "#10A37F")
-        self.controller.quota_last_percents = {}
         self.assertIsNone(self.controller.quota_runway_state())
 
-    def test_runway_display_claims_when_selected(self) -> None:
+    def test_runway_display_falls_back_to_agent_while_authority_is_withheld(self) -> None:
         from sidepulse.settings import LED_DISPLAY_QUOTA_RUNWAY
 
         device = self.status_bar.StatusBarDevice(
@@ -9359,7 +15045,7 @@ class QuotaRunwayTests(unittest.TestCase):
             display=LED_DISPLAY_QUOTA_RUNWAY,
         )
         kind = self.controller.active_led_display_kind_for_device(device, None)
-        self.assertEqual(kind, LED_DISPLAY_QUOTA_RUNWAY)
+        self.assertEqual(kind, self.status_bar.LED_DISPLAY_AGENT)
 
 
 class PowerUpLookTests(unittest.TestCase):
@@ -9435,6 +15121,9 @@ class StudioLibraryTests(unittest.TestCase):
 class OvertimePatinaWebhookTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_controller(self)
+        # These tests exercise timer/webhook state only. Actions such as
+        # stopTimebox_ call refresh_, so keep physical device I/O disabled.
+        self.controller.leds_enabled = False
 
     def test_overtime_ember_engages_and_stop_clears(self) -> None:
         self.controller.timebox_overtime_since = time.monotonic() - 120.0
@@ -9561,6 +15250,9 @@ class WebhookBridgeTests(unittest.TestCase):
 
     def setUp(self) -> None:
         isolate_controller(self)
+        # Quota threshold transitions may request a display refresh. This
+        # class asserts webhook routing, never physical device behavior.
+        self.controller.leds_enabled = False
         self.posted: list[dict] = []
         self.controller.post_webhook = self.posted.append
 
@@ -9580,17 +15272,18 @@ class WebhookBridgeTests(unittest.TestCase):
             save_settings(enabled, path)
             self.assertEqual(load_settings(path).webhook_events, ("completion",))
 
-    def test_quota_threshold_posts_when_ticked(self) -> None:
-        self.controller.settings = (
-            self.controller.settings
-            .with_quota_alerts_enabled(True)
-            .with_escalation_webhook_url("https://example.invalid/hook")
-            .with_webhook_event("quota_threshold", True)
+    def test_quota_threshold_cannot_be_enabled_as_a_webhook_event(self) -> None:
+        with self.assertRaises(ValueError):
+            self.controller.settings.with_webhook_event("quota_threshold", True)
+        self.controller.settings = dataclass_replace(
+            self.controller.settings,
+            quota_alerts_enabled=True,
+            escalation_webhook_url="https://example.invalid/hook",
+            webhook_events=("quota_threshold",),
         )
         self.controller.track_quota_thresholds({"Codex weekly": 70.0})
         self.controller.track_quota_thresholds({"Codex weekly": 95.0})
-        events = [p["event"] for p in self.posted]
-        self.assertIn("sidepulse.quota_threshold", events)
+        self.assertEqual(self.posted, [])
 
     def test_quota_threshold_stays_quiet_without_opt_in(self) -> None:
         self.controller.settings = (
@@ -9696,6 +15389,9 @@ class BacklogBehaviorTests(unittest.TestCase):
             collected_at=datetime.now(timezone.utc),
             aggregate=SimpleNamespace(mode=AgentMode.WAITING_FOR_INPUT),
         )
+        self.controller.current_attention_projection = (
+            self.status_bar.projection_for_statuses((ask,), self.controller.settings)
+        )
         self.assertEqual(
             self.controller.active_led_display_kind_for_device(device, None),
             self.status_bar.LED_DISPLAY_AGENT,
@@ -9707,12 +15403,14 @@ class BacklogBehaviorTests(unittest.TestCase):
         )
         # A remembered device snapshots the then-current global display,
         # which used to shadow the switch forever after.
-        self.controller.set_battery_led_display(True)
-        self.assertEqual(
-            self.controller.settings.display_for_device("Dot"),
-            self.status_bar.LED_DISPLAY_BATTERY,
-        )
-        self.controller.set_battery_led_display(False)
+        with patch.object(self.controller, "refresh_") as refresh:
+            self.controller.set_battery_led_display(True)
+            self.assertEqual(
+                self.controller.settings.display_for_device("Dot"),
+                self.status_bar.LED_DISPLAY_BATTERY,
+            )
+            self.controller.set_battery_led_display(False)
+        self.assertEqual(refresh.call_args_list, [call(None), call(None)])
         self.assertEqual(
             self.controller.settings.display_for_device("Dot"),
             self.status_bar.LED_DISPLAY_AGENT,
@@ -9729,6 +15427,10 @@ class CompletionThroughSnapshotTests(unittest.TestCase):
 
     def setUp(self) -> None:
         isolate_controller(self)
+        self.controller.status_keepalive_targets = lambda: ()
+        self.controller.settings = (
+            self.controller.settings.with_completion_notification_enabled(True)
+        )
         self.posted: list = []
         self.controller.post_completion_notification = self.posted.append
 
@@ -9802,6 +15504,578 @@ class CompletionThroughSnapshotTests(unittest.TestCase):
         self.assertIn("claude:session:hero", [s.agent_id for s in rows])
 
 
+class AgentMailboxMenuTests(unittest.TestCase):
+    """The AppKit menu consumes the pure mailbox projection as one surface."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def _status(
+        self,
+        provider: str,
+        session: str,
+        mode: AgentMode,
+        *,
+        updated_at: datetime | None = None,
+        event_name: str = "PostToolUse",
+        tool_name: str | None = None,
+        display_name: str | None = None,
+        is_worker: bool = False,
+        parent_session: str | None = None,
+        message: str | None = None,
+        cwd: str | None = None,
+    ) -> AgentStatus:
+        identity_kind = "agent" if is_worker else "session"
+        return AgentStatus(
+            provider=provider,
+            agent_id=f"{provider}:{identity_kind}:{session}",
+            display_name=display_name or f"{provider.title()} {session}",
+            mode=mode,
+            updated_at=updated_at or datetime.now(timezone.utc),
+            event_name=event_name,
+            session_id=parent_session if is_worker else session,
+            tool_name=tool_name,
+            message=message,
+            cwd=cwd,
+        )
+
+    def _snapshot(self, statuses) -> SimpleNamespace:
+        return SimpleNamespace(
+            statuses=tuple(statuses),
+            stale_statuses=(),
+            collected_at=datetime.now(timezone.utc),
+        )
+
+    def _build(self, statuses):
+        snapshot = self._snapshot(statuses)
+        self.controller.update_attention_projection(snapshot)
+        menu = self.status_bar.build_menu(
+            snapshot,
+            self.status_bar.STATE_WORKING,
+            self.controller,
+        )
+        mailbox = next(
+            menu.itemAtIndex_(index)
+            for index in range(menu.numberOfItems())
+            if menu.itemAtIndex_(index).title().startswith("Agent Mailbox")
+        )
+        return snapshot, menu, mailbox
+
+    @staticmethod
+    def _items(menu):
+        return [menu.itemAtIndex_(index) for index in range(menu.numberOfItems())]
+
+    def _shelf(self, mailbox, title: str):
+        return next(
+            item.submenu()
+            for item in self._items(mailbox.submenu())
+            if item.title() == title
+        )
+
+    def test_mailbox_summary_and_fixed_shelves_replace_legacy_agent_blocks(self) -> None:
+        now = datetime.now(timezone.utc)
+        statuses = (
+            self._status(
+                "claude",
+                "ask",
+                AgentMode.WAITING_FOR_INPUT,
+                updated_at=now - timedelta(minutes=4),
+                event_name="PermissionRequest",
+            ),
+            self._status("codex", "active", AgentMode.WORKING, updated_at=now),
+            self._status("codex", "done", AgentMode.COMPLETED, event_name="Stop"),
+            self._status(
+                "claude",
+                "failed",
+                AgentMode.BLOCKED_ERROR,
+                event_name="PostToolUseFailure",
+            ),
+        )
+
+        _snapshot, menu, mailbox = self._build(statuses)
+
+        self.assertEqual(
+            mailbox.title(),
+            "Agent Mailbox · 2 active · 1 need you · 2 ready",
+        )
+        self.assertEqual(
+            [item.title() for item in self._items(mailbox.submenu())],
+            ["Needs You", "In Progress", "Ready for Review", "Recent"],
+        )
+        top_titles = [item.title() for item in self._items(menu)]
+        self.assertNotIn("Agents", top_titles)
+        self.assertFalse(any(title.startswith("Needs You (") for title in top_titles))
+        self.assertEqual(sum(title.startswith("Agent Mailbox") for title in top_titles), 1)
+
+    def test_mailbox_retained_order_survives_activity_and_input_order_changes(self) -> None:
+        now = datetime.now(timezone.utc)
+        first = self._status(
+            "codex",
+            "first",
+            AgentMode.TOOL_RUNNING,
+            updated_at=now - timedelta(minutes=2),
+            tool_name="Read",
+        )
+        second = self._status(
+            "codex",
+            "second",
+            AgentMode.TOOL_RUNNING,
+            updated_at=now - timedelta(minutes=1),
+            tool_name="Edit",
+        )
+        _snapshot, _menu, initial_mailbox = self._build((first, second))
+        initial_titles = [
+            item.title() for item in self._items(self._shelf(initial_mailbox, "In Progress"))
+        ]
+
+        refreshed_first = self._status(
+            "codex",
+            "first",
+            AgentMode.TOOL_RUNNING,
+            updated_at=now,
+            tool_name="Bash",
+        )
+        _snapshot, _menu, refreshed_mailbox = self._build((second, refreshed_first))
+        refreshed_titles = [
+            item.title()
+            for item in self._items(self._shelf(refreshed_mailbox, "In Progress"))
+        ]
+
+        self.assertTrue(initial_titles[0].startswith("● Codex first"), initial_titles)
+        self.assertTrue(refreshed_titles[0].startswith("● Codex first"), refreshed_titles)
+        self.assertIn("Running command", refreshed_titles[0])
+
+    def test_many_workers_stay_bounded_below_two_primary_rows(self) -> None:
+        mains = (
+            self._status("claude", "main-a", AgentMode.WORKING),
+            self._status("claude", "main-b", AgentMode.WORKING),
+        )
+        workers = tuple(
+            self._status(
+                "claude",
+                f"worker-{parent}-{index}",
+                AgentMode.WORKING,
+                is_worker=True,
+                parent_session=parent,
+            )
+            for parent in ("main-a", "main-b")
+            for index in range(15)
+        )
+
+        _snapshot, menu, mailbox = self._build((*mains, *workers))
+        shelf_items = self._items(self._shelf(mailbox, "In Progress"))
+        primary = [item for item in shelf_items if item.action() == "openSessionPrimary:"]
+        rollups = [item for item in shelf_items if item.title().startswith("↳")]
+
+        self.assertEqual(len(primary), 2)
+        self.assertEqual(len(rollups), 2)
+        self.assertEqual(
+            [item.title() for item in self._items(menu) if "worker-" in item.title()],
+            [],
+        )
+        for rollup in rollups:
+            worker_items = self._items(rollup.submenu())
+            self.assertEqual(
+                len([item for item in worker_items if item.action() == "openSessionPrimary:"]),
+                12,
+            )
+            self.assertEqual(worker_items[-1].title(), "3 more")
+            self.assertFalse(worker_items[-1].isEnabled())
+
+    def test_worker_ask_row_navigates_to_projected_worker_identity(self) -> None:
+        self.controller.settings = self.controller.settings.with_subagent_asks_alert(True)
+        parent = self._status("claude", "main", AgentMode.WORKING)
+        worker = self._status(
+            "claude",
+            "permission-worker",
+            AgentMode.WAITING_FOR_INPUT,
+            event_name="PermissionRequest",
+            is_worker=True,
+            parent_session="main",
+        )
+
+        _snapshot, _menu, mailbox = self._build((parent, worker))
+        rows = [
+            item
+            for item in self._items(self._shelf(mailbox, "Needs You"))
+            if item.action() == "openSessionPrimary:"
+        ]
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn("Claude main", rows[0].title())
+        self.assertEqual(rows[0].representedObject().agent_id, worker.agent_id)
+
+    def test_failed_and_completed_rows_keep_actions_without_ask_identity(self) -> None:
+        failed = self._status(
+            "codex",
+            "failed",
+            AgentMode.BLOCKED_ERROR,
+            event_name="PostToolUseFailure",
+        )
+        completed = self._status(
+            "claude",
+            "done",
+            AgentMode.COMPLETED,
+            event_name="Stop",
+        )
+
+        _snapshot, _menu, mailbox = self._build((failed, completed))
+        rows = [
+            item
+            for item in self._items(self._shelf(mailbox, "Ready for Review"))
+            if item.action() == "openSessionPrimary:"
+        ]
+
+        self.assertEqual(
+            {item.representedObject().mode for item in rows},
+            {AgentMode.BLOCKED_ERROR, AgentMode.COMPLETED},
+        )
+        self.assertTrue(all("Ask" not in item.title() for item in rows))
+        self.assertTrue(all(item.image() is not None for item in rows))
+
+    def test_mailbox_shelf_reports_exact_overflow(self) -> None:
+        statuses = tuple(
+            self._status("codex", f"active-{index:02d}", AgentMode.WORKING)
+            for index in range(15)
+        )
+
+        _snapshot, _menu, mailbox = self._build(statuses)
+        items = self._items(self._shelf(mailbox, "In Progress"))
+
+        self.assertEqual(
+            len([item for item in items if item.action() == "openSessionPrimary:"]),
+            12,
+        )
+        self.assertEqual(items[-1].title(), "3 more")
+        self.assertFalse(items[-1].isEnabled())
+
+    def test_provider_name_color_and_accessible_icon_survive_mailbox_projection(self) -> None:
+        status = self._status(
+            "codex",
+            "named",
+            AgentMode.WORKING,
+            display_name="Codex Build Agent",
+        )
+        self.controller.settings = self.controller.settings.with_colors(
+            self.controller.settings.colors.with_session_color(
+                status.agent_id,
+                "#FF3366",
+            )
+        )
+
+        _snapshot, _menu, mailbox = self._build((status,))
+        row = next(
+            item
+            for item in self._items(self._shelf(mailbox, "In Progress"))
+            if item.action() == "openSessionPrimary:"
+        )
+
+        self.assertIn("Codex Build Agent", row.title())
+        self.assertTrue(row.title().startswith("● "))
+        self.assertIsNotNone(row.attributedTitle())
+        self.assertIsNotNone(row.image())
+        self.assertEqual(row.representedObject().provider, "codex")
+
+    def test_background_refresh_does_not_mark_completion_seen_but_visit_does(self) -> None:
+        completed = self._status(
+            "claude",
+            "done",
+            AgentMode.COMPLETED,
+            event_name="Stop",
+        )
+        snapshot = self._snapshot((completed,))
+
+        self.controller.update_attention_projection(snapshot)
+        self.assertNotIn(completed.agent_id, self.controller.mailbox_seen_completion_ids)
+        self.assertEqual(
+            [
+                section.kind.value
+                for section in self.controller.current_mailbox_projection.sections
+                if section.rows
+            ],
+            ["ready_for_review"],
+        )
+
+        self.controller.last_snapshot = snapshot
+        self.controller.menuWillOpen_(None)
+
+        self.assertIn(completed.agent_id, self.controller.mailbox_seen_completion_ids)
+        self.assertEqual(
+            [
+                section.kind.value
+                for section in self.controller.current_mailbox_projection.sections
+                if section.rows
+            ],
+            ["recent"],
+        )
+
+    def test_fresh_stale_completion_stays_ready_while_another_session_is_active(self) -> None:
+        active = self._status("codex", "active", AgentMode.WORKING)
+        completed = self._status(
+            "claude",
+            "done",
+            AgentMode.COMPLETED,
+            event_name="Stop",
+        )
+        snapshot = SimpleNamespace(
+            statuses=(active,),
+            stale_statuses=(completed,),
+            collected_at=datetime.now(timezone.utc),
+        )
+
+        self.controller.update_attention_projection(snapshot)
+
+        ready = next(
+            section
+            for section in self.controller.current_mailbox_projection.sections
+            if section.kind.value == "ready_for_review"
+        )
+        self.assertEqual(tuple(row.agent_id for row in ready.rows), (completed.agent_id,))
+
+    def test_session_end_stale_completion_never_enters_mailbox(self) -> None:
+        active = self._status("codex", "active", AgentMode.WORKING)
+        closed = self._status(
+            "claude",
+            "closed",
+            AgentMode.COMPLETED,
+            event_name="SessionEnd",
+        )
+        snapshot = SimpleNamespace(
+            statuses=(active,),
+            stale_statuses=(closed,),
+            collected_at=datetime.now(timezone.utc),
+        )
+
+        self.controller.update_attention_projection(snapshot)
+
+        visible_ids = {
+            row.agent_id
+            for section in self.controller.current_mailbox_projection.sections
+            for row in section.rows
+        }
+        self.assertNotIn(closed.agent_id, visible_ids)
+
+    def test_older_stale_completion_cannot_override_newer_current_active_identity(self) -> None:
+        now = datetime.now(timezone.utc)
+        active = self._status(
+            "codex",
+            "reused",
+            AgentMode.WORKING,
+            updated_at=now,
+        )
+        old_completion = self._status(
+            "codex",
+            "reused",
+            AgentMode.COMPLETED,
+            updated_at=now - timedelta(minutes=2),
+            event_name="Stop",
+        )
+        snapshot = SimpleNamespace(
+            statuses=(active,),
+            stale_statuses=(old_completion,),
+            collected_at=now,
+        )
+
+        self.controller.update_attention_projection(snapshot)
+
+        visible = [
+            (section.kind.value, row.agent_id)
+            for section in self.controller.current_mailbox_projection.sections
+            for row in section.rows
+        ]
+        self.assertEqual(visible, [("in_progress", active.agent_id)])
+
+    def test_expired_stale_completion_cannot_enter_mailbox(self) -> None:
+        now = datetime.now(timezone.utc)
+        active = self._status("codex", "active", AgentMode.WORKING, updated_at=now)
+        expired = self._status(
+            "claude",
+            "expired",
+            AgentMode.COMPLETED,
+            updated_at=now - timedelta(seconds=self.status_bar.COMPLETED_VISIBLE_SECONDS + 1),
+            event_name="Stop",
+        )
+        snapshot = SimpleNamespace(
+            statuses=(active,),
+            stale_statuses=(expired,),
+            collected_at=now,
+        )
+
+        self.controller.update_attention_projection(snapshot)
+
+        visible_ids = {
+            row.agent_id
+            for section in self.controller.current_mailbox_projection.sections
+            for row in section.rows
+        }
+        self.assertNotIn(expired.agent_id, visible_ids)
+
+    def test_clear_finished_identity_is_removed_from_next_mailbox_projection(self) -> None:
+        completed = self._status(
+            "claude",
+            "cleared",
+            AgentMode.COMPLETED,
+            event_name="Stop",
+        )
+        snapshot = self._snapshot((completed,))
+        self.controller.cleared_session_ids = {completed.agent_id}
+
+        self.controller.update_attention_projection(snapshot)
+
+        visible_ids = {
+            row.agent_id
+            for section in self.controller.current_mailbox_projection.sections
+            for row in section.rows
+        }
+        self.assertNotIn(completed.agent_id, visible_ids)
+
+    def test_clear_finished_prunes_mailbox_identity_memory_immediately(self) -> None:
+        completed = self._status(
+            "claude",
+            "cleared-memory",
+            AgentMode.COMPLETED,
+            event_name="Stop",
+        )
+        self.controller.last_snapshot = self._snapshot((completed,))
+        self.controller.mailbox_retained_order = {completed.agent_id: 7, "other": 8}
+        self.controller.mailbox_seen_completion_ids = {completed.agent_id, "other"}
+
+        with patch.object(self.controller, "refresh_"):
+            self.controller.clearFinished_(None)
+
+        self.assertEqual(self.controller.mailbox_retained_order, {"other": 8})
+        self.assertEqual(self.controller.mailbox_seen_completion_ids, {"other"})
+
+    def test_clear_finished_removes_promoted_stale_completion_and_memory(self) -> None:
+        active = self._status("codex", "active", AgentMode.WORKING)
+        completed = self._status(
+            "claude",
+            "stale-done",
+            AgentMode.COMPLETED,
+            event_name="Stop",
+        )
+        snapshot = SimpleNamespace(
+            statuses=(active,),
+            stale_statuses=(completed,),
+            collected_at=datetime.now(timezone.utc),
+        )
+        self.controller.last_snapshot = snapshot
+        self.controller.update_attention_projection(snapshot)
+        ready_before = next(
+            section
+            for section in self.controller.current_mailbox_projection.sections
+            if section.kind.value == "ready_for_review"
+        )
+        self.assertEqual(tuple(row.agent_id for row in ready_before.rows), (completed.agent_id,))
+        self.controller.mailbox_seen_completion_ids = {completed.agent_id, "other"}
+
+        with patch.object(
+            self.controller,
+            "refresh_",
+            side_effect=lambda _sender: self.controller.update_attention_projection(snapshot),
+        ):
+            self.controller.clearFinished_(None)
+
+        visible_after = {
+            row.agent_id
+            for section in self.controller.current_mailbox_projection.sections
+            for row in section.rows
+        }
+        self.assertNotIn(completed.agent_id, visible_after)
+        self.assertIn(completed.agent_id, self.controller.cleared_session_ids)
+        self.assertNotIn(completed.agent_id, self.controller.mailbox_retained_order)
+        self.assertEqual(self.controller.mailbox_seen_completion_ids, {"other"})
+
+    def test_clear_finished_ignores_ineligible_stale_completion_records(self) -> None:
+        now = datetime.now(timezone.utc)
+        active = self._status(
+            "codex", "reused", AgentMode.WORKING, updated_at=now
+        )
+        duplicate_completion = self._status(
+            "codex",
+            "reused",
+            AgentMode.COMPLETED,
+            updated_at=now - timedelta(minutes=1),
+            event_name="Stop",
+        )
+        session_end = self._status(
+            "claude", "closed", AgentMode.COMPLETED, event_name="SessionEnd"
+        )
+        current_session_end = self._status(
+            "codex", "current-closed", AgentMode.COMPLETED, event_name="SessionEnd"
+        )
+        expired = self._status(
+            "claude",
+            "expired-clear",
+            AgentMode.COMPLETED,
+            updated_at=now
+            - timedelta(seconds=self.status_bar.COMPLETED_VISIBLE_SECONDS + 1),
+            event_name="Stop",
+        )
+        snapshot = SimpleNamespace(
+            statuses=(active, current_session_end),
+            stale_statuses=(duplicate_completion, session_end, expired),
+            collected_at=now,
+        )
+        self.controller.last_snapshot = snapshot
+
+        with patch.object(self.controller, "refresh_"):
+            self.controller.clearFinished_(None)
+
+        self.assertEqual(self.controller.cleared_session_ids, set())
+
+    def test_menu_signature_tracks_mailbox_content_but_ignores_private_payloads(self) -> None:
+        now = datetime.now(timezone.utc)
+        initial = self._status(
+            "codex",
+            "active",
+            AgentMode.TOOL_RUNNING,
+            updated_at=now,
+            tool_name="Read",
+            message="private first prompt",
+            cwd="/Users/private/first",
+        )
+        snapshot = self._snapshot((initial,))
+        self.controller.update_attention_projection(snapshot)
+        with patch("sidepulse.status_bar.time.monotonic", return_value=100.0):
+            signature = self.status_bar.menu_content_signature(
+                snapshot, self.status_bar.STATE_WORKING, self.controller
+            )
+
+        private_only = self._status(
+            "codex",
+            "active",
+            AgentMode.TOOL_RUNNING,
+            updated_at=now,
+            tool_name="Read",
+            message="different authorization payload",
+            cwd="/private/other/location",
+        )
+        private_snapshot = self._snapshot((private_only,))
+        self.controller.update_attention_projection(private_snapshot)
+        with patch("sidepulse.status_bar.time.monotonic", return_value=100.0):
+            private_signature = self.status_bar.menu_content_signature(
+                private_snapshot, self.status_bar.STATE_WORKING, self.controller
+            )
+
+        activity_changed = self._status(
+            "codex",
+            "active",
+            AgentMode.TOOL_RUNNING,
+            updated_at=now,
+            tool_name="Bash",
+        )
+        activity_snapshot = self._snapshot((activity_changed,))
+        self.controller.update_attention_projection(activity_snapshot)
+        with patch("sidepulse.status_bar.time.monotonic", return_value=100.0):
+            activity_signature = self.status_bar.menu_content_signature(
+                activity_snapshot, self.status_bar.STATE_WORKING, self.controller
+            )
+
+        self.assertEqual(signature, private_signature)
+        self.assertNotEqual(signature, activity_signature)
+
+
 class MenuQualityOfLifeTests(unittest.TestCase):
     """Worker rollup, device-health rows, completion banners."""
 
@@ -9842,8 +16116,19 @@ class MenuQualityOfLifeTests(unittest.TestCase):
             self.status_bar.STATE_WORKING,
             self.controller,
         )
+        mailbox = next(
+            menu.itemAtIndex_(index)
+            for index in range(menu.numberOfItems())
+            if menu.itemAtIndex_(index).title().startswith("Agent Mailbox")
+        )
+        in_progress = next(
+            mailbox.submenu().itemAtIndex_(index).submenu()
+            for index in range(mailbox.submenu().numberOfItems())
+            if mailbox.submenu().itemAtIndex_(index).title() == "In Progress"
+        )
         titles = [
-            menu.itemAtIndex_(index).title() for index in range(menu.numberOfItems())
+            in_progress.itemAtIndex_(index).title()
+            for index in range(in_progress.numberOfItems())
         ]
         rollups = [title for title in titles if "worker" in title and "\u21b3" in title]
         self.assertEqual(len(rollups), 1, titles)
@@ -9852,9 +16137,9 @@ class MenuQualityOfLifeTests(unittest.TestCase):
         self.assertFalse(any("worker w" in title for title in titles))
         # ...but every one is in the rollup's submenu, clickable.
         rollup_item = next(
-            menu.itemAtIndex_(index)
-            for index in range(menu.numberOfItems())
-            if "\u21b3" in menu.itemAtIndex_(index).title()
+            in_progress.itemAtIndex_(index)
+            for index in range(in_progress.numberOfItems())
+            if "\u21b3" in in_progress.itemAtIndex_(index).title()
         )
         submenu = rollup_item.submenu()
         self.assertEqual(submenu.numberOfItems(), 5)
@@ -9875,7 +16160,9 @@ class MenuQualityOfLifeTests(unittest.TestCase):
     def test_completion_banner_fires_on_fresh_main_transition_only(self) -> None:
         posted: list = []
         self.controller.post_completion_notification = posted.append
-        self.assertTrue(self.controller.settings.completion_notification_enabled)
+        self.controller.settings = (
+            self.controller.settings.with_completion_notification_enabled(True)
+        )
         working = _status("codex", AgentMode.WORKING)
         done = _status("codex", AgentMode.COMPLETED)
         self.controller.track_completions((working,))
@@ -9884,7 +16171,7 @@ class MenuQualityOfLifeTests(unittest.TestCase):
         self.assertEqual(len(posted), 1)
         self.assertEqual(posted[0].agent_id, done.agent_id)
 
-    def test_summary_line_and_provider_headers(self) -> None:
+    def test_mailbox_summary_and_provider_rows(self) -> None:
         now = datetime.now(timezone.utc)
 
         def _main(provider, session):
@@ -9908,86 +16195,376 @@ class MenuQualityOfLifeTests(unittest.TestCase):
         menu = self.status_bar.build_menu(
             self._snapshot(statuses), self.status_bar.STATE_WORKING, self.controller
         )
-        titles = [
-            menu.itemAtIndex_(index).title() for index in range(menu.numberOfItems())
-        ]
-        self.assertTrue(
-            any("3 sessions" in title and "2 workers" in title for title in titles),
-            titles,
+        mailbox = next(
+            menu.itemAtIndex_(index)
+            for index in range(menu.numberOfItems())
+            if menu.itemAtIndex_(index).title().startswith("Agent Mailbox")
         )
-        self.assertIn("Claude", titles)
-        self.assertIn("Codex", titles)
-        # Claude block renders before Codex, once each.
+        self.assertEqual(
+            mailbox.title(), "Agent Mailbox · 3 active · 0 need you · 0 ready"
+        )
+        in_progress = next(
+            mailbox.submenu().itemAtIndex_(index).submenu()
+            for index in range(mailbox.submenu().numberOfItems())
+            if mailbox.submenu().itemAtIndex_(index).title() == "In Progress"
+        )
+        titles = [
+            in_progress.itemAtIndex_(index).title()
+            for index in range(in_progress.numberOfItems())
+        ]
         self.assertEqual(titles.count("Claude"), 1)
+        self.assertEqual(titles.count("Codex"), 1)
         self.assertLess(titles.index("Claude"), titles.index("Codex"))
+        self.assertTrue(any("claude one" in title and "2 workers" in title for title in titles))
+        self.assertTrue(any("claude two" in title for title in titles))
+        self.assertTrue(any("codex three" in title for title in titles))
 
-    def test_banner_click_jumps_to_the_session(self) -> None:
-        opened: list = []
+
+
+class ModernNotificationControllerTests(unittest.TestCase):
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.deliveries: list[tuple[str, str, str, dict[str, str]]] = []
+            self.authorization_requests = 0
+            self.authorization_observations = 0
+            self.delegates: list[object | None] = []
+            self.closed = 0
+
+        def deliver(self, identifier, title, body, user_info) -> bool:
+            self.deliveries.append((identifier, title, body, dict(user_info)))
+            return True
+
+        def request_authorization(self, completion=None) -> bool:
+            from sidepulse.macos_notifications import NotificationAuthorizationState
+
+            self.authorization_requests += 1
+            if completion is not None:
+                completion(NotificationAuthorizationState.AUTHORIZED)
+            return True
+
+        def authorization_state(self):
+            from sidepulse.macos_notifications import NotificationAuthorizationState
+
+            self.authorization_observations += 1
+            return NotificationAuthorizationState.AUTHORIZED
+
+        def set_delegate(self, delegate) -> bool:
+            self.delegates.append(delegate)
+            return True
+
+        def close(self, *, timeout_seconds: float) -> bool:
+            self.closed += 1
+            return True
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.client = self.RecordingClient()
+        self.controller.notification_client = self.client
+        self.controller.current_operator_state = empty_operator_state()
+        self.controller.settings = (
+            self.controller.settings.with_completion_notification_enabled(True)
+        )
+
+    def _completion_fixture(self):
+        from sidepulse.operator_state import (
+            CanonicalOperatorEvent,
+            InterruptionClass,
+            SemanticEventKey,
+            TransitionKind,
+        )
+
+        source = SourceKey("codex", "hooks", "local:notification", "live_agent_events")
+        work_key = WorkKey(source, WorkIdentifier("work:notification"))
+        watermark = ProviderWatermark(
+            source,
+            WatermarkBasis.PROVIDER_SEQUENCE,
+            1_800_000_000.0,
+            EventToken("event:notification-complete"),
+            7,
+            1,
+        )
+        event_key = SemanticEventKey(work_key, TransitionKind.COMPLETED, watermark)
+        event = CanonicalOperatorEvent(
+            event_key,
+            work_key,
+            TransitionKind.COMPLETED,
+            InterruptionClass.COURTESY,
+            watermark.occurred_at_epoch,
+            SourceFreshness.FRESH,
+        )
+        common = dict(
+            provider="codex",
+            agent_id="codex:notification",
+            display_name="PRIVATE PROMPT /Users/private",
+            updated_at=datetime.now(timezone.utc),
+            event_name="Test",
+            work_key=work_key,
+        )
+        return (
+            AgentStatus(mode=AgentMode.WORKING, **common),
+            AgentStatus(mode=AgentMode.COMPLETED, **common),
+            event,
+        )
+
+    @staticmethod
+    def _response(metadata: dict[str, str]):
+        content = SimpleNamespace(userInfo=lambda: metadata)
+        request = SimpleNamespace(content=lambda: content)
+        notification = SimpleNamespace(request=lambda: request)
+        return SimpleNamespace(notification=lambda: notification)
+
+    def _deliver_completion(self):
+        working, completed, event = self._completion_fixture()
+        self.controller.track_completions((working,), operator_events=())
+        self.controller.last_snapshot = SimpleNamespace(
+            statuses=(completed,),
+            stale_statuses=(),
+            operator_events=(event,),
+            operator_state=self.controller.current_operator_state,
+            collected_at=datetime.now(timezone.utc),
+        )
+        self.controller.track_completions(
+            (completed,),
+            operator_events=(event,),
+        )
+        return completed, event
+
+    def test_completion_delivery_uses_generic_copy_and_opaque_action_token(self) -> None:
+        self._deliver_completion()
+
+        self.assertEqual(len(self.client.deliveries), 1)
+        identifier, title, body, metadata = self.client.deliveries[0]
+        self.assertRegex(identifier, r"completion\.[0-9a-f]{64}\Z")
+        self.assertEqual(title, "SidePulse")
+        self.assertEqual(body, "A Codex session finished")
+        self.assertEqual(set(metadata), {"action_token"})
+        self.assertRegex(metadata["action_token"], r"[A-Za-z0-9_-]{43}\Z")
+        rendered = repr(self.client.deliveries)
+        self.assertNotIn("PRIVATE PROMPT", rendered)
+        self.assertNotIn("/Users/private", rendered)
+        self.assertNotIn("agent_id", rendered)
+
+    def test_modern_response_routes_once_through_current_semantic_event(self) -> None:
+        completed, _event = self._deliver_completion()
+        metadata = self.client.deliveries[0][3]
+        opened: list[str] = []
+        completions: list[bool] = []
         self.controller.open_session = lambda status, action, remember: opened.append(
             status.agent_id
         )
-        status = _status("claude", AgentMode.COMPLETED)
-        self.controller.last_snapshot = SimpleNamespace(
-            statuses=(status,),
-            stale_statuses=(),
-            collected_at=datetime.now(timezone.utc),
-        )
-        fake = SimpleNamespace(userInfo=lambda: {"agent_id": status.agent_id})
-        self.controller.userNotificationCenter_didActivateNotification_(None, fake)
-        self.assertEqual(opened, [status.agent_id])
 
-    def test_escalation_banner_rides_the_chime_latch(self) -> None:
-        delivered: list = []
-        ask = _status("codex", AgentMode.WAITING_FOR_INPUT)
+        for _ in range(2):
+            self.controller.userNotificationCenter_didReceiveNotificationResponse_withCompletionHandler_(
+                None,
+                self._response(metadata),
+                lambda: completions.append(True),
+            )
+
+        self.assertEqual(opened, [completed.agent_id])
+        self.assertEqual(completions, [True, True])
+
+    def test_stale_generation_response_is_inert_but_completes_delegate(self) -> None:
+        self._deliver_completion()
+        metadata = self.client.deliveries[0][3]
+        self.controller.current_operator_state = dataclass_replace(
+            self.controller.current_operator_state,
+            generation=1,
+        )
+        opened: list[str] = []
+        completed: list[bool] = []
+        self.controller.open_session = lambda status, action, remember: opened.append(
+            status.agent_id
+        )
+
+        self.controller.userNotificationCenter_didReceiveNotificationResponse_withCompletionHandler_(
+            None,
+            self._response(metadata),
+            lambda: completed.append(True),
+        )
+
+        self.assertEqual(opened, [])
+        self.assertEqual(completed, [True])
+
+    def test_completion_notification_respects_toggle_and_quiet_state(self) -> None:
+        working, completed, event = self._completion_fixture()
+        self.controller.track_completions((working,), operator_events=())
+        self.controller.settings = (
+            self.controller.settings.with_completion_notification_enabled(False)
+        )
+        self.controller.track_completions((completed,), operator_events=(event,))
+        self.assertEqual(self.client.deliveries, [])
+
+        self.controller.last_agent_modes = {working.agent_id: AgentMode.WORKING}
+        self.controller.settings = (
+            self.controller.settings.with_completion_notification_enabled(True)
+        )
+        self.controller.quiet_until_monotonic = time.monotonic() + 60.0
+        self.controller.track_completions((completed,), operator_events=(event,))
+        self.assertEqual(self.client.deliveries, [])
+
+    def test_escalation_notification_uses_current_request_and_latches_once(self) -> None:
+        from sidepulse.operator_state import (
+            AcknowledgementEligibility,
+            CanonicalRequestTruth,
+            RequestPhase,
+            SemanticEventKey,
+            TransitionKind,
+        )
+
+        source = SourceKey("codex", "hooks", "local:attention", "live_agent_events")
+        work_key = WorkKey(source, WorkIdentifier("work:attention"))
+        request_key = RequestKey(work_key, RequestIdentifier("request:attention"))
+        watermark = ProviderWatermark(
+            source,
+            WatermarkBasis.PROVIDER_SEQUENCE,
+            1_800_000_001.0,
+            EventToken("event:attention-opened"),
+            8,
+            1,
+        )
+        event_key = SemanticEventKey(
+            request_key,
+            TransitionKind.REQUEST_OPENED,
+            watermark,
+        )
+        request = CanonicalRequestTruth(
+            request_key,
+            RequestPhase.LIVE_UNACKNOWLEDGED,
+            RequestKind.PERMISSION,
+            NextActor.USER,
+            watermark,
+            SourceFreshness.FRESH,
+            AcknowledgementEligibility.ELIGIBLE,
+            event_key,
+            watermark.occurred_at_epoch,
+            500.0,
+            ObservationAuthority.AUTHORITATIVE_PROVIDER,
+        )
+        self.controller.current_operator_state = dataclass_replace(
+            empty_operator_state(),
+            generation=1,
+            requests=(request,),
+        )
+        ask = AgentStatus(
+            provider="codex",
+            agent_id="codex:attention",
+            display_name="PRIVATE ATTENTION CONTENT",
+            mode=AgentMode.WAITING_FOR_INPUT,
+            updated_at=datetime.now(timezone.utc),
+            event_name="PermissionRequest",
+            work_key=work_key,
+            request_key=request_key,
+        )
         self.controller.last_snapshot = SimpleNamespace(
             statuses=(ask,),
             stale_statuses=(),
+            operator_events=(),
+            operator_state=self.controller.current_operator_state,
             collected_at=datetime.now(timezone.utc),
         )
         self.controller.settings = self.controller.settings.with_escalation_tier(
             "chime"
         )
         self.controller.ask_blocked_since = time.monotonic() - 500.0
-        with patch(
-            "sidepulse.status_bar.deliver_macos_notification",
-            side_effect=lambda title, body, user_info=None: delivered.append(title),
-        ):
-            self.controller.apply_escalation(allow_refresh=False)
-            # Latched: a second pass never re-posts.
-            self.controller.apply_escalation(allow_refresh=False)
-        self.assertEqual(delivered, ["Agent needs you"])
 
-    def test_completion_banner_respects_toggle_and_quiet(self) -> None:
-        delivered: list = []
-        status = _status("claude", AgentMode.COMPLETED)
-        # Explicitly disabled: short-circuits before AppKit is imported
-        # (the feature now defaults ON).
-        self.controller.settings = (
-            self.controller.settings.with_completion_notification_enabled(False)
+        self.controller.apply_escalation(allow_refresh=False)
+        self.controller.apply_escalation(allow_refresh=False)
+
+        self.assertEqual(len(self.client.deliveries), 1)
+        identifier, title, body, metadata = self.client.deliveries[0]
+        self.assertRegex(identifier, r"attention\.[0-9a-f]{64}\Z")
+        self.assertEqual((title, body), ("SidePulse", "A Codex session needs you"))
+        self.assertEqual(set(metadata), {"action_token"})
+        self.assertNotIn("PRIVATE ATTENTION CONTENT", repr(self.client.deliveries))
+
+    def test_foreground_notification_completes_with_alert_presentation(self) -> None:
+        presented: list[int] = []
+
+        self.controller.userNotificationCenter_willPresentNotification_withCompletionHandler_(
+            None,
+            object(),
+            presented.append,
         )
-        self.controller.post_completion_notification(status)
-        self.controller.settings = (
-            self.controller.settings.with_completion_notification_enabled(True)
+
+        self.assertEqual(presented, [1 << 2])
+
+    def test_explicit_permission_action_updates_controller_state(self) -> None:
+        from sidepulse.macos_notifications import NotificationAuthorizationState
+
+        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = (
+            lambda selector, payload, _wait: getattr(
+                self.controller,
+                selector.replace(":", "_"),
+            )(payload)
         )
-        self.controller.quiet_until_monotonic = time.monotonic() + 60.0
-        with patch(
-            "sidepulse.status_bar.deliver_macos_notification",
-            side_effect=lambda title, body, user_info=None: delivered.append(
-                (title, body)
-            ),
+
+        self.controller.requestNotificationPermission_(None)
+
+        self.assertEqual(self.client.authorization_requests, 1)
+        self.assertIs(
+            self.controller.notification_authorization_state,
+            NotificationAuthorizationState.AUTHORIZED,
+        )
+
+    def test_led_behavior_pane_renders_not_determined_permission_state(self) -> None:
+        from sidepulse.macos_notifications import NotificationAuthorizationState
+
+        self.controller._notification_authorization_checked = True
+        self.controller.notification_authorization_state = (
+            NotificationAuthorizationState.NOT_DETERMINED
+        )
+        self.controller.show_settings_window()
+        self.controller.ensure_settings_pane("led_behavior")
+
+        label = self.controller.settings_fields["notification_authorization_status"]
+        button = self.controller.settings_buttons["notification_permission"]
+        self.assertEqual(label.stringValue(), "Not requested")
+        self.assertEqual(button.title(), "Enable Notifications\u2026")
+        self.assertFalse(button.isHidden())
+
+    def test_unavailable_permission_action_retries_observation_without_prompt(
+        self,
+    ) -> None:
+        from sidepulse.macos_notifications import NotificationAuthorizationState
+
+        self.controller._notification_authorization_checked = True
+        self.controller.notification_authorization_state = (
+            NotificationAuthorizationState.UNAVAILABLE
+        )
+        self.controller.show_settings_window()
+        self.controller.ensure_settings_pane("led_behavior")
+        self.controller.refresh_notification_authorization_controls()
+        button = self.controller.settings_buttons["notification_permission"]
+
+        self.assertEqual(button.title(), "Retry Permission Check\u2026")
+        self.assertFalse(button.isHidden())
+
+        with patch.object(self.status_bar.threading, "Thread") as thread_type:
+            self.controller.requestNotificationPermission_(None)
+        observe = thread_type.call_args.kwargs["target"]
+        observe()
+
+        self.assertEqual(self.client.authorization_requests, 0)
+        self.assertEqual(self.client.authorization_observations, 1)
+
+    def test_termination_clears_notification_delegate_bindings_and_worker(self) -> None:
+        self._deliver_completion()
+        self.assertTrue(self.controller._notification_action_bindings)
+        self.assertTrue(self.controller._notification_events_by_work_key)
+
+        self.controller.monitor = None
+        with (
+            patch.object(self.controller.virtual_status_device, "terminate"),
+            patch.object(self.controller, "stop_event_server"),
+            patch.object(self.controller.closed_lid_awake, "release"),
+            patch.object(self.controller.keep_awake, "release"),
         ):
-            self.controller.post_completion_notification(status)
-        self.assertEqual(delivered, [])
-        self.controller.quiet_until_monotonic = 0.0
-        with patch(
-            "sidepulse.status_bar.deliver_macos_notification",
-            side_effect=lambda title, body, user_info=None: delivered.append(
-                (title, body)
-            ),
-        ):
-            self.controller.post_completion_notification(status)
-        self.assertEqual(len(delivered), 1)
-        self.assertEqual(delivered[0][0], "Claude finished")
+            self.controller.applicationWillTerminate_(None)
+
+        self.assertEqual(self.client.delegates, [None])
+        self.assertEqual(self.client.closed, 1)
+        self.assertEqual(self.controller._notification_action_bindings, {})
+        self.assertEqual(self.controller._notification_events_by_work_key, {})
 
 
 class LazyPaneBuildTests(unittest.TestCase):
@@ -10329,28 +16906,34 @@ class TimeboxHandshakeTests(unittest.TestCase):
         self.controller.settings = self.controller.settings.with_timebox_shortcut(
             "25", "Focus On", "Focus Off"
         )
-        self.controller.startTimebox_(self._Sender(25))
-        self.assertEqual(self.fired, ["Focus On"])
-        self.controller.stopTimebox_(None)
+        with patch.object(self.controller, "refresh_") as refresh:
+            self.controller.startTimebox_(self._Sender(25))
+            self.assertEqual(self.fired, ["Focus On"])
+            self.controller.stopTimebox_(None)
+            self.assertEqual(self.fired, ["Focus On", "Focus Off"])
+            # Stop again (or the zero-crossing racing Stop): pop-once holds.
+            self.controller.stopTimebox_(None)
         self.assertEqual(self.fired, ["Focus On", "Focus Off"])
-        # Stop again (or the zero-crossing racing Stop): pop-once holds.
-        self.controller.stopTimebox_(None)
-        self.assertEqual(self.fired, ["Focus On", "Focus Off"])
+        self.assertEqual(refresh.call_args_list, [call(None), call(None), call(None)])
 
     def test_off_only_mapping_still_fires_at_end(self) -> None:
         self.controller.settings = self.controller.settings.with_timebox_shortcut(
             "45", "", "Wind Down"
         )
-        self.controller.startTimebox_(self._Sender(45))
+        with patch.object(self.controller, "refresh_") as refresh:
+            self.controller.startTimebox_(self._Sender(45))
+        refresh.assert_called_once_with(None)
         self.assertEqual(self.fired, [])
         self.controller.fire_timebox_off_shortcut()
         self.controller.fire_timebox_off_shortcut()
         self.assertEqual(self.fired, ["Wind Down"])
 
     def test_unmapped_preset_behaves_exactly_as_today(self) -> None:
-        self.controller.startTimebox_(self._Sender(15))
-        self.controller.stopTimebox_(None)
+        with patch.object(self.controller, "refresh_") as refresh:
+            self.controller.startTimebox_(self._Sender(15))
+            self.controller.stopTimebox_(None)
         self.assertEqual(self.fired, [])
+        self.assertEqual(refresh.call_args_list, [call(None), call(None)])
 
 
 class ProjectHueFamilyTests(unittest.TestCase):
@@ -10609,16 +17192,21 @@ class QuotaAlertTests(unittest.TestCase):
             [("Codex weekly", 75.0), ("Codex weekly", 90.0)],
         )
 
-    def test_track_quota_thresholds_fires_blink_when_enabled(self) -> None:
+    def test_track_quota_thresholds_stays_dormant_when_legacy_enable_is_requested(
+        self,
+    ) -> None:
         self.controller.settings = (
             self.controller.settings.with_quota_alerts_enabled(True)
         )
+        self.assertFalse(self.controller.settings.quota_alerts_enabled)
         self.controller.track_quota_thresholds({"Codex weekly": 70.0})
         self.assertEqual(self.controller.quota_blink_until, 0.0)
-        self.controller.track_quota_thresholds({"Codex weekly": 91.0})
-        self.assertGreater(self.controller.quota_blink_until, 0.0)
-        self.assertIn("Codex weekly at", self.controller.quota_blink_label)
-        self.assertEqual(self.controller.quota_blink_color, "#10A37F")
+        with patch.object(self.controller, "refresh_") as refresh:
+            self.controller.track_quota_thresholds({"Codex weekly": 91.0})
+        self.assertEqual(self.controller.quota_blink_until, 0.0)
+        self.assertIsNone(self.controller.quota_blink_label)
+        self.assertIsNone(self.controller.quota_blink_color)
+        refresh.assert_not_called()
 
     def test_disabled_or_quiet_never_blinks(self) -> None:
         self.controller.track_quota_thresholds({"Codex weekly": 70.0})
@@ -10645,28 +17233,35 @@ class QuotaAlertTests(unittest.TestCase):
             quota_resets({"Codex weekly": 40.0}, {"Codex weekly": 5.0}), []
         )
 
-    def test_sunrise_sets_brand_sweep(self) -> None:
+    def test_sunrise_consumer_stays_dormant(self) -> None:
         self.controller.settings = (
             self.controller.settings.with_quota_alerts_enabled(True)
         )
         self.controller.track_quota_thresholds({"Codex weekly": 83.0})
-        self.controller.track_quota_thresholds({"Codex weekly": 1.0})
-        self.assertEqual(self.controller.completion_sweep_color, "#10A37F")
-        self.assertGreater(self.controller.completion_sweep_until, 0.0)
+        with patch.object(self.controller, "refresh_") as refresh:
+            self.controller.track_quota_thresholds({"Codex weekly": 1.0})
+        self.assertIsNone(self.controller.completion_sweep_color)
+        self.assertEqual(self.controller.completion_sweep_until, 0.0)
+        refresh.assert_not_called()
 
-    def test_threshold_settings_round_trip_and_validation(self) -> None:
+    def test_threshold_settings_migrate_disabled_and_are_not_resaved(self) -> None:
         from sidepulse.settings import AgentMonitorSettings, load_settings, save_settings
 
         configured = AgentMonitorSettings().with_quota_alert_thresholds([90, 50.5, 90])
-        self.assertEqual(configured.quota_alert_thresholds, (50.5, 90.0))
+        self.assertEqual(configured.quota_alert_thresholds, (75.0, 90.0))
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
             save_settings(configured.with_quota_alerts_enabled(True), path)
             loaded = load_settings(path)
-        self.assertTrue(loaded.quota_alerts_enabled)
-        self.assertEqual(loaded.quota_alert_thresholds, (50.5, 90.0))
-        with self.assertRaises(ValueError):
-            AgentMonitorSettings().with_quota_alert_thresholds([])
+            payload = json.loads(path.read_text())
+        self.assertFalse(loaded.quota_alerts_enabled)
+        self.assertEqual(loaded.quota_alert_thresholds, (75.0, 90.0))
+        self.assertNotIn("quota_alerts_enabled", payload)
+        self.assertNotIn("quota_alert_thresholds", payload)
+        self.assertEqual(
+            AgentMonitorSettings().with_quota_alert_thresholds([]).quota_alert_thresholds,
+            (75.0, 90.0),
+        )
 
 
 class GlowDialTests(unittest.TestCase):
@@ -10776,7 +17371,9 @@ class PaletteTests(unittest.TestCase):
         from sidepulse.colors import CURATED_PALETTES
 
         sender = NS(identifier=lambda: "Sunset")
-        self.controller.applyPalette_(sender)
+        with patch.object(self.controller, "refresh_") as refresh:
+            self.controller.applyPalette_(sender)
+        refresh.assert_called_once_with(None)
         expected = CURATED_PALETTES["Sunset"]
         self.assertEqual(
             self.controller.settings.colors.mode_colors["working"],
@@ -10905,7 +17502,7 @@ class T3AdoptionTests(unittest.TestCase):
         error = self._status("claude:session:c", AgentMode.BLOCKED_ERROR, event="PostToolUseFailure")
         self.assertTrue(hard.is_hard_ask)
         self.assertFalse(soft.is_hard_ask)
-        self.assertTrue(error.is_hard_ask)
+        self.assertFalse(error.is_hard_ask)
 
     def test_plan_ready_detection(self) -> None:
         plan = self._status(
@@ -10955,7 +17552,8 @@ class T3AdoptionTests(unittest.TestCase):
         self.controller.last_snapshot = NS(
             statuses=[done], stale_statuses=[], collected_at=datetime.now(timezone.utc)
         )
-        self.controller.clearFinished_(None)
+        with patch.object(self.controller, "refresh_"):
+            self.controller.clearFinished_(None)
         self.assertIn("claude:session:a", self.controller.cleared_session_ids)
         snapshot = self.controller.last_snapshot
         self.assertEqual(self.status_bar.unseen_completions(snapshot, self.controller), [])
@@ -10996,19 +17594,29 @@ class MenuTeachingTests(unittest.TestCase):
 
     def test_empty_state_teaches_the_next_step(self) -> None:
         menu = self._menu()
-        titles = [
-            menu.itemAtIndex_(index).title() for index in range(menu.numberOfItems())
-        ]
+        mailbox = menu.itemAtIndex_(0)
+        recent = next(
+            mailbox.submenu().itemAtIndex_(index).submenu()
+            for index in range(mailbox.submenu().numberOfItems())
+            if mailbox.submenu().itemAtIndex_(index).title() == "Recent"
+        )
+        titles = [recent.itemAtIndex_(index).title() for index in range(recent.numberOfItems())]
         self.assertIn("No agents yet", titles)
         self.assertTrue(any("Start Claude Code" in title for title in titles))
 
     def test_empty_state_offers_setup_when_no_hooks_installed(self) -> None:
         menu = self._menu(hooks_installed=False)
+        mailbox = menu.itemAtIndex_(0)
+        recent = next(
+            mailbox.submenu().itemAtIndex_(index).submenu()
+            for index in range(mailbox.submenu().numberOfItems())
+            if mailbox.submenu().itemAtIndex_(index).title() == "Recent"
+        )
         connect = next(
             (
-                menu.itemAtIndex_(index)
-                for index in range(menu.numberOfItems())
-                if "Connect your agents" in menu.itemAtIndex_(index).title()
+                recent.itemAtIndex_(index)
+                for index in range(recent.numberOfItems())
+                if "Connect your agents" in recent.itemAtIndex_(index).title()
             ),
             None,
         )
@@ -11016,8 +17624,8 @@ class MenuTeachingTests(unittest.TestCase):
         self.assertEqual(connect.action(), "openSetup:")
         self.assertFalse(
             any(
-                "Start Claude Code" in menu.itemAtIndex_(index).title()
-                for index in range(menu.numberOfItems())
+                "Start Claude Code" in recent.itemAtIndex_(index).title()
+                for index in range(recent.numberOfItems())
             )
         )
 
@@ -11136,12 +17744,14 @@ class StudioDisplayAndTrancheCTests(unittest.TestCase):
         lon = self.controller.settings_fields["weather_longitude_field"]
         lat.setStringValue_("41.88")
         lon.setStringValue_("-87.63")
-        self.controller.applyWeatherLocation_(None)
-        self.assertEqual(self.controller.settings.weather_latitude, 41.88)
-        self.assertEqual(self.controller.settings.weather_longitude, -87.63)
-        lat.setStringValue_("")
-        lon.setStringValue_("")
-        self.controller.applyWeatherLocation_(None)
+        with patch.object(self.controller, "refresh_") as refresh:
+            self.controller.applyWeatherLocation_(None)
+            self.assertEqual(self.controller.settings.weather_latitude, 41.88)
+            self.assertEqual(self.controller.settings.weather_longitude, -87.63)
+            lat.setStringValue_("")
+            lon.setStringValue_("")
+            self.controller.applyWeatherLocation_(None)
+        self.assertEqual(refresh.call_args_list, [call(None), call(None)])
         self.assertIsNone(self.controller.settings.weather_latitude)
         self.assertIsNone(self.controller.settings.weather_longitude)
 
@@ -11213,7 +17823,7 @@ class CalendarAlertTests(unittest.TestCase):
         program = calendar_glow_program(128)
         self.assertLessEqual(len(program.encode()), MAX_LED_BYTES)
         self.assertLessEqual(len(program.splitlines()), MAX_LED_LINES)
-        # Unlike a notification blink, the warning holds until the event
+        # Unlike a one-shot alert, the warning holds until the event
         # starts -- it must loop.
         self.assertIn("repeat", program)
 
@@ -11221,7 +17831,6 @@ class CalendarAlertTests(unittest.TestCase):
         device = self._device()
         self.controller.settings = (
             self.controller.settings.with_calendar_alerts_enabled(True)
-            .with_notification_blinks_enabled(True)
             .with_reminder_alerts_enabled(True)
         )
         # Glow active -> calendar outranks the agent display.
@@ -11236,15 +17845,7 @@ class CalendarAlertTests(unittest.TestCase):
             self.controller.active_led_display_kind_for_device(device, None),
             self.status_bar.LED_DISPLAY_REMINDERS,
         )
-        # A notification blink outranks both.
-        self.controller.notification_blink_color = "#34C759"
-        self.controller.notification_blink_until = time.monotonic() + 1.0
-        self.assertEqual(
-            self.controller.active_led_display_kind_for_device(device, None),
-            self.status_bar.LED_DISPLAY_NOTIFICATION,
-        )
         # All expired -> back to agent status.
-        self.controller.notification_blink_until = 0.0
         self.controller.reminders_glow_until = 0.0
         self.controller.calendar_glow_until = time.monotonic() - 1.0
         self.assertEqual(
@@ -11254,16 +17855,24 @@ class CalendarAlertTests(unittest.TestCase):
 
     def test_reminders_due_glows_once_per_reminder(self) -> None:
         self.controller.settings = self.controller.settings.with_reminder_alerts_enabled(True)
-        self.controller.remindersDue_([("rem-1", "Pay rent")])
-        self.assertGreater(self.controller.reminders_glow_until, time.monotonic())
-        first_until = self.controller.reminders_glow_until
-        # The same reminder arriving again (still due, still incomplete)
-        # must NOT re-fire the glow.
-        self.controller.reminders_glow_until = 0.0
-        self.controller.remindersDue_([("rem-1", "Pay rent")])
-        self.assertEqual(self.controller.reminders_glow_until, 0.0)
-        # A different reminder fires fresh.
-        self.controller.remindersDue_([("rem-2", "Stand-up")])
+        with patch.object(self.controller, "refresh_") as refresh:
+            self.controller._apply_reminders_observation_result(
+                self.status_bar.RemindersObservationResult(True, ("1" * 64,))
+            )
+            self.assertGreater(self.controller.reminders_glow_until, time.monotonic())
+            first_until = self.controller.reminders_glow_until
+            # The same reminder arriving again (still due, still incomplete)
+            # must NOT re-fire the glow.
+            self.controller.reminders_glow_until = 0.0
+            self.controller._apply_reminders_observation_result(
+                self.status_bar.RemindersObservationResult(True, ("1" * 64,))
+            )
+            self.assertEqual(self.controller.reminders_glow_until, 0.0)
+            # A different reminder fires fresh.
+            self.controller._apply_reminders_observation_result(
+                self.status_bar.RemindersObservationResult(True, ("2" * 64,))
+            )
+        self.assertEqual(refresh.call_args_list, [call(None), call(None)])
         self.assertGreater(self.controller.reminders_glow_until, 0.0)
         self.assertGreaterEqual(first_until, 0.0)
 
@@ -11276,82 +17885,1763 @@ class CalendarAlertTests(unittest.TestCase):
         self.assertTrue(reloaded.reminder_alerts_enabled)
 
 
-class NotificationBlinkTests(unittest.TestCase):
-    def _fixture_db(self, tmp: str) -> Path:
-        import sqlite3
-
-        path = Path(tmp) / "db"
-        connection = sqlite3.connect(path)
-        connection.execute("CREATE TABLE app (app_id INTEGER PRIMARY KEY, identifier TEXT)")
-        connection.execute("CREATE TABLE record (rec_id INTEGER PRIMARY KEY, app_id INTEGER)")
-        connection.execute("INSERT INTO app VALUES (1, 'com.apple.MobileSMS')")
-        connection.execute("INSERT INTO app VALUES (2, 'net.whatsapp.WhatsApp')")
-        connection.execute("INSERT INTO record VALUES (10, 1)")
-        connection.commit()
-        connection.close()
-        return path
-
-    def test_watch_returns_only_new_deliveries_in_order(self) -> None:
-        import sqlite3
-
-        from sidepulse import notification_watch
-
-        with tempfile.TemporaryDirectory() as tmp:
-            path = self._fixture_db(tmp)
-            cursor = notification_watch.latest_record_id(path)
-            self.assertEqual(cursor, 10)
-            connection = sqlite3.connect(path)
-            connection.execute("INSERT INTO record VALUES (11, 2)")
-            connection.execute("INSERT INTO record VALUES (12, 1)")
-            connection.commit()
-            connection.close()
-            new_cursor, apps = notification_watch.delivered_after(cursor, path)
-            self.assertEqual(new_cursor, 12)
-            self.assertEqual(apps, ["net.whatsapp.WhatsApp", "com.apple.MobileSMS"])
-            self.assertEqual(notification_watch.delivered_after(new_cursor, path), (12, []))
-
-    def test_watch_raises_unavailable_without_the_store(self) -> None:
-        from sidepulse import notification_watch
-
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(notification_watch.NotificationWatchUnavailableError):
-                notification_watch.latest_record_id(Path(tmp) / "missing")
-
-    def test_blink_program_fits_device_limits_and_does_not_repeat(self) -> None:
-        from sidepulse.device_writer import MAX_LED_BYTES, MAX_LED_LINES
-        from sidepulse.led_status import notification_blink_program
-
-        program = notification_blink_program("#34C759", 128)
-        self.assertLessEqual(len(program.encode()), MAX_LED_BYTES)
-        self.assertLessEqual(len(program.splitlines()), MAX_LED_LINES)
-        # The blink is a moment: status_bar reverts to the agent display
-        # when the window closes, so the program must not loop.
-        self.assertNotIn("repeat", program)
-
-    def test_notification_settings_round_trip_and_atomic_write(self) -> None:
-        configured = (
-            AgentMonitorSettings()
-            .with_notification_blinks_enabled(False)
-            .with_notification_app_color("com.apple.MobileSMS", "1a2b3c")
+class ReminderObservationRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.clock = [675.0]
+        self.factory = _PresentationTimerFactory()
+        self.controller._presentation_monotonic = lambda: self.clock[0]
+        self.controller._runtime_timer_registry = (
+            self.controller._build_presentation_timer_registry(
+                timer_factory=self.factory,
+                monotonic=lambda: self.clock[0],
+            )
         )
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "settings.json"
-            save_settings(configured, path)
-            # Atomic write: the scratch file must not survive.
-            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["settings.json"])
-            reloaded = load_settings(path)
-        self.assertFalse(reloaded.notification_blinks_enabled)
-        self.assertEqual(reloaded.notification_app_colors["com.apple.MobileSMS"], "#1A2B3C")
+        self.controller._presentation_scheduler_state = (
+            self.status_bar.PresentationSchedulerState()
+        )
+        self.controller._presentation_scheduler_inputs = None
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        self.controller._runtime_worker_monotonic = lambda: self.clock[0]
 
-    def test_invalid_notification_color_is_rejected(self) -> None:
-        base = AgentMonitorSettings()
-        unchanged = base.with_notification_app_color("com.apple.MobileSMS", "not-a-color")
+    def tearDown(self) -> None:
+        self.controller._runtime_worker_registry.close_all(timeout_seconds=1.0)
+
+    def _inputs(self, **changes):
+        values = {
+            "screen_bar_enabled": False,
+            "visible": False,
+            "display_asleep": False,
+            "app_terminating": False,
+            "animation_active": False,
+            "next_visual_change_at": None,
+            "alcove_enabled": False,
+            "alcove_relevant": False,
+            "pointer_interaction_relevant": False,
+        }
+        values.update(changes)
+        return self.status_bar.PresentationSchedulerInputs(**values)
+
+    def test_reminder_intent_is_disabled_by_default_and_withdrawn_immediately(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_reminder_alerts_enabled(False)
+        )
+        with (
+            patch.object(self.status_bar.reminders_watch, "fetch_due") as fetch_due,
+            patch.object(
+                self.status_bar.reminders_watch,
+                "request_access",
+            ) as request_access,
+        ):
+            self.controller.reconcile_presentation_timers(self._inputs())
+            self.controller._reminders_observation_timer_fired()
+
+            self.assertNotIn(
+                self.status_bar.RuntimeFeature.REMINDERS_OBSERVATION,
+                self.controller._runtime_timer_registry.snapshot().active_features,
+            )
+            self.assertEqual(self.controller._os_poll_worker.snapshot().submitted, 0)
+            fetch_due.assert_not_called()
+            request_access.assert_not_called()
+
+            self.controller.settings = (
+                self.controller.settings.with_reminder_alerts_enabled(True)
+            )
+            for _ in range(100):
+                self.controller.reconcile_presentation_timers(self._inputs())
+
+            reminder_timers = tuple(
+                timer
+                for timer in self.factory.live
+                if timer.feature
+                is self.status_bar.RuntimeFeature.REMINDERS_OBSERVATION
+            )
+            self.assertEqual(len(reminder_timers), 1)
+            self.assertEqual(reminder_timers[0].delay, 60.0)
+            self.assertEqual(reminder_timers[0].interval, 60.0)
+            self.assertEqual(reminder_timers[0].tolerances, [6.0])
+
+            self.controller.settings = (
+                self.controller.settings.with_reminder_alerts_enabled(False)
+            )
+            self.controller.reconcile_presentation_timers(self._inputs())
+
+        self.assertEqual(reminder_timers[0].invalidations, 1)
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.REMINDERS_OBSERVATION,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+
+    def test_reminder_tick_uses_bounded_private_os_poll_adapter(self) -> None:
+        submissions = []
+        self.controller.settings = (
+            self.controller.settings.with_reminder_alerts_enabled(True)
+        )
+        self.controller._reminders_observation_active = True
+        self.controller._os_poll_generation = 8
+        self.controller._presentation_scheduler_inputs = self._inputs()
+        self.controller._os_poll_worker = SimpleNamespace(submit=submissions.append)
+
+        self.controller._reminders_observation_timer_fired()
+
+        self.assertEqual(len(submissions), 1)
+        command = submissions[0]
+        self.assertIs(command.domain, self.status_bar.RuntimeWorkerDomain.OS_POLL)
+        self.assertEqual(command.key, "reminders-observation")
+        self.assertEqual(command.generation, 8)
         self.assertEqual(
-            unchanged.notification_app_colors["com.apple.MobileSMS"],
-            base.notification_app_colors["com.apple.MobileSMS"],
+            command.payload,
+            self.status_bar.RemindersObservationRequest(lookback_seconds=120.0),
         )
-        removed = base.with_notification_app_color("com.apple.MobileSMS", None)
-        self.assertNotIn("com.apple.MobileSMS", removed.notification_app_colors)
+        self.assertNotIn("title", repr(command.payload).casefold())
+        self.assertNotIn("identifier", repr(command.payload).casefold())
+
+        private_identifier = "private-reminder-id"
+        private_title = "Prepare confidential Project Atlas memo"
+        with patch.object(
+            self.status_bar.reminders_watch,
+            "fetch_due",
+            side_effect=lambda _lookback, completion: completion(
+                [(private_identifier, private_title)]
+            ),
+        ):
+            result = self.controller._execute_os_poll_command(command)
+
+        self.assertIsInstance(result, self.status_bar.RemindersObservationResult)
+        self.assertTrue(result.available)
+        self.assertEqual(len(result.identifiers), 1)
+        self.assertEqual(len(result.identifiers[0]), 64)
+        self.assertNotIn(private_identifier, repr(result))
+        self.assertNotIn(private_title, repr(result))
+        self.assertNotIn("title", repr(result).casefold())
+
+    def test_reminder_results_are_fenced_bounded_and_use_exact_cue_deadline(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_reminder_alerts_enabled(True)
+        )
+        self.controller._reminders_observation_active = True
+        self.controller._reminders_observation_fire_at = self.clock[0] + 60.0
+        self.controller._os_poll_generation = 11
+        self.controller._presentation_scheduler_inputs = self._inputs()
+        self.controller.refresh_ = MagicMock()
+        request = self.status_bar.RemindersObservationRequest(
+            lookback_seconds=120.0
+        )
+
+        def command(generation: int, deadline: float):
+            return self.status_bar.RuntimeWorkCommand(
+                self.status_bar.RuntimeWorkerDomain.OS_POLL,
+                "reminders-observation",
+                generation,
+                deadline,
+                request,
+            )
+
+        result = self.status_bar.RemindersObservationResult(True, ("a" * 64,))
+        self.controller._apply_os_poll_result(
+            command(10, self.clock[0] + 30.0),
+            result,
+        )
+        self.controller._apply_os_poll_result(
+            command(11, self.clock[0] - 1.0),
+            result,
+        )
+        self.assertEqual(self.controller.reminders_glow_until, 0.0)
+        self.controller.refresh_.assert_not_called()
+
+        current = command(11, self.clock[0] + 30.0)
+        self.controller._apply_os_poll_result(current, result)
+        first_deadline = self.controller.reminders_glow_until
+        self.assertGreater(first_deadline, self.clock[0])
+        cue_timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+        )
+        self.assertAlmostEqual(cue_timer.delay, first_deadline - self.clock[0])
+        self.assertIsNone(cue_timer.interval)
+        self.assertEqual(cue_timer.tolerances, [0.0])
+        self.controller.refresh_.assert_called_once_with(None)
+
+        self.controller._apply_os_poll_result(current, result)
+        self.assertEqual(self.controller.reminders_glow_until, first_deadline)
+        self.assertIs(
+            next(
+                timer
+                for timer in self.factory.live
+                if timer.feature
+                is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+            ),
+            cue_timer,
+        )
+        self.controller.refresh_.assert_called_once_with(None)
+
+        second_batch = tuple(
+            f"{index:064x}" for index in range(1, 257)
+        )
+        self.controller._apply_os_poll_result(
+            current,
+            self.status_bar.RemindersObservationResult(True, second_batch),
+        )
+        self.assertLessEqual(
+            len(self.controller.reminders_seen),
+            self.status_bar.MAX_REMINDER_OBSERVATION_IDENTIFIERS,
+        )
+
+        self.controller._presentation_scheduler_inputs = self._inputs(
+            display_asleep=True
+        )
+        self.controller._apply_os_poll_result(
+            current,
+            self.status_bar.RemindersObservationResult(True, ("b" * 64,)),
+        )
+        self.controller._presentation_scheduler_inputs = self._inputs(
+            app_terminating=True
+        )
+        self.controller._apply_os_poll_result(
+            current,
+            self.status_bar.RemindersObservationResult(True, ("c" * 64,)),
+        )
+        self.assertNotIn("b" * 64, self.controller.reminders_seen)
+        self.assertNotIn("c" * 64, self.controller.reminders_seen)
+
+    def test_reminder_callback_timeout_releases_shared_worker_and_late_callback_is_inert(self) -> None:
+        started = threading.Event()
+        late_callbacks = []
+        drains = []
+
+        def fetch_due(_lookback, completion):
+            late_callbacks.append(completion)
+            started.set()
+
+        self.controller._runtime_worker_registry.close_all(timeout_seconds=1.0)
+        (
+            self.controller._runtime_worker_registry,
+            self.controller._os_poll_worker,
+        ) = self.controller._build_runtime_worker_registry(
+            monotonic=lambda: self.clock[0],
+            dispatch_main=drains.append,
+        )
+        self.controller.settings = (
+            self.controller.settings.with_reminder_alerts_enabled(True)
+        )
+        self.controller._reminders_observation_active = True
+        self.controller._reminders_observation_fire_at = self.clock[0] + 60.0
+        self.controller._lid_observation_active = True
+        self.controller._os_poll_generation = 17
+        self.controller._presentation_scheduler_inputs = self._inputs()
+
+        with (
+            patch.object(
+                self.status_bar,
+                "REMINDERS_FETCH_TIMEOUT_SECONDS",
+                0.01,
+            ),
+            patch.object(
+                self.status_bar.reminders_watch,
+                "fetch_due",
+                side_effect=fetch_due,
+            ),
+            patch.object(self.status_bar, "read_lid_closed", return_value=True),
+        ):
+            self.controller._reminders_observation_timer_fired()
+            self.assertTrue(started.wait(1.0))
+            self.controller._lid_observation_timer_fired()
+            deadline = time.monotonic() + 1.0
+            while self.controller._os_poll_worker.snapshot().completed < 2:
+                if time.monotonic() >= deadline:
+                    self.fail("reminder timeout stranded the shared OS worker")
+                time.sleep(0.001)
+
+        self.assertEqual(len(drains), 1)
+        drains.pop()()
+        self.assertTrue(self.controller.last_lid_closed)
+        self.assertEqual(self.controller.reminders_glow_until, 0.0)
+        self.assertEqual(
+            self.controller.reminders_watch_retry_at,
+            self.clock[0] + self.status_bar.REMINDERS_WATCH_RETRY_SECONDS,
+        )
+
+        previous_seen = dict(self.controller.reminders_seen)
+        self.controller._os_poll_generation += 1
+        late_callbacks[0]([("late-private-id", "Late private title")])
+
+        self.assertEqual(self.controller.reminders_seen, previous_seen)
+        self.assertEqual(self.controller.reminders_glow_until, 0.0)
+
+    def test_reminder_permission_is_explicit_enable_only_main_thread_and_single_flight(self) -> None:
+        inputs = self._inputs()
+        self.controller.virtual_status_device = SimpleNamespace(
+            presentation_scheduler_inputs=lambda: inputs
+        )
+        worker = MagicMock()
+        self.controller._os_poll_worker = worker
+        enabled_sender = SimpleNamespace(state=lambda: 1)
+        disabled_sender = SimpleNamespace(state=lambda: 0)
+        callbacks = []
+        request_threads = []
+
+        def request_access(completion):
+            callbacks.append(completion)
+            request_threads.append(threading.get_ident())
+
+        with (
+            patch.object(self.status_bar, "save_settings"),
+            patch.object(
+                self.status_bar.reminders_watch,
+                "authorization_status",
+                return_value=self.status_bar.reminders_watch.AUTH_NOT_DETERMINED,
+            ) as authorization_status,
+            patch.object(
+                self.status_bar.reminders_watch,
+                "request_access",
+                side_effect=request_access,
+            ) as request_access_mock,
+            patch.object(
+                self.status_bar.reminders_watch,
+                "fetch_due",
+            ) as fetch_due,
+        ):
+            for _ in range(100):
+                self.controller.reconcile_presentation_timers(inputs)
+            authorization_status.assert_not_called()
+            request_access_mock.assert_not_called()
+
+            self.controller.toggleReminderAlerts_(enabled_sender)
+            self.controller.toggleReminderAlerts_(enabled_sender)
+            for _ in range(100):
+                self.controller.reconcile_presentation_timers(inputs)
+
+            authorization_status.assert_called_once_with()
+            request_access_mock.assert_called_once_with(callbacks[0])
+            self.assertEqual(request_threads, [threading.main_thread().ident])
+            fetch_due.assert_not_called()
+
+            self.controller.toggleReminderAlerts_(disabled_sender)
+            callback_thread = threading.Thread(target=lambda: callbacks[0](True))
+            callback_thread.start()
+            callback_thread.join(1.0)
+
+        self.assertFalse(self.controller._reminders_observation_active)
+        self.assertEqual(self.controller.reminders_glow_until, 0.0)
+        worker.submit.assert_not_called()
+
+    def test_reminder_permission_callback_is_inert_after_sleep(self) -> None:
+        inputs = self._inputs()
+        self.controller.virtual_status_device = SimpleNamespace(
+            presentation_scheduler_inputs=lambda: inputs
+        )
+        callbacks = []
+        self.controller.set_settings_message = MagicMock()
+
+        with (
+            patch.object(self.status_bar, "save_settings"),
+            patch.object(
+                self.status_bar.reminders_watch,
+                "authorization_status",
+                return_value=self.status_bar.reminders_watch.AUTH_NOT_DETERMINED,
+            ),
+            patch.object(
+                self.status_bar.reminders_watch,
+                "request_access",
+                side_effect=callbacks.append,
+            ),
+        ):
+            self.controller.toggleReminderAlerts_(SimpleNamespace(state=lambda: 1))
+
+        self.controller.set_settings_message.reset_mock()
+        self.controller.reconcile_presentation_timers(
+            self._inputs(display_asleep=True)
+        )
+        self.controller.reminderAccessResolved_(
+            {
+                "token": self.controller._reminders_permission_request_token,
+                "granted": False,
+            }
+        )
+
+        self.assertIsNone(self.controller._reminders_permission_request_token)
+        self.assertFalse(self.controller._reminders_permission_failed)
+        self.assertEqual(self.controller.reminders_glow_until, 0.0)
+        self.controller.set_settings_message.assert_not_called()
+
+    def test_reminder_permission_denial_withdraws_timer_and_active_cue(self) -> None:
+        inputs = self._inputs()
+        self.controller.virtual_status_device = SimpleNamespace(
+            presentation_scheduler_inputs=lambda: inputs
+        )
+        self.controller.settings = (
+            self.controller.settings.with_reminder_alerts_enabled(True)
+        )
+        self.controller.reconcile_presentation_timers(inputs)
+        self.controller._apply_reminders_observation_result(
+            self.status_bar.RemindersObservationResult(True, ("f" * 64,))
+        )
+        self.controller.refresh_ = MagicMock()
+        worker = MagicMock()
+        self.controller._os_poll_worker = worker
+
+        with (
+            patch.object(self.status_bar, "save_settings"),
+            patch.object(
+                self.status_bar.reminders_watch,
+                "authorization_status",
+                return_value=self.status_bar.reminders_watch.AUTH_DENIED,
+            ),
+            patch.object(
+                self.status_bar.reminders_watch,
+                "request_access",
+            ) as request_access,
+            patch.object(
+                self.status_bar.reminders_watch,
+                "fetch_due",
+            ) as fetch_due,
+        ):
+            self.controller.toggleReminderAlerts_(SimpleNamespace(state=lambda: 1))
+
+        self.assertTrue(self.controller.settings.reminder_alerts_enabled)
+        self.assertTrue(self.controller._reminders_permission_failed)
+        self.assertFalse(self.controller._reminders_observation_active)
+        self.assertEqual(self.controller.reminders_glow_until, 0.0)
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.REMINDERS_OBSERVATION,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+        worker.submit.assert_not_called()
+        request_access.assert_not_called()
+        fetch_due.assert_not_called()
+        self.controller.refresh_.assert_called_once_with(None)
+
+    def test_reminder_permission_unavailable_clears_active_cue_without_replay(self) -> None:
+        inputs = self._inputs()
+        self.controller.virtual_status_device = SimpleNamespace(
+            presentation_scheduler_inputs=lambda: inputs
+        )
+        self.controller.settings = (
+            self.controller.settings.with_reminder_alerts_enabled(True)
+        )
+        self.controller.reconcile_presentation_timers(inputs)
+        self.controller._apply_reminders_observation_result(
+            self.status_bar.RemindersObservationResult(True, ("9" * 64,))
+        )
+        self.controller.refresh_ = MagicMock()
+
+        with (
+            patch.object(self.status_bar, "save_settings"),
+            patch.object(
+                self.status_bar.reminders_watch,
+                "authorization_status",
+                side_effect=self.status_bar.reminders_watch.RemindersUnavailableError(
+                    "private EventKit error"
+                ),
+            ),
+            patch.object(
+                self.status_bar.reminders_watch,
+                "request_access",
+            ) as request_access,
+            patch.object(
+                self.status_bar.reminders_watch,
+                "fetch_due",
+            ) as fetch_due,
+        ):
+            self.controller.toggleReminderAlerts_(SimpleNamespace(state=lambda: 1))
+            self.controller._reminders_observation_timer_fired()
+
+        self.assertTrue(self.controller._reminders_permission_failed)
+        self.assertFalse(self.controller._reminders_observation_active)
+        self.assertEqual(self.controller.reminders_glow_until, 0.0)
+        self.controller.refresh_.assert_called_once_with(None)
+        request_access.assert_not_called()
+        fetch_due.assert_not_called()
+
+    def test_reminder_burst_keeps_one_running_and_one_latest_pending(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        drains = []
+        reads = []
+
+        def fetch_due(lookback, completion):
+            reads.append((threading.current_thread().name, lookback, completion))
+            if len(reads) == 1:
+                started.set()
+                self.assertTrue(release.wait(2.0))
+            completion([(f"private-{len(reads)}", "Private reminder title")])
+
+        self.controller._runtime_worker_registry.close_all(timeout_seconds=1.0)
+        (
+            self.controller._runtime_worker_registry,
+            self.controller._os_poll_worker,
+        ) = self.controller._build_runtime_worker_registry(
+            monotonic=lambda: self.clock[0],
+            dispatch_main=drains.append,
+        )
+        self.controller.settings = (
+            self.controller.settings.with_reminder_alerts_enabled(True)
+        )
+        self.controller._reminders_observation_active = True
+        self.controller._reminders_observation_fire_at = self.clock[0] + 60.0
+        self.controller._os_poll_generation = 23
+        self.controller._presentation_scheduler_inputs = self._inputs()
+        self.controller.refresh_ = MagicMock()
+
+        with patch.object(
+            self.status_bar.reminders_watch,
+            "fetch_due",
+            side_effect=fetch_due,
+        ):
+            self.controller._reminders_observation_timer_fired()
+            self.assertTrue(started.wait(1.0))
+            for _ in range(99):
+                self.controller._reminders_observation_timer_fired()
+
+            snapshot = self.controller._os_poll_worker.snapshot()
+            self.assertTrue(snapshot.running)
+            self.assertEqual(snapshot.pending_count, 1)
+            self.assertEqual(snapshot.submitted, 100)
+            self.assertEqual(snapshot.started, 1)
+            self.assertEqual(snapshot.queued, 1)
+            self.assertEqual(snapshot.replaced_pending, 98)
+
+            release.set()
+            deadline = time.monotonic() + 2.0
+            while self.controller._os_poll_worker.snapshot().completed < 2:
+                if time.monotonic() >= deadline:
+                    self.fail("reminder observations did not complete")
+                time.sleep(0.001)
+
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(
+            [thread_name for thread_name, _lookback, _callback in reads],
+            ["sidepulse-runtime-os-poll", "sidepulse-runtime-os-poll"],
+        )
+        self.assertEqual(len(drains), 1)
+        drains.pop()()
+        self.assertEqual(len(self.controller.reminders_seen), 1)
+        self.controller.refresh_.assert_called_once_with(None)
+        self.assertEqual(
+            self.controller._os_poll_worker.snapshot().dispatched_results,
+            1,
+        )
+
+    def test_disabled_launch_has_no_legacy_reminder_timer_or_eventkit_access(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_reminder_alerts_enabled(False)
+        )
+        timer_api = MagicMock()
+        status_item = MagicMock()
+        status_api = MagicMock()
+        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = (
+            status_item
+        )
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(self.status_bar, "NSApp"))
+            stack.enter_context(patch.object(self.status_bar, "NSStatusBar", status_api))
+            stack.enter_context(patch.object(self.status_bar, "NSTimer", timer_api))
+            stack.enter_context(patch.object(self.status_bar.threading, "Thread"))
+            fetch_due = stack.enter_context(
+                patch.object(self.status_bar.reminders_watch, "fetch_due")
+            )
+            request_access = stack.enter_context(
+                patch.object(self.status_bar.reminders_watch, "request_access")
+            )
+            authorization_status = stack.enter_context(
+                patch.object(self.status_bar.reminders_watch, "authorization_status")
+            )
+            for name in (
+                "load_operator_local_state",
+                "start_event_server",
+                "replay_debug_logs",
+                "refresh_",
+                "show_setup_window_if_needed",
+                "reconcile_lid_observation",
+            ):
+                stack.enter_context(patch.object(self.controller, name))
+            stack.enter_context(patch.object(self.controller.virtual_status_device, "show"))
+            stack.enter_context(patch.object(self.controller.virtual_status_device, "hide"))
+
+            self.controller.applicationDidFinishLaunching_(None)
+
+        selectors = tuple(
+            invocation.args[2]
+            for invocation in (
+                timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.call_args_list
+            )
+        )
+        self.assertNotIn("pollReminders:", selectors)
+        self.assertFalse(hasattr(self.controller, "reminders_watch_timer"))
+        self.assertFalse(hasattr(self.controller, "pollReminders_"))
+        fetch_due.assert_not_called()
+        request_access.assert_not_called()
+        authorization_status.assert_not_called()
+
+    def test_reminder_sleep_and_termination_withdraw_timer_cue_and_late_result(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_reminder_alerts_enabled(True)
+        )
+        self.controller.reconcile_presentation_timers(self._inputs())
+        reminder_timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.REMINDERS_OBSERVATION
+        )
+        self.controller._apply_reminders_observation_result(
+            self.status_bar.RemindersObservationResult(True, ("d" * 64,))
+        )
+        cue_timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+        )
+
+        self.controller.reconcile_presentation_timers(
+            self._inputs(display_asleep=True)
+        )
+
+        self.assertEqual(reminder_timer.invalidations, 1)
+        self.assertEqual(cue_timer.invalidations, 1)
+        self.assertEqual(self.controller.reminders_glow_until, 0.0)
+        self.assertFalse(self.controller.runtimeTimerFired_(reminder_timer))
+        self.assertFalse(self.controller.runtimeTimerFired_(cue_timer))
+
+        self.controller.reconcile_presentation_timers(self._inputs())
+        wake_timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.REMINDERS_OBSERVATION
+        )
+        request = self.status_bar.RemindersObservationRequest(120.0)
+        stale_command = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.OS_POLL,
+            "reminders-observation",
+            self.controller._os_poll_generation,
+            self.clock[0] + 30.0,
+            request,
+        )
+        previous_seen = dict(self.controller.reminders_seen)
+        self.controller._reminders_permission_request_token = (
+            self.controller._reminders_permission_generation
+        )
+
+        with (
+            patch.object(self.controller.virtual_status_device, "terminate"),
+            patch.object(self.controller, "stop_event_server"),
+            patch.object(self.controller.closed_lid_awake, "release"),
+            patch.object(self.controller.keep_awake, "release"),
+        ):
+            self.controller.applicationWillTerminate_(None)
+            self.controller._apply_os_poll_result(
+                stale_command,
+                self.status_bar.RemindersObservationResult(True, ("e" * 64,)),
+            )
+
+        self.assertFalse(self.controller._reminders_observation_active)
+        self.assertIsNone(self.controller._reminders_permission_request_token)
+        self.assertEqual(wake_timer.invalidations, 1)
+        self.assertEqual(self.controller.reminders_seen, previous_seen)
+        self.assertEqual(self.controller.reminders_glow_until, 0.0)
+
+
+class CalendarObservationRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.clock = [650.0]
+        self.factory = _PresentationTimerFactory()
+        self.controller._presentation_monotonic = lambda: self.clock[0]
+        self.controller._runtime_timer_registry = (
+            self.controller._build_presentation_timer_registry(
+                timer_factory=self.factory,
+                monotonic=lambda: self.clock[0],
+            )
+        )
+        self.controller._presentation_scheduler_state = (
+            self.status_bar.PresentationSchedulerState()
+        )
+        self.controller._presentation_scheduler_inputs = None
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        self.controller._runtime_worker_monotonic = lambda: self.clock[0]
+
+    def tearDown(self) -> None:
+        self.controller._runtime_worker_registry.close_all(timeout_seconds=1.0)
+
+    def _inputs(self, **changes):
+        values = {
+            "screen_bar_enabled": False,
+            "visible": False,
+            "display_asleep": False,
+            "app_terminating": False,
+            "animation_active": False,
+            "next_visual_change_at": None,
+            "alcove_enabled": False,
+            "alcove_relevant": False,
+            "pointer_interaction_relevant": False,
+        }
+        values.update(changes)
+        return self.status_bar.PresentationSchedulerInputs(**values)
+
+    def test_calendar_intent_is_disabled_by_default_and_withdrawn_immediately(self) -> None:
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
+            False
+        )
+        with patch.object(
+            self.status_bar.calendar_watch,
+            "next_event_start",
+        ) as next_event_start:
+            self.controller.reconcile_presentation_timers(self._inputs())
+            self.controller._calendar_observation_timer_fired()
+
+            self.assertNotIn(
+                self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION,
+                self.controller._runtime_timer_registry.snapshot().active_features,
+            )
+            self.assertEqual(self.controller._os_poll_worker.snapshot().submitted, 0)
+            next_event_start.assert_not_called()
+
+            self.controller.settings = (
+                self.controller.settings.with_calendar_alerts_enabled(True)
+            )
+            for _ in range(100):
+                self.controller.reconcile_presentation_timers(self._inputs())
+
+            calendar_timers = tuple(
+                timer
+                for timer in self.factory.live
+                if timer.feature
+                is self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION
+            )
+            self.assertEqual(len(calendar_timers), 1)
+            self.assertEqual(calendar_timers[0].delay, 30.0)
+            self.assertEqual(calendar_timers[0].interval, 30.0)
+            self.assertEqual(calendar_timers[0].tolerances, [3.0])
+
+            self.controller.reconcile_presentation_timers(
+                self._inputs(display_asleep=True)
+            )
+            self.controller.runtimeTimerFired_(calendar_timers[0])
+            self.assertEqual(calendar_timers[0].invalidations, 1)
+            self.assertEqual(
+                self.controller._runtime_timer_registry.snapshot().callback_count(
+                    self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION
+                ),
+                0,
+            )
+
+            self.controller.reconcile_presentation_timers(self._inputs())
+            wake_timer = next(
+                timer
+                for timer in self.factory.live
+                if timer.feature
+                is self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION
+            )
+
+            self.controller.settings = (
+                self.controller.settings.with_calendar_alerts_enabled(False)
+            )
+            self.controller.reconcile_presentation_timers(self._inputs())
+
+            self.assertNotIn(
+                self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION,
+                self.controller._runtime_timer_registry.snapshot().active_features,
+            )
+            self.assertEqual(wake_timer.invalidations, 1)
+            self.controller._calendar_observation_timer_fired()
+            self.assertEqual(self.controller._os_poll_worker.snapshot().submitted, 0)
+            next_event_start.assert_not_called()
+
+    def test_calendar_tick_uses_private_os_poll_adapter(self) -> None:
+        submissions = []
+        self.controller.settings = (
+            self.controller.settings.with_calendar_alerts_enabled(True)
+            .with_calendar_lead_minutes(12.0)
+        )
+        self.controller._calendar_observation_active = True
+        self.controller._os_poll_generation = 8
+        self.controller._presentation_scheduler_inputs = self._inputs()
+        self.controller._os_poll_worker = SimpleNamespace(submit=submissions.append)
+
+        self.controller._calendar_observation_timer_fired()
+
+        self.assertEqual(len(submissions), 1)
+        command = submissions[0]
+        self.assertIs(command.domain, self.status_bar.RuntimeWorkerDomain.OS_POLL)
+        self.assertEqual(command.key, "calendar-observation")
+        self.assertEqual(command.generation, 8)
+        self.assertEqual(
+            command.payload,
+            self.status_bar.CalendarObservationRequest(lead_minutes=12.0),
+        )
+        self.assertNotIn("title", repr(command.payload).casefold())
+        self.assertNotIn("identifier", repr(command.payload).casefold())
+
+        private_title = "Private board meeting for Project Atlas"
+        starts_at = datetime.now(timezone.utc) + timedelta(seconds=120.0)
+        with patch.object(
+            self.status_bar.calendar_watch,
+            "next_event_start",
+            return_value=(private_title, starts_at),
+        ):
+            result = self.controller._execute_os_poll_command(command)
+
+        self.assertIsInstance(result, self.status_bar.CalendarObservationResult)
+        self.assertTrue(result.available)
+        self.assertGreaterEqual(result.starts_in_seconds, 0.0)
+        self.assertLessEqual(result.starts_in_seconds, 120.0)
+        self.assertNotIn(private_title, repr(result))
+        self.assertNotIn("title", repr(result).casefold())
+        self.assertNotIn("identifier", repr(result).casefold())
+
+    def test_calendar_results_are_generation_deadline_and_lifecycle_fenced(self) -> None:
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
+            True
+        )
+        self.controller._calendar_observation_active = True
+        self.controller._os_poll_generation = 11
+        self.controller._presentation_scheduler_inputs = self._inputs()
+        self.controller.calendar_glow_until = 0.0
+        self.controller.calendar_event_title = None
+        self.controller.refresh_ = MagicMock()
+        request = self.status_bar.CalendarObservationRequest(lead_minutes=10.0)
+
+        def command(generation: int, deadline: float):
+            return self.status_bar.RuntimeWorkCommand(
+                self.status_bar.RuntimeWorkerDomain.OS_POLL,
+                "calendar-observation",
+                generation,
+                deadline,
+                request,
+            )
+
+        result = self.status_bar.CalendarObservationResult(
+            available=True,
+            starts_in_seconds=90.0,
+        )
+
+        self.controller._apply_os_poll_result(
+            command(10, self.clock[0] + 30.0),
+            result,
+        )
+        self.controller._apply_os_poll_result(
+            command(11, self.clock[0] - 1.0),
+            result,
+        )
+        self.assertEqual(self.controller.calendar_glow_until, 0.0)
+        self.controller.refresh_.assert_not_called()
+
+        current = command(11, self.clock[0] + 30.0)
+        self.controller._apply_os_poll_result(current, result)
+        self.controller._apply_os_poll_result(current, result)
+
+        self.assertEqual(self.controller.calendar_glow_until, self.clock[0] + 90.0)
+        self.assertIsNone(self.controller.calendar_event_title)
+        self.controller.refresh_.assert_called_once_with(None)
+
+        self.controller._presentation_scheduler_inputs = self._inputs(
+            display_asleep=True
+        )
+        self.controller._apply_os_poll_result(
+            current,
+            self.status_bar.CalendarObservationResult(
+                available=True,
+                starts_in_seconds=None,
+            ),
+        )
+        self.controller._presentation_scheduler_inputs = self._inputs(
+            app_terminating=True
+        )
+        self.controller._apply_os_poll_result(
+            current,
+            self.status_bar.CalendarObservationResult(
+                available=True,
+                starts_in_seconds=None,
+            ),
+        )
+
+        self.assertEqual(self.controller.calendar_glow_until, self.clock[0] + 90.0)
+        self.controller.refresh_.assert_called_once_with(None)
+
+    def test_calendar_timeout_is_static_and_backs_off_without_retry(self) -> None:
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
+            True
+        )
+        self.controller._calendar_observation_active = True
+        self.controller._os_poll_generation = 4
+        self.controller._presentation_scheduler_inputs = self._inputs()
+        command = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.OS_POLL,
+            "calendar-observation",
+            4,
+            self.clock[0] + 30.0,
+            self.status_bar.CalendarObservationRequest(lead_minutes=10.0),
+        )
+        private_error = "timeout reading /Users/private/Secret Calendar"
+
+        with patch.object(
+            self.status_bar.calendar_watch,
+            "next_event_start",
+            side_effect=TimeoutError(private_error),
+        ) as next_event_start:
+            result = self.controller._execute_os_poll_command(command)
+
+        self.assertEqual(
+            result,
+            self.status_bar.CalendarObservationResult(
+                available=False,
+                starts_in_seconds=None,
+            ),
+        )
+        self.assertNotIn(private_error, repr(result))
+        self.controller._apply_os_poll_result(command, result)
+        self.assertEqual(
+            self.controller.calendar_watch_retry_at,
+            self.clock[0] + self.status_bar.CALENDAR_WATCH_RETRY_SECONDS,
+        )
+
+        submissions = []
+        self.controller._os_poll_worker = SimpleNamespace(submit=submissions.append)
+        self.controller._calendar_observation_timer_fired()
+
+        self.assertEqual(submissions, [])
+        next_event_start.assert_called_once_with(10.0)
+
+    def test_calendar_unavailable_clears_active_cue_and_arms_retry(self) -> None:
+        self.controller.calendar_glow_until = 900.0
+        self.controller.calendar_event_title = "Private active event"
+        self.controller.refresh_ = MagicMock()
+
+        self.controller._apply_calendar_observation_result(
+            self.status_bar.CalendarObservationResult(
+                available=False,
+                starts_in_seconds=None,
+            )
+        )
+
+        self.assertEqual(self.controller.calendar_glow_until, 0.0)
+        self.assertIsNone(self.controller.calendar_event_title)
+        self.controller.refresh_.assert_called_once_with(None)
+        self.assertEqual(self.controller.calendar_watch_retry_at, 950.0)
+
+    def test_calendar_toggle_reconciles_and_submits_only_through_worker(self) -> None:
+        inputs = self._inputs()
+        self.controller.virtual_status_device = SimpleNamespace(
+            presentation_scheduler_inputs=lambda: inputs
+        )
+        worker = MagicMock()
+        self.controller._os_poll_worker = worker
+        enabled_sender = SimpleNamespace(state=lambda: 1)
+        disabled_sender = SimpleNamespace(state=lambda: 0)
+
+        with (
+            patch.object(self.status_bar, "save_settings"),
+            patch.object(
+                self.status_bar.calendar_watch,
+                "authorization_status",
+                return_value=self.status_bar.calendar_watch.AUTH_AUTHORIZED,
+            ) as authorization_status,
+            patch.object(
+                self.status_bar.calendar_watch,
+                "next_event_start",
+            ) as next_event_start,
+        ):
+            self.controller.toggleCalendarAlerts_(enabled_sender)
+
+            calendar_timer = next(
+                timer
+                for timer in self.factory.live
+                if timer.feature
+                is self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION
+            )
+            self.assertEqual(calendar_timer.interval, 30.0)
+            self.assertEqual(worker.submit.call_count, 1)
+            next_event_start.assert_not_called()
+
+            self.controller.toggleCalendarAlerts_(disabled_sender)
+
+        self.assertFalse(self.controller._calendar_observation_active)
+        self.assertEqual(calendar_timer.invalidations, 1)
+        self.assertEqual(worker.submit.call_count, 1)
+        authorization_status.assert_called_once_with()
+        next_event_start.assert_not_called()
+
+    def test_disabled_launch_has_no_legacy_calendar_timer_or_event_lookup(self) -> None:
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
+            False
+        )
+        timer_api = MagicMock()
+        status_item = MagicMock()
+        status_api = MagicMock()
+        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = (
+            status_item
+        )
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(self.status_bar, "NSApp"))
+            stack.enter_context(patch.object(self.status_bar, "NSStatusBar", status_api))
+            stack.enter_context(patch.object(self.status_bar, "NSTimer", timer_api))
+            stack.enter_context(patch.object(self.status_bar.threading, "Thread"))
+            next_event_start = stack.enter_context(
+                patch.object(self.status_bar.calendar_watch, "next_event_start")
+            )
+            for name in (
+                "load_operator_local_state",
+                "start_event_server",
+                "replay_debug_logs",
+                "refresh_",
+                "show_setup_window_if_needed",
+                "reconcile_lid_observation",
+            ):
+                stack.enter_context(patch.object(self.controller, name))
+            stack.enter_context(patch.object(self.controller.virtual_status_device, "show"))
+            stack.enter_context(patch.object(self.controller.virtual_status_device, "hide"))
+
+            self.controller.applicationDidFinishLaunching_(None)
+
+        selectors = tuple(
+            invocation.args[2]
+            for invocation in (
+                timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.call_args_list
+            )
+        )
+        self.assertNotIn("pollCalendar:", selectors)
+        self.assertFalse(hasattr(self.controller, "calendar_watch_timer"))
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+        self.assertEqual(self.controller._os_poll_worker.snapshot().submitted, 1)
+        next_event_start.assert_not_called()
+
+    def test_termination_withdraws_calendar_and_blocks_late_callback(self) -> None:
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
+            True
+        )
+        self.controller.reconcile_presentation_timers(self._inputs())
+        calendar_timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION
+        )
+        submitted = self.controller._os_poll_worker.snapshot().submitted
+
+        with (
+            patch.object(self.controller.virtual_status_device, "terminate"),
+            patch.object(self.controller, "stop_event_server"),
+            patch.object(self.controller.closed_lid_awake, "release"),
+            patch.object(self.controller.keep_awake, "release"),
+        ):
+            self.controller.applicationWillTerminate_(None)
+            self.controller._calendar_observation_timer_fired()
+
+        self.assertFalse(self.controller._calendar_observation_active)
+        self.assertEqual(calendar_timer.invalidations, 1)
+        self.assertEqual(
+            self.controller._os_poll_worker.snapshot().submitted,
+            submitted,
+        )
+
+    def test_calendar_burst_keeps_one_running_and_one_latest_pending(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        drains = []
+        reads = []
+
+        def next_event_start(lead_minutes):
+            reads.append((threading.current_thread().name, lead_minutes))
+            if len(reads) == 1:
+                started.set()
+                self.assertTrue(release.wait(2.0))
+                return (
+                    "Private first event",
+                    datetime.now(timezone.utc) + timedelta(seconds=30.0),
+                )
+            return (
+                "Private latest event",
+                datetime.now(timezone.utc) + timedelta(seconds=120.0),
+            )
+
+        self.controller._runtime_worker_registry.close_all(timeout_seconds=1.0)
+        (
+            self.controller._runtime_worker_registry,
+            self.controller._os_poll_worker,
+        ) = self.controller._build_runtime_worker_registry(
+            monotonic=lambda: self.clock[0],
+            dispatch_main=drains.append,
+        )
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
+            True
+        )
+        self.controller._calendar_observation_active = True
+        self.controller._os_poll_generation = 5
+        self.controller._presentation_scheduler_inputs = self._inputs()
+        self.controller.refresh_ = MagicMock()
+
+        with patch.object(
+            self.status_bar.calendar_watch,
+            "next_event_start",
+            side_effect=next_event_start,
+        ):
+            self.controller._calendar_observation_timer_fired()
+            self.assertTrue(started.wait(1.0))
+            for _ in range(99):
+                self.controller._calendar_observation_timer_fired()
+
+            snapshot = self.controller._os_poll_worker.snapshot()
+            self.assertTrue(snapshot.running)
+            self.assertEqual(snapshot.pending_count, 1)
+            self.assertEqual(snapshot.submitted, 100)
+            self.assertEqual(snapshot.started, 1)
+            self.assertEqual(snapshot.queued, 1)
+            self.assertEqual(snapshot.replaced_pending, 98)
+
+            release.set()
+            deadline = time.monotonic() + 2.0
+            while self.controller._os_poll_worker.snapshot().completed < 2:
+                if time.monotonic() >= deadline:
+                    self.fail("calendar observations did not complete")
+                time.sleep(0.001)
+
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(
+            [thread_name for thread_name, _lead in reads],
+            ["sidepulse-runtime-os-poll", "sidepulse-runtime-os-poll"],
+        )
+        self.assertEqual(len(drains), 1)
+        drains.pop()()
+        self.assertGreater(self.controller.calendar_glow_until, self.clock[0] + 100.0)
+        self.assertIsNone(self.controller.calendar_event_title)
+        self.controller.refresh_.assert_called_once_with(None)
+        self.assertEqual(
+            self.controller._os_poll_worker.snapshot().dispatched_results,
+            1,
+        )
+
+    def test_late_access_recheck_while_disabled_creates_no_calendar_work(self) -> None:
+        inputs = self._inputs()
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
+            False
+        )
+        self.controller.virtual_status_device = SimpleNamespace(
+            presentation_scheduler_inputs=lambda: inputs
+        )
+        worker = MagicMock()
+        self.controller._os_poll_worker = worker
+
+        with patch.object(
+            self.status_bar.calendar_watch,
+            "next_event_start",
+        ) as next_event_start:
+            self.controller.calendarAccessResolved_(True)
+            self.controller.reconcile_lid_observation()
+            self.controller._calendar_observation_timer_fired()
+
+        self.assertFalse(self.controller._calendar_observation_active)
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+        worker.submit.assert_not_called()
+        next_event_start.assert_not_called()
+
+    def test_calendar_lead_change_obsoletes_in_flight_result(self) -> None:
+        inputs = self._inputs()
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
+            True
+        )
+        self.controller._calendar_observation_active = True
+        self.controller._os_poll_generation = 15
+        self.controller._presentation_scheduler_inputs = inputs
+        self.controller.virtual_status_device = SimpleNamespace(
+            presentation_scheduler_inputs=lambda: inputs
+        )
+        self.controller.refresh_ = MagicMock()
+        stale = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.OS_POLL,
+            "calendar-observation",
+            15,
+            self.clock[0] + 30.0,
+            self.status_bar.CalendarObservationRequest(lead_minutes=10.0),
+        )
+        field = SimpleNamespace(
+            stringValue=lambda: "20",
+            setStringValue_=MagicMock(),
+        )
+        self.controller.settings_fields["calendar_lead_field"] = field
+
+        with patch.object(self.status_bar, "save_settings"):
+            self.controller.applyCalendarLead_(None)
+
+        self.assertEqual(self.controller._os_poll_generation, 16)
+        self.controller._apply_os_poll_result(
+            stale,
+            self.status_bar.CalendarObservationResult(
+                available=True,
+                starts_in_seconds=90.0,
+            ),
+        )
+        self.assertEqual(self.controller.calendar_glow_until, 0.0)
+        self.controller.refresh_.assert_not_called()
+
+
+class WeatherObservationRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.clock = [625.0]
+        self.factory = _PresentationTimerFactory()
+        self.controller._presentation_monotonic = lambda: self.clock[0]
+        self.controller._runtime_timer_registry = (
+            self.controller._build_presentation_timer_registry(
+                timer_factory=self.factory,
+                monotonic=lambda: self.clock[0],
+            )
+        )
+        self.controller._presentation_scheduler_state = (
+            self.status_bar.PresentationSchedulerState()
+        )
+        self.controller._presentation_scheduler_inputs = None
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        self.controller._runtime_worker_monotonic = lambda: self.clock[0]
+
+    def tearDown(self) -> None:
+        self.controller._runtime_worker_registry.close_all(timeout_seconds=1.0)
+
+    def _inputs(self, **changes):
+        values = {
+            "screen_bar_enabled": False,
+            "visible": False,
+            "display_asleep": False,
+            "app_terminating": False,
+            "animation_active": False,
+            "next_visual_change_at": None,
+            "alcove_enabled": False,
+            "alcove_relevant": False,
+            "pointer_interaction_relevant": False,
+        }
+        values.update(changes)
+        return self.status_bar.PresentationSchedulerInputs(**values)
+
+    def test_weather_intent_is_explicitly_gated_and_exactly_one_tolerant_timer(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_weather_alerts_enabled(False)
+        )
+        with (
+            patch.object(self.status_bar.threading, "Thread") as thread_type,
+            patch.object(self.status_bar.weather_watch, "ip_location") as ip_location,
+            patch.object(self.status_bar.weather_watch, "active_alerts") as active_alerts,
+        ):
+            self.controller.reconcile_presentation_timers(self._inputs())
+
+            self.assertNotIn(
+                self.status_bar.RuntimeFeature.WEATHER_OBSERVATION,
+                self.controller._runtime_timer_registry.snapshot().active_features,
+            )
+            self.assertNotIn(
+                self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH,
+                tuple(
+                    snapshot.domain
+                    for snapshot in self.controller._runtime_worker_registry.snapshot()
+                ),
+            )
+            disabled_worker = self.controller._weather_worker.snapshot()
+            self.assertFalse(disabled_worker.thread_alive)
+            self.assertEqual(disabled_worker.submitted, 0)
+            thread_type.assert_not_called()
+            ip_location.assert_not_called()
+            active_alerts.assert_not_called()
+
+            self.controller.settings = (
+                self.controller.settings.with_weather_alerts_enabled(True)
+            )
+            for _ in range(100):
+                self.controller.reconcile_presentation_timers(self._inputs())
+
+        weather_timers = tuple(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
+        )
+        self.assertEqual(len(weather_timers), 1)
+        self.assertEqual(weather_timers[0].delay, 600.0)
+        self.assertEqual(weather_timers[0].interval, 600.0)
+        self.assertEqual(weather_timers[0].tolerances, [60.0])
+        self.assertTrue(self.factory.registrations[-1][1])
+        self.assertIn(
+            self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH,
+            tuple(
+                snapshot.domain
+                for snapshot in self.controller._runtime_worker_registry.snapshot()
+            ),
+        )
+
+    def test_weather_tick_uses_fixed_key_and_bounded_derived_worker_values(self) -> None:
+        submissions = []
+        self.controller.settings = (
+            self.controller.settings.with_weather_alerts_enabled(True)
+            .with_weather_location(41.88, -87.63)
+        )
+        self.controller._weather_observation_active = True
+        self.controller._weather_observation_generation = 8
+        self.controller._presentation_scheduler_inputs = self._inputs()
+        self.controller._weather_worker = SimpleNamespace(submit=submissions.append)
+
+        self.controller._weather_observation_timer_fired()
+
+        self.assertEqual(len(submissions), 1)
+        command = submissions[0]
+        self.assertIs(
+            command.domain,
+            self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH,
+        )
+        self.assertEqual(command.key, self.status_bar.WEATHER_WORKER_KEY)
+        self.assertEqual(command.generation, 8)
+        self.assertEqual(
+            command.payload,
+            self.status_bar.WeatherObservationRequest(41.88, -87.63),
+        )
+        self.assertNotIn("41.88", command.key)
+        self.assertNotIn("-87.63", command.key)
+        self.assertNotIn("http", command.key)
+        self.assertNotIn("/", command.key)
+
+        private_id = "https://api.weather.gov/alerts/private-alert-id"
+        private_event = "Tornado Warning for confidential facility Alpha"
+        with (
+            patch.object(self.status_bar.weather_watch, "ip_location") as ip_location,
+            patch.object(
+                self.status_bar.weather_watch,
+                "active_alerts",
+                return_value=[(private_id, "Extreme", private_event)] * 500,
+            ) as active_alerts,
+        ):
+            result = self.controller._execute_weather_command(command)
+
+        ip_location.assert_not_called()
+        active_alerts.assert_called_once_with(41.88, -87.63)
+        self.assertEqual(
+            result,
+            self.status_bar.WeatherObservationResult(
+                available=True,
+                active=True,
+                classification="Tornado warning",
+            ),
+        )
+        rendered = repr(result)
+        self.assertNotIn(private_id, rendered)
+        self.assertNotIn(private_event, rendered)
+        self.assertNotIn("41.88", rendered)
+        self.assertNotIn("-87.63", rendered)
+
+        private_error = (
+            "GET https://api.weather.gov/private?point=41.88,-87.63 failed: "
+            + "private-body" * 1000
+        )
+        with patch.object(
+            self.status_bar.weather_watch,
+            "active_alerts",
+            side_effect=RuntimeError(private_error),
+        ):
+            failed = self.controller._execute_weather_command(command)
+
+        self.assertEqual(
+            failed,
+            self.status_bar.WeatherObservationResult(
+                available=False,
+                active=False,
+                classification=None,
+            ),
+        )
+        self.assertNotIn(private_error, repr(failed))
+
+    def test_weather_location_change_cancels_old_generation_and_keeps_latest_pending(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        drains = []
+        reads = []
+
+        def active_alerts(latitude, longitude):
+            reads.append((threading.current_thread().name, latitude, longitude))
+            if len(reads) == 1:
+                started.set()
+                self.assertTrue(release.wait(2.0))
+                return [("private-old", "Extreme", "Private tornado headline")]
+            return []
+
+        self.controller._runtime_worker_registry.close_all(timeout_seconds=1.0)
+        (
+            self.controller._runtime_worker_registry,
+            self.controller._os_poll_worker,
+        ) = self.controller._build_runtime_worker_registry(
+            monotonic=lambda: self.clock[0],
+            dispatch_main=drains.append,
+        )
+        self.controller.settings = (
+            self.controller.settings.with_weather_alerts_enabled(True)
+            .with_weather_location(41.88, -87.63)
+        )
+        self.controller._weather_observation_active = True
+        self.controller._weather_observation_fire_at = self.clock[0] + 600.0
+        self.controller._presentation_scheduler_inputs = self._inputs()
+        self.controller.refresh_ = MagicMock()
+        self.controller.set_settings_message = MagicMock()
+        self.controller.settings_fields = {
+            "weather_latitude_field": SimpleNamespace(stringValue=lambda: "34.05"),
+            "weather_longitude_field": SimpleNamespace(stringValue=lambda: "-118.24"),
+        }
+        generation = self.controller._weather_observation_generation
+
+        with (
+            patch.object(
+                self.status_bar.weather_watch,
+                "active_alerts",
+                side_effect=active_alerts,
+            ),
+            patch.object(self.status_bar, "save_settings"),
+        ):
+            self.controller._weather_observation_timer_fired()
+            self.assertTrue(started.wait(1.0))
+            self.controller.applyWeatherLocation_(None)
+
+            snapshot = self.controller._weather_worker.snapshot()
+            self.assertEqual(
+                self.controller._weather_observation_generation,
+                generation + 1,
+            )
+            self.assertTrue(snapshot.running)
+            self.assertEqual(snapshot.pending_count, 1)
+            self.assertEqual(snapshot.submitted, 2)
+            self.assertEqual(snapshot.cancelled, 1)
+
+            release.set()
+            deadline = time.monotonic() + 2.0
+            while self.controller._weather_worker.snapshot().completed < 2:
+                if time.monotonic() >= deadline:
+                    self.fail("weather observations did not complete")
+                time.sleep(0.001)
+
+        self.assertEqual(
+            reads,
+            [
+                ("sidepulse-runtime-weather-fetch", 41.88, -87.63),
+                ("sidepulse-runtime-weather-fetch", 34.05, -118.24),
+            ],
+        )
+        self.assertEqual(len(drains), 1)
+        drains.pop()()
+        self.assertFalse(self.controller.weather_alert_active)
+        self.assertIsNone(self.controller.weather_alert_event)
+        self.assertEqual(
+            self.controller._weather_worker.snapshot().dispatched_results,
+            1,
+        )
+
+    def test_weather_burst_has_one_worker_running_and_one_latest_pending_until_shutdown(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        drains = []
+        reads = []
+
+        def active_alerts(latitude, longitude):
+            reads.append((threading.current_thread().name, latitude, longitude))
+            if len(reads) == 1:
+                started.set()
+                self.assertTrue(release.wait(2.0))
+            return []
+
+        self.controller._runtime_worker_registry.close_all(timeout_seconds=1.0)
+        (
+            self.controller._runtime_worker_registry,
+            self.controller._os_poll_worker,
+        ) = self.controller._build_runtime_worker_registry(
+            monotonic=lambda: self.clock[0],
+            dispatch_main=drains.append,
+        )
+        self.controller.settings = (
+            self.controller.settings.with_weather_alerts_enabled(True)
+            .with_weather_location(41.88, -87.63)
+        )
+        self.controller.reconcile_presentation_timers(self._inputs())
+
+        with (
+            patch.object(self.status_bar.weather_watch, "ip_location") as ip_location,
+            patch.object(
+                self.status_bar.weather_watch,
+                "active_alerts",
+                side_effect=active_alerts,
+            ),
+        ):
+            self.controller._weather_observation_timer_fired()
+            self.assertTrue(started.wait(1.0))
+            for _ in range(99):
+                self.controller._weather_observation_timer_fired()
+
+            snapshot = self.controller._weather_worker.snapshot()
+            self.assertTrue(snapshot.running)
+            self.assertEqual(snapshot.pending_count, 1)
+            self.assertEqual(snapshot.submitted, 100)
+            self.assertEqual(snapshot.started, 1)
+            self.assertEqual(snapshot.queued, 1)
+            self.assertEqual(snapshot.replaced_pending, 98)
+            self.assertEqual(
+                sum(
+                    thread.name == "sidepulse-runtime-weather-fetch"
+                    for thread in threading.enumerate()
+                ),
+                1,
+            )
+
+            release.set()
+            deadline = time.monotonic() + 2.0
+            while self.controller._weather_worker.snapshot().completed < 2:
+                if time.monotonic() >= deadline:
+                    self.fail("weather observations did not complete")
+                time.sleep(0.001)
+
+        ip_location.assert_not_called()
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(
+            {thread_name for thread_name, _latitude, _longitude in reads},
+            {"sidepulse-runtime-weather-fetch"},
+        )
+        self.assertEqual(len(drains), 1)
+        drains.pop()()
+        self.assertEqual(
+            self.controller._weather_worker.snapshot().dispatched_results,
+            1,
+        )
+
+        self.controller.settings = (
+            self.controller.settings.with_weather_alerts_enabled(False)
+        )
+        self.controller.reconcile_presentation_timers(self._inputs())
+        submitted = self.controller._weather_worker.snapshot().submitted
+        self.controller._weather_observation_timer_fired()
+        registered = {
+            snapshot.domain: snapshot
+            for snapshot in self.controller._runtime_worker_registry.snapshot()
+        }
+
+        self.assertIn(
+            self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH,
+            registered,
+        )
+        self.assertTrue(
+            registered[self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH].accepting
+        )
+        self.assertEqual(self.controller._weather_worker.snapshot().submitted, submitted)
+
+    def test_weather_toggle_uses_shared_registry_and_generation_fences_without_raw_thread(self) -> None:
+        inputs = self._inputs()
+        self.controller.virtual_status_device = SimpleNamespace(
+            presentation_scheduler_inputs=lambda: inputs
+        )
+        worker = self.controller._weather_worker
+        self.controller.weather_alert_active = True
+        self.controller.weather_alert_event = "Tornado warning"
+        self.controller.refresh_ = MagicMock()
+        generation = self.controller._weather_observation_generation
+
+        with (
+            patch.object(self.status_bar, "save_settings"),
+            patch.object(worker, "submit") as submit,
+            patch.object(worker, "cancel_generation") as cancel_generation,
+            patch.object(self.status_bar.threading, "Thread") as thread_type,
+            patch.object(self.status_bar.weather_watch, "ip_location") as ip_location,
+            patch.object(self.status_bar.weather_watch, "active_alerts") as active_alerts,
+        ):
+            self.controller.toggleWeatherAlerts_(SimpleNamespace(state=lambda: 1))
+
+            weather_timer = next(
+                timer
+                for timer in self.factory.live
+                if timer.feature is self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
+            )
+            self.assertTrue(self.controller._weather_observation_active)
+            self.assertEqual(
+                self.controller._weather_observation_generation,
+                generation + 1,
+            )
+            self.assertEqual(cancel_generation.call_args_list, [call(generation)])
+            self.assertEqual(submit.call_count, 1)
+
+            self.controller.toggleWeatherAlerts_(SimpleNamespace(state=lambda: 0))
+
+        self.assertFalse(self.controller._weather_observation_active)
+        self.assertEqual(
+            self.controller._weather_observation_generation,
+            generation + 2,
+        )
+        self.assertEqual(
+            cancel_generation.call_args_list,
+            [call(generation), call(generation + 1)],
+        )
+        self.assertEqual(submit.call_count, 1)
+        self.assertEqual(weather_timer.invalidations, 1)
+        self.assertFalse(self.controller.weather_alert_active)
+        self.assertIsNone(self.controller.weather_alert_event)
+        self.controller.refresh_.assert_called_once_with(None)
+        thread_type.assert_not_called()
+        ip_location.assert_not_called()
+        active_alerts.assert_not_called()
+
+        domains = tuple(
+            snapshot.domain
+            for snapshot in self.controller._runtime_worker_registry.snapshot()
+        )
+        self.assertEqual(
+            domains,
+            (
+                self.status_bar.RuntimeWorkerDomain.OS_POLL,
+                self.status_bar.RuntimeWorkerDomain.HARDWARE_WRITE,
+                self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH,
+            ),
+        )
+
+    def test_weather_failure_withdraws_truth_and_rearms_once_at_retry_boundary(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_weather_alerts_enabled(True)
+        )
+        worker = MagicMock()
+        self.controller._weather_worker = worker
+        self.controller.reconcile_presentation_timers(self._inputs())
+        first_timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
+        )
+        worker.reset_mock()
+        self.controller.weather_alert_active = True
+        self.controller.weather_alert_event = "Tornado warning"
+        self.controller.refresh_ = MagicMock()
+        command = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH,
+            self.status_bar.WEATHER_WORKER_KEY,
+            self.controller._weather_observation_generation,
+            self.clock[0] + self.status_bar.WEATHER_FETCH_TIMEOUT_SECONDS,
+            self.status_bar.WeatherObservationRequest(None, None),
+        )
+        unavailable = self.status_bar.WeatherObservationResult(False, False, None)
+
+        self.controller._apply_weather_result(command, unavailable)
+        self.controller._apply_weather_result(command, unavailable)
+
+        self.assertFalse(self.controller.weather_alert_active)
+        self.assertIsNone(self.controller.weather_alert_event)
+        self.controller.refresh_.assert_called_once_with(None)
+        self.assertEqual(
+            self.controller.weather_watch_retry_at,
+            self.clock[0] + self.status_bar.WEATHER_WATCH_RETRY_SECONDS,
+        )
+        retry_timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
+        )
+        self.assertIsNot(retry_timer, first_timer)
+        self.assertEqual(first_timer.invalidations, 1)
+        self.assertEqual(retry_timer.delay, self.status_bar.WEATHER_WATCH_RETRY_SECONDS)
+        self.assertEqual(retry_timer.interval, self.status_bar.WEATHER_WATCH_SECONDS)
+        self.assertEqual(retry_timer.tolerances, [60.0])
+
+        self.controller.runtimeTimerFired_(first_timer)
+        self.assertEqual(
+            self.controller._runtime_timer_registry.snapshot().callback_count(
+                self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
+            ),
+            0,
+        )
+        worker.submit.assert_not_called()
+
+        self.clock[0] = self.controller.weather_watch_retry_at
+        self.controller.runtimeTimerFired_(retry_timer)
+
+        worker.submit.assert_called_once()
+        self.assertEqual(
+            self.controller._runtime_timer_registry.snapshot().callback_count(
+                self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
+            ),
+            1,
+        )
+
+    def test_weather_results_are_generation_deadline_sleep_and_termination_fenced(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_weather_alerts_enabled(True)
+        )
+        self.controller.reconcile_presentation_timers(self._inputs())
+        weather_timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
+        )
+        generation = self.controller._weather_observation_generation
+        request = self.status_bar.WeatherObservationRequest(None, None)
+
+        def command(command_generation, deadline):
+            return self.status_bar.RuntimeWorkCommand(
+                self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH,
+                self.status_bar.WEATHER_WORKER_KEY,
+                command_generation,
+                deadline,
+                request,
+            )
+
+        active = self.status_bar.WeatherObservationResult(
+            True,
+            True,
+            "Tornado warning",
+        )
+        self.controller.refresh_ = MagicMock()
+        self.controller.webhook_event_enabled = MagicMock(return_value=False)
+
+        self.controller._apply_weather_result(
+            command(generation - 1, self.clock[0] + 30.0),
+            active,
+        )
+        self.controller._apply_weather_result(
+            command(generation, self.clock[0]),
+            active,
+        )
+        self.assertFalse(self.controller.weather_alert_active)
+        self.controller.refresh_.assert_not_called()
+
+        current = command(generation, self.clock[0] + 30.0)
+        self.controller._presentation_scheduler_inputs = self._inputs(
+            display_asleep=True
+        )
+        self.controller._apply_weather_result(current, active)
+        self.controller._presentation_scheduler_inputs = self._inputs(
+            app_terminating=True
+        )
+        self.controller._apply_weather_result(current, active)
+        self.assertFalse(self.controller.weather_alert_active)
+        self.controller.refresh_.assert_not_called()
+
+        self.controller._presentation_scheduler_inputs = self._inputs()
+        self.controller._apply_weather_result(current, active)
+        self.assertTrue(self.controller.weather_alert_active)
+        self.assertEqual(self.controller.weather_alert_event, "Tornado warning")
+        self.controller.refresh_.assert_called_once_with(None)
+        self.controller.refresh_.reset_mock()
+
+        with (
+            patch.object(self.controller.virtual_status_device, "terminate"),
+            patch.object(self.controller, "stop_event_server"),
+            patch.object(self.controller.closed_lid_awake, "release"),
+            patch.object(self.controller.keep_awake, "release"),
+        ):
+            self.controller.applicationWillTerminate_(None)
+            self.controller._apply_weather_result(current, active)
+            self.controller._weather_observation_timer_fired()
+
+        self.assertFalse(self.controller._weather_observation_active)
+        self.assertFalse(self.controller.weather_alert_active)
+        self.assertIsNone(self.controller.weather_alert_event)
+        self.assertEqual(weather_timer.invalidations, 1)
+        self.controller.refresh_.assert_called_once_with(None)
 
 
 class AppBundleTests(unittest.TestCase):
@@ -11386,14 +19676,14 @@ class AppBundleTests(unittest.TestCase):
             self.assertFalse((bundle / "Contents" / "pyvenv.cfg").exists())
             self.assertFalse((bundle / "Contents" / "lib").exists())
             verify = sp.run(
-                ["codesign", "--verify", "--strict", str(bundle)],
+                ["/usr/bin/codesign", "--verify", "--strict", str(bundle)],
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
             self.assertEqual(verify.returncode, 0, verify.stderr)
             identity = sp.run(
-                ["codesign", "-dv", str(bundle)],
+                ["/usr/bin/codesign", "-dv", str(bundle)],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -11423,6 +19713,3711 @@ class AppBundleTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("SidePulse.app/Contents/MacOS/SidePulse", result.stdout)
             self.assertIn("site-packages", result.stdout)
+
+
+class _PresentationTimerDouble:
+    def __init__(self, feature, *, delay, interval, target, selector) -> None:
+        self.feature = feature
+        self.delay = delay
+        self.interval = interval
+        self.target = target
+        self.selector = selector
+        self.invalidations = 0
+        self.tolerances: list[float] = []
+
+    def userInfo(self):
+        return self.feature
+
+    def setTolerance_(self, tolerance: float) -> None:
+        self.tolerances.append(tolerance)
+
+    def invalidate(self) -> None:
+        self.invalidations += 1
+
+
+class _PresentationTimerFactory:
+    def __init__(self) -> None:
+        self.created: list[_PresentationTimerDouble] = []
+        self.registrations: list[tuple[_PresentationTimerDouble, bool]] = []
+
+    def create_timer(
+        self,
+        *,
+        delay: float,
+        interval: float | None,
+        target,
+        selector: str,
+        user_info,
+    ) -> _PresentationTimerDouble:
+        timer = _PresentationTimerDouble(
+            user_info,
+            delay=delay,
+            interval=interval,
+            target=target,
+            selector=selector,
+        )
+        self.created.append(timer)
+        return timer
+
+    def register_timer(self, timer, *, common_modes: bool) -> None:
+        self.registrations.append((timer, common_modes))
+
+    @property
+    def live(self) -> tuple[_PresentationTimerDouble, ...]:
+        return tuple(timer for timer in self.created if timer.invalidations == 0)
+
+
+class PresentationRuntimeIntegrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.clock = [700.0]
+        self.factory = _PresentationTimerFactory()
+        self.controller._presentation_monotonic = lambda: self.clock[0]
+        self.controller._runtime_timer_registry = (
+            self.controller._build_presentation_timer_registry(
+                timer_factory=self.factory,
+                monotonic=lambda: self.clock[0],
+            )
+        )
+        self.controller._presentation_scheduler_state = (
+            self.status_bar.PresentationSchedulerState()
+        )
+        self.controller._presentation_scheduler_inputs = None
+
+    def _inputs(self, **changes):
+        values = {
+            "screen_bar_enabled": True,
+            "visible": True,
+            "display_asleep": False,
+            "app_terminating": False,
+            "animation_active": False,
+            "next_visual_change_at": None,
+            "alcove_enabled": False,
+            "alcove_relevant": False,
+            "pointer_interaction_relevant": False,
+        }
+        values.update(changes)
+        return self.status_bar.PresentationSchedulerInputs(**values)
+
+    def test_task9g_signal_preview_is_exact_pane_scoped_bounded_and_idempotent(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        window_state = {"visible": True}
+        self.controller.settings_window = SimpleNamespace(
+            isVisible=lambda: window_state["visible"]
+        )
+        self.controller.current_settings_pane = "led_behavior"
+        preview = MagicMock()
+        preview.isHiddenOrHasHiddenAncestor.return_value = False
+        preview.visibleRect.return_value = SimpleNamespace(
+            size=SimpleNamespace(width=120.0)
+        )
+        self.controller.settings_fields = {"signal_preview:calendar": preview}
+        inputs = self._inputs(screen_bar_enabled=False, visible=False)
+
+        for _ in range(100):
+            self.controller.reconcile_presentation_timers(inputs)
+
+        timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature
+            is self.status_bar.RuntimeFeature.SETTINGS_SIGNAL_PREVIEW
+        )
+        self.assertGreaterEqual(timer.interval, 1.0 / 30.0)
+        self.assertEqual(timer.tolerances, [timer.interval * 0.1])
+        self.assertIn((timer, True), self.factory.registrations)
+        self.assertEqual(
+            sum(
+                candidate.feature
+                is self.status_bar.RuntimeFeature.SETTINGS_SIGNAL_PREVIEW
+                for candidate in self.factory.created
+            ),
+            1,
+        )
+
+        self.clock[0] += timer.interval
+        self.controller.runtimeTimerFired_(timer)
+        preview.setNeedsDisplay_.assert_called_once_with(True)
+
+        self.controller.current_settings_pane = "profile"
+        self.controller._reconcile_current_presentation_inputs()
+        self.assertEqual(timer.invalidations, 1)
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.SETTINGS_SIGNAL_PREVIEW,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+        preview.setNeedsDisplay_.reset_mock()
+        self.controller.runtimeTimerFired_(timer)
+        preview.setNeedsDisplay_.assert_not_called()
+
+    def test_task9g_color_preview_releases_engines_on_irrelevance_and_reduce_motion(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        self.controller.settings_window = SimpleNamespace(isVisible=lambda: True)
+        self.controller.current_settings_pane = "color_studio"
+        self.controller.color_preview_rows = [
+            {"led_count": 8, "dots": (), "legend": MagicMock()}
+        ]
+        engine = MagicMock()
+        engine.step.return_value = ()
+        self.controller.color_preview_wasm = {8: engine}
+        self.controller.color_preview_programs = {8: "#112233"}
+        inputs = self._inputs(screen_bar_enabled=False, visible=False)
+
+        self.controller.reconcile_presentation_timers(inputs)
+
+        timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature
+            is self.status_bar.RuntimeFeature.SETTINGS_COLOR_PREVIEW
+        )
+        self.assertGreaterEqual(timer.interval, 1.0 / 30.0)
+        self.assertIn((timer, True), self.factory.registrations)
+        self.clock[0] += timer.interval
+        self.controller.runtimeTimerFired_(timer)
+        engine.step.assert_called_once()
+
+        self.controller._accessibility_display_preferences = (
+            self.status_bar.AccessibilityDisplayPreferences(reduce_motion=True)
+        )
+        self.controller._reconcile_current_presentation_inputs()
+
+        self.assertEqual(timer.invalidations, 1)
+        self.assertEqual(self.controller.color_preview_wasm, {})
+        self.assertEqual(self.controller.color_preview_programs, {})
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.SETTINGS_COLOR_PREVIEW,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+
+    def test_task9g_setup_preview_stops_for_close_sleep_and_termination(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        window_state = {"visible": True}
+        self.controller.setup_window = SimpleNamespace(
+            isVisible=lambda: window_state["visible"]
+        )
+        demo_view = MagicMock()
+        self.controller.setup_fields = {"demo_view": demo_view}
+        active = self._inputs(screen_bar_enabled=False, visible=False)
+
+        self.controller.reconcile_presentation_timers(active)
+        first = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.SETUP_DEMO
+        )
+        self.assertEqual(first.interval, 1.0 / 30.0)
+        self.assertIn((first, True), self.factory.registrations)
+
+        self.clock[0] += first.interval
+        self.controller.runtimeTimerFired_(first)
+        demo_view.setNeedsDisplay_.assert_called_once_with(True)
+
+        window_state["visible"] = False
+        self.controller._reconcile_current_presentation_inputs()
+        self.assertEqual(first.invalidations, 1)
+        demo_view.setNeedsDisplay_.reset_mock()
+        self.controller.runtimeTimerFired_(first)
+        demo_view.setNeedsDisplay_.assert_not_called()
+
+        window_state["visible"] = True
+        self.controller._reconcile_current_presentation_inputs()
+        second = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.SETUP_DEMO
+        )
+        self.controller.reconcile_presentation_timers(
+            self._inputs(display_asleep=True)
+        )
+        self.assertEqual(second.invalidations, 1)
+
+        self.controller.reconcile_presentation_timers(active)
+        third = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.SETUP_DEMO
+        )
+        self.controller.reconcile_presentation_timers(
+            self._inputs(app_terminating=True)
+        )
+        self.assertEqual(third.invalidations, 1)
+
+    def test_task9g_settings_message_deadline_replaces_and_elapsed_close_does_not_replay(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        window_state = {"visible": True}
+        self.controller.settings_window = SimpleNamespace(
+            isVisible=lambda: window_state["visible"]
+        )
+        label = MagicMock()
+        self.controller.settings_fields = {"message": label}
+        inputs = self._inputs(screen_bar_enabled=False, visible=False)
+        self.controller._presentation_scheduler_inputs = inputs
+
+        self.controller.set_settings_message("First")
+        first = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature
+            is self.status_bar.RuntimeFeature.SETTINGS_MESSAGE_DEADLINE
+        )
+        self.clock[0] += 1.0
+        self.controller.set_settings_message("Second")
+        second = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature
+            is self.status_bar.RuntimeFeature.SETTINGS_MESSAGE_DEADLINE
+        )
+
+        self.assertIsNot(first, second)
+        self.assertEqual(first.invalidations, 1)
+        self.assertIsNone(second.interval)
+        self.assertIn((second, True), self.factory.registrations)
+        label.setAlphaValue_.assert_called_with(1.0)
+
+        self.controller.runtimeTimerFired_(first)
+        label.animator.return_value.setAlphaValue_.assert_not_called()
+
+        window_state["visible"] = False
+        self.controller._settings_window_closing = True
+        self.controller._reconcile_current_presentation_inputs()
+        self.assertEqual(second.invalidations, 1)
+        self.clock[0] += 4.0
+        window_state["visible"] = True
+        self.controller._settings_window_closing = False
+        self.controller._reconcile_current_presentation_inputs()
+
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.SETTINGS_MESSAGE_DEADLINE,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+        self.assertEqual(label.setAlphaValue_.call_args, call(0.0))
+        label.animator.return_value.setAlphaValue_.assert_not_called()
+
+    def test_task9g_test_signal_deadline_is_keyed_and_sleep_cannot_replay(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        inputs = self._inputs(screen_bar_enabled=False, visible=False)
+        self.controller._presentation_scheduler_inputs = inputs
+        self.controller.refresh_ = MagicMock()
+        self.controller.set_settings_message = MagicMock()
+        calendar = SimpleNamespace(identifier=lambda: "calendar")
+        reminder = SimpleNamespace(identifier=lambda: "reminders")
+
+        with patch.object(
+            self.status_bar.time,
+            "monotonic",
+            side_effect=lambda: self.clock[0],
+        ):
+            self.controller.testSignal_(calendar)
+            first = next(
+                timer
+                for timer in self.factory.live
+                if timer.feature
+                is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+            )
+            self.clock[0] += 1.0
+            self.controller.testSignal_(reminder)
+            second = next(
+                timer
+                for timer in self.factory.live
+                if timer.feature
+                is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+            )
+
+        self.assertIsNot(first, second)
+        self.assertEqual(first.invalidations, 1)
+        self.assertEqual(self.controller.test_signal_key, "reminders")
+        self.controller.runtimeTimerFired_(first)
+        self.assertEqual(self.controller.test_signal_key, "reminders")
+
+        self.controller.reconcile_presentation_timers(
+            self._inputs(display_asleep=True)
+        )
+        self.assertEqual(second.invalidations, 1)
+        self.assertIsNone(self.controller.test_signal_key)
+        self.assertEqual(self.controller.test_signal_until, 0.0)
+
+        self.clock[0] += 10.0
+        self.controller.reconcile_presentation_timers(inputs)
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+
+    def test_task9g_tip_and_completion_holds_share_one_finite_deadline(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        inputs = self._inputs(screen_bar_enabled=False, visible=False)
+        self.controller._presentation_scheduler_inputs = inputs
+        view = MagicMock()
+        layer = view.layer.return_value
+        self.controller.completion_sweep_until = self.clock[0] + 5.0
+        self.controller.all_clear_until = self.clock[0] + 8.0
+
+        with patch.object(
+            self.status_bar.time,
+            "monotonic",
+            side_effect=lambda: self.clock[0],
+        ), patch.object(self.status_bar, "NSColor"):
+            self.controller.flash_view(view)
+
+        timers = [
+            timer
+            for timer in self.factory.live
+            if timer.feature
+            is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+        ]
+        self.assertEqual(len(timers), 1)
+        self.assertIsNone(timers[0].interval)
+
+        self.clock[0] += 1.0
+        self.controller.runtimeTimerFired_(timers[0])
+        layer.setBackgroundColor_.assert_called_with(None)
+        next_timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature
+            is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+        )
+        self.assertEqual(next_timer.delay, 4.0)
+
+        self.clock[0] += 4.0
+        self.controller.runtimeTimerFired_(next_timer)
+        final_timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature
+            is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+        )
+        self.assertEqual(final_timer.delay, 3.0)
+
+    def test_task9g_deadline_dispatch_does_not_mutate_tracked_menu_hierarchy_or_controls(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        inputs = self._inputs(screen_bar_enabled=False, visible=False)
+        self.controller._presentation_scheduler_inputs = inputs
+        self.controller.status_menu_open = True
+        self.controller._menu_rebuild_pending = ("operator-owned",)
+        self.controller.native_agent_menu_registry = MagicMock()
+        self.controller.current_settings_pane = "led_behavior"
+        fields = {"signal_preview:calendar": object()}
+        self.controller.settings_fields = fields
+        self.controller.refresh_ = MagicMock()
+        self.controller.test_signal_key = "calendar"
+        self.controller.test_signal_until = self.clock[0] + 1.0
+        self.controller._reconcile_current_presentation_inputs()
+        timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature
+            is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+        )
+
+        self.clock[0] += 1.0
+        self.controller.runtimeTimerFired_(timer)
+
+        self.assertTrue(self.controller.status_menu_open)
+        self.assertEqual(
+            self.controller._menu_rebuild_pending,
+            ("operator-owned",),
+        )
+        self.controller.native_agent_menu_registry.take_deferred_after_close.assert_not_called()
+        self.assertEqual(self.controller.current_settings_pane, "led_behavior")
+        self.assertIs(self.controller.settings_fields, fields)
+
+    def test_task10_status_transition_drives_finite_coordinator_and_keyed_settlement(
+        self,
+    ) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        self.controller.current_operator_state = empty_operator_state()
+        button = MagicMock()
+        self.controller.status_item = SimpleNamespace(button=lambda: button)
+        inputs = self._inputs(screen_bar_enabled=False, visible=False)
+        self.controller._presentation_scheduler_inputs = inputs
+        glance = ResolvedGlance(
+            semantic=GlanceSemantic.REST,
+            glyph=SemanticGlyph.REST,
+            cue=None,
+            override_reason=GlanceOverrideReason.NONE,
+            relay_epoch=1.0,
+            next_visual_change_at=None,
+        )
+        first = FiniteCue("task10:runtime:first", GlanceSemantic.FRESH_FAILURE, 2, 0.5)
+        second = FiniteCue(
+            "task10:runtime:second",
+            GlanceSemantic.FRESH_COMPLETION,
+            2,
+            0.5,
+        )
+        self.controller.set_status_emphasis_plan(glance, (first, second))
+
+        self.controller.set_status(self.status_bar.STATE_DONE)
+
+        self.assertIs(self.controller._status_finite_cues.active, first)
+        self.assertIs(self.controller._status_finite_cues.pending, second)
+        first_timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+        )
+        self.assertEqual(first_timer.delay, 1.0)
+        self.assertIsNone(first_timer.interval)
+        self.assertEqual(first_timer.tolerances, [0.0])
+        first_deadline = self.controller._status_cue_deadline
+
+        self.clock[0] += 0.4
+        self.controller.set_status(self.status_bar.STATE_DONE)
+        self.assertEqual(self.controller._status_cue_deadline, first_deadline)
+        self.assertIs(self.factory.live[0], first_timer)
+
+        self.clock[0] = first_deadline
+        self.controller.runtimeTimerFired_(first_timer)
+        self.assertIs(self.controller._status_finite_cues.active, second)
+        second_timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+        )
+        self.assertIsNot(second_timer, first_timer)
+        self.assertEqual(second_timer.delay, 1.0)
+
+        self.clock[0] = self.controller._status_cue_deadline
+        self.controller.runtimeTimerFired_(second_timer)
+        self.assertIsNone(self.controller._status_finite_cues.active)
+        self.assertIsNone(self.controller._status_finite_cues.pending)
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+        steady = status_item_accessibility(
+            self.controller.current_operator_state,
+            glance,
+        )
+        self.assertEqual(button.setTitle_.call_args.args[0].strip(), steady.value)
+        self.assertTrue(all(call.args[0].strip() for call in button.setTitle_.call_args_list))
+
+    def test_task10_sleep_through_production_status_cue_settles_without_wake_replay(
+        self,
+    ) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        self.controller.current_operator_state = empty_operator_state()
+        button = MagicMock()
+        self.controller.status_item = SimpleNamespace(button=lambda: button)
+        inputs = self._inputs(screen_bar_enabled=False, visible=False)
+        self.controller._presentation_scheduler_inputs = inputs
+        glance = ResolvedGlance(
+            semantic=GlanceSemantic.REST,
+            glyph=SemanticGlyph.REST,
+            cue=None,
+            override_reason=GlanceOverrideReason.NONE,
+            relay_epoch=1.0,
+            next_visual_change_at=None,
+        )
+        cue = FiniteCue(
+            "task10:runtime:sleep",
+            GlanceSemantic.FRESH_COMPLETION,
+            2,
+            0.5,
+        )
+        self.controller.set_status_emphasis_plan(glance, (cue,))
+        self.controller.set_status(self.status_bar.STATE_DONE)
+        timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+        )
+
+        self.controller.reconcile_presentation_timers(
+            self._inputs(
+                screen_bar_enabled=False,
+                visible=False,
+                display_asleep=True,
+            )
+        )
+        self.assertEqual(timer.invalidations, 1)
+        self.assertIsNone(self.controller._status_finite_cues.active)
+        self.assertIsNone(self.controller._status_finite_cues.pending)
+
+        self.clock[0] += 5.0
+        self.controller.reconcile_presentation_timers(inputs)
+        self.controller.set_status(self.status_bar.STATE_DONE)
+
+        self.assertIsNone(self.controller._status_finite_cues.active)
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+        steady = status_item_accessibility(
+            self.controller.current_operator_state,
+            glance,
+        )
+        self.assertEqual(button.setTitle_.call_args.args[0].strip(), steady.value)
+
+    def test_task10_status_plan_rejects_unbounded_invalid_stale_or_inactive_input(
+        self,
+    ) -> None:
+        self.controller._runtime_started = True
+        newer = ResolvedGlance(
+            semantic=GlanceSemantic.FRESH_COMPLETION,
+            glyph=SemanticGlyph.RIGHT_ANCHOR,
+            cue=None,
+            override_reason=GlanceOverrideReason.NONE,
+            relay_epoch=2.0,
+            next_visual_change_at=None,
+        )
+        valid = FiniteCue(
+            "task10:bounded",
+            GlanceSemantic.FRESH_COMPLETION,
+            2,
+            0.5,
+        )
+        self.assertTrue(self.controller.set_status_emphasis_plan(newer, (valid,)))
+
+        content_bearing = FiniteCue(
+            "x" * 129,
+            GlanceSemantic.FRESH_FAILURE,
+            2,
+            0.5,
+        )
+        third = FiniteCue(
+            "task10:third",
+            GlanceSemantic.ATTENTION,
+            1,
+            0.5,
+        )
+        self.assertFalse(
+            self.controller.set_status_emphasis_plan(newer, (content_bearing,))
+        )
+        self.assertFalse(
+            self.controller.set_status_emphasis_plan(newer, (valid, valid, third))
+        )
+        older = dataclass_replace(newer, relay_epoch=1.0)
+        self.assertFalse(self.controller.set_status_emphasis_plan(older, (valid,)))
+        self.assertIs(self.controller._current_resolved_glance, newer)
+        self.assertEqual(self.controller._status_cue_candidates, (valid,))
+
+        self.controller._runtime_started = False
+        self.assertFalse(self.controller.set_status_emphasis_plan(newer, (valid,)))
+        self.assertIs(self.controller._current_resolved_glance, newer)
+
+    def test_task10_stale_generation_plan_is_inert_and_plain_status_is_unchanged(
+        self,
+    ) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        self.controller.current_operator_state = empty_operator_state()
+        self.controller.settings = dataclass_replace(
+            self.controller.settings,
+            menu_bar_label_enabled=False,
+        )
+        button = MagicMock()
+        self.controller.status_item = SimpleNamespace(button=lambda: button)
+
+        self.controller.set_status(self.status_bar.STATE_DONE)
+        self.assertEqual(button.setTitle_.call_args.args[0], "")
+        self.assertEqual(
+            button.setToolTip_.call_args.args[0],
+            "SidePulse Agent Monitor: Done",
+        )
+
+        glance = ResolvedGlance(
+            semantic=GlanceSemantic.REST,
+            glyph=SemanticGlyph.REST,
+            cue=None,
+            override_reason=GlanceOverrideReason.NONE,
+            relay_epoch=1.0,
+            next_visual_change_at=None,
+        )
+        cue = FiniteCue(
+            "task10:stale-generation",
+            GlanceSemantic.FRESH_COMPLETION,
+            2,
+            0.5,
+        )
+        self.assertTrue(self.controller.set_status_emphasis_plan(glance, (cue,)))
+        self.controller._accessibility_generation += 1
+        button.reset_mock()
+
+        self.controller.set_status(self.status_bar.STATE_DONE)
+
+        self.assertEqual(button.setTitle_.call_args.args[0], "")
+        self.assertIsNone(self.controller._current_resolved_glance)
+        self.assertEqual(self.controller._status_cue_candidates, ())
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+
+    def test_display_environment_timer_is_gated_by_visible_presentation_surface(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        self.controller.settings = dataclass_replace(
+            self.controller.settings,
+            focus_sync_enabled=False,
+            focus_profile_rules={},
+        )
+
+        self.controller.reconcile_presentation_timers(
+            self._inputs(screen_bar_enabled=False, visible=False)
+        )
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.DISPLAY_ENVIRONMENT,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+
+        self.controller.reconcile_presentation_timers(
+            self._inputs(screen_bar_enabled=True, visible=True)
+        )
+        self.assertIn(
+            self.status_bar.RuntimeFeature.DISPLAY_ENVIRONMENT,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+
+    def test_display_environment_timer_is_relevant_for_brightness_and_focus_settings(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        inactive_surface = self._inputs(screen_bar_enabled=False, visible=False)
+        settings_cases = (
+            self.controller.settings.with_device_auto_brightness(
+                self.status_bar.VIRTUAL_DEVICE_ID,
+                True,
+                name="Screen Bar",
+            ),
+            dataclass_replace(self.controller.settings, focus_sync_enabled=True),
+            dataclass_replace(
+                self.controller.settings,
+                focus_profile_rules={"com.apple.focus.work": "Day"},
+            ),
+        )
+
+        for settings in settings_cases:
+            with self.subTest(settings=settings):
+                self.controller.settings = settings
+                self.controller._presentation_scheduler_inputs = None
+                self.controller.reconcile_presentation_timers(inactive_surface)
+                timer = next(
+                    timer
+                    for timer in self.factory.live
+                    if timer.feature is self.status_bar.RuntimeFeature.DISPLAY_ENVIRONMENT
+                )
+                self.assertEqual(timer.interval, 3.0)
+                self.assertEqual(timer.tolerances, [0.25])
+                self.controller._set_display_environment_active(False)
+                self.controller._runtime_timer_registry.invalidate(
+                    self.status_bar.RuntimeFeature.DISPLAY_ENVIRONMENT
+                )
+
+    def test_display_environment_tick_submits_generation_fenced_os_poll(self) -> None:
+        submissions = []
+        self.controller._display_environment_active = True
+        self.controller._os_poll_generation = 9
+        self.controller._os_poll_worker = SimpleNamespace(submit=submissions.append)
+        self.controller.settings = dataclass_replace(
+            self.controller.settings,
+            focus_sync_enabled=True,
+        )
+        self.controller.timebox_ends_at = 1.0
+        self.controller.ask_blocked_since = 1.0
+        self.controller.apply_escalation = MagicMock()
+        self.controller.fire_timebox_off_shortcut = MagicMock()
+
+        self.controller._display_environment_timer_fired()
+
+        self.assertEqual(len(submissions), 1)
+        command = submissions[0]
+        self.assertIs(command.domain, self.status_bar.RuntimeWorkerDomain.OS_POLL)
+        self.assertEqual(command.key, "display-environment")
+        self.assertEqual(command.generation, 9)
+        self.assertIsInstance(command.payload, self.status_bar.DisplayEnvironmentRequest)
+        self.assertTrue(command.payload.read_focus)
+        self.assertEqual(self.controller.timebox_ends_at, 1.0)
+        self.assertEqual(self.controller.ask_blocked_since, 1.0)
+        self.controller.apply_escalation.assert_not_called()
+        self.controller.fire_timebox_off_shortcut.assert_not_called()
+
+    def test_display_environment_reads_brightness_and_focus_on_os_poll_worker(self) -> None:
+        command = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.OS_POLL,
+            "display-environment",
+            4,
+            time.monotonic() + 10.0,
+            self.status_bar.DisplayEnvironmentRequest(
+                read_brightness=True,
+                read_focus=True,
+                read_accessibility=False,
+            ),
+        )
+
+        with (
+            patch.object(
+                self.status_bar.display_brightness,
+                "auto_led_brightness",
+                return_value=144,
+            ),
+            patch.object(
+                self.status_bar.focus_sync,
+                "active_focus_mode_identifiers",
+                return_value=["focus-work"],
+            ),
+        ):
+            result = self.controller._execute_os_poll_command(command)
+
+        self.assertEqual(
+            result,
+            self.status_bar.DisplayEnvironmentResult(
+                brightness=144,
+                active_focus_ids=("focus-work",),
+                accessibility_preferences=None,
+            ),
+        )
+
+    def test_display_environment_result_is_generation_fenced_and_deduplicated(self) -> None:
+        request = self.status_bar.DisplayEnvironmentRequest(
+            read_brightness=True,
+            read_focus=True,
+            read_accessibility=False,
+        )
+        stale = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.OS_POLL,
+            "display-environment",
+            5,
+            time.monotonic() + 10.0,
+            request,
+        )
+        current = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.OS_POLL,
+            "display-environment",
+            6,
+            time.monotonic() + 10.0,
+            request,
+        )
+        result = self.status_bar.DisplayEnvironmentResult(
+            brightness=140,
+            active_focus_ids=("focus-work",),
+            accessibility_preferences=None,
+        )
+        self.controller._display_environment_active = True
+        self.controller._os_poll_generation = 6
+        self.controller.last_watched_brightness = 100
+        self.controller.last_watched_focus_scale = 1.0
+        self.controller.settings = (
+            self.controller.settings.with_focus_sync_enabled(True).with_focus_dim_rule(
+                "focus-work",
+                0.5,
+            )
+        )
+        self.controller.refresh_ = MagicMock()
+
+        self.controller._apply_os_poll_result(stale, result)
+        self.assertEqual(self.controller.last_watched_brightness, 100)
+        self.controller.refresh_.assert_not_called()
+
+        self.controller._apply_os_poll_result(current, result)
+        self.controller._apply_os_poll_result(current, result)
+
+        self.assertEqual(self.controller.last_watched_brightness, 140)
+        self.assertEqual(self.controller.last_active_focus_ids, {"focus-work"})
+        self.assertEqual(self.controller.last_watched_focus_scale, 0.5)
+        self.controller.refresh_.assert_called_once_with(None)
+
+    def test_accessibility_display_result_advances_generation_without_replay(self) -> None:
+        request = self.status_bar.DisplayEnvironmentRequest(
+            read_brightness=False,
+            read_focus=False,
+            read_accessibility=True,
+        )
+        command = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.OS_POLL,
+            "display-environment",
+            3,
+            time.monotonic() + 10.0,
+            request,
+        )
+        preferences = self.status_bar.AccessibilityDisplayPreferences(
+            reduce_motion=True
+        )
+        result = self.status_bar.DisplayEnvironmentResult(
+            brightness=None,
+            active_focus_ids=None,
+            accessibility_preferences=preferences,
+        )
+        self.controller._display_environment_active = True
+        self.controller._os_poll_generation = 3
+        self.controller.refresh_ = MagicMock()
+        prior_signal = self.controller.failure_signal_coordinator.active(
+            self.clock[0]
+        )
+
+        self.controller._apply_os_poll_result(command, result)
+        self.controller._apply_os_poll_result(command, result)
+
+        self.assertIs(self.controller._accessibility_display_preferences, preferences)
+        self.assertEqual(self.controller._accessibility_generation, 1)
+        self.assertEqual(
+            self.controller.failure_signal_coordinator.active(self.clock[0]),
+            prior_signal,
+        )
+        self.controller.refresh_.assert_called_once_with(None)
+
+    def test_timebox_uses_exact_one_shot_deadline_instead_of_display_poll(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        self.controller.timebox_ends_at = self.clock[0] + 25.0
+        self.controller.timebox_total_seconds = 25.0
+
+        self.controller.reconcile_presentation_timers(
+            self._inputs(screen_bar_enabled=False, visible=False)
+        )
+
+        timer = next(
+            timer
+            for timer in self.factory.live
+            if timer.feature is self.status_bar.RuntimeFeature.TIMEBOX_DEADLINE
+        )
+        self.assertEqual(timer.delay, 25.0)
+        self.assertIsNone(timer.interval)
+        self.assertEqual(timer.tolerances, [0.0])
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.DISPLAY_ENVIRONMENT,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+
+    def test_timebox_start_and_stop_reconcile_deadline_immediately(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        inputs = self._inputs(screen_bar_enabled=False, visible=False)
+        self.controller.virtual_status_device = SimpleNamespace(
+            presentation_scheduler_inputs=lambda: inputs
+        )
+        self.controller.refresh_ = MagicMock()
+        sender = SimpleNamespace(representedObject=lambda: 1)
+
+        with patch.object(
+            self.status_bar.time,
+            "monotonic",
+            side_effect=lambda: self.clock[0],
+        ):
+            self.controller.startTimebox_(sender)
+            timer = next(
+                timer
+                for timer in self.factory.live
+                if timer.feature is self.status_bar.RuntimeFeature.TIMEBOX_DEADLINE
+            )
+            self.assertEqual(timer.delay, 60.0)
+
+            self.controller.stopTimebox_(None)
+
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.TIMEBOX_DEADLINE,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+        self.assertEqual(timer.invalidations, 1)
+
+    def test_escalation_rearms_one_exact_deadline_for_each_remaining_stage(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        self.controller.ask_blocked_since = self.clock[0] - 20.0
+        self.controller.ask_blocked_by_agent = {
+            "codex": self.controller.ask_blocked_since
+        }
+        self.controller.refresh_ = MagicMock()
+        self.controller.settings = dataclass_replace(
+            self.controller.settings,
+            escalation_ramp_seconds=30.0,
+            escalation_menu_bar_seconds=120.0,
+            escalation_final_seconds=300.0,
+            escalation_tier="takeover",
+        )
+
+        with patch.object(
+            self.status_bar.time,
+            "monotonic",
+            side_effect=lambda: self.clock[0],
+        ):
+            self.controller.reconcile_presentation_timers(
+                self._inputs(screen_bar_enabled=False, visible=False)
+            )
+            stage_one = next(
+                timer
+                for timer in self.factory.live
+                if timer.feature is self.status_bar.RuntimeFeature.ESCALATION_DEADLINE
+            )
+            self.assertEqual(stage_one.delay, 10.0)
+            self.assertIsNone(stage_one.interval)
+            self.assertEqual(stage_one.tolerances, [0.0])
+
+            self.clock[0] += 10.0
+            self.controller.runtimeTimerFired_(stage_one)
+            stage_two = next(
+                timer
+                for timer in self.factory.live
+                if timer.feature is self.status_bar.RuntimeFeature.ESCALATION_DEADLINE
+            )
+            self.assertEqual(stage_two.delay, 90.0)
+
+            self.clock[0] += 90.0
+            self.controller.runtimeTimerFired_(stage_two)
+            stage_three = next(
+                timer
+                for timer in self.factory.live
+                if timer.feature is self.status_bar.RuntimeFeature.ESCALATION_DEADLINE
+            )
+            self.assertEqual(stage_three.delay, 180.0)
+
+    def test_ask_open_and_close_reconcile_escalation_deadline_immediately(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        inputs = self._inputs(screen_bar_enabled=False, visible=False)
+        self.controller.virtual_status_device = SimpleNamespace(
+            presentation_scheduler_inputs=lambda: inputs
+        )
+        self.controller.settings = dataclass_replace(
+            self.controller.settings,
+            escalation_ramp_seconds=30.0,
+            escalation_menu_bar_seconds=120.0,
+            escalation_final_seconds=300.0,
+            escalation_tier="takeover",
+        )
+
+        with patch.object(
+            self.status_bar.time,
+            "monotonic",
+            side_effect=lambda: self.clock[0],
+        ):
+            self.controller.track_ask_blocked(
+                (_status("codex", AgentMode.WAITING_FOR_INPUT),)
+            )
+            timer = next(
+                timer
+                for timer in self.factory.live
+                if timer.feature is self.status_bar.RuntimeFeature.ESCALATION_DEADLINE
+            )
+            self.assertEqual(timer.delay, 30.0)
+
+            self.controller.track_ask_blocked(
+                (_status("codex", AgentMode.WORKING),)
+            )
+
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.ESCALATION_DEADLINE,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+        self.assertEqual(timer.invalidations, 1)
+
+    def test_sleep_and_termination_withdraw_task9c_callbacks_without_replay(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        self.controller.settings = self.controller.settings.with_device_auto_brightness(
+            self.status_bar.VIRTUAL_DEVICE_ID,
+            True,
+            name="Screen Bar",
+        )
+        self.controller.settings = dataclass_replace(
+            self.controller.settings,
+            focus_sync_enabled=True,
+        )
+        self.controller.timebox_ends_at = self.clock[0] + 60.0
+        self.controller.timebox_total_seconds = 60.0
+        self.controller.ask_blocked_since = self.clock[0]
+        self.controller.ask_blocked_by_agent = {"codex": self.clock[0]}
+        active = self._inputs(screen_bar_enabled=False, visible=False)
+
+        with patch.object(
+            self.status_bar.time,
+            "monotonic",
+            side_effect=lambda: self.clock[0],
+        ):
+            self.controller.reconcile_presentation_timers(active)
+            task_timers = {
+                timer.feature: timer
+                for timer in self.factory.live
+                if timer.feature
+                in {
+                    self.status_bar.RuntimeFeature.DISPLAY_ENVIRONMENT,
+                    self.status_bar.RuntimeFeature.TIMEBOX_DEADLINE,
+                    self.status_bar.RuntimeFeature.ESCALATION_DEADLINE,
+                }
+            }
+            self.assertEqual(len(task_timers), 3, task_timers)
+
+            submitted = self.controller._os_poll_worker.snapshot().submitted
+            self.controller.reconcile_presentation_timers(
+                self._inputs(display_asleep=True)
+            )
+            for timer in task_timers.values():
+                self.controller.runtimeTimerFired_(timer)
+            self.controller._display_environment_timer_fired()
+
+            self.assertEqual(
+                self.controller._os_poll_worker.snapshot().submitted,
+                submitted,
+            )
+            for feature in task_timers:
+                self.assertEqual(
+                    self.controller._runtime_timer_registry.snapshot().callback_count(
+                        feature
+                    ),
+                    0,
+                )
+
+            self.controller.reconcile_presentation_timers(
+                self._inputs(app_terminating=True)
+            )
+            self.assertFalse(
+                set(task_timers)
+                & set(
+                    self.controller._runtime_timer_registry.snapshot().active_features
+                )
+            )
+
+    def test_timebox_elapsed_during_sleep_reduces_once_without_invalid_timer(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        self.controller.timebox_ends_at = self.clock[0] + 10.0
+        self.controller.timebox_total_seconds = 10.0
+        self.controller.fire_timebox_off_shortcut = MagicMock()
+        self.controller.webhook_event_enabled = MagicMock(return_value=False)
+        self.controller.set_settings_message = MagicMock()
+        self.controller.refresh_ = MagicMock()
+        active = self._inputs(screen_bar_enabled=False, visible=False)
+
+        self.controller.reconcile_presentation_timers(active)
+        self.controller.reconcile_presentation_timers(
+            self._inputs(display_asleep=True)
+        )
+        self.clock[0] += 20.0
+
+        self.controller.reconcile_presentation_timers(active)
+
+        self.assertIsNone(self.controller.timebox_ends_at)
+        self.assertEqual(self.controller.timebox_overtime_since, self.clock[0])
+        self.controller.fire_timebox_off_shortcut.assert_called_once_with()
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.TIMEBOX_DEADLINE,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+
+    def test_shared_registry_stays_stable_and_invalidates_every_feature(self) -> None:
+        active = self._inputs(
+            animation_active=True,
+            next_visual_change_at=self.clock[0] + 5.0,
+            alcove_enabled=True,
+            alcove_relevant=True,
+            pointer_interaction_relevant=True,
+        )
+
+        for _ in range(100):
+            self.controller.reconcile_presentation_timers(active)
+
+        snapshot = self.controller._runtime_timer_registry.snapshot()
+        self.assertEqual(len(snapshot.active_features), 4)
+        self.assertEqual(snapshot.created, 4)
+        self.assertEqual(len(self.factory.live), 4)
+        self.assertTrue(all(timer.target is self.controller for timer in self.factory.created))
+
+        self.controller.reconcile_presentation_timers(
+            self._inputs(app_terminating=True, animation_active=True)
+        )
+
+        self.assertEqual(self.controller._runtime_timer_registry.snapshot().active_features, ())
+        self.assertEqual(self.factory.live, ())
+
+    def test_elapsed_deadline_reconciles_once_without_a_zero_delay_timer(self) -> None:
+        device = SimpleNamespace(
+            presentationStaticDeadline=MagicMock(),
+            redraw_=MagicMock(),
+            presentationAlcoveObservation=MagicMock(),
+        )
+        self.controller.virtual_status_device = device
+        elapsed = self._inputs(next_visual_change_at=self.clock[0] - 1.0)
+
+        self.controller.reconcile_presentation_timers(elapsed)
+        self.controller.reconcile_presentation_timers(
+            self._inputs(
+                next_visual_change_at=self.clock[0] - 1.0,
+                pointer_interaction_relevant=True,
+            )
+        )
+
+        device.presentationStaticDeadline.assert_called_once_with()
+        self.assertFalse(
+            any(
+                timer.feature
+                is self.status_bar.RuntimeFeature.PRESENTATION_STATIC_DEADLINE
+                for timer in self.factory.created
+            )
+        )
+
+    def test_fixed_runtime_selector_dispatches_only_the_registered_timer(self) -> None:
+        device = SimpleNamespace(
+            presentationStaticDeadline=MagicMock(),
+            redraw_=MagicMock(),
+            presentationAlcoveObservation=MagicMock(),
+        )
+        self.controller.virtual_status_device = device
+        self.controller.reconcile_presentation_timers(
+            self._inputs(animation_active=True)
+        )
+        timer = self.factory.live[0]
+
+        self.controller.runtimeTimerFired_(timer)
+        self.controller.runtimeTimerFired_(
+            _PresentationTimerDouble(
+                timer.feature,
+                delay=timer.delay,
+                interval=timer.interval,
+                target=self.controller,
+                selector=timer.selector,
+            )
+        )
+
+        device.redraw_.assert_called_once_with(None)
+
+    def test_planned_alcove_and_pointer_handlers_dispatch_without_extra_timers(self) -> None:
+        device = SimpleNamespace(
+            presentationStaticDeadline=MagicMock(),
+            redraw_=MagicMock(),
+            presentationAlcoveObservation=MagicMock(),
+        )
+        self.controller.virtual_status_device = device
+        self.controller.peekTick_ = MagicMock()
+        self.controller.reconcile_presentation_timers(
+            self._inputs(
+                alcove_enabled=True,
+                alcove_relevant=True,
+                pointer_interaction_relevant=True,
+            )
+        )
+        timers = {timer.feature: timer for timer in self.factory.live}
+
+        self.controller.runtimeTimerFired_(
+            timers[self.status_bar.RuntimeFeature.ALCOVE_OBSERVATION]
+        )
+        self.controller.runtimeTimerFired_(
+            timers[self.status_bar.RuntimeFeature.POINTER_PEEK]
+        )
+
+        device.presentationAlcoveObservation.assert_called_once_with()
+        self.controller.peekTick_.assert_called_once_with(None)
+        self.assertEqual(len(self.factory.live), 2)
+
+    def test_future_static_deadline_dispatches_once_and_removes_itself(self) -> None:
+        device = SimpleNamespace(
+            presentationStaticDeadline=MagicMock(),
+            redraw_=MagicMock(),
+            presentationAlcoveObservation=MagicMock(),
+        )
+        self.controller.virtual_status_device = device
+        deadline = self.clock[0] + 2.0
+        self.controller.reconcile_presentation_timers(
+            self._inputs(next_visual_change_at=deadline)
+        )
+        timer = self.factory.live[0]
+        self.clock[0] = deadline
+
+        self.controller.runtimeTimerFired_(timer)
+        self.controller.runtimeTimerFired_(timer)
+
+        device.presentationStaticDeadline.assert_called_once_with()
+        self.assertEqual(self.factory.live, ())
+
+    def test_fifty_controller_lifecycle_cycles_leave_no_live_timer(self) -> None:
+        active = self._inputs(
+            animation_active=True,
+            alcove_enabled=True,
+            alcove_relevant=True,
+            pointer_interaction_relevant=True,
+        )
+        asleep = self._inputs(
+            display_asleep=True,
+            animation_active=True,
+            alcove_enabled=True,
+            alcove_relevant=True,
+            pointer_interaction_relevant=True,
+        )
+        max_live = 0
+
+        for _ in range(50):
+            self.controller.reconcile_presentation_timers(active)
+            max_live = max(max_live, len(self.factory.live))
+            self.controller.reconcile_presentation_timers(asleep)
+            self.assertEqual(self.factory.live, ())
+
+        snapshot = self.controller._runtime_timer_registry.snapshot()
+        self.assertEqual(max_live, 3)
+        self.assertEqual(snapshot.active_features, ())
+        self.assertEqual(snapshot.created, snapshot.invalidated)
+
+
+class LidObservationRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.clock = [900.0]
+        self.factory = _PresentationTimerFactory()
+        self.controller._presentation_monotonic = lambda: self.clock[0]
+        self.controller._runtime_timer_registry = (
+            self.controller._build_presentation_timer_registry(
+                timer_factory=self.factory,
+                monotonic=lambda: self.clock[0],
+            )
+        )
+        self.controller._presentation_scheduler_state = (
+            self.status_bar.PresentationSchedulerState()
+        )
+        self.controller._presentation_scheduler_inputs = None
+        self.controller._runtime_started = True
+
+    def tearDown(self) -> None:
+        registry = getattr(self.controller, "_runtime_worker_registry", None)
+        if registry is not None:
+            registry.close_all(timeout_seconds=1.0)
+
+    def _inputs(self, **changes):
+        values = {
+            "screen_bar_enabled": False,
+            "visible": False,
+            "display_asleep": False,
+            "app_terminating": False,
+            "animation_active": False,
+            "next_visual_change_at": None,
+            "alcove_enabled": False,
+            "alcove_relevant": False,
+            "pointer_interaction_relevant": False,
+        }
+        values.update(changes)
+        return self.status_bar.PresentationSchedulerInputs(**values)
+
+    def test_lid_timer_is_relevance_gated_tolerant_and_withdrawn_for_lifecycle(self) -> None:
+        default_settings = self.controller.settings
+        blank_animation = self.status_bar.LedAnimationSetting("", 1.0)
+        self.controller.leds_enabled = True
+        self.controller.keep_awake.holding_requested = False
+        self.controller.settings = dataclass_replace(
+            default_settings,
+            closed_lid_awake_policy=self.status_bar.CLOSED_LID_AWAKE_NEVER,
+            lid_closed_animation=blank_animation,
+            lid_open_animation=blank_animation,
+            lid_closed_active_animation=blank_animation,
+            lid_open_active_animation=blank_animation,
+        )
+
+        self.controller.reconcile_presentation_timers(self._inputs())
+
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.LID_OBSERVATION,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+        self.assertFalse(self.controller._lid_observation_relevant())
+
+        self.controller.keep_awake.holding_requested = True
+        self.assertTrue(self.controller._lid_observation_relevant())
+        self.controller.keep_awake.holding_requested = False
+        self.controller.settings = default_settings.with_closed_lid_awake_policy(
+            self.status_bar.CLOSED_LID_AWAKE_NEVER
+        )
+        self.assertTrue(self.controller._lid_observation_relevant())
+        self.controller.leds_enabled = False
+
+        self.controller.settings = self.controller.settings.with_closed_lid_awake_policy(
+            self.status_bar.CLOSED_LID_AWAKE_AGENTS
+        )
+        for _ in range(100):
+            self.controller.reconcile_presentation_timers(self._inputs())
+
+        snapshot = self.controller._runtime_timer_registry.snapshot()
+        self.assertEqual(
+            snapshot.active_features,
+            (self.status_bar.RuntimeFeature.LID_OBSERVATION,),
+        )
+        # One earlier DEVICE_INVENTORY timer was correctly created while
+        # physical LEDs were enabled, then withdrawn before this lid-only plan.
+        self.assertEqual(snapshot.created, 2)
+        lid_timer = self.factory.live[0]
+        self.assertEqual(lid_timer.interval, 1.0)
+        self.assertEqual(lid_timer.tolerances, [0.1])
+
+        self.clock[0] += 0.25
+        self.controller.reconcile_presentation_timers(
+            self._inputs(pointer_interaction_relevant=True)
+        )
+        live_by_feature = {timer.feature: timer for timer in self.factory.live}
+        self.assertIs(
+            live_by_feature[self.status_bar.RuntimeFeature.LID_OBSERVATION],
+            lid_timer,
+        )
+        self.assertEqual(lid_timer.invalidations, 0)
+
+        self.controller.reconcile_presentation_timers(
+            self._inputs(display_asleep=True)
+        )
+        self.controller.runtimeTimerFired_(lid_timer)
+        self.assertEqual(
+            self.controller._runtime_timer_registry.snapshot().active_features,
+            (),
+        )
+        submitted = self.controller._os_poll_worker.snapshot().submitted
+        self.controller._lid_observation_timer_fired()
+        self.assertEqual(
+            self.controller._os_poll_worker.snapshot().submitted,
+            submitted,
+        )
+
+        self.controller.reconcile_presentation_timers(self._inputs())
+        wake_timer = self.factory.live[0]
+        self.controller.reconcile_presentation_timers(
+            self._inputs(app_terminating=True)
+        )
+        self.controller.runtimeTimerFired_(wake_timer)
+        submitted = self.controller._os_poll_worker.snapshot().submitted
+        self.controller._lid_observation_timer_fired()
+        self.assertEqual(
+            self.controller._runtime_timer_registry.snapshot().active_features,
+            (),
+        )
+        self.assertEqual(
+            self.controller._os_poll_worker.snapshot().submitted,
+            submitted,
+        )
+        self.assertEqual(
+            self.controller._runtime_timer_registry.snapshot().callback_count(
+                self.status_bar.RuntimeFeature.LID_OBSERVATION
+            ),
+            0,
+        )
+
+    def test_lid_ioreg_burst_uses_os_poll_and_delivers_only_latest_result(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        reads: list[str] = []
+        drains: list[object] = []
+
+        def read_lid() -> bool:
+            reads.append(threading.current_thread().name)
+            if len(reads) == 1:
+                started.set()
+                self.assertTrue(release.wait(2.0))
+                return False
+            return True
+
+        self.controller._runtime_worker_registry.close_all(timeout_seconds=1.0)
+        (
+            self.controller._runtime_worker_registry,
+            self.controller._os_poll_worker,
+        ) = self.controller._build_runtime_worker_registry(
+            dispatch_main=drains.append,
+        )
+        self.controller._lid_observation_active = True
+        self.controller._os_poll_generation = 1
+        self.controller.last_lid_closed = None
+
+        with patch.object(self.status_bar, "read_lid_closed", side_effect=read_lid):
+            self.controller._lid_observation_timer_fired()
+            self.assertTrue(started.wait(1.0))
+            for _ in range(99):
+                self.controller._lid_observation_timer_fired()
+
+            snapshot = self.controller._os_poll_worker.snapshot()
+            self.assertEqual(snapshot.domain, self.status_bar.RuntimeWorkerDomain.OS_POLL)
+            self.assertTrue(snapshot.running)
+            self.assertEqual(snapshot.pending_count, 1)
+            self.assertEqual(snapshot.submitted, 100)
+
+            release.set()
+            deadline = time.monotonic() + 2.0
+            while self.controller._os_poll_worker.snapshot().completed < 2:
+                if time.monotonic() >= deadline:
+                    self.fail("lid observations did not complete")
+                time.sleep(0.001)
+
+        self.assertEqual(
+            reads,
+            ["sidepulse-runtime-os-poll", "sidepulse-runtime-os-poll"],
+        )
+        self.assertEqual(len(drains), 1)
+        drains.pop()()
+        self.assertIs(self.controller.last_lid_closed, True)
+        self.assertEqual(self.controller._os_poll_worker.snapshot().dispatched_results, 1)
+
+    def test_lid_result_is_generation_fenced_and_preserves_transition_semantics(self) -> None:
+        self.controller._lid_observation_active = True
+        self.controller._os_poll_generation = 7
+        self.controller.last_lid_closed = False
+        self.controller.play_lid_animation = MagicMock()
+        stale = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.OS_POLL,
+            "lid-observation",
+            6,
+            time.monotonic() + 10.0,
+            self.status_bar.LidObservationRequest(),
+        )
+        current = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.OS_POLL,
+            "lid-observation",
+            7,
+            time.monotonic() + 10.0,
+            self.status_bar.LidObservationRequest(),
+        )
+        result = self.status_bar.LidObservationResult(
+            ok=True,
+            closed=True,
+            error=None,
+        )
+
+        self.controller._apply_os_poll_result(stale, result)
+        self.assertIs(self.controller.last_lid_closed, False)
+        self.controller.play_lid_animation.assert_not_called()
+
+        self.controller._apply_os_poll_result(current, result)
+        self.assertIs(self.controller.last_lid_closed, True)
+        self.controller.play_lid_animation.assert_called_once_with(
+            self.status_bar.LID_ANIMATION_CLOSED
+        )
+
+        self.controller.last_lid_closed = None
+        self.controller.play_lid_animation.reset_mock()
+        self.controller._apply_os_poll_result(current, result)
+        self.assertIs(self.controller.last_lid_closed, True)
+        self.controller.play_lid_animation.assert_not_called()
+        self.controller._apply_os_poll_result(
+            current,
+            self.status_bar.LidObservationResult(
+                ok=True,
+                closed=False,
+                error=None,
+            ),
+        )
+        self.controller.play_lid_animation.assert_called_once_with(
+            self.status_bar.LID_ANIMATION_OPEN
+        )
+
+        with patch.object(
+            self.status_bar,
+            "read_lid_closed",
+            side_effect=OSError("/Users/private/project was exposed"),
+        ):
+            failed = self.controller._execute_os_poll_command(current)
+        self.assertEqual(
+            failed,
+            self.status_bar.LidObservationResult(
+                ok=False,
+                closed=None,
+                error="lid observation unavailable",
+            ),
+        )
+
+    def test_launch_uses_shared_lid_registry_without_legacy_nstimer(self) -> None:
+        timer_api = MagicMock()
+        status_item = MagicMock()
+        status_api = MagicMock()
+        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = (
+            status_item
+        )
+        patched_methods = (
+            "load_operator_local_state",
+            "start_event_server",
+            "replay_debug_logs",
+            "refresh_",
+            "reconcile_lid_observation",
+            "show_setup_window_if_needed",
+        )
+
+        with ExitStack() as stack:
+            method_mocks = {}
+            stack.enter_context(patch.object(self.status_bar, "NSApp"))
+            stack.enter_context(patch.object(self.status_bar, "NSStatusBar", status_api))
+            stack.enter_context(patch.object(self.status_bar, "NSTimer", timer_api))
+            thread_type = stack.enter_context(
+                patch.object(self.status_bar.threading, "Thread")
+            )
+            stack.enter_context(patch.object(self.controller.virtual_status_device, "show"))
+            stack.enter_context(patch.object(self.controller.virtual_status_device, "hide"))
+            for name in patched_methods:
+                method_mocks[name] = stack.enter_context(
+                    patch.object(self.controller, name)
+                )
+            self.controller.applicationDidFinishLaunching_(None)
+
+        selectors = tuple(
+            invocation.args[2]
+            for invocation in (
+                timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.call_args_list
+            )
+        )
+        self.assertNotIn("pollLid:", selectors)
+        self.assertNotIn("pollDevices:", selectors)
+        self.assertNotIn("pollScreenBrightness:", selectors)
+        self.assertFalse(hasattr(self.controller, "pollScreenBrightness_"))
+        self.assertEqual(
+            tuple(
+                snapshot.domain
+                for snapshot in self.controller._runtime_worker_registry.snapshot()
+            ),
+            (
+                self.status_bar.RuntimeWorkerDomain.OS_POLL,
+                self.status_bar.RuntimeWorkerDomain.HARDWARE_WRITE,
+            ),
+        )
+        method_mocks["reconcile_lid_observation"].assert_called_once_with()
+        self.assertEqual(thread_type.call_count, 3)
+        self.assertEqual(thread_type.return_value.start.call_count, 3)
+
+
+class DeviceRuntimeSchedulingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def tearDown(self) -> None:
+        registry = getattr(self.controller, "_runtime_worker_registry", None)
+        if registry is not None:
+            registry.close_all(timeout_seconds=1.0)
+
+    def test_legacy_virtual_device_never_restores_device_poll_timer(self) -> None:
+        timer_api = MagicMock()
+        status_item = MagicMock()
+        status_api = MagicMock()
+        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = (
+            status_item
+        )
+        self.controller.virtual_status_device = SimpleNamespace(
+            show=MagicMock(),
+            hide=MagicMock(),
+        )
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(self.status_bar, "NSApp"))
+            stack.enter_context(patch.object(self.status_bar, "NSStatusBar", status_api))
+            stack.enter_context(patch.object(self.status_bar, "NSTimer", timer_api))
+            stack.enter_context(patch.object(self.status_bar.threading, "Thread"))
+            poll_devices_once = stack.enter_context(
+                patch.object(self.controller, "poll_devices_once")
+            )
+            for name in (
+                "load_operator_local_state",
+                "start_event_server",
+                "replay_debug_logs",
+                "refresh_",
+                "show_setup_window_if_needed",
+            ):
+                stack.enter_context(patch.object(self.controller, name))
+
+            self.controller.applicationDidFinishLaunching_(None)
+            self.controller.reconcile_device_runtime()
+
+        selectors = tuple(
+            invocation.args[2]
+            for invocation in (
+                timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_.call_args_list
+            )
+        )
+        self.assertNotIn("pollDevices:", selectors)
+        self.assertFalse(hasattr(self.controller, "device_poll_timer"))
+        poll_devices_once.assert_not_called()
+
+    def test_disabled_leds_and_closed_devices_pane_schedule_no_inventory_or_hardware_work(
+        self,
+    ) -> None:
+        self.controller.leds_enabled = False
+        self.controller.settings_window = SimpleNamespace(isVisible=lambda: False)
+        self.controller.current_settings_pane = "devices"
+
+        with patch.object(self.status_bar, "discover_devices") as discover:
+            self.controller.reconcile_device_runtime()
+
+        discover.assert_not_called()
+        snapshots = {
+            snapshot.domain: snapshot
+            for snapshot in self.controller._runtime_worker_registry.snapshot()
+        }
+        self.assertEqual(
+            snapshots[self.status_bar.RuntimeWorkerDomain.OS_POLL].submitted,
+            0,
+        )
+        self.assertEqual(
+            snapshots[self.status_bar.RuntimeWorkerDomain.HARDWARE_WRITE].submitted,
+            0,
+        )
+        self.assertNotIn(
+            self.status_bar.RuntimeFeature.DEVICE_INVENTORY,
+            self.controller._runtime_timer_registry.snapshot().active_features,
+        )
+
+    def test_runtime_device_reads_use_only_worker_published_inventory(self) -> None:
+        self.controller._runtime_started = True
+        self.controller.leds_enabled = False
+        self.controller.settings_window = SimpleNamespace(isVisible=lambda: False)
+        self.controller._device_discovery_cache = None
+
+        with patch.object(
+            self.status_bar,
+            "discover_devices",
+            side_effect=AssertionError("main-thread discovery"),
+        ) as discover:
+            candidates = self.controller.discover_device_candidates()
+
+        self.assertEqual(candidates, [])
+        discover.assert_not_called()
+
+    def test_inventory_adapter_refuses_more_than_sixteen_physical_devices(self) -> None:
+        candidates = tuple(
+            self.status_bar.DeviceCandidate(
+                Path(f"/Volumes/SidePulse-{index}"),
+                Path(f"/Volumes/SidePulse-{index}/LEDS.LED"),
+                "name matches device",
+            )
+            for index in range(17)
+        )
+
+        with self.assertRaisesRegex(ValueError, "invalid device inventory"):
+            self.status_bar.DeviceInventoryResult(candidates)
+
+    def test_hardware_sync_submits_at_most_sixteen_opaque_device_keys_without_threads(
+        self,
+    ) -> None:
+        devices = tuple(
+            self.status_bar.StatusBarDevice(
+                device_id=f"/Volumes/SidePulse-{index}",
+                name=f"SidePulse {index}",
+                root=Path(f"/Volumes/SidePulse-{index}"),
+                target=Path(f"/Volumes/SidePulse-{index}/LEDS.LED"),
+                connected=True,
+                display=self.status_bar.LED_DISPLAY_AGENT,
+            )
+            for index in range(17)
+        )
+        submissions = []
+        worker = SimpleNamespace(submit=lambda command: submissions.append(command))
+        self.controller._runtime_started = True
+        self.controller._hardware_write_active = True
+        self.controller._hardware_write_generation = 4
+        self.controller._hardware_write_worker = worker
+
+        with (
+            patch.object(self.controller, "status_bar_devices", return_value=list(devices)),
+            patch.object(self.controller, "sync_virtual_status_device"),
+            patch.object(self.status_bar.threading, "Thread") as thread_type,
+        ):
+            self.controller.sync_leds(
+                AgentMode.WORKING,
+                None,
+                self.status_bar.LED_DISPLAY_AGENT,
+                (),
+            )
+
+        thread_type.assert_not_called()
+        self.assertEqual(len(submissions), 16)
+        self.assertEqual(len({command.key for command in submissions}), 16)
+        for command in submissions:
+            self.assertIs(
+                command.domain,
+                self.status_bar.RuntimeWorkerDomain.HARDWARE_WRITE,
+            )
+            self.assertEqual(command.generation, 4)
+            self.assertNotIn("/", command.key)
+            self.assertNotIn("Volumes", command.key)
+            self.assertIsInstance(command.payload, self.status_bar.HardwareWriteRequest)
+
+    def test_hardware_result_preserves_exact_failure_and_rejects_stale_generation(
+        self,
+    ) -> None:
+        device = self.status_bar.StatusBarDevice(
+            device_id="sidepulse-test",
+            name="SidePulse Test",
+            root=Path("/Volumes/SidePulseTest"),
+            target=Path("/Volumes/SidePulseTest/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        request = self.status_bar.HardwareWriteRequest(
+            device=device,
+            mode=AgentMode.WORKING,
+            battery_snapshot=None,
+            statuses=(),
+            projection=None,
+            relay_elapsed_seconds=0.5,
+        )
+        failure = self.status_bar.HardwareWriteResult(
+            request=request,
+            write=self.status_bar.LedStatusWrite(
+                state=LedDisplayState.WORKING,
+                target=None,
+                program="",
+                changed=False,
+                error="write verification failed",
+            ),
+            label="SidePulse Test Working",
+            agent_display_rendered=True,
+            completed_at=100.0,
+        )
+        key = self.controller._hardware_worker_key(device)
+        stale = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.HARDWARE_WRITE,
+            key,
+            6,
+            time.monotonic() + 10.0,
+            request,
+        )
+        current = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.HARDWARE_WRITE,
+            key,
+            7,
+            time.monotonic() + 10.0,
+            request,
+        )
+        self.controller._hardware_write_active = True
+        self.controller._hardware_write_generation = 7
+        self.controller.schedule_screen_bar_sync = MagicMock()
+
+        self.controller._apply_hardware_write_result(stale, failure)
+        self.assertEqual(self.controller.device_errors, {})
+        self.controller.schedule_screen_bar_sync.assert_not_called()
+
+        self.controller._apply_hardware_write_result(current, failure)
+        self.assertEqual(
+            self.controller.device_errors,
+            {"sidepulse-test": "write verification failed"},
+        )
+        self.assertEqual(self.controller.last_led_error, "write verification failed")
+        self.controller.schedule_screen_bar_sync.assert_called_once_with(
+            AgentMode.WORKING,
+            None,
+            (),
+            None,
+            None,
+            0.5,
+        )
+
+    def test_stale_or_disabled_hardware_command_is_rejected_before_writer_call(self) -> None:
+        device = self.status_bar.StatusBarDevice(
+            device_id="sidepulse-test",
+            name="SidePulse Test",
+            root=Path("/Volumes/SidePulseTest"),
+            target=Path("/Volumes/SidePulseTest/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        request = self.status_bar.HardwareWriteRequest(
+            device=device,
+            mode=AgentMode.WORKING,
+            battery_snapshot=None,
+            statuses=(),
+            projection=None,
+            relay_elapsed_seconds=0.0,
+        )
+        command = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.HARDWARE_WRITE,
+            self.controller._hardware_worker_key(device),
+            2,
+            time.monotonic() + 10.0,
+            request,
+        )
+        self.controller._hardware_write_generation = 3
+        self.controller._hardware_write_active = True
+
+        with patch.object(self.controller, "_sync_hardware_device") as write:
+            with self.assertRaisesRegex(ValueError, "stale hardware write command"):
+                self.controller._execute_hardware_write_command(command)
+            self.controller._hardware_write_generation = 2
+            self.controller._hardware_write_active = False
+            with self.assertRaisesRegex(ValueError, "stale hardware write command"):
+                self.controller._execute_hardware_write_command(command)
+
+        write.assert_not_called()
+
+    def test_inventory_applies_once_for_current_generation_and_advances_hardware_fence(
+        self,
+    ) -> None:
+        root = Path(self._tmp.name) / "SidePulsePro"
+        root.mkdir()
+        target = root / "LEDS.LED"
+        target.touch()
+        candidate = self.status_bar.DeviceCandidate(root, target, "name matches device")
+        result = self.status_bar.DeviceInventoryResult((candidate,))
+        stale = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.OS_POLL,
+            "device-inventory",
+            4,
+            time.monotonic() + 10.0,
+            self.status_bar.DeviceInventoryRequest(),
+        )
+        current = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.OS_POLL,
+            "device-inventory",
+            5,
+            time.monotonic() + 10.0,
+            self.status_bar.DeviceInventoryRequest(),
+        )
+        cancellations = []
+        self.controller._hardware_write_worker = SimpleNamespace(
+            cancel_generation=cancellations.append
+        )
+        self.controller._device_inventory_active = True
+        self.controller._os_poll_generation = 5
+        self.controller._hardware_write_generation = 8
+
+        self.controller._apply_os_poll_result(stale, result)
+        self.assertEqual(self.controller._device_inventory_candidates, ())
+        self.assertEqual(cancellations, [])
+
+        self.controller._apply_os_poll_result(current, result)
+        signature = self.controller.last_connected_device_signature
+        self.assertEqual(self.controller._device_inventory_candidates, (candidate,))
+        self.assertEqual(self.controller._hardware_write_generation, 9)
+        self.assertEqual(cancellations, [8])
+        self.assertEqual(len(self.controller._hardware_device_keys), 1)
+        self.assertEqual(len(signature), 1)
+
+        self.controller._apply_os_poll_result(current, result)
+        self.assertEqual(self.controller.last_connected_device_signature, signature)
+        self.assertEqual(self.controller._hardware_write_generation, 9)
+        self.assertEqual(cancellations, [8])
+
+        with patch.object(
+            self.status_bar,
+            "device_mount_key",
+            return_value="replacement-mount",
+        ):
+            self.controller._apply_os_poll_result(current, result)
+        self.assertNotEqual(self.controller.last_connected_device_signature, signature)
+        self.assertEqual(self.controller._hardware_write_generation, 10)
+        self.assertEqual(cancellations, [8, 9])
+
+    def test_hardware_worker_is_long_lived_and_keeps_one_latest_pending_per_device(
+        self,
+    ) -> None:
+        root = Path(self._tmp.name) / "SidePulsePro"
+        root.mkdir()
+        target = root / "LEDS.LED"
+        target.touch()
+        device = self.status_bar.StatusBarDevice(
+            device_id="sidepulse-test",
+            name="SidePulse Test",
+            root=root,
+            target=target,
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        started = threading.Event()
+        release = threading.Event()
+        executions = []
+        drains = []
+
+        def execute(command):
+            executions.append(command)
+            if len(executions) == 1:
+                started.set()
+                self.assertTrue(release.wait(2.0))
+            return self.status_bar.HardwareWriteResult(
+                request=command.payload,
+                write=self.status_bar.LedStatusWrite(
+                    state=LedDisplayState.WORKING,
+                    target=target,
+                    program="",
+                    changed=False,
+                ),
+                label="SidePulse Test Working",
+                agent_display_rendered=True,
+                completed_at=time.monotonic(),
+            )
+
+        self.controller._runtime_worker_registry.close_all(timeout_seconds=1.0)
+        with patch.object(
+            self.controller,
+            "_execute_hardware_write_command",
+            side_effect=execute,
+        ):
+            (
+                self.controller._runtime_worker_registry,
+                self.controller._os_poll_worker,
+            ) = self.controller._build_runtime_worker_registry(
+                dispatch_main=drains.append,
+            )
+            self.controller._runtime_started = True
+            self.controller._hardware_write_active = True
+            self.controller._hardware_write_generation = 3
+            with (
+                patch.object(
+                    self.controller,
+                    "status_bar_devices",
+                    return_value=[device],
+                ),
+                patch.object(self.controller, "sync_virtual_status_device"),
+            ):
+                self.controller.sync_leds(
+                    AgentMode.WORKING,
+                    None,
+                    self.status_bar.LED_DISPLAY_AGENT,
+                    (),
+                )
+                self.assertTrue(started.wait(1.0))
+                for _ in range(99):
+                    self.controller.sync_leds(
+                        AgentMode.WORKING,
+                        None,
+                        self.status_bar.LED_DISPLAY_AGENT,
+                        (),
+                    )
+
+            snapshots = {
+                snapshot.domain: snapshot
+                for snapshot in self.controller._runtime_worker_registry.snapshot()
+            }
+            hardware = snapshots[self.status_bar.RuntimeWorkerDomain.HARDWARE_WRITE]
+            self.assertTrue(hardware.running)
+            self.assertEqual(hardware.pending_count, 1)
+            self.assertEqual(hardware.submitted, 100)
+            self.assertEqual(hardware.replaced_pending, 98)
+            self.assertEqual(
+                sum(
+                    thread.name == "sidepulse-runtime-hardware-write"
+                    for thread in threading.enumerate()
+                ),
+                1,
+            )
+
+            release.set()
+            deadline = time.monotonic() + 2.0
+            while self.controller._hardware_write_worker.snapshot().completed < 2:
+                if time.monotonic() >= deadline:
+                    self.fail("hardware writes did not complete")
+                time.sleep(0.001)
+
+        self.assertEqual(len(executions), 2)
+        self.assertEqual(executions[0].key, executions[1].key)
+
+
+class InstalledAgentInventoryControllerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.controller._runtime_started = True
+
+    def tearDown(self) -> None:
+        self.controller._runtime_worker_registry.close_all(timeout_seconds=1.0)
+
+    def test_inventory_refresh_is_generation_fenced_and_uses_only_the_existing_os_poll_worker(self) -> None:
+        """Dropping the fence would apply old host state after a newer refresh or termination."""
+        from sidepulse.installed_agent_inventory import (
+            InventoryRoot,
+            collect_installed_agent_inventory,
+        )
+
+        root = Path(self._tmp.name) / "inventory-home"
+        root.mkdir()
+        root.chmod(0o700)
+        roots = (InventoryRoot("home", root, frozenset({os.getuid()})),)
+        submissions = []
+        self.controller._os_poll_generation = 250
+        self.controller._installed_agent_inventory_roots = lambda: roots
+        self.controller._os_poll_worker = SimpleNamespace(
+            submit=submissions.append,
+        )
+
+        for _ in range(100):
+            self.controller.refresh_installed_agent_inventory()
+
+        self.assertEqual(len(submissions), 100)
+        self.assertEqual(
+            {command.domain for command in submissions},
+            {self.status_bar.RuntimeWorkerDomain.OS_POLL},
+        )
+        self.assertEqual({command.key for command in submissions}, {"installed-agent-inventory"})
+        self.assertEqual(
+            tuple(command.generation for command in submissions),
+            tuple(range(250, 350)),
+        )
+        self.assertTrue(all(command.payload == roots for command in submissions))
+
+        result = collect_installed_agent_inventory(roots)
+        stale = submissions[-2]
+        current = submissions[-1]
+        self.controller._apply_os_poll_result(stale, result)
+        self.assertIsNone(self.controller._installed_agent_inventory_result)
+        self.controller._apply_os_poll_result(current, result)
+        self.assertIs(self.controller._installed_agent_inventory_result, result)
+
+        self.controller._runtime_started = False
+        self.controller._apply_os_poll_result(current, result)
+        self.assertIs(self.controller._installed_agent_inventory_result, result)
+
+        self.controller._runtime_started = True
+        refused = SimpleNamespace(
+            submit=lambda _command: self.status_bar.SubmissionDisposition.REFUSED,
+        )
+        self.controller._os_poll_worker = refused
+        self.assertFalse(self.controller.refresh_installed_agent_inventory())
+
+    def test_hidden_or_unrelated_settings_panes_do_not_schedule_inventory_repeats(self) -> None:
+        """Treating every settings reconciliation as inventory work would create hidden polling."""
+        submissions = []
+        self.controller._os_poll_worker = SimpleNamespace(submit=submissions.append)
+        self.controller._installed_agent_inventory_roots = lambda: ()
+        self.controller.settings_window = SimpleNamespace(isVisible=lambda: False)
+        self.controller.current_settings_pane = "devices"
+
+        for _ in range(100):
+            self.controller.reconcile_installed_agent_inventory()
+
+        self.assertEqual(submissions, [])
+        self.controller.settings_window = SimpleNamespace(isVisible=lambda: True)
+        self.controller.current_settings_pane = "installed_agents"
+        self.controller.reconcile_installed_agent_inventory()
+        self.assertEqual(len(submissions), 1)
+        self.assertEqual(submissions[0].key, "installed-agent-inventory")
+
+
+class LatestFeatureSettingsCompositionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.controller.refresh_installed_agent_inventory = MagicMock(return_value=True)
+
+    @staticmethod
+    def _descendant_text(view) -> tuple[str, ...]:
+        rendered = []
+        for child in view.subviews():
+            if hasattr(child, "stringValue"):
+                value = str(child.stringValue())
+                if value:
+                    rendered.append(value)
+            if hasattr(child, "title"):
+                value = str(child.title())
+                if value:
+                    rendered.append(value)
+            rendered.extend(LatestFeatureSettingsCompositionTests._descendant_text(child))
+        return tuple(rendered)
+
+    def test_installed_agents_is_lazy_grouped_private_and_refreshable(self) -> None:
+        from sidepulse.installed_agents import installed_surface_registrations
+
+        self.controller.show_settings_window()
+        self.assertNotIn("installed_agents", self.controller.settings_panes)
+        self.assertEqual(
+            [
+                label
+                for key, label in self.status_bar.SETTINGS_SIDEBAR_ITEMS
+                if key == "installed_agents"
+            ],
+            ["Installed Agents"],
+        )
+
+        self.controller.select_settings_pane("installed_agents")
+        pane = self.controller.settings_panes["installed_agents"]
+        fields = self.controller.settings_fields["installed_agent_status_fields"]
+        registrations = installed_surface_registrations()
+        self.assertEqual(len(fields), len(registrations))
+        self.assertEqual(
+            tuple(fields),
+            tuple((row.provider_id, row.surface_id) for row in registrations),
+        )
+        self.assertEqual(
+            self.controller.settings_window.title(),
+            "SidePulse Settings: Installed Agents",
+        )
+        self.controller.refresh_installed_agent_inventory.assert_called_once_with()
+        rendered = "\n".join(self._descendant_text(pane))
+        for expected in (
+            "OpenCode CLI",
+            "Google Antigravity CLI",
+            "Gemini CLI",
+            "GitHub Copilot",
+            "Not detected",
+            "Detection only",
+        ):
+            self.assertIn(expected, rendered)
+        for prohibited in (
+            "/Users/",
+            "/Applications/",
+            ".config/",
+            "api-key",
+            "account email",
+            "raw error",
+        ):
+            self.assertNotIn(prohibited, rendered.casefold())
+        refresh = self.controller.settings_buttons["refresh_installed_agents"]
+        self.assertEqual(refresh.title(), "Refresh")
+        self.assertEqual(refresh.accessibilityLabel(), "Refresh installed coding agents")
+
+    def test_profile_never_claims_zero_history_before_the_local_scan_finishes(self) -> None:
+        self.controller.show_settings_window()
+
+        self.assertEqual(
+            self.controller.settings_fields["profile_usage_label"].stringValue(),
+            "Loading local usage history…",
+        )
+
+    def test_inventory_result_mutates_stable_rows_without_focus_or_lifecycle_output(self) -> None:
+        from sidepulse.installed_agent_inventory import InstalledAgentInventoryResult
+        from sidepulse.installed_agents import (
+            InstalledSurfaceObservation,
+            InstalledSurfaceReduction,
+            SurfacePresence,
+            installed_surface_registrations,
+        )
+
+        self.controller.show_settings_window()
+        self.controller.select_settings_pane("installed_agents")
+        registrations = installed_surface_registrations()
+        status_fields = self.controller.settings_fields["installed_agent_status_fields"]
+        opencode_cli_key = ("opencode", "cli")
+        opencode_plugin_key = ("opencode", "sidepulse-plugin")
+        stable_cli = status_fields[opencode_cli_key]
+        stable_plugin = status_fields[opencode_plugin_key]
+        refresh = self.controller.settings_buttons["refresh_installed_agents"]
+        self.controller.settings_window.makeFirstResponder_(refresh)
+        observations = tuple(
+            InstalledSurfaceObservation(
+                row.key,
+                (
+                    SurfacePresence.INSTALLED
+                    if (row.provider_id, row.surface_id) == opencode_cli_key
+                    else SurfacePresence.CONFIGURED
+                    if (row.provider_id, row.surface_id) == opencode_plugin_key
+                    else SurfacePresence.ABSENT
+                ),
+                None,
+                (
+                    row.capability_ids
+                    if (row.provider_id, row.surface_id)
+                    in {opencode_cli_key, opencode_plugin_key}
+                    else ()
+                ),
+                None,
+            )
+            for row in registrations
+        )
+        result = InstalledAgentInventoryResult(
+            InstalledSurfaceReduction(observations),
+            len(registrations),
+            len(registrations) - 1,
+        )
+        self.controller._runtime_started = True
+        self.controller._installed_agent_inventory_generation = 9
+        self.controller._runtime_worker_monotonic = lambda: 100.0
+        command = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.OS_POLL,
+            "installed-agent-inventory",
+            9,
+            105.0,
+            (),
+        )
+        self.controller._apply_os_poll_result(command, result)
+
+        self.assertIs(status_fields[opencode_cli_key], stable_cli)
+        self.assertIs(status_fields[opencode_plugin_key], stable_plugin)
+        self.assertEqual(stable_cli.stringValue(), "Installed · Detection only")
+        self.assertEqual(stable_plugin.stringValue(), "Configured · Monitoring")
+        self.assertIs(self.controller.settings_window.firstResponder(), refresh)
+        self.assertEqual(result.reduction.work_rows, ())
+        self.assertEqual(result.reduction.requests, ())
+        self.assertEqual(result.reduction.notifications, ())
+        self.assertEqual(result.reduction.hardware_presentation_changes, ())
+
+    def test_capacity_is_lazy_complete_truthful_and_does_no_implicit_provider_work(self) -> None:
+        from sidepulse.provider_capacity import provider_capacity_policies
+
+        self.controller.show_settings_window()
+        with patch.object(self.controller, "maybe_refresh_usage_summary") as refresh:
+            self.controller.select_settings_pane("capacity")
+        refresh.assert_not_called()
+        pane = self.controller.settings_panes["capacity"]
+        policies = provider_capacity_policies()
+        fields = self.controller.settings_fields["capacity_policy_status_fields"]
+        self.assertEqual(tuple(fields), tuple(row.profile_id for row in policies))
+        rendered = "\n".join(self._descendant_text(pane))
+        for expected in (
+            "ChatGPT and Codex",
+            "OpenAI API",
+            "Claude Team and Enterprise",
+            "Gemini Code Assist",
+            "Google Antigravity",
+            "Google Cloud API",
+            "GitHub Copilot",
+            "OpenCode",
+            "Available locally",
+            "Permission required",
+            "Check provider",
+            "Uses model provider",
+        ):
+            self.assertIn(expected, rendered)
+        for prohibited in (
+            "local:test",
+            "experimental-remote",
+            "service-account",
+            "google-cloud-oauth",
+            "api-key",
+            "account discriminator",
+            "raw error",
+        ):
+            self.assertNotIn(prohibited, rendered.casefold())
+
+    def test_capacity_refresh_is_explicit_and_updates_stable_live_labels(self) -> None:
+        self.controller.show_settings_window()
+        self.controller.select_settings_pane("capacity")
+        live = self.controller.settings_fields["capacity_live_fields"]
+        codex = live["codex"]
+        claude = live["claude"]
+        codex_identity = id(codex)
+        first_responder = self.controller.settings_buttons["refresh_capacity"]
+        self.controller.settings_window.makeFirstResponder_(first_responder)
+        self.controller.codex_summary_text = "Codex capacity observed"
+        self.controller.claude_plan_text = "Claude capacity observed"
+        self.controller.refresh_capacity_settings_projection()
+        self.assertEqual(id(live["codex"]), codex_identity)
+        self.assertEqual(codex.stringValue(), "Codex capacity observed")
+        self.assertEqual(claude.stringValue(), "Claude capacity observed")
+        self.assertIs(self.controller.settings_window.firstResponder(), first_responder)
+
+        with patch.object(self.controller, "maybe_refresh_usage_summary") as refresh:
+            self.controller.refreshCapacitySources_(None)
+        refresh.assert_called_once_with(reason="manual")
+
+    def test_new_feature_panes_wrap_at_two_hundred_percent_and_keep_keyboard_order(self) -> None:
+        self.controller.semantic_text_scale_percent = 200
+        self.controller.show_settings_window()
+        self.controller.select_settings_pane("installed_agents")
+        intro = self.controller.settings_fields["installed_agents_intro"]
+        self.assertFalse(intro.usesSingleLineMode())
+        self.assertGreaterEqual(intro.font().pointSize(), 22.0)
+        installed_refresh = self.controller.settings_buttons["refresh_installed_agents"]
+        self.assertTrue(installed_refresh.acceptsFirstResponder())
+
+        self.controller.select_settings_pane("capacity")
+        capacity_intro = self.controller.settings_fields["capacity_intro"]
+        self.assertFalse(capacity_intro.usesSingleLineMode())
+        self.assertGreaterEqual(capacity_intro.font().pointSize(), 22.0)
+        capacity_refresh = self.controller.settings_buttons["refresh_capacity"]
+        self.assertTrue(capacity_refresh.acceptsFirstResponder())
+
+
+class RelayControllerContinuityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+        relay = ColorSettings.defaults().with_blend_mode(BLEND_MODE_RELAY).with_cycle_speed(1.6)
+        self.controller.settings = self.controller.settings.with_colors(relay)
+        self.controller._relay_epoch = 100.0
+
+    @staticmethod
+    def _first_pulse_index(program: str) -> int:
+        return int(_program_body(program)[1].split("; ", 1)[0].split(":", 1)[0])
+
+    def test_one_resolved_completion_is_staged_and_shared_by_all_surfaces(self) -> None:
+        from sidepulse.attention import AttentionProjection, LifecycleMode
+        from sidepulse.operator_state import (
+            CanonicalOperatorEvent,
+            InterruptionClass,
+            SemanticEventKey,
+            TransitionKind,
+        )
+
+        source = SourceKey("codex", "hooks", "local:test", "live_agent_events")
+        work_key = WorkKey(source, WorkIdentifier("work:transport"))
+        event = CanonicalOperatorEvent(
+            SemanticEventKey(
+                work_key,
+                TransitionKind.COMPLETED,
+                ProviderWatermark(
+                    source,
+                    WatermarkBasis.PROVIDER_SEQUENCE,
+                    1_800_000_000.0,
+                    EventToken("event:transport-completed"),
+                    1,
+                    1,
+                ),
+            ),
+            work_key,
+            TransitionKind.COMPLETED,
+            InterruptionClass.COURTESY,
+            1_800_000_000.0,
+            SourceFreshness.FRESH,
+        )
+        projection = AttentionProjection(
+            lifecycle_mode=LifecycleMode.IDLE,
+            actionable_attention=(),
+            visible_rows=(),
+            transient_signals=(),
+            dominant_provider=None,
+            click_target_agent_id=None,
+        )
+        devices = tuple(
+            self.status_bar.StatusBarDevice(
+                device_id=device_id,
+                name=name,
+                root=Path(self._tmp.name) / device_id,
+                target=Path(self._tmp.name) / device_id / "LEDS.LED",
+                connected=True,
+                display=self.status_bar.LED_DISPLAY_AGENT,
+            )
+            for device_id, name in (
+                ("sidepulsedot", "SidePulse Dot"),
+                ("sidepulsepro", "SidePulse Pro"),
+            )
+        )
+        submissions = []
+        virtual_calls = []
+        self.controller._runtime_started = True
+        self.controller._accessibility_display_preferences = (
+            self.status_bar.AccessibilityDisplayPreferences()
+        )
+        self.controller._hardware_write_active = True
+        self.controller._hardware_write_generation = 11
+        self.controller._hardware_write_worker = SimpleNamespace(
+            submit=lambda command: submissions.append(command)
+        )
+
+        def capture_virtual(*args, **kwargs):
+            virtual_calls.append(kwargs)
+
+        with (
+            patch.object(self.controller, "status_bar_devices", return_value=list(devices)),
+            patch.object(
+                self.controller,
+                "sync_virtual_status_device",
+                side_effect=capture_virtual,
+            ),
+            patch.object(
+                self.controller,
+                "set_status_emphasis_plan",
+                wraps=self.controller.set_status_emphasis_plan,
+            ) as stage,
+            patch.object(
+                self.status_bar,
+                "resolve_glance",
+                wraps=self.status_bar.resolve_glance,
+            ) as resolve,
+        ):
+            self.controller.sync_leds(
+                AgentMode.COMPLETED,
+                None,
+                self.status_bar.LED_DISPLAY_AGENT,
+                (),
+                projection=projection,
+                operator_events=(event,),
+                capacity=None,
+                presentation_time=100.8,
+            )
+
+        self.assertEqual(resolve.call_count, 1)
+        self.assertEqual(len(submissions), 2)
+        self.assertEqual(len(virtual_calls), 1)
+        resolved = submissions[0].payload.resolved_glance
+        self.assertIs(submissions[1].payload.resolved_glance, resolved)
+        self.assertIs(virtual_calls[0]["resolved_glance"], resolved)
+        self.assertEqual(resolved.semantic, GlanceSemantic.FRESH_COMPLETION)
+        self.assertEqual(
+            resolved.cue.event_key,
+            "completion:event:transport-completed",
+        )
+        self.assertEqual(resolved.relay_epoch, 100.0)
+        self.assertEqual(resolved.next_visual_change_at, 101.6)
+        self.assertEqual(submissions[0].payload.presentation_time, 100.8)
+        self.assertEqual(virtual_calls[0]["presentation_time"], 100.8)
+        stage.assert_called_once_with(resolved, (resolved.cue,))
+
+    def test_unavailable_hardware_does_not_change_automatic_semantic_priority(
+        self,
+    ) -> None:
+        from sidepulse.attention import AttentionProjection, LifecycleMode
+
+        projection = AttentionProjection(
+            lifecycle_mode=LifecycleMode.ACTIVE,
+            actionable_attention=(),
+            visible_rows=(),
+            transient_signals=(),
+            dominant_provider="codex",
+            click_target_agent_id=None,
+        )
+        self.controller._runtime_started = True
+        self.controller._accessibility_display_preferences = (
+            self.status_bar.AccessibilityDisplayPreferences()
+        )
+        virtual_calls = []
+
+        with (
+            patch.object(self.controller, "status_bar_devices", return_value=[]),
+            patch.object(
+                self.controller,
+                "sync_virtual_status_device",
+                side_effect=lambda *args, **kwargs: virtual_calls.append(kwargs),
+            ),
+        ):
+            self.controller.sync_leds(
+                AgentMode.WORKING,
+                None,
+                self.status_bar.LED_DISPLAY_AGENT,
+                (),
+                projection=projection,
+                presentation_time=100.8,
+            )
+
+        self.assertEqual(len(virtual_calls), 1)
+        resolved = virtual_calls[0]["resolved_glance"]
+        self.assertEqual(resolved.semantic, GlanceSemantic.ACTIVE)
+        self.assertEqual(resolved.override_reason, GlanceOverrideReason.NONE)
+        self.assertEqual(resolved.relay_epoch, 100.0)
+
+    def test_physical_worker_composes_shared_semantics_before_existing_writer_seam(
+        self,
+    ) -> None:
+        from sidepulse.attention import AttentionProjection, LifecycleMode
+
+        projection = AttentionProjection(
+            lifecycle_mode=LifecycleMode.ACTIVE,
+            actionable_attention=(),
+            visible_rows=(),
+            transient_signals=(),
+            dominant_provider="codex",
+            click_target_agent_id=None,
+        )
+        self.controller._accessibility_display_preferences = (
+            self.status_bar.AccessibilityDisplayPreferences()
+        )
+        resolved = self.controller.resolve_presentation_glance(
+            projection,
+            operator_events=(),
+            capacity=None,
+            presentation_time=100.8,
+        )
+        device = self.status_bar.StatusBarDevice(
+            device_id="sidepulsedot",
+            name="SidePulse Dot",
+            root=Path(self._tmp.name) / "sidepulsedot",
+            target=Path(self._tmp.name) / "sidepulsedot" / "LEDS.LED",
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        controller = MagicMock()
+        controller.brightness = 255
+        controller.sync_program.return_value = self.status_bar.LedStatusWrite(
+            LedDisplayState.WORKING,
+            device.target,
+            "composed",
+            True,
+        )
+        request = self.status_bar.HardwareWriteRequest(
+            device=device,
+            mode=AgentMode.WORKING,
+            battery_snapshot=None,
+            statuses=(),
+            projection=projection,
+            relay_elapsed_seconds=0.8,
+            accessibility_preferences=self.controller._accessibility_display_preferences,
+            resolved_glance=resolved,
+            presentation_time=100.8,
+        )
+
+        with (
+            patch.object(
+                self.controller,
+                "active_led_display_kind_for_device",
+                return_value=self.status_bar.LED_DISPLAY_AGENT,
+            ),
+            patch.object(self.controller, "agent_controller_for_device", return_value=controller),
+            patch.object(self.status_bar, "write_led_program") as direct_writer,
+            patch.object(
+                self.status_bar,
+                "compose_presentation_program",
+                wraps=self.status_bar.compose_presentation_program,
+            ) as compose,
+        ):
+            result = self.controller._sync_hardware_device(request)
+
+        self.assertIs(compose.call_args.args[0], resolved)
+        self.assertEqual(compose.call_args.kwargs["presentation_time"], 100.8)
+        self.assertEqual(compose.call_args.kwargs["led_count"], 2)
+        controller.sync_projection.assert_not_called()
+        controller.sync_snapshot.assert_not_called()
+        controller.sync_program.assert_called_once()
+        direct_writer.assert_not_called()
+        self.assertEqual(controller.sync_program.call_args.args[1], LedDisplayState.WORKING)
+        self.assertTrue(result.write.changed)
+
+    def test_physical_worker_keeps_one_write_identity_while_relay_phase_advances(
+        self,
+    ) -> None:
+        from sidepulse.attention import AttentionProjection, LifecycleMode
+
+        projection = AttentionProjection(
+            lifecycle_mode=LifecycleMode.ACTIVE,
+            actionable_attention=(),
+            visible_rows=(),
+            transient_signals=(),
+            dominant_provider="codex",
+            click_target_agent_id=None,
+        )
+        preferences = self.status_bar.AccessibilityDisplayPreferences()
+        self.controller._accessibility_display_preferences = preferences
+        device = self.status_bar.StatusBarDevice(
+            device_id="sidepulsepro",
+            name="SidePulse Pro",
+            root=Path(self._tmp.name) / "sidepulsepro",
+            target=Path(self._tmp.name) / "sidepulsepro" / "LEDS.LED",
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        physical = MagicMock()
+        physical.brightness = 255
+        physical.channel_gains = (1.0, 1.0, 1.0)
+        physical.resting_glow = 0.0
+        physical.sync_program.side_effect = (
+            self.status_bar.LedStatusWrite(
+                LedDisplayState.WORKING,
+                device.target,
+                "early",
+                True,
+            ),
+            self.status_bar.LedStatusWrite(
+                LedDisplayState.WORKING,
+                device.target,
+                "",
+                False,
+            ),
+        )
+
+        def request(at: float):
+            resolved = self.controller.resolve_presentation_glance(
+                projection,
+                operator_events=(),
+                capacity=None,
+                presentation_time=at,
+            )
+            return self.status_bar.HardwareWriteRequest(
+                device=device,
+                mode=AgentMode.WORKING,
+                battery_snapshot=None,
+                statuses=(),
+                projection=projection,
+                relay_elapsed_seconds=at - 100.0,
+                accessibility_preferences=preferences,
+                resolved_glance=resolved,
+                presentation_time=at,
+            )
+
+        with (
+            patch.object(
+                self.controller,
+                "active_led_display_kind_for_device",
+                return_value=self.status_bar.LED_DISPLAY_AGENT,
+            ),
+            patch.object(
+                self.controller,
+                "agent_controller_for_device",
+                return_value=physical,
+            ),
+        ):
+            self.controller._sync_hardware_device(request(100.2))
+            self.controller._sync_hardware_device(request(100.8))
+
+        first, second = physical.sync_program.call_args_list
+        self.assertNotEqual(first.args[0], second.args[0])
+        self.assertIsNotNone(first.kwargs["dedupe_token"])
+        self.assertEqual(
+            first.kwargs["dedupe_token"],
+            second.kwargs["dedupe_token"],
+        )
+
+    def test_hardware_failure_does_not_hide_or_rebase_screen_bar_truth(self) -> None:
+        from sidepulse.attention import AttentionProjection, LifecycleMode
+
+        projection = AttentionProjection(
+            lifecycle_mode=LifecycleMode.ACTIVE,
+            actionable_attention=(),
+            visible_rows=(),
+            transient_signals=(),
+            dominant_provider="codex",
+            click_target_agent_id=None,
+        )
+        preferences = self.status_bar.AccessibilityDisplayPreferences()
+        self.controller._accessibility_display_preferences = preferences
+        resolved = self.controller.resolve_presentation_glance(
+            projection,
+            operator_events=(),
+            capacity=None,
+            presentation_time=100.8,
+        )
+        virtual = SimpleNamespace(
+            set_wraps_menu_bar=MagicMock(),
+            set_geometry_overrides=MagicMock(),
+            set_bracket_style=MagicMock(),
+            set_min_glow=MagicMock(),
+            set_follow_alcove=MagicMock(),
+            set_standing_gauges=MagicMock(),
+            set_click_handler=MagicMock(),
+            set_pointer_interaction_relevant=MagicMock(),
+            set_program=MagicMock(),
+        )
+        self.controller.virtual_status_device = virtual
+        self.controller.settings = self.controller.settings.with_virtual_status_device(True)
+        virtual_device = self.status_bar.StatusBarDevice(
+            device_id=self.status_bar.VIRTUAL_DEVICE_ID,
+            name=self.status_bar.VIRTUAL_DEVICE_NAME,
+            root=Path(self._tmp.name),
+            target=Path(self._tmp.name) / "virtual",
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        physical = self.status_bar.StatusBarDevice(
+            device_id="sidepulsedot",
+            name="SidePulse Dot",
+            root=Path(self._tmp.name) / "sidepulsedot",
+            target=Path(self._tmp.name) / "sidepulsedot" / "LEDS.LED",
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        request = self.status_bar.HardwareWriteRequest(
+            device=physical,
+            mode=AgentMode.WORKING,
+            battery_snapshot=None,
+            statuses=(),
+            projection=projection,
+            relay_elapsed_seconds=0.8,
+            accessibility_preferences=preferences,
+            resolved_glance=resolved,
+            presentation_time=100.8,
+        )
+        failure = self.status_bar.HardwareWriteResult(
+            request=request,
+            write=self.status_bar.LedStatusWrite(
+                LedDisplayState.WORKING,
+                None,
+                "",
+                False,
+                "write verification failed",
+            ),
+            label="SidePulse Dot Working",
+            agent_display_rendered=True,
+            completed_at=900.0,
+        )
+        command = self.status_bar.RuntimeWorkCommand(
+            domain=self.status_bar.RuntimeWorkerDomain.HARDWARE_WRITE,
+            key=self.controller._hardware_worker_key(physical),
+            generation=self.controller._hardware_write_generation,
+            deadline=101.0,
+            payload=request,
+        )
+        self.controller._hardware_write_active = True
+
+        with (
+            patch.object(self.controller, "status_bar_devices", return_value=[virtual_device]),
+            patch.object(self.controller, "effective_brightness_for_device", return_value=255),
+            patch.object(
+                self.controller,
+                "active_led_display_kind_for_device",
+                return_value=self.status_bar.LED_DISPLAY_AGENT,
+            ),
+            patch.object(self.controller, "screen_bar_click_status", return_value=None),
+            patch.object(self.controller, "schedule_screen_bar_sync") as delayed,
+            patch.object(
+                self.status_bar,
+                "compose_presentation_program",
+                wraps=self.status_bar.compose_presentation_program,
+            ) as compose,
+        ):
+            self.controller.sync_virtual_status_device(
+                AgentMode.WORKING,
+                None,
+                (),
+                projection=projection,
+                resolved_glance=resolved,
+                presentation_time=100.8,
+            )
+            self.controller._apply_hardware_write_result(command, failure)
+
+        self.assertIs(compose.call_args.args[0], resolved)
+        self.assertEqual(virtual.set_program.call_count, 1)
+        self.assertEqual(virtual.set_program.call_args.kwargs["started_at"], 100.8)
+        self.assertEqual(resolved.relay_epoch, 100.0)
+        self.assertIs(
+            virtual.set_program.call_args.kwargs["motion"],
+            self.status_bar.MotionClass.CONTINUOUS,
+        )
+        self.assertIn(
+            "0:",
+            virtual.set_program.call_args.kwargs["static_fallback_program"],
+        )
+        self.assertIsNone(
+            virtual.set_program.call_args.kwargs["next_visual_change_at"]
+        )
+        self.assertIn(" pulse ", virtual.set_program.call_args.args[0])
+        self.assertEqual(
+            self.controller.device_errors[physical.device_id],
+            "write verification failed",
+        )
+        delayed.assert_not_called()
+
+    def test_status_rebuild_keeps_controller_phase_and_maps_two_to_eight_leds(self) -> None:
+        device_root = Path(self._tmp.name) / "SidePulseDot"
+        device_root.mkdir()
+        target = device_root / "LEDS.LED"
+        target.touch()
+        device = self.status_bar.StatusBarDevice(
+            device_id="sidepulsedot",
+            name="SidePulse Dot",
+            root=device_root,
+            target=target,
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        scheduled: list[dict[str, object]] = []
+
+        def capture_schedule(
+            mode,
+            battery_snapshot,
+            statuses,
+            started_at,
+            projection=None,
+            relay_elapsed_seconds=None,
+        ):
+            scheduled.append(
+                {
+                    "started_at": started_at,
+                    "relay_elapsed_seconds": relay_elapsed_seconds,
+                }
+            )
+
+        initial = (_status("codex", AgentMode.WORKING), _status("claude", AgentMode.WORKING))
+        changed = (_status("codex", AgentMode.WORKING), _status("claude", AgentMode.IDLE_READY))
+        with (
+            patch.object(self.controller, "status_bar_devices", return_value=[device]),
+            patch.object(
+                self.controller,
+                "active_led_display_kind_for_device",
+                return_value=self.status_bar.LED_DISPLAY_AGENT,
+            ),
+            patch.object(self.controller, "schedule_screen_bar_sync", side_effect=capture_schedule),
+            patch(
+                "sidepulse.status_bar.time.monotonic",
+                side_effect=[100.1, 100.12, 100.15, 100.9, 100.92, 100.95],
+            ),
+        ):
+            self.controller.sync_leds_now(AgentMode.WORKING, None, "agent", initial)
+            first_program = target.read_text(encoding="utf-8")
+            self.controller.sync_leds_now(AgentMode.WORKING, None, "agent", changed)
+            rebuilt_program = target.read_text(encoding="utf-8")
+
+        self.assertEqual(self._first_pulse_index(first_program), 0)
+        self.assertEqual(self._first_pulse_index(rebuilt_program), 1)
+        self.assertAlmostEqual(scheduled[-1]["relay_elapsed_seconds"], 0.9)
+        self.assertEqual(scheduled[-1]["started_at"], 100.95)
+
+        _, screen_bar_program = program_for_snapshot(
+            changed,
+            led_count=8,
+            colors=self.controller.settings.colors,
+            relay_elapsed_seconds=scheduled[-1]["relay_elapsed_seconds"],
+        )
+        self.assertEqual(self._first_pulse_index(screen_bar_program), 4)
+
+    def test_screen_bar_uses_scheduled_elapsed_and_physical_write_anchor(self) -> None:
+        virtual = SimpleNamespace(
+            set_wraps_menu_bar=MagicMock(),
+            set_geometry_overrides=MagicMock(),
+            set_bracket_style=MagicMock(),
+            set_min_glow=MagicMock(),
+            set_follow_alcove=MagicMock(),
+            set_standing_gauges=MagicMock(),
+            set_click_handler=MagicMock(),
+            set_pointer_interaction_relevant=MagicMock(),
+            set_program=MagicMock(),
+        )
+        self.controller.virtual_status_device = virtual
+        self.controller.settings = self.controller.settings.with_virtual_status_device(True)
+        device = self.status_bar.StatusBarDevice(
+            device_id=self.status_bar.VIRTUAL_DEVICE_ID,
+            name=self.status_bar.VIRTUAL_DEVICE_NAME,
+            root=Path(self._tmp.name),
+            target=Path(self._tmp.name) / "virtual",
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        statuses = (_status("codex", AgentMode.WORKING), _status("claude", AgentMode.IDLE_READY))
+
+        with (
+            patch.object(self.controller, "status_bar_devices", return_value=[device]),
+            patch.object(self.controller, "active_led_display_kind_for_device", return_value="agent"),
+            patch.object(self.controller, "effective_brightness_for_device", return_value=255),
+            patch.object(self.controller, "screen_bar_click_status", return_value=None),
+            patch("sidepulse.status_bar.program_for_snapshot", wraps=program_for_snapshot) as render,
+        ):
+            self.controller.sync_virtual_status_device(
+                AgentMode.WORKING,
+                None,
+                statuses,
+                started_at=100.95,
+                relay_elapsed_seconds=0.9,
+            )
+
+        self.assertEqual(render.call_args.kwargs["relay_elapsed_seconds"], 0.9)
+        rendered_program = virtual.set_program.call_args.args[0]
+        self.assertEqual(self._first_pulse_index(rendered_program), 4)
+        self.assertEqual(virtual.set_program.call_args.kwargs["started_at"], 100.95)
+
+    def test_screen_bar_receives_agent_change_hidden_by_dot_dedupe(self) -> None:
+        physical_root = Path(self._tmp.name) / "SidePulseDot"
+        physical_root.mkdir()
+        physical_target = physical_root / "LEDS.LED"
+        physical_target.touch()
+        physical = self.status_bar.StatusBarDevice(
+            device_id="sidepulsedot",
+            name="SidePulse Dot",
+            root=physical_root,
+            target=physical_target,
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        virtual_device = self.status_bar.StatusBarDevice(
+            device_id=self.status_bar.VIRTUAL_DEVICE_ID,
+            name=self.status_bar.VIRTUAL_DEVICE_NAME,
+            root=Path(self._tmp.name),
+            target=Path(self._tmp.name) / "virtual",
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        virtual = SimpleNamespace(
+            set_wraps_menu_bar=MagicMock(),
+            set_geometry_overrides=MagicMock(),
+            set_bracket_style=MagicMock(),
+            set_min_glow=MagicMock(),
+            set_follow_alcove=MagicMock(),
+            set_standing_gauges=MagicMock(),
+            set_click_handler=MagicMock(),
+            set_pointer_interaction_relevant=MagicMock(),
+            set_program=MagicMock(),
+        )
+        self.controller.virtual_status_device = virtual
+        self.controller.settings = self.controller.settings.with_virtual_status_device(True)
+        initial = (
+            _status("codex", AgentMode.WORKING),
+            _status("claude", AgentMode.WORKING),
+            _status("devin", AgentMode.WORKING),
+            _status("grok", AgentMode.WORKING),
+        )
+        third_agent_changed = (
+            initial[0],
+            initial[1],
+            _status("devin", AgentMode.COMPLETED),
+            initial[3],
+        )
+        payloads: list[dict[str, object]] = []
+
+        def dispatch(selector, payload, _wait):
+            self.assertEqual(selector, "applyScreenBarSync:")
+            payloads.append(payload)
+            self.controller.applyScreenBarSync_(payload)
+
+        with (
+            patch.object(
+                self.controller,
+                "status_bar_devices",
+                side_effect=[[physical], [virtual_device], [physical], [virtual_device]],
+            ),
+            patch.object(
+                self.controller,
+                "active_led_display_kind_for_device",
+                return_value=self.status_bar.LED_DISPLAY_AGENT,
+            ),
+            patch.object(self.controller, "effective_brightness_for_device", return_value=255),
+            patch.object(self.controller, "screen_bar_click_status", return_value=None),
+            patch.object(
+                self.controller,
+                "performSelectorOnMainThread_withObject_waitUntilDone_",
+                side_effect=dispatch,
+            ),
+            patch("sidepulse.status_bar.time.monotonic", return_value=100.1),
+        ):
+            self.controller.sync_leds_now(AgentMode.WORKING, None, "agent", initial)
+            first_physical = physical_target.read_text(encoding="utf-8")
+            self.controller.sync_leds_now(
+                AgentMode.WORKING,
+                None,
+                "agent",
+                third_agent_changed,
+            )
+            second_physical = physical_target.read_text(encoding="utf-8")
+
+        self.assertEqual(first_physical, second_physical)
+        self.assertEqual(virtual.set_program.call_count, 2)
+        first_virtual = virtual.set_program.call_args_list[0].args[0]
+        second_virtual = virtual.set_program.call_args_list[1].args[0]
+        self.assertNotEqual(first_virtual, second_virtual)
+        self.assertEqual(
+            virtual.set_program.call_args_list[0].kwargs["dedupe_token"],
+            virtual.set_program.call_args_list[1].kwargs["dedupe_token"],
+        )
+        self.assertEqual(payloads[0]["started_at"], 100.1)
+        self.assertIsNone(payloads[1]["started_at"])
+
+
+class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    @staticmethod
+    def _canonical_snapshot(count: int = 5):
+        source = SourceKey("codex", "hooks", "local:test", "live_agent_events")
+        watermark = ProviderWatermark(
+            source,
+            WatermarkBasis.PROVIDER_SEQUENCE,
+            1_800_000_000.0,
+            EventToken("event:root"),
+            1,
+            1,
+        )
+        work_facts = []
+        request_facts = []
+        for index in range(count):
+            work_key = WorkKey(source, WorkIdentifier(f"work:{index}"))
+            request_key = RequestKey(
+                work_key,
+                RequestIdentifier(f"request:{index}"),
+            )
+            work_facts.append(
+                ProviderWorkFact(
+                    work_key,
+                    WorkLifecycle.WAITING,
+                    watermark,
+                    f"Codex work:{index}",
+                    None,
+                    NextActor.USER,
+                )
+            )
+            request_facts.append(
+                ProviderRequestFact(
+                    request_key,
+                    ProviderRequestState.LIVE,
+                    RequestKind.PERMISSION,
+                    NextActor.USER,
+                    watermark,
+                )
+            )
+        batch = ProviderFactBatch(
+            source,
+            ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+            SourceHealth.HEALTHY,
+            SourceFreshness.FRESH,
+            watermark.occurred_at_epoch,
+            watermark,
+            tuple(work_facts),
+            tuple(request_facts),
+            (),
+        )
+        monitor = LiveAgentMonitor(
+            clock_sampler=lambda: ClockSample(
+                watermark.occurred_at_epoch,
+                100.0,
+                BootIdentifier("boot:test"),
+            )
+        )
+        monitor.ingest_batch(
+            batch,
+            clock=ClockSample(
+                watermark.occurred_at_epoch,
+                100.0,
+                BootIdentifier("boot:test"),
+            ),
+        )
+        return monitor.snapshot()
+
+    @staticmethod
+    def _titles(menu):
+        return [menu.itemAtIndex_(index).title() for index in range(menu.numberOfItems())]
+
+    def test_canonical_root_caps_urgent_rows_and_moves_shelves_to_browser(self) -> None:
+        snapshot = self._canonical_snapshot()
+        self.controller.last_snapshot = snapshot
+        self.controller.status_bar_devices = MagicMock(return_value=[])
+
+        menu = self.status_bar.build_menu(
+            snapshot,
+            self.status_bar.STATE_ASK,
+            self.controller,
+        )
+        titles = self._titles(menu)
+
+        self.assertTrue(titles[0].startswith("Agent Mailbox · 5 active · 5 need you"))
+        self.assertEqual(sum(title.endswith("· needs you") for title in titles), 3)
+        self.assertEqual(titles[4], "2 more...")
+        self.assertTrue(menu.itemAtIndex_(4).isEnabled())
+        self.assertEqual(
+            menu.itemAtIndex_(4).representedObject().shelf,
+            MailboxSectionKind.NEEDS_YOU,
+        )
+        self.assertEqual(titles[5], "Open Agent Browser...")
+        self.assertNotIn("In Progress", titles)
+        self.assertNotIn("Ready for Review", titles)
+        self.assertNotIn("Recent", titles)
+        self.assertEqual(titles[-1], "Quit SidePulse")
+
+    def test_status_menu_open_marks_visit_and_only_plans_capacity_refresh(self) -> None:
+        snapshot = self._canonical_snapshot(1)
+        self.controller.last_snapshot = snapshot
+        self.controller.current_operator_state = snapshot.operator_state
+        before_preferences = self.controller.mailbox_preferences
+        before_opened_at = self.controller.menu_last_opened_at
+
+        with (
+            patch.object(self.controller, "maybe_refresh_usage_summary") as usage,
+            patch.object(self.controller, "request_usage_refresh") as request_usage,
+            patch("sidepulse.status_bar.detect_log_path") as detect,
+            patch("sidepulse.status_bar.discover_devices") as discover,
+        ):
+            self.controller.menuWillOpen_(None)
+
+        usage.assert_called_once_with(reason="menu-open")
+        request_usage.assert_not_called()
+        detect.assert_not_called()
+        discover.assert_not_called()
+        self.assertEqual(self.controller.mailbox_preferences, before_preferences)
+        self.assertIsNone(before_opened_at)
+        self.assertIsNotNone(self.controller.menu_last_opened_at)
+
+    def test_urgent_rows_and_browser_receive_current_shared_action_descriptors(self) -> None:
+        snapshot = self._canonical_snapshot(1)
+        self.controller.last_snapshot = snapshot
+        self.controller.current_operator_state = snapshot.operator_state
+
+        menu = self.status_bar.build_menu(
+            snapshot,
+            self.status_bar.STATE_ASK,
+            self.controller,
+        )
+        urgent = menu.itemAtIndex_(1)
+        self.assertEqual(
+            self._titles(urgent.submenu()),
+            ["Open", "I'm on It", "Watch", "Pin"],
+        )
+        self.assertFalse(urgent.submenu().itemAtIndex_(0).isEnabled())
+        browser = next(
+            item
+            for item in (menu.itemAtIndex_(index) for index in range(menu.numberOfItems()))
+            if item.title() == "Open Agent Browser..."
+        )
+        self.assertTrue(self.controller.openAgentBrowser_(browser))
+        row_key = snapshot.operator_state.works[0].key
+        self.assertEqual(
+            tuple(
+                descriptor.kind
+                for descriptor in self.controller.agent_browser_controller.actions_by_work_key[
+                    row_key
+                ]
+            ),
+            (
+                OperatorActionKind.OPEN,
+                OperatorActionKind.ACKNOWLEDGE,
+                OperatorActionKind.WATCH,
+                OperatorActionKind.PIN,
+            ),
+        )
+
+    def test_action_revalidates_generation_and_keeps_failed_save_visible(self) -> None:
+        snapshot = self._canonical_snapshot(1)
+        self.controller.last_snapshot = snapshot
+        self.controller.current_operator_state = snapshot.operator_state
+        self.controller.status_bar_devices = MagicMock(return_value=[])
+        self.controller.status_item = MagicMock()
+        self.controller.update_status_menu(snapshot, self.status_bar.STATE_ASK)
+        root_menu = self.controller.status_item.setMenu_.call_args.args[0]
+        browser_item = next(
+            item
+            for item in (
+                root_menu.itemAtIndex_(index)
+                for index in range(root_menu.numberOfItems())
+            )
+            if item.title() == "Open Agent Browser..."
+        )
+        self.assertTrue(self.controller.openAgentBrowser_(browser_item))
+        self.controller.mailbox_preferences_saver = MagicMock(
+            side_effect=OSError("private store unavailable")
+        )
+        work_key = snapshot.operator_state.works[0].key
+
+        stale = AgentBrowserActionPayload(
+            work_key,
+            snapshot.operator_state.generation + 1,
+            OperatorActionKind.WATCH,
+        )
+        self.assertFalse(self.controller.performAgentBrowserPayload_(stale))
+        self.assertEqual(self.controller.mailbox_preferences, ())
+
+        current = dataclass_replace(stale, generation=snapshot.operator_state.generation)
+        self.assertTrue(self.controller.performAgentBrowserPayload_(current))
+        self.assertEqual(self.controller.mailbox_preferences[0].work_key, work_key)
+        self.assertTrue(self.controller.mailbox_preferences_dirty)
+        self.assertEqual(
+            self.controller.operator_action_error,
+            "Could not save mailbox change. SidePulse will retry.",
+        )
+        browser = self.controller.agent_browser_controller
+        self.assertTrue(browser.projection.rows[0].watched)
+        self.assertEqual(
+            browser.error_label.stringValue(),
+            "Could not save mailbox change. SidePulse will retry.",
+        )
+        self.assertIn(
+            OperatorActionKind.UNWATCH,
+            tuple(
+                descriptor.kind
+                for descriptor in browser.actions_by_work_key[work_key]
+            ),
+        )
+        republished_root = self.controller.status_item.setMenu_.call_args.args[0]
+        self.assertIn(
+            "Unwatch",
+            self._titles(republished_root.itemAtIndex_(1).submenu()),
+        )
+        self.assertIn(
+            "Could not save mailbox change. SidePulse will retry.",
+            self._titles(republished_root),
+        )
+
+    def test_worker_preference_action_inverts_to_family_and_rejects_late_generation(
+        self,
+    ) -> None:
+        snapshot = self._canonical_snapshot(1)
+        root = snapshot.operator_state.works[0]
+        worker_key = WorkKey(
+            root.key.source_key,
+            WorkIdentifier("worker:preference"),
+        )
+        worker = dataclass_replace(
+            root,
+            key=worker_key,
+            lifecycle=WorkLifecycle.ACTIVE,
+            next_actor=NextActor.PROVIDER,
+            safe_label="Codex worker",
+            parent_key=root.key,
+            request_keys=(),
+        )
+        state = dataclass_replace(
+            snapshot.operator_state,
+            generation=17,
+            works=(root, worker),
+        )
+        self.controller.current_operator_state = state
+        self.controller.last_snapshot = dataclass_replace(snapshot, operator_state=state)
+        self.controller.mailbox_preferences_saver = lambda _preferences: None
+
+        late = AgentBrowserActionPayload(
+            worker_key,
+            16,
+            OperatorActionKind.WATCH,
+        )
+        current = dataclass_replace(late, generation=17)
+
+        self.assertFalse(self.controller.performAgentBrowserPayload_(late))
+        self.assertEqual(self.controller.mailbox_preferences, ())
+        self.assertTrue(self.controller.performAgentBrowserPayload_(current))
+        self.assertEqual(len(self.controller.mailbox_preferences), 1)
+        self.assertEqual(
+            self.controller.mailbox_preferences[0].work_key,
+            root.key,
+        )
+        self.assertNotEqual(
+            self.controller.mailbox_preferences[0].work_key,
+            worker_key,
+        )
+
+    def test_duplicate_worker_event_is_inert_before_family_projection(self) -> None:
+        source = SourceKey("codex", "hooks", "local:duplicate", "live_agent_events")
+        watermark = ProviderWatermark(
+            source,
+            WatermarkBasis.PROVIDER_SEQUENCE,
+            1_800_000_100.0,
+            EventToken("event:duplicate-worker"),
+            22,
+            1,
+        )
+        parent_key = WorkKey(source, WorkIdentifier("duplicate-parent"))
+        worker_key = WorkKey(source, WorkIdentifier("duplicate-worker"))
+        batch = ProviderFactBatch(
+            source,
+            ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+            SourceHealth.HEALTHY,
+            SourceFreshness.FRESH,
+            watermark.occurred_at_epoch,
+            watermark,
+            (
+                ProviderWorkFact(
+                    parent_key,
+                    WorkLifecycle.ACTIVE,
+                    watermark,
+                    "Codex duplicate-parent",
+                    None,
+                    NextActor.PROVIDER,
+                ),
+                ProviderWorkFact(
+                    worker_key,
+                    WorkLifecycle.ACTIVE,
+                    watermark,
+                    "Codex duplicate-worker",
+                    parent_key,
+                    NextActor.PROVIDER,
+                ),
+            ),
+            (),
+            (),
+        )
+        clock = ClockSample(
+            watermark.occurred_at_epoch,
+            200.0,
+            BootIdentifier("boot:duplicate-worker"),
+        )
+        monitor = LiveAgentMonitor(clock_sampler=lambda: clock)
+
+        monitor.ingest_batch(batch, clock=clock)
+        first = monitor.snapshot()
+        monitor.ingest_batch(batch, clock=clock)
+        duplicate = monitor.snapshot()
+        projection = self.status_bar._canonical_agent_browser_projection(
+            duplicate,
+            self.controller,
+            family_key=parent_key,
+            selected_work_key=worker_key,
+        )
+
+        self.assertEqual(duplicate.operator_state, first.operator_state)
+        self.assertEqual(len(duplicate.operator_state.works), 2)
+        self.assertEqual(duplicate.operator_events, ())
+        self.assertEqual(projection.scoped_count, 1)
+        self.assertEqual(tuple(row.work_key for row in projection.rows), (worker_key,))
+
+    def test_open_agent_browser_reuses_one_controller_and_validates_generation(self) -> None:
+        snapshot = self._canonical_snapshot(2)
+        self.controller.last_snapshot = snapshot
+        self.controller.current_operator_state = snapshot.operator_state
+        menu = self.status_bar.build_menu(
+            snapshot,
+            self.status_bar.STATE_ASK,
+            self.controller,
+        )
+        browser_item = next(
+            item
+            for item in (menu.itemAtIndex_(index) for index in range(menu.numberOfItems()))
+            if item.title() == "Open Agent Browser..."
+        )
+
+        self.assertTrue(self.controller.openAgentBrowser_(browser_item))
+        first = self.controller.agent_browser_controller
+        self.assertTrue(self.controller.openAgentBrowser_(browser_item))
+        self.assertIs(self.controller.agent_browser_controller, first)
+        stale = SimpleNamespace(
+            representedObject=lambda: dataclass_replace(
+                browser_item.representedObject(),
+                generation=snapshot.operator_state.generation + 1,
+            )
+        )
+        self.assertFalse(self.controller.openAgentBrowser_(stale))
+
+    def test_tracked_canonical_state_patches_same_native_item_in_place(self) -> None:
+        snapshot = self._canonical_snapshot(1)
+        self.controller.last_snapshot = snapshot
+        self.controller.status_bar_devices = MagicMock(return_value=[])
+        self.controller.status_item = MagicMock()
+        self.controller.update_status_menu(snapshot, self.status_bar.STATE_ASK)
+        menu = self.controller.status_item.setMenu_.call_args.args[0]
+        urgent = menu.itemAtIndex_(1)
+        open_item = urgent.submenu().itemAtIndex_(0)
+        self.assertFalse(open_item.isEnabled())
+        work = snapshot.operator_state.works[0]
+        self.controller.navigation_candidates_by_work_key = {
+            work.key: (
+                NavigationCandidate(
+                    work.key,
+                    work.watermark.sequence,
+                    "open:primary",
+                    "url",
+                    "codex://threads/work%3A0",
+                    SourceFreshness.FRESH,
+                    True,
+                ),
+            )
+        }
+        self.controller.status_menu_open = True
+        self.controller.update_status_menu(
+            snapshot,
+            self.status_bar.STATE_ASK,
+        )
+
+        self.assertIs(menu.itemAtIndex_(1), urgent)
+        self.assertIs(urgent.submenu().itemAtIndex_(0), open_item)
+        self.assertTrue(open_item.isEnabled())
+        self.assertEqual(self.controller.status_item.setMenu_.call_count, 1)
+
+    def test_mailbox_boundary_uses_exact_deadline_in_common_modes(self) -> None:
+        timer = MagicMock()
+        run_loop = MagicMock()
+        with (
+            patch.object(self.status_bar, "NSTimer") as timers,
+            patch.object(self.status_bar, "NSRunLoop") as run_loops,
+            patch("sidepulse.status_bar.time.time", return_value=100.0),
+        ):
+            timers.timerWithTimeInterval_target_selector_userInfo_repeats_.return_value = (
+                timer
+            )
+            run_loops.currentRunLoop.return_value = run_loop
+            self.controller.schedule_mailbox_boundary(101.25)
+
+        self.assertEqual(
+            self.controller.mailbox_boundary_schedule.deadline_epoch,
+            101.25,
+        )
+        self.assertEqual(
+            timers.timerWithTimeInterval_target_selector_userInfo_repeats_.call_args.args[0],
+            1.25,
+        )
+        run_loop.addTimer_forMode_.assert_called_once_with(
+            timer,
+            self.status_bar.NSRunLoopCommonModes,
+        )
+
+
+class Task10AccessibilityObservationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_launch_registers_once_and_termination_removes_before_surface_release(
+        self,
+    ) -> None:
+        lifecycle = []
+
+        class Center:
+            def __init__(center_self) -> None:
+                center_self.added = []
+                center_self.removed = []
+
+            def addObserver_selector_name_object_(
+                center_self, observer, selector, name, observed
+            ) -> None:
+                lifecycle.append("observer-added")
+                center_self.added.append((observer, selector, name, observed))
+
+            def removeObserver_name_object_(
+                center_self, observer, name, observed
+            ) -> None:
+                lifecycle.append("observer-removed")
+                center_self.removed.append((observer, name, observed))
+
+        center = Center()
+        workspace = SimpleNamespace(
+            notificationCenter=lambda: center,
+            accessibilityDisplayShouldReduceMotion=lambda: False,
+            accessibilityDisplayShouldReduceTransparency=lambda: False,
+            accessibilityDisplayShouldIncreaseContrast=lambda: False,
+            accessibilityDisplayShouldDifferentiateWithoutColor=lambda: False,
+        )
+        workspace_api = SimpleNamespace(sharedWorkspace=lambda: workspace)
+        status_item = MagicMock()
+        status_api = MagicMock()
+        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = (
+            status_item
+        )
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(self.status_bar, "NSApp"))
+            stack.enter_context(patch.object(self.status_bar, "NSStatusBar", status_api))
+            stack.enter_context(patch.object(self.status_bar, "NSWorkspace", workspace_api))
+            stack.enter_context(patch.object(self.status_bar.threading, "Thread"))
+            for name in (
+                "load_operator_local_state",
+                "start_event_server",
+                "replay_debug_logs",
+                "refresh_",
+                "reconcile_lid_observation",
+                "show_setup_window_if_needed",
+            ):
+                stack.enter_context(patch.object(self.controller, name))
+            stack.enter_context(patch.object(self.controller.virtual_status_device, "show"))
+            stack.enter_context(patch.object(self.controller.virtual_status_device, "hide"))
+            self.controller.applicationDidFinishLaunching_(None)
+            self.controller.applicationDidFinishLaunching_(None)
+
+        self.assertEqual(len(center.added), 1)
+        self.assertEqual(center.added[0][1], "accessibilityDisplayOptionsDidChange:")
+        self.assertEqual(
+            center.added[0][2],
+            self.status_bar.NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+        )
+        self.assertIsNone(center.added[0][3])
+        self.assertEqual(
+            self.controller._accessibility_display_preferences,
+            self.status_bar.AccessibilityDisplayPreferences(),
+        )
+        self.assertEqual(self.controller._accessibility_generation, 1)
+
+        self.controller.monitor = None
+        self.controller.virtual_status_device.terminate = lambda: lifecycle.append(
+            "surface-released"
+        )
+        with patch.object(self.controller, "stop_event_server"):
+            self.controller.applicationWillTerminate_(None)
+            self.controller.applicationWillTerminate_(None)
+
+        self.assertEqual(len(center.removed), 1)
+        self.assertLess(
+            lifecycle.index("observer-removed"),
+            lifecycle.index("surface-released"),
+        )
+
+    @staticmethod
+    def _workspace(center, values, reads):
+        def read(key):
+            reads.append(key)
+            return values[key]
+
+        return SimpleNamespace(
+            notificationCenter=lambda: center,
+            accessibilityDisplayShouldReduceMotion=lambda: read("motion"),
+            accessibilityDisplayShouldReduceTransparency=lambda: read(
+                "transparency"
+            ),
+            accessibilityDisplayShouldIncreaseContrast=lambda: read("contrast"),
+            accessibilityDisplayShouldDifferentiateWithoutColor=lambda: read(
+                "differentiate"
+            ),
+        )
+
+    def test_duplicate_notification_is_inert_and_stale_main_payload_is_rejected(
+        self,
+    ) -> None:
+        values = {
+            "motion": False,
+            "transparency": False,
+            "contrast": False,
+            "differentiate": False,
+        }
+        reads = []
+        workspace = self._workspace(MagicMock(), values, reads)
+        preferences = self.status_bar.AccessibilityDisplayPreferences()
+        self.controller._runtime_started = True
+        self.controller._accessibility_observer_center = workspace.notificationCenter()
+        self.controller._accessibility_observer_generation = 7
+        self.controller._accessibility_display_preferences = preferences
+        self.controller._accessibility_generation = 3
+        self.controller.virtual_status_device.set_accessibility_display_preferences = (
+            MagicMock()
+        )
+        self.controller._hardware_write_worker = MagicMock()
+        self.controller.refresh_ = MagicMock()
+        self.controller.show_settings_window = MagicMock()
+        scheduled = []
+        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = (
+            lambda selector, payload, wait: scheduled.append((selector, payload, wait))
+        )
+
+        with patch.object(
+            self.status_bar,
+            "NSWorkspace",
+            SimpleNamespace(sharedWorkspace=lambda: workspace),
+        ):
+            self.controller.accessibilityDisplayOptionsDidChange_(None)
+
+        self.assertEqual(reads, ["motion", "transparency", "contrast", "differentiate"])
+        self.assertEqual(len(scheduled), 1)
+        selector, payload, wait = scheduled[0]
+        self.assertEqual(selector, "applyAccessibilityDisplayOptions:")
+        self.assertFalse(wait)
+        self.controller.applyAccessibilityDisplayOptions_(payload)
+
+        self.assertEqual(self.controller._accessibility_generation, 3)
+        self.assertIs(self.controller._accessibility_display_preferences, preferences)
+        self.controller.virtual_status_device.set_accessibility_display_preferences.assert_not_called()
+        self.controller._hardware_write_worker.submit.assert_not_called()
+        self.controller.refresh_.assert_not_called()
+        self.controller.show_settings_window.assert_not_called()
+
+        values["contrast"] = True
+        with patch.object(
+            self.status_bar,
+            "NSWorkspace",
+            SimpleNamespace(sharedWorkspace=lambda: workspace),
+        ):
+            self.controller.accessibilityDisplayOptionsDidChange_(None)
+        stale_payload = scheduled[-1][1]
+        self.controller._accessibility_observer_generation += 1
+        self.controller.applyAccessibilityDisplayOptions_(stale_payload)
+        self.assertEqual(self.controller._accessibility_generation, 3)
+        self.controller.virtual_status_device.set_accessibility_display_preferences.assert_not_called()
+
+        reads.clear()
+        scheduled_count = len(scheduled)
+        self.controller._runtime_started = False
+        self.controller._accessibility_observer_center = None
+        with patch.object(
+            self.status_bar,
+            "NSWorkspace",
+            SimpleNamespace(sharedWorkspace=lambda: workspace),
+        ):
+            self.controller.accessibilityDisplayOptionsDidChange_(None)
+        self.assertEqual(reads, [])
+        self.assertEqual(len(scheduled), scheduled_count)
+
+    def test_changed_notification_repaints_and_replans_physical_from_same_snapshot(
+        self,
+    ) -> None:
+        values = {
+            "motion": True,
+            "transparency": True,
+            "contrast": True,
+            "differentiate": True,
+        }
+        reads = []
+        center = MagicMock()
+        workspace = self._workspace(center, values, reads)
+        self.controller._runtime_started = True
+        self.controller._accessibility_observer_center = center
+        self.controller._accessibility_observer_generation = 11
+        self.controller._accessibility_display_preferences = (
+            self.status_bar.AccessibilityDisplayPreferences()
+        )
+        self.controller._hardware_write_active = True
+        self.controller._hardware_write_worker = MagicMock()
+        physical = self.status_bar.StatusBarDevice(
+            device_id="sidepulse-task10",
+            name="SidePulse Task 10",
+            root=Path("/Volumes/SidePulseTask10"),
+            target=Path("/Volumes/SidePulseTask10/LEDS.LED"),
+            connected=True,
+            display=self.status_bar.LED_DISPLAY_AGENT,
+        )
+        self.controller.status_bar_devices = MagicMock(return_value=[physical])
+        self.controller.last_snapshot = SimpleNamespace(
+            statuses=(),
+            aggregate=SimpleNamespace(mode=AgentMode.IDLE_READY),
+        )
+        self.controller.current_attention_projection = None
+        self.controller.virtual_status_device.set_accessibility_display_preferences = (
+            MagicMock()
+        )
+        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = (
+            lambda _selector, payload, _wait: self.controller.applyAccessibilityDisplayOptions_(
+                payload
+            )
+        )
+
+        with patch.object(
+            self.status_bar,
+            "NSWorkspace",
+            SimpleNamespace(sharedWorkspace=lambda: workspace),
+        ):
+            self.controller.accessibilityDisplayOptionsDidChange_(None)
+
+        self.assertEqual(self.controller._accessibility_generation, 1)
+        snapshot = self.controller._accessibility_display_preferences
+        self.assertEqual(
+            snapshot,
+            self.status_bar.AccessibilityDisplayPreferences(True, True, True, True),
+        )
+        virtual_call = (
+            self.controller.virtual_status_device.set_accessibility_display_preferences.call_args
+        )
+        self.assertIs(virtual_call.args[0], snapshot)
+        command = self.controller._hardware_write_worker.submit.call_args.args[0]
+        self.assertIs(command.payload.accessibility_preferences, snapshot)
+        self.assertEqual(command.payload.projection, None)
+
+
+class Task10FiniteStatusEmphasisTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+        self.controller._runtime_started = True
+        self.controller._presentation_scheduler_inputs = None
+        self.controller.current_operator_state = empty_operator_state()
+        self.button = MagicMock()
+        self.controller.status_item = SimpleNamespace(button=lambda: self.button)
+        self.glance = ResolvedGlance(
+            semantic=GlanceSemantic.REST,
+            glyph=SemanticGlyph.REST,
+            cue=None,
+            override_reason=GlanceOverrideReason.NONE,
+            relay_epoch=1.0,
+            next_visual_change_at=None,
+        )
+
+    def test_one_active_one_pending_never_blank_and_settles_to_formatter_text(
+        self,
+    ) -> None:
+        first = FiniteCue("task10:first", GlanceSemantic.FRESH_FAILURE, 2, 0.5)
+        second = FiniteCue(
+            "task10:second",
+            GlanceSemantic.FRESH_COMPLETION,
+            2,
+            0.5,
+        )
+
+        state = self.controller.reconcile_status_emphasis(
+            self.glance,
+            (first, second),
+            now=10.0,
+            sleeping=False,
+        )
+        self.assertIs(state.active, first)
+        self.assertIs(state.pending, second)
+        self.assertEqual(state.next_deadline, 11.0)
+        original_deadline = state.next_deadline
+        self.controller._presentation_monotonic = lambda: 10.0
+        self.controller.set_status(self.status_bar.STATE_IDLE)
+        self.assertTrue(self.button.setTitle_.call_args.args[0].strip())
+
+        duplicate = self.controller.reconcile_status_emphasis(
+            self.glance,
+            (first, second),
+            now=10.4,
+            sleeping=False,
+        )
+        self.assertEqual(duplicate.next_deadline, original_deadline)
+        self.assertTrue(all(call.args[0].strip() for call in self.button.setTitle_.call_args_list))
+
+        pending = self.controller.reconcile_status_emphasis(
+            self.glance,
+            (first, second),
+            now=11.0,
+            sleeping=False,
+        )
+        self.assertIs(pending.active, second)
+        settled = self.controller.reconcile_status_emphasis(
+            self.glance,
+            (first, second),
+            now=12.0,
+            sleeping=False,
+        )
+        self.assertIsNone(settled.active)
+        self.assertIsNone(settled.pending)
+        steady = status_item_accessibility(
+            self.controller.current_operator_state,
+            self.glance,
+        )
+        self.assertEqual(self.button.setTitle_.call_args.args[0].strip(), steady.value)
+        self.assertEqual(self.button.setAccessibilityLabel_.call_args.args[0], steady.label)
+        self.assertEqual(self.button.setAccessibilityHelp_.call_args.args[0], steady.help)
+
+    def test_sleep_consumes_status_cue_and_wake_keeps_steady_truth(self) -> None:
+        cue = FiniteCue("task10:sleep", GlanceSemantic.FRESH_COMPLETION, 2, 0.5)
+
+        asleep = self.controller.reconcile_status_emphasis(
+            self.glance,
+            (cue,),
+            now=20.0,
+            sleeping=True,
+        )
+        awake = self.controller.reconcile_status_emphasis(
+            self.glance,
+            (cue,),
+            now=21.0,
+            sleeping=False,
+        )
+
+        self.assertIsNone(asleep.active)
+        self.assertIsNone(awake.active)
+        steady = status_item_accessibility(
+            self.controller.current_operator_state,
+            self.glance,
+        )
+        self.assertEqual(self.button.setTitle_.call_args.args[0].strip(), steady.value)
 
 
 if __name__ == "__main__":

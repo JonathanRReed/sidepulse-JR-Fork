@@ -1,4 +1,8 @@
-"""Builds the SidePulse.app wrapper bundle the launchd job runs inside.
+"""Build an explicitly mutable SidePulse.app development wrapper.
+
+This module is not the production packaging path. Production uses the
+self-contained PyInstaller app built by packaging/build_macos_pkg.sh. The
+wrapper here remains only for deliberate source-development and TCC testing.
 
 Why a bundle at all: macOS TCC (Full Disk Access today; Calendars and
 notification observation tomorrow) attributes permissions to the
@@ -60,6 +64,12 @@ from pathlib import Path
 from typing import Any
 
 from .providers import default_state_dir
+from .status_bar_launch import (
+    APPLE_EVENTS_USAGE_DESCRIPTION,
+    REVIEWED_TERMINAL_BUNDLE_IDENTIFIERS,
+    terminal_navigation_requires_apple_events,
+)
+from .trusted_tools import trusted_system_tool
 
 APP_BUNDLE_NAME = "SidePulse.app"
 APP_BUNDLE_IDENTIFIER = "io.sidepulse.app"
@@ -92,7 +102,12 @@ def default_boot_dir() -> Path:
     return default_state_dir() / "bundle-boot"
 
 
-def _info_plist(environment: dict[str, str]) -> bytes:
+def _info_plist(
+    environment: dict[str, str],
+    *,
+    terminal_bundle_identifiers: tuple[str, ...] = REVIEWED_TERMINAL_BUNDLE_IDENTIFIERS,
+    fallback_to_terminal: bool = True,
+) -> bytes:
     info: dict[str, Any] = {
         "CFBundleName": "SidePulse",
         "CFBundleDisplayName": "SidePulse",
@@ -105,11 +120,7 @@ def _info_plist(environment: dict[str, str]) -> bytes:
         # Finder/Raycast/TCC-reopen launches resolve the interpreter's
         # runtime exactly like the launchd job does.
         "LSEnvironment": environment,
-        # Usage descriptions for the TCC prompts the bundle presents.
-        # EVERY foreseeable key ships in one batch: each Info.plist
-        # change re-signs the bundle, and macOS pins existing TCC
-        # grants (Full Disk Access included) to the exact signature --
-        # so every new key here costs the user a re-grant. Batch them.
+        # Usage descriptions for TCC-protected actions this bundle actually exposes.
         "NSCalendarsUsageDescription": (
             "SidePulse can glow before calendar events start."
         ),
@@ -120,6 +131,11 @@ def _info_plist(environment: dict[str, str]) -> bytes:
             "SidePulse can glow when reminders come due."
         ),
     }
+    if terminal_navigation_requires_apple_events(
+        terminal_bundle_identifiers,
+        fallback_to_terminal=fallback_to_terminal,
+    ):
+        info["NSAppleEventsUsageDescription"] = APPLE_EVENTS_USAGE_DESCRIPTION
     return plistlib.dumps(info)
 
 
@@ -205,8 +221,9 @@ _sidepulse_plain_launch_boot()
 
 
 def _codesign(bundle: Path) -> None:
+    codesign = str(trusted_system_tool("codesign"))
     sign = subprocess.run(
-        ["codesign", "--force", "--sign", "-", str(bundle)],
+        [codesign, "--force", "--sign", "-", str(bundle)],
         capture_output=True,
         text=True,
         timeout=60,
@@ -214,7 +231,7 @@ def _codesign(bundle: Path) -> None:
     if sign.returncode != 0:
         raise AppBundleError(f"codesign failed for {bundle}: {sign.stderr.strip()}")
     verify = subprocess.run(
-        ["codesign", "--verify", "--strict", str(bundle)],
+        [codesign, "--verify", "--strict", str(bundle)],
         capture_output=True,
         text=True,
         timeout=60,
@@ -228,7 +245,7 @@ def _codesign(bundle: Path) -> None:
 def _signature_valid(bundle: Path) -> bool:
     try:
         verify = subprocess.run(
-            ["codesign", "--verify", "--strict", str(bundle)],
+            [str(trusted_system_tool("codesign")), "--verify", "--strict", str(bundle)],
             capture_output=True,
             timeout=60,
         )
@@ -242,7 +259,7 @@ def build_app_bundle(
     venv_python: Path | str | None = None,
     boot_dir: Path | None = None,
 ) -> AppBundleResult:
-    """Creates or refreshes the wrapper bundle. Idempotent: recopies the
+    """Create or refresh the development-only wrapper bundle. Idempotent: recopies the
     interpreter only when the resolved CPython binary changed, rewrites
     metadata only when its content differs, and re-signs only when the
     bundle changed or its signature no longer verifies."""

@@ -5,6 +5,136 @@ current directory the way `python -m pytest` does)."""
 import sys
 from pathlib import Path
 
+import pytest
+
 _ROOT = str(Path(__file__).resolve().parent.parent)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+
+
+_LIVE_VOLUME_ROOT = Path("/Volumes")
+
+
+def _is_live_volume_path(path: object) -> bool:
+    candidate = Path(path)
+    try:
+        candidate = candidate.expanduser().resolve(strict=False)
+        root = _LIVE_VOLUME_ROOT.resolve(strict=False)
+    except OSError:
+        candidate = candidate.absolute()
+        root = _LIVE_VOLUME_ROOT
+    return candidate == root or root in candidate.parents
+
+
+@pytest.fixture(autouse=True)
+def block_live_volume_writes(monkeypatch):
+    """Fail tests before any file or keepalive write reaches real hardware."""
+
+    original_write_text = Path.write_text
+    original_write_bytes = Path.write_bytes
+    original_touch = Path.touch
+    original_replace = Path.replace
+
+    def reject(path: object, operation: str) -> None:
+        if _is_live_volume_path(path):
+            raise AssertionError(
+                f"test attempted {operation} on mounted hardware path: {path}"
+            )
+
+    def guarded_write_text(path, *args, **kwargs):
+        reject(path, "write_text")
+        return original_write_text(path, *args, **kwargs)
+
+    def guarded_write_bytes(path, *args, **kwargs):
+        reject(path, "write_bytes")
+        return original_write_bytes(path, *args, **kwargs)
+
+    def guarded_touch(path, *args, **kwargs):
+        reject(path, "touch")
+        return original_touch(path, *args, **kwargs)
+
+    def guarded_replace(path, target, *args, **kwargs):
+        reject(path, "replace source")
+        reject(target, "replace target")
+        return original_replace(path, target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", guarded_write_text, raising=False)
+    monkeypatch.setattr(Path, "write_bytes", guarded_write_bytes, raising=False)
+    monkeypatch.setattr(Path, "touch", guarded_touch, raising=False)
+    monkeypatch.setattr(Path, "replace", guarded_replace, raising=False)
+
+    from sidepulse import keep_awake
+
+    original_keepalive_touch = keep_awake.touch_keepalive_file
+    original_poke_status_file = keep_awake.KeepAwakeController.poke_status_file
+
+    def guarded_keepalive_touch(path):
+        reject(path, "keepalive touch")
+        return original_keepalive_touch(path)
+
+    def guarded_poke_status_file(controller, target, *args, **kwargs):
+        if target is not None:
+            reject(keep_awake.keepalive_file_for_target(target), "keepalive poke")
+        return original_poke_status_file(controller, target, *args, **kwargs)
+
+    def guarded_subprocess_run(arguments, *args, **kwargs):
+        command = list(arguments) if not isinstance(arguments, (str, bytes)) else []
+        if command and command[0] == "/usr/bin/touch":
+            for target in command[1:]:
+                reject(target, "subprocess touch")
+        return original_subprocess_run(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(keep_awake, "touch_keepalive_file", guarded_keepalive_touch)
+    monkeypatch.setattr(
+        keep_awake.KeepAwakeController,
+        "poke_status_file",
+        guarded_poke_status_file,
+    )
+    original_subprocess_run = keep_awake.subprocess.run
+    monkeypatch.setattr(keep_awake.subprocess, "run", guarded_subprocess_run)
+
+    try:
+        from sidepulse import status_bar
+    except (ImportError, SystemExit):
+        return
+
+    original_keepalive_targets = status_bar.StatusBarController.status_keepalive_targets
+
+    def guarded_keepalive_targets(controller):
+        targets = original_keepalive_targets(controller)
+        for target in targets:
+            reject(target, "keepalive target selection")
+        return targets
+
+    monkeypatch.setattr(
+        status_bar.StatusBarController,
+        "status_keepalive_targets",
+        guarded_keepalive_targets,
+    )
+
+    from sidepulse import device_writer
+
+    original_write_led_program = device_writer.write_led_program
+
+    def guarded_write_led_program(
+        text,
+        *,
+        device_path=None,
+        file_name="LEDS.LED",
+        dry_run=False,
+        preserve_existing_inode=False,
+    ):
+        if device_path is not None:
+            reject(
+                device_writer.target_from_device_path(Path(device_path), file_name),
+                "LED program write",
+            )
+        return original_write_led_program(
+            text,
+            device_path=device_path,
+            file_name=file_name,
+            dry_run=dry_run,
+            preserve_existing_inode=preserve_existing_inode,
+        )
+
+    monkeypatch.setattr(device_writer, "write_led_program", guarded_write_led_program)

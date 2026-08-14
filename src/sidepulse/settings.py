@@ -3,14 +3,24 @@ from __future__ import annotations
 import json
 import os
 import re
-import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from .battery import DEFAULT_POWER_CHANGE_PREVIEW_SECONDS
+from .capacity_calibration import (
+    ForecastReleaseAuthority,
+    forecast_release_authority_from_payload,
+    forecast_release_authority_to_payload,
+)
 from .colors import ColorSettings
 from .led_status import DEFAULT_CHANNEL_GAIN, normalize_channel_gain
+from .private_io import (
+    atomic_private_write,
+    ensure_private_directory,
+    ensure_private_file,
+    read_private_text,
+)
 from .session_actions import SESSION_OPEN_CHOICES
 
 LED_DISPLAY_AGENT = "agent"
@@ -25,23 +35,12 @@ LED_DISPLAY_CHOICES = (
     LED_DISPLAY_STUDIO,
     LED_DISPLAY_QUOTA_RUNWAY,
 )
+SETTINGS_SCHEMA_VERSION = 1
 CALIBRATION_PROFILE_SLOTS = ("Day", "Night", "Travel")
-# Notification blink defaults: each app's own brand color, so the blink
-# says WHICH app without reading anything.
 BRACKET_STYLE_CHOICES = ("auto", "spatial", "identity")
-NOTIFICATION_APP_IMESSAGE = "com.apple.MobileSMS"
-NOTIFICATION_APP_WHATSAPP = "net.whatsapp.WhatsApp"
-NOTIFICATION_APP_TELEGRAM = "ru.keepcoder.Telegram"
-DEFAULT_NOTIFICATION_APP_COLORS: dict[str, str] = {
-    NOTIFICATION_APP_IMESSAGE: "#34C759",
-    NOTIFICATION_APP_WHATSAPP: "#25D366",
-    NOTIFICATION_APP_TELEGRAM: "#2AABEE",
-}
 
 WEBHOOK_EVENT_KEYS = (
     "completion",
-    "quota_sunrise",
-    "quota_threshold",
     "weather",
     "timebox",
 )
@@ -174,7 +173,11 @@ class DeviceDisplaySetting:
             "id": self.device_id,
             "name": self.name,
             "path": self.path,
-            "led_display": self.led_display,
+            "led_display": (
+                LED_DISPLAY_AGENT
+                if self.led_display == LED_DISPLAY_QUOTA_RUNWAY
+                else self.led_display
+            ),
             "brightness": self.brightness,
             "auto_brightness_enabled": self.auto_brightness_enabled,
             "red_gain": self.red_gain,
@@ -230,18 +233,10 @@ class AgentMonitorSettings:
     # battery is the one signal that should outrank agent status.
     low_battery_alert_enabled: bool = True
     low_battery_threshold_percent: float = 5.0
-    # Blink the LEDs briefly in an app's own color when it delivers a
-    # notification, then return to agent status. Reads the Notification
-    # Center store, so it needs Full Disk Access (the same grant the
-    # Focus rules use) and stays silently inert without it.
-    notification_blinks_enabled: bool = True
     # Sweep the bar in the finishing agent's color the moment ANY
     # session completes -- the aggregate hides completions whenever
     # another agent is still working.
     completion_sweep_enabled: bool = True
-    notification_app_colors: dict[str, str] = field(
-        default_factory=lambda: dict(DEFAULT_NOTIFICATION_APP_COLORS)
-    )
     # Calm purple glow starting this many minutes before a calendar
     # event. Off by default: enabling it presents the system Calendars
     # permission prompt (see calendar_watch.py).
@@ -330,29 +325,40 @@ class AgentMonitorSettings:
     # expanded live activity never outgrows the bracket. On by default;
     # manual wing lengths always win over it.
     screen_bar_follow_alcove: bool = True
-    # Opt-in: reading the Claude Code keychain item triggers a one-time
-    # macOS prompt, so this must never default on.
+    # Legacy quota controls remain load-compatible for one migration wave,
+    # but they cannot authorize a private source or an outbound effect.
     claude_plan_limits_enabled: bool = False
     quota_alerts_enabled: bool = False
+    # Capacity retention is a separate, explicit consent boundary. Existing
+    # transcript and broad usage settings never enable either history stream.
+    capacity_history_enabled: bool = False
+    capacity_history_retention_days: int = 7
+    local_activity_history_enabled: bool = False
+    # Zero is the explicit off state. Broad or legacy history consent never
+    # enables the metadata-only operator ledger.
+    operator_history_retention_days: int = 0
+    forecast_release_authority: ForecastReleaseAuthority = field(
+        default_factory=ForecastReleaseAuthority.withheld
+    )
     usage_graph_days: int = 7
     # "tokens" leads with token counts (cost approximated in parens,
     # the CodexBar presentation); "cost" leads with dollars.
     usage_display_mode: str = "tokens"
+    usage_graph_providers: tuple[str, ...] = ("claude", "codex")
     codex_percent_enabled: bool = True
     escalation_webhook_url: str = ""
     # Named Studio programs -- a shelf of looks.
     studio_library: tuple[tuple[str, str], ...] = ()
     night_warmth_enabled: bool = False
     focus_signal_policy: dict[str, str] = field(default_factory=dict)
-    # A macOS notification banner when a main session finishes -- for
-    # eyes that were on another screen when the lights swept. ON by
-    # default (the point of a finish signal is not needing to opt in);
-    # sub-agents never post.
-    completion_notification_enabled: bool = True
-    # Webhook bridge: which MOMENT events (beyond stage-3 escalation,
-    # which always fires when the URL is set) also POST to the webhook.
-    # Valid keys: completion, quota_sunrise, quota_threshold, weather,
-    # timebox. Empty = escalation only, the pre-bridge behavior.
+    # A macOS notification banner when a main session finishes. New
+    # installations remain off until the user opts in and explicitly
+    # handles the macOS permission action. Existing settings files that
+    # predate this policy preserve their prior effective choice once.
+    completion_notification_enabled: bool = False
+    notification_policy_version: int = 1
+    # Webhook bridge: which non-capacity moment events (beyond stage-3
+    # escalation, which always fires when the URL is set) also POST.
     webhook_events: tuple[str, ...] = ()
     # Story #10: timebox preset -> (start Shortcut, end Shortcut). Keys
     # are the preset minutes as strings ("25"); either name may be "".
@@ -386,6 +392,8 @@ class AgentMonitorSettings:
     def with_led_display(self, display: str) -> AgentMonitorSettings:
         if display not in LED_DISPLAY_CHOICES:
             raise ValueError(f"Unknown LED display: {display}")
+        if display == LED_DISPLAY_QUOTA_RUNWAY:
+            display = LED_DISPLAY_AGENT
         return replace(self, led_display=display)
 
     def display_for_device(self, device_id: str) -> str:
@@ -410,6 +418,8 @@ class AgentMonitorSettings:
     ) -> AgentMonitorSettings:
         if display not in LED_DISPLAY_CHOICES:
             raise ValueError(f"Unknown LED display: {display}")
+        if display == LED_DISPLAY_QUOTA_RUNWAY:
+            display = LED_DISPLAY_AGENT
 
         devices: list[DeviceDisplaySetting] = []
         updated = False
@@ -750,7 +760,11 @@ class AgentMonitorSettings:
         return replace(self, night_warmth_enabled=bool(enabled))
 
     def with_completion_notification_enabled(self, enabled: bool) -> AgentMonitorSettings:
-        return replace(self, completion_notification_enabled=bool(enabled))
+        return replace(
+            self,
+            completion_notification_enabled=bool(enabled),
+            notification_policy_version=1,
+        )
 
     def with_webhook_event(self, key: str, enabled: bool) -> AgentMonitorSettings:
         if key not in WEBHOOK_EVENT_KEYS:
@@ -815,9 +829,23 @@ class AgentMonitorSettings:
         return replace(self, escalation_webhook_url=str(url).strip())
 
     def with_usage_display_mode(self, mode: str) -> AgentMonitorSettings:
-        if mode not in ("tokens", "cost"):
-            raise ValueError("usage display mode is tokens or cost")
+        if mode not in ("tokens", "cost", "sessions"):
+            raise ValueError("usage display mode is tokens, cost, or sessions")
         return replace(self, usage_display_mode=mode)
+
+    def with_usage_graph_providers(
+        self,
+        provider_ids: tuple[str, ...],
+    ) -> AgentMonitorSettings:
+        allowed = {"claude", "codex"}
+        if (
+            type(provider_ids) is not tuple
+            or not provider_ids
+            or len(provider_ids) != len(set(provider_ids))
+            or any(provider_id not in allowed for provider_id in provider_ids)
+        ):
+            raise ValueError("usage graph providers must be selected and supported")
+        return replace(self, usage_graph_providers=provider_ids)
 
     def with_codex_percent_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, codex_percent_enabled=bool(enabled))
@@ -828,22 +856,16 @@ class AgentMonitorSettings:
         return replace(self, usage_graph_days=int(days))
 
     def with_quota_alerts_enabled(self, enabled: bool) -> AgentMonitorSettings:
-        return replace(self, quota_alerts_enabled=bool(enabled))
+        del enabled
+        return replace(self, quota_alerts_enabled=False)
 
     def with_quota_alert_thresholds(self, thresholds) -> AgentMonitorSettings:
-        cleaned = sorted(
-            {
-                max(1.0, min(100.0, float(value)))
-                for value in thresholds
-                if isinstance(value, (int, float)) and not isinstance(value, bool)
-            }
-        )
-        if not cleaned:
-            raise ValueError("at least one threshold between 1 and 100")
-        return replace(self, quota_alert_thresholds=tuple(cleaned))
+        del thresholds
+        return replace(self, quota_alert_thresholds=(75.0, 90.0))
 
     def with_claude_plan_limits_enabled(self, enabled: bool) -> AgentMonitorSettings:
-        return replace(self, claude_plan_limits_enabled=bool(enabled))
+        del enabled
+        return replace(self, claude_plan_limits_enabled=False)
 
     def with_screen_bar_gauges_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, screen_bar_gauges_enabled=bool(enabled))
@@ -999,9 +1021,6 @@ class AgentMonitorSettings:
     def with_low_battery_threshold_percent(self, percent: float) -> AgentMonitorSettings:
         return replace(self, low_battery_threshold_percent=max(1.0, min(50.0, float(percent))))
 
-    def with_notification_blinks_enabled(self, enabled: bool) -> AgentMonitorSettings:
-        return replace(self, notification_blinks_enabled=bool(enabled))
-
     def with_completion_sweep_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, completion_sweep_enabled=bool(enabled))
 
@@ -1104,17 +1123,6 @@ class AgentMonitorSettings:
         styles[key] = style.normalized().to_dict()
         return replace(self, signal_styles=styles)
 
-    def with_notification_app_color(self, bundle_id: str, color: str | None) -> AgentMonitorSettings:
-        """color=None removes the app from the blink list entirely."""
-        apps = dict(self.notification_app_colors)
-        if color is None:
-            apps.pop(bundle_id, None)
-        else:
-            normalized = _hex_color(color)
-            if normalized is not None:
-                apps[bundle_id] = normalized
-        return replace(self, notification_app_colors=apps)
-
     def focus_dim_fraction(self, mode_identifier: str) -> float:
         """The brightness fraction to apply while this Focus is active --
         its own rule if set, otherwise the shared idle-dim amount (the
@@ -1135,7 +1143,12 @@ class AgentMonitorSettings:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "led_display": self.led_display,
+            "settings_schema_version": SETTINGS_SCHEMA_VERSION,
+            "led_display": (
+                LED_DISPLAY_AGENT
+                if self.led_display == LED_DISPLAY_QUOTA_RUNWAY
+                else self.led_display
+            ),
             "devices": [device.to_dict() for device in self.devices],
             "virtual_status_device_enabled": self.virtual_status_device_enabled,
             "virtual_status_device_wraps_menu_bar": self.virtual_status_device_wraps_menu_bar,
@@ -1160,9 +1173,7 @@ class AgentMonitorSettings:
                 "low_battery_alert_enabled": self.low_battery_alert_enabled,
                 "low_battery_threshold_percent": self.low_battery_threshold_percent,
             },
-            "notification_blinks_enabled": self.notification_blinks_enabled,
             "completion_sweep_enabled": self.completion_sweep_enabled,
-            "notification_app_colors": dict(sorted(self.notification_app_colors.items())),
             "calendar_alerts_enabled": self.calendar_alerts_enabled,
             "calendar_lead_minutes": self.calendar_lead_minutes,
             "reminder_alerts_enabled": self.reminder_alerts_enabled,
@@ -1173,7 +1184,13 @@ class AgentMonitorSettings:
             "timer_expected_minutes": self.timer_expected_minutes,
             "focus_profile_rules": dict(sorted(self.focus_profile_rules.items())),
             "studio_program": self.studio_program,
-            "signal_styles": dict(sorted(self.signal_styles.items())),
+            "signal_styles": dict(
+                sorted(
+                    (key, value)
+                    for key, value in self.signal_styles.items()
+                    if key != "notification"
+                )
+            ),
             "escalation_tier": self.escalation_tier,
             "escalation_ramp_seconds": self.escalation_ramp_seconds,
             "escalation_menu_bar_seconds": self.escalation_menu_bar_seconds,
@@ -1190,22 +1207,40 @@ class AgentMonitorSettings:
             "screen_bar_min_glow": self.screen_bar_min_glow,
             "screen_bar_gauges_enabled": self.screen_bar_gauges_enabled,
             "screen_bar_follow_alcove": self.screen_bar_follow_alcove,
-            "claude_plan_limits_enabled": self.claude_plan_limits_enabled,
-            "quota_alerts_enabled": self.quota_alerts_enabled,
+            "capacity_history_enabled": self.capacity_history_enabled,
+            "capacity_history_retention_days": (
+                self.capacity_history_retention_days
+                if type(self.capacity_history_retention_days) is int
+                and self.capacity_history_retention_days in (7, 30, 90)
+                else 7
+            ),
+            "local_activity_history_enabled": self.local_activity_history_enabled,
+            "operator_history_retention_days": (
+                self.operator_history_retention_days
+                if type(self.operator_history_retention_days) is int
+                and self.operator_history_retention_days in (0, 7, 30, 90)
+                else 0
+            ),
+            "forecast_release_authority": forecast_release_authority_to_payload(
+                self.forecast_release_authority
+            ),
             "usage_graph_days": self.usage_graph_days,
             "usage_display_mode": self.usage_display_mode,
+            "usage_graph_providers": list(self.usage_graph_providers),
             "codex_percent_enabled": self.codex_percent_enabled,
             "escalation_webhook_url": self.escalation_webhook_url,
             "studio_library": [list(item) for item in self.studio_library],
             "night_warmth_enabled": self.night_warmth_enabled,
             "focus_signal_policy": dict(self.focus_signal_policy),
             "completion_notification_enabled": self.completion_notification_enabled,
-            "webhook_events": list(self.webhook_events),
+            "notification_policy_version": 1,
+            "webhook_events": [
+                key for key in self.webhook_events if key in WEBHOOK_EVENT_KEYS
+            ],
             "timebox_shortcuts": {
                 key: list(pair) for key, pair in self.timebox_shortcuts.items()
             },
             "subagent_asks_alert": self.subagent_asks_alert,
-            "quota_alert_thresholds": list(self.quota_alert_thresholds),
             "dismissed_tips": list(self.dismissed_tips),
             "focus_dim_rules": dict(sorted(self.focus_dim_rules.items())),
         }
@@ -1265,23 +1300,12 @@ def _signal_styles(raw: object) -> dict[str, dict]:
         return {}
     result: dict[str, dict] = {}
     for key, value in raw.items():
+        if key == "notification":
+            continue
         fallback = DEFAULT_SIGNAL_STYLES.get(key)
         if fallback is None:
             continue
         result[key] = SignalStyle.from_dict(value, fallback).to_dict()
-    return result
-
-
-def _notification_app_colors(raw: object) -> dict[str, str]:
-    """Absent -> the defaults; present -> exactly what was saved (an
-    empty dict is a legitimate "no apps" choice), each color validated."""
-    if not isinstance(raw, dict):
-        return dict(DEFAULT_NOTIFICATION_APP_COLORS)
-    result: dict[str, str] = {}
-    for bundle_id, color in raw.items():
-        normalized = _hex_color(color)
-        if isinstance(bundle_id, str) and bundle_id and normalized is not None:
-            result[bundle_id] = normalized
     return result
 
 
@@ -1315,22 +1339,31 @@ def _preserve_corrupt_settings(target: Path) -> None:
     them -- repeated startups against the same corruption keep the
     FIRST capture."""
     try:
+        ensure_private_directory(target.parent)
+        ensure_private_file(target)
         backup = target.with_name(target.name + ".corrupt")
+        if backup.is_symlink():
+            return
         if backup.exists():
+            ensure_private_file(backup)
             target.unlink(missing_ok=True)
             return
         os.replace(target, backup)
+        ensure_private_file(backup)
     except OSError:
         pass
 
 
 def load_settings(path: Path | None = None) -> AgentMonitorSettings:
     target = (path or default_settings_path()).expanduser()
-    if not target.exists():
-        return AgentMonitorSettings()
-
     try:
-        data = json.loads(target.read_text())
+        target.lstat()
+        ensure_private_directory(target.parent)
+        data = json.loads(read_private_text(target))
+    except FileNotFoundError:
+        return AgentMonitorSettings()
+    except OSError:
+        return AgentMonitorSettings()
     except Exception:
         _preserve_corrupt_settings(target)
         return AgentMonitorSettings()
@@ -1411,9 +1444,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         low_battery_threshold_percent=max(
             1.0, min(50.0, _float_setting(battery.get("low_battery_threshold_percent"), 5.0))
         ),
-        notification_blinks_enabled=_bool_setting(data.get("notification_blinks_enabled"), True),
         completion_sweep_enabled=_bool_setting(data.get("completion_sweep_enabled"), True),
-        notification_app_colors=_notification_app_colors(data.get("notification_app_colors")),
         calendar_alerts_enabled=_bool_setting(data.get("calendar_alerts_enabled"), False),
         calendar_lead_minutes=max(
             1.0, min(60.0, _float_setting(data.get("calendar_lead_minutes"), 5.0))
@@ -1465,15 +1496,47 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         screen_bar_min_glow=_fraction_setting(data.get("screen_bar_min_glow"), 0.25),
         screen_bar_gauges_enabled=_bool_setting(data.get("screen_bar_gauges_enabled"), False),
         screen_bar_follow_alcove=_bool_setting(data.get("screen_bar_follow_alcove"), True),
-        claude_plan_limits_enabled=_bool_setting(
-            data.get("claude_plan_limits_enabled"), False
+        claude_plan_limits_enabled=False,
+        quota_alerts_enabled=False,
+        capacity_history_enabled=_bool_setting(
+            data.get("capacity_history_enabled"), False
         ),
-        quota_alerts_enabled=_bool_setting(data.get("quota_alerts_enabled"), False),
+        capacity_history_retention_days=(
+            data.get("capacity_history_retention_days")
+            if type(data.get("capacity_history_retention_days")) is int
+            and data.get("capacity_history_retention_days") in (7, 30, 90)
+            else 7
+        ),
+        local_activity_history_enabled=_bool_setting(
+            data.get("local_activity_history_enabled"), False
+        ),
+        operator_history_retention_days=(
+            data.get("operator_history_retention_days")
+            if type(data.get("operator_history_retention_days")) is int
+            and data.get("operator_history_retention_days") in (0, 7, 30, 90)
+            else 0
+        ),
+        forecast_release_authority=forecast_release_authority_from_payload(
+            data.get("forecast_release_authority")
+        ),
         subagent_asks_alert=_bool_setting(data.get("subagent_asks_alert"), False),
         usage_display_mode=(
             data.get("usage_display_mode")
-            if data.get("usage_display_mode") in ("tokens", "cost")
+            if data.get("usage_display_mode") in ("tokens", "cost", "sessions")
             else "tokens"
+        ),
+        usage_graph_providers=(
+            tuple(
+                provider_id
+                for provider_id in data.get("usage_graph_providers")
+                if provider_id in {"claude", "codex"}
+            )
+            if isinstance(data.get("usage_graph_providers"), list)
+            and any(
+                provider_id in {"claude", "codex"}
+                for provider_id in data.get("usage_graph_providers")
+            )
+            else ("claude", "codex")
         ),
         codex_percent_enabled=_bool_setting(data.get("codex_percent_enabled"), True),
         escalation_webhook_url=str(data.get("escalation_webhook_url") or "").strip(),
@@ -1488,8 +1551,10 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             else {}
         ),
         completion_notification_enabled=_bool_setting(
-            data.get("completion_notification_enabled"), True
+            data.get("completion_notification_enabled"),
+            "notification_policy_version" not in data,
         ),
+        notification_policy_version=1,
         webhook_events=tuple(
             key
             for key in (data.get("webhook_events") or [])
@@ -1518,9 +1583,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             if data.get("usage_graph_days") in (7, 30, 90, 365)
             else 7
         ),
-        quota_alert_thresholds=_quota_thresholds_setting(
-            data.get("quota_alert_thresholds")
-        ),
+        quota_alert_thresholds=(75.0, 90.0),
         dismissed_tips=tuple(
             str(item)
             for item in (data.get("dismissed_tips") or [])
@@ -1535,23 +1598,13 @@ def save_settings(
     path: Path | None = None,
 ) -> Path:
     target = (path or default_settings_path()).expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
     # Atomic: a crash mid-write must never truncate the file -- a
     # truncated settings.json silently loads as ALL defaults, losing
     # every color, device, and rule. (Also written from the LED worker
     # thread via remember_connected_devices, so in-place truncation had
     # a real interleaving window, not just a power-loss one.)
     payload = json.dumps(settings.to_dict(), indent=2, sort_keys=True) + "\n"
-    # Scratch name is unique per writer: the LED worker thread and
-    # main-thread UI actions both save concurrently, and a SHARED
-    # scratch let one thread os.replace() a file the other was still
-    # writing -- a truncated settings.json.
-    scratch = target.with_name(
-        f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
-    scratch.write_text(payload)
-    os.replace(scratch, target)
-    return target
+    return atomic_private_write(target, payload)
 
 
 def _quota_thresholds_setting(value: object) -> tuple[float, ...]:
@@ -1603,6 +1656,8 @@ def normalize_closed_lid_grace_minutes(
 
 
 def _led_display_setting(value: object, default: str) -> str:
+    if value == LED_DISPLAY_QUOTA_RUNWAY:
+        return LED_DISPLAY_AGENT
     if isinstance(value, str) and value in LED_DISPLAY_CHOICES:
         return value
     return default

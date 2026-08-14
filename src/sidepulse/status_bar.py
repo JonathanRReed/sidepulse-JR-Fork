@@ -1,20 +1,27 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from typing import ClassVar
 
 try:
     import objc
     from AppKit import (
+        NSAlert,
+        NSAlertFirstButtonReturn,
         NSApp,
         NSApplication,
         NSApplicationActivationPolicyAccessory,
@@ -54,12 +61,15 @@ try:
         NSWindowStyleMaskClosable,
         NSWindowStyleMaskTitled,
         NSWorkspace,
+        NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
     )
     from Foundation import (
         NSURL,
         NSIndexSet,
         NSMutableAttributedString,
         NSObject,
+        NSRunLoop,
+        NSRunLoopCommonModes,
         NSString,
         NSTimer,
     )
@@ -75,14 +85,29 @@ from . import (
     display_brightness,
     focus_sync,
     native_ui,
-    notification_watch,
     reminders_watch,
     usage_stats,
     weather_watch,
 )
 from . import colors as colors_module
 from . import signals as signals_module
+from .accessibility_display import (
+    AccessibilityDisplayPreferences,
+    refresh_accessibility_display_preferences,
+)
+from .agent_browser import (
+    AgentBrowserQuery,
+    build_agent_browser_documents,
+    project_agent_browser,
+)
+from .agent_browser_window import (
+    AgentBrowserActionPayload,
+    AgentBrowserOpenPayload,
+    AgentBrowserWindowController,
+    build_agent_root_items,
+)
 from .app_bundle import default_app_bundle_path, running_inside_bundle
+from .attention import AttentionProjection, LifecycleMode, project_attention
 from .audit import (
     default_status_audit_log_path,
     export_status_audit_csv,
@@ -96,12 +121,29 @@ from .battery import (
     program_for_battery,
     read_battery_snapshot,
 )
+from .capacity_refresh import (
+    CapacityRefreshCoordinator,
+    RefreshCause,
+    RefreshCommitKind,
+    RefreshDecisionKind,
+    RefreshFailureKind,
+    RefreshSourceKey,
+    RefreshSourceRegistration,
+)
+from .capacity_types import (
+    CapacitySnapshot,
+    CapacitySourceHealth,
+    QuotaLaneObservation,
+    SourceHealthKind,
+    SourceKey,
+)
 from .collector import (
     CLAUDE_TRANSCRIPT_PROVIDER,
     CODEX_TRANSCRIPT_PROVIDER,
     COMPLETED_VISIBLE_SECONDS,
     AgentMonitor,
     LiveAgentMonitor,
+    MonitorSnapshot,
     SourceSpec,
     aggregate_status,
     default_sources,
@@ -121,8 +163,13 @@ from .colors import (
     PRESET_LABELS,
     ColorSettings,
     apply_preset,
+    program_for_projection,
     program_for_snapshot,
 )
+from .completions import (
+    COMPLETION_NOTIFY_FRESHNESS_SECONDS as COMPLETION_NOTIFY_FRESHNESS_SECONDS,
+)
+from .completions import canonical_current_statuses, detect_completion_batch
 from .device_writer import (
     DEFAULT_FILE_NAME,
     MOUNT_ROOT,
@@ -135,12 +182,32 @@ from .device_writer import (
     validate_led_text,
     write_led_program,
 )
+from .freshness import bounded_age_seconds, is_recent
 from .install import (
     install_provider_hooks,
     uninstall_provider_hooks,
 )
+from .installed_agent_inventory import (
+    InstalledAgentInventoryResult,
+    default_inventory_roots,
+    execute_inventory_command,
+)
+from .installed_agents import (
+    SurfacePresence,
+    SurfaceSupportLevel,
+    installed_surface_registrations,
+)
+from .interruption_policy import (
+    ActionTokenBinding,
+    InterruptionRoute,
+    action_token_metadata,
+    generic_notification_copy,
+    issue_action_token,
+    resolve_action_token,
+)
 from .ipc import (
     HookEventServer,
+    ProviderRefreshHint,
     another_instance_alive,
     default_event_socket_path,
     default_latest_state_path,
@@ -151,10 +218,12 @@ from .led_status import (
     MIN_CHANNEL_GAIN,
     AgentLedController,
     LedDisplayState,
+    LedStatusWrite,
     apply_brightness,
     apply_channel_gain_to_program,
     apply_resting_glow_to_program,
     brightness_percent,
+    failure_signal_program,
     led_count_for_target,
     normalize_brightness,
     normalized_device_name,
@@ -172,15 +241,136 @@ from .lid_sleep import (
     sleep_helper_install_command,
     sleep_helper_installed,
 )
+from .local_triage import (
+    LocalTriageMutationKind,
+    LocalTriageState,
+    apply_local_triage_mutation,
+)
+from .macos_notifications import (
+    MacOSNotificationClient,
+    NotificationAuthorizationState,
+)
+from .mailbox import (
+    AgentMailboxProjection,
+    MailboxRow,
+    MailboxSectionKind,
+    project_canonical_mailbox,
+    project_mailbox,
+)
+from .mailbox_preference_store import (
+    load_mailbox_preference_document,
+    save_mailbox_preferences_v2,
+)
+from .mailbox_preferences import (
+    MailboxPreference,
+    MailboxPreferenceMode,
+    MailboxPreferenceProjection,
+    apply_mailbox_preferences,
+)
+from .menu_tracking import (
+    ExactBoundarySchedule,
+    MenuItemState,
+    StableNativeMenuRegistry,
+)
 from .models import MODE_LABELS, AgentMode, AgentStatus
+from .navigation_policy import (
+    OperatorActionKind,
+    OperatorLocalActionState,
+    build_operator_actions,
+    resolve_navigation,
+)
+from .operator_accessibility import status_item_accessibility
+from .operator_export import (
+    MAX_DEBUG_EXPORT_BYTES,
+    MAX_HISTORY_EXPORT_BYTES,
+    DebugExportV1,
+    HistoryExportV1,
+    encode_debug_export,
+    encode_history_export,
+)
+from .operator_history import (
+    HistoryEventKind,
+    OperatorHistoryProjection,
+    RuntimeHistoryEvent,
+    aggregate_operator_history,
+)
+from .operator_history_store import (
+    OperatorHistoryRestoreHealth,
+    OperatorHistoryStore,
+    default_operator_history_path,
+    save_operator_history,
+)
+from .operator_state import (
+    CanonicalOperatorEvent,
+    CanonicalOperatorState,
+    InterruptionClass,
+    RequestPhase,
+    SemanticEventKey,
+    TransitionKind,
+)
+from .operator_triage_store import load_operator_triage, save_operator_triage
+from .presentation_policy import (
+    CapacityGlance,
+    FiniteCue,
+    FiniteCueState,
+    GlanceInputs,
+    GlanceOverrideReason,
+    GlanceSemantic,
+    MotionClass,
+    ResolvedGlance,
+    SemanticGlyph,
+    compose_presentation_program,
+    continuous_presentation_identity,
+    resolve_glance,
+    valid_finite_cue,
+    valid_presentation_time,
+)
+from .presentation_scheduler import (
+    PresentationSchedulerInputs,
+    PresentationSchedulerState,
+    plan_presentation_schedule,
+)
+from .private_export import write_private_export
+from .provider_contracts import ProviderIdentifier
+from .provider_facts import NextActor, RequestKey, SourceFreshness, WorkKey
 from .providers import (
     HOOK_PROVIDERS,
     PROVIDER_SPECS,
     ProviderConfig,
     default_state_dir,
     detect_log_path,
+    negotiated_provider_sources,
     parse_log_line,
     provider_spec,
+)
+from .refresh_policy import (
+    DEFAULT_FRESH_SECONDS,
+    LOW_POWER_FRESH_SECONDS,
+    ProviderRefreshState,
+    mark_refresh_failed,
+    mark_refresh_started,
+    mark_refresh_succeeded,
+    plan_menu_open_refresh,
+    retain_attempted_boundary_keys,
+)
+from .render_policy import runtime_render_environment
+from .reset_policy import (
+    DEFAULT_RESET_GRACE_SECONDS,
+    MINIMUM_RESET_REFRESH_DELAY_SECONDS,
+    ResetBoundaryPlan,
+    evaluate_reset_continuity,
+    next_countdown_deadline,
+    plan_reset_boundary_refresh,
+)
+from .runtime_scheduler import (
+    AppKitTimerRegistry,
+    LatestWinsWorker,
+    RuntimeFeature,
+    RuntimeTimerIntent,
+    RuntimeWorkCommand,
+    RuntimeWorkerDomain,
+    RuntimeWorkerRegistry,
+    SubmissionDisposition,
 )
 from .sd_eject_guard_launch import (
     SD_EJECT_GUARD_DISPLAY_NAME,
@@ -192,6 +382,7 @@ from .session_actions import (
     SESSION_OPEN_APP,
     SESSION_OPEN_TERMINAL,
     SESSION_OPEN_VSCODE,
+    activate_navigation_resolution,
     available_session_open_actions,
     default_session_open_action,
     session_open_action_label,
@@ -203,7 +394,6 @@ from .settings import (
     CLOSED_LID_AWAKE_ALWAYS,
     CLOSED_LID_AWAKE_CHOICES,
     CLOSED_LID_AWAKE_NEVER,
-    DEFAULT_NOTIFICATION_APP_COLORS,
     LED_DISPLAY_AGENT,
     LED_DISPLAY_BATTERY,
     LED_DISPLAY_CHOICES,
@@ -214,6 +404,7 @@ from .settings import (
     LID_ANIMATION_CLOSED_ACTIVE,
     LID_ANIMATION_OPEN,
     LID_ANIMATION_OPEN_ACTIVE,
+    AgentMonitorSettings,
     LedAnimationSetting,
     default_lid_animation,
     default_settings_path,
@@ -221,10 +412,25 @@ from .settings import (
     normalize_animation_duration,
     save_settings,
 )
+from .signal_coordinator import (
+    ActiveSignal,
+    FiniteCueCoordinator,
+    FiniteSignalCoordinator,
+)
 from .status_bar_launch import (
     LAUNCH_AGENT_LABEL,
+    TerminalLaunchPlan,
     install_launch_agent,
     launch_agent_installed,
+    resolve_terminal_launch,
+    terminal_launch_arguments,
+)
+from .trusted_tools import trusted_system_tool
+from .usage_view import (
+    LocalActivitySection,
+    ProviderUsageViewModel,
+    build_provider_usage_view,
+    source_text_for_coverage,
 )
 from .virtual_device import (
     VIRTUAL_DEVICE_ID,
@@ -233,10 +439,51 @@ from .virtual_device import (
     VirtualStatusDevice,
     monotonic_ms,
     slot_width_for_screen,
+    virtual_display_state_for_projection,
 )
 from .virtual_device import (
     WINDOW_HEIGHT as SCREEN_BAR_PREVIEW_HEIGHT,
 )
+
+
+def _capacity_source_keys_by_provider():
+    rows = tuple(
+        row.source_key
+        for row in negotiated_provider_sources()
+        if row.source_key.capability_id == "remote_quota_windows"
+        and row.observation_invocation_allowed
+    )
+    keys = {source_key.provider_id: source_key for source_key in rows}
+    if len(keys) != len(rows):
+        raise RuntimeError("ambiguous capacity source registry")
+    return keys
+
+
+CAPACITY_SOURCE_KEYS_BY_PROVIDER = _capacity_source_keys_by_provider()
+
+
+def _transcript_source_keys_by_provider():
+    rows = tuple(
+        row.source_key
+        for row in negotiated_provider_sources()
+        if row.source_key.capability_id == "transcript_usage"
+        and row.observation_invocation_allowed
+    )
+    keys = {source_key.provider_id: source_key for source_key in rows}
+    if len(keys) != len(rows):
+        raise RuntimeError("ambiguous transcript usage source registry")
+    return keys
+
+
+TRANSCRIPT_SOURCE_KEYS_BY_PROVIDER = _transcript_source_keys_by_provider()
+CAPACITY_REFRESH_DEADLINE_SECONDS = 30.0
+CAPACITY_REFRESH_FAILURE_COPY = {
+    RefreshFailureKind.FAILED: "Capacity refresh failed",
+    RefreshFailureKind.TIMED_OUT: "Capacity refresh timed out",
+    RefreshFailureKind.SIGN_IN_REQUIRED: "Sign in to refresh capacity",
+    RefreshFailureKind.ACCESS_DENIED: "Capacity access denied",
+    RefreshFailureKind.SOURCE_UNAVAILABLE: "Capacity source unavailable",
+}
 
 
 @dataclass(frozen=True)
@@ -262,10 +509,411 @@ class StatusBarDevice:
     reason: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class LidObservationRequest:
+    """Content-free authority to read the bounded system lid property."""
+
+
+@dataclass(frozen=True, slots=True)
+class LidObservationResult:
+    ok: bool
+    closed: bool | None
+    error: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.ok) is not bool:
+            raise ValueError("invalid lid observation status")
+        if self.ok:
+            if self.closed is not None and type(self.closed) is not bool:
+                raise ValueError("invalid lid observation state")
+            if self.error is not None:
+                raise ValueError("successful lid observation cannot contain an error")
+            return
+        if self.closed is not None:
+            raise ValueError("failed lid observation cannot contain a state")
+        if type(self.error) is not str or not self.error or len(self.error) > 256:
+            raise ValueError("invalid lid observation error")
+
+
+@dataclass(frozen=True, slots=True)
+class DisplayEnvironmentRequest:
+    read_brightness: bool
+    read_focus: bool
+    read_accessibility: bool
+    previous_accessibility_preferences: AccessibilityDisplayPreferences | None = None
+
+    def __post_init__(self) -> None:
+        if not all(
+            type(value) is bool
+            for value in (
+                self.read_brightness,
+                self.read_focus,
+                self.read_accessibility,
+            )
+        ):
+            raise ValueError("invalid display environment request")
+        if self.previous_accessibility_preferences is not None and type(
+            self.previous_accessibility_preferences
+        ) is not AccessibilityDisplayPreferences:
+            raise ValueError("invalid display accessibility preferences")
+
+
+@dataclass(frozen=True, slots=True)
+class DisplayEnvironmentResult:
+    brightness: int | None
+    active_focus_ids: tuple[str, ...] | None
+    accessibility_preferences: AccessibilityDisplayPreferences | None
+
+    def __post_init__(self) -> None:
+        if self.brightness is not None and (
+            type(self.brightness) is not int or not 0 <= self.brightness <= 255
+        ):
+            raise ValueError("invalid display brightness result")
+        if self.active_focus_ids is not None and (
+            type(self.active_focus_ids) is not tuple
+            or len(self.active_focus_ids) > 64
+            or any(
+                type(identifier) is not str
+                or not identifier
+                or len(identifier.encode("utf-8")) > 256
+                for identifier in self.active_focus_ids
+            )
+        ):
+            raise ValueError("invalid display focus result")
+        if self.accessibility_preferences is not None and type(
+            self.accessibility_preferences
+        ) is not AccessibilityDisplayPreferences:
+            raise ValueError("invalid display accessibility result")
+
+
+@dataclass(frozen=True, slots=True)
+class CalendarObservationRequest:
+    lead_minutes: float
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.lead_minutes, (int, float))
+            or isinstance(self.lead_minutes, bool)
+            or not math.isfinite(float(self.lead_minutes))
+            or not 0.0 <= float(self.lead_minutes) <= 60.0
+        ):
+            raise ValueError("invalid calendar observation window")
+        object.__setattr__(self, "lead_minutes", float(self.lead_minutes))
+
+
+@dataclass(frozen=True, slots=True)
+class CalendarObservationResult:
+    available: bool
+    starts_in_seconds: float | None
+
+    def __post_init__(self) -> None:
+        if type(self.available) is not bool:
+            raise ValueError("invalid calendar availability")
+        starts_in_seconds = self.starts_in_seconds
+        if not self.available:
+            if starts_in_seconds is not None:
+                raise ValueError("unavailable calendar cannot contain an event")
+            return
+        if starts_in_seconds is None:
+            return
+        if (
+            not isinstance(starts_in_seconds, (int, float))
+            or isinstance(starts_in_seconds, bool)
+            or not math.isfinite(float(starts_in_seconds))
+            or not 0.0 <= float(starts_in_seconds) <= 3600.0
+        ):
+            raise ValueError("invalid calendar event offset")
+        object.__setattr__(self, "starts_in_seconds", float(starts_in_seconds))
+
+
+MAX_REMINDER_OBSERVATION_IDENTIFIERS = 256
+REMINDERS_FETCH_TIMEOUT_SECONDS = 5.0
+
+
+@dataclass(frozen=True, slots=True)
+class RemindersObservationRequest:
+    lookback_seconds: float
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.lookback_seconds, (int, float))
+            or isinstance(self.lookback_seconds, bool)
+            or not math.isfinite(float(self.lookback_seconds))
+            or not 0.0 <= float(self.lookback_seconds) <= 3600.0
+        ):
+            raise ValueError("invalid reminders observation window")
+        object.__setattr__(self, "lookback_seconds", float(self.lookback_seconds))
+
+
+@dataclass(frozen=True, slots=True)
+class RemindersObservationResult:
+    available: bool
+    identifiers: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.available) is not bool:
+            raise ValueError("invalid reminders availability")
+        if (
+            type(self.identifiers) is not tuple
+            or len(self.identifiers) > MAX_REMINDER_OBSERVATION_IDENTIFIERS
+            or any(
+                type(identifier) is not str
+                or len(identifier) != 64
+                or any(character not in "0123456789abcdef" for character in identifier)
+                for identifier in self.identifiers
+            )
+        ):
+            raise ValueError("invalid reminder identifiers")
+        if not self.available and self.identifiers:
+            raise ValueError("unavailable reminders cannot contain identifiers")
+
+
+@dataclass(frozen=True, slots=True)
+class WeatherObservationRequest:
+    latitude: float | None
+    longitude: float | None
+
+    def __post_init__(self) -> None:
+        latitude = self.latitude
+        longitude = self.longitude
+        if (latitude is None) != (longitude is None):
+            raise ValueError("weather coordinates must be paired")
+        if latitude is None:
+            return
+        if (
+            not isinstance(latitude, (int, float))
+            or isinstance(latitude, bool)
+            or not math.isfinite(float(latitude))
+            or not -90.0 <= float(latitude) <= 90.0
+            or not isinstance(longitude, (int, float))
+            or isinstance(longitude, bool)
+            or not math.isfinite(float(longitude))
+            or not -180.0 <= float(longitude) <= 180.0
+        ):
+            raise ValueError("invalid weather coordinates")
+        object.__setattr__(self, "latitude", float(latitude))
+        object.__setattr__(self, "longitude", float(longitude))
+
+
+WEATHER_CLASSIFICATIONS = frozenset(
+    {
+        "Tornado warning",
+        "Hurricane warning",
+        "Flash flood warning",
+        "Severe thunderstorm warning",
+        "Extreme weather alert",
+        "Severe weather alert",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class WeatherObservationResult:
+    available: bool
+    active: bool
+    classification: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.available) is not bool or type(self.active) is not bool:
+            raise ValueError("invalid weather observation state")
+        if not self.available and (self.active or self.classification is not None):
+            raise ValueError("unavailable weather cannot contain alert truth")
+        if self.active != (self.classification is not None):
+            raise ValueError("weather alert truth requires a classification")
+        if (
+            self.classification is not None
+            and self.classification not in WEATHER_CLASSIFICATIONS
+        ):
+            raise ValueError("invalid weather classification")
+
+
+def _weather_classification(severity: object, event: object) -> str:
+    normalized = str(event).casefold()
+    if "tornado" in normalized:
+        return "Tornado warning"
+    if "hurricane" in normalized:
+        return "Hurricane warning"
+    if "flash flood" in normalized:
+        return "Flash flood warning"
+    if "severe thunderstorm" in normalized:
+        return "Severe thunderstorm warning"
+    if str(severity).casefold() == "extreme":
+        return "Extreme weather alert"
+    return "Severe weather alert"
+
+
+MAX_RUNTIME_PHYSICAL_DEVICES = 16
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceInventoryRequest:
+    """Content-free authority to enumerate supported SidePulse volumes."""
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceInventoryResult:
+    candidates: tuple[DeviceCandidate, ...]
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.candidates) is not tuple or len(self.candidates) > MAX_RUNTIME_PHYSICAL_DEVICES:
+            raise ValueError("invalid device inventory")
+        if not all(type(candidate) is DeviceCandidate for candidate in self.candidates):
+            raise ValueError("invalid device inventory candidate")
+        if self.error is not None and (
+            type(self.error) is not str or not self.error or len(self.error) > 256
+        ):
+            raise ValueError("invalid device inventory error")
+
+
+@dataclass(frozen=True, slots=True)
+class HardwareWriteRequest:
+    device: StatusBarDevice
+    mode: AgentMode
+    battery_snapshot: BatterySnapshot | None
+    statuses: tuple[AgentStatus, ...]
+    projection: AttentionProjection | None
+    relay_elapsed_seconds: float
+    accessibility_preferences: AccessibilityDisplayPreferences | None = None
+    resolved_glance: ResolvedGlance | None = None
+    presentation_time: float | None = None
+    capacity_remaining_fraction: float | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.device) is not StatusBarDevice
+            or not self.device.connected
+            or self.device.device_id == VIRTUAL_DEVICE_ID
+        ):
+            raise ValueError("invalid hardware device")
+        if not isinstance(self.mode, AgentMode):
+            raise ValueError("invalid hardware mode")
+        if type(self.statuses) is not tuple or not all(
+            isinstance(status, AgentStatus) for status in self.statuses
+        ):
+            raise ValueError("invalid hardware statuses")
+        if self.projection is not None and not isinstance(
+            self.projection, AttentionProjection
+        ):
+            raise ValueError("invalid hardware projection")
+        if (
+            isinstance(self.relay_elapsed_seconds, bool)
+            or not math.isfinite(float(self.relay_elapsed_seconds))
+            or float(self.relay_elapsed_seconds) < 0.0
+        ):
+            raise ValueError("invalid relay time")
+        if self.accessibility_preferences is not None and type(
+            self.accessibility_preferences
+        ) is not AccessibilityDisplayPreferences:
+            raise ValueError("invalid accessibility display preferences")
+        if self.resolved_glance is not None and type(
+            self.resolved_glance
+        ) is not ResolvedGlance:
+            raise ValueError("invalid resolved presentation")
+        if self.presentation_time is not None and not valid_presentation_time(
+            self.presentation_time
+        ):
+            raise ValueError("invalid presentation time")
+        if self.resolved_glance is not None and (
+            self.presentation_time is None
+            or float(self.presentation_time) < float(self.resolved_glance.relay_epoch)
+        ):
+            raise ValueError("invalid resolved presentation time")
+        if self.capacity_remaining_fraction is not None and (
+            isinstance(self.capacity_remaining_fraction, bool)
+            or not math.isfinite(float(self.capacity_remaining_fraction))
+            or not 0.0 <= float(self.capacity_remaining_fraction) <= 1.0
+        ):
+            raise ValueError("invalid presentation capacity")
+
+
+@dataclass(frozen=True, slots=True)
+class HardwareWriteResult:
+    request: HardwareWriteRequest
+    write: LedStatusWrite
+    label: str
+    agent_display_rendered: bool
+    completed_at: float
+
+    def __post_init__(self) -> None:
+        if type(self.request) is not HardwareWriteRequest or type(self.write) is not LedStatusWrite:
+            raise ValueError("invalid hardware write result")
+        if type(self.label) is not str or len(self.label) > 256:
+            raise ValueError("invalid hardware write label")
+        if type(self.agent_display_rendered) is not bool:
+            raise ValueError("invalid hardware display state")
+        if (
+            isinstance(self.completed_at, bool)
+            or not math.isfinite(float(self.completed_at))
+            or float(self.completed_at) < 0.0
+        ):
+            raise ValueError("invalid hardware completion time")
+
+
+@dataclass(frozen=True, slots=True)
+class HardwarePresentationSync:
+    request: HardwareWriteRequest
+    started_at: float | None
+
+
+def hardware_presentation_sync_for_result(
+    result: HardwareWriteResult,
+) -> HardwarePresentationSync | None:
+    if type(result) is not HardwareWriteResult:
+        raise ValueError("invalid hardware write result")
+    if not (
+        result.write.changed
+        or result.write.error is not None
+        or result.agent_display_rendered
+    ):
+        return None
+    return HardwarePresentationSync(
+        request=result.request,
+        started_at=(
+            result.request.resolved_glance.relay_epoch
+            if result.request.resolved_glance is not None
+            else result.completed_at if result.write.changed else None
+        ),
+    )
+
+
+def display_state_for_resolved_glance(resolved: ResolvedGlance) -> LedDisplayState:
+    if type(resolved) is not ResolvedGlance:
+        raise ValueError("invalid resolved presentation")
+    return {
+        GlanceSemantic.ATTENTION: LedDisplayState.ASK,
+        GlanceSemantic.FRESH_FAILURE: LedDisplayState.FAILED,
+        GlanceSemantic.FRESH_COMPLETION: LedDisplayState.DONE,
+        GlanceSemantic.ACTIVE: LedDisplayState.WORKING,
+        GlanceSemantic.UNRESOLVED_FAILURE: LedDisplayState.FAILED,
+        GlanceSemantic.CAPACITY: LedDisplayState.WORKING,
+        GlanceSemantic.REST: LedDisplayState.IDLE,
+    }[resolved.semantic]
+
+
+def color_for_resolved_glance(
+    colors: ColorSettings,
+    resolved: ResolvedGlance,
+) -> str:
+    if type(colors) is not ColorSettings or type(resolved) is not ResolvedGlance:
+        raise ValueError("invalid resolved presentation color")
+    mode_key = {
+        GlanceSemantic.ATTENTION: "ask",
+        GlanceSemantic.FRESH_FAILURE: "ask",
+        GlanceSemantic.FRESH_COMPLETION: "done",
+        GlanceSemantic.ACTIVE: "working",
+        GlanceSemantic.UNRESOLVED_FAILURE: "ask",
+        GlanceSemantic.CAPACITY: "working",
+        GlanceSemantic.REST: "idle",
+    }[resolved.semantic]
+    return colors.mode_color(mode_key)
+
+
 STATE_IDLE = StatusBarState("Idle", "circle", 4)
 STATE_WORKING = StatusBarState("Working", "arrow.triangle.2.circlepath", 2)
 STATE_DONE = StatusBarState("Done", "checkmark.circle", 3)
 STATE_ASK = StatusBarState("Ask", "questionmark.circle", 1)
+STATE_FAILED = StatusBarState("Failed", "exclamationmark.triangle", 2)
 STATUS_BAR_DEVICE_PRIORITY = ("sidepulsepro", "sidepulsedot")
 STATUS_BAR_KEEPALIVE_VOLUME_NAMES = (
     "SidePulsePro",
@@ -274,11 +922,14 @@ STATUS_BAR_KEEPALIVE_VOLUME_NAMES = (
 # Runtime-only display kind (never a persisted per-device choice): the
 # low-battery reminder takes over every display while active.
 LED_DISPLAY_LOW_BATTERY = "low_battery"
-LED_DISPLAY_NOTIFICATION = "notification"
+LED_DISPLAY_FAILURE = "failure"
 LED_DISPLAY_CALENDAR = "calendar"
 LED_DISPLAY_ESCALATION = "escalation"
 LED_DISPLAY_TEST = "signal_test"
 SIGNAL_TEST_SECONDS = 5.0
+SETTINGS_SIGNAL_PREVIEW_INTERVAL_SECONDS = 1.0 / 8.0
+SETTINGS_COLOR_PREVIEW_INTERVAL_SECONDS = 1.0 / 12.0
+SETUP_DEMO_INTERVAL_SECONDS = 1.0 / 30.0
 LED_DISPLAY_COMPLETION = "completion"
 LED_DISPLAY_REMINDERS = "reminders"
 REMINDERS_WATCH_SECONDS = 60.0
@@ -289,15 +940,15 @@ LED_DISPLAY_ALL_CLEAR = "all_clear"
 LED_DISPLAY_PEEK = "peek"
 WEATHER_WATCH_SECONDS = 600.0
 WEATHER_WATCH_RETRY_SECONDS = 1800.0
+WEATHER_FETCH_TIMEOUT_SECONDS = 30.0
+WEATHER_WORKER_KEY = "weather-observation"
 CALENDAR_WATCH_SECONDS = 30.0
 CALENDAR_WATCH_RETRY_SECONDS = 300.0
-# How often the Notification Center store is polled (one indexed
-# rec_id query on a small database), and how long to back off after a
-# failed read (no Full Disk Access yet, database locked, ...).
-NOTIFICATION_WATCH_SECONDS = 2.0
-NOTIFICATION_WATCH_RETRY_SECONDS = 60.0
 
 STATUS_BAR_REFRESH_SECONDS = 15.0
+MAX_NOTIFICATION_ACTION_BINDINGS = 256
+NOTIFICATION_ACTION_TTL_SECONDS = 300.0
+NOTIFICATION_FOREGROUND_PRESENTATION_OPTIONS = 1 << 2
 # How often the screen-brightness watcher samples (one cheap ctypes call)
 # and the minimum 0-255 delta that counts as a real change -- small enough
 # to feel continuous, large enough that sensor jitter never causes writes.
@@ -313,14 +964,13 @@ MIN_ESCALATION_VISIBLE_BRIGHTNESS = 12
 # ambient level ("the flashing light is very dim even though its
 # brightness should be 100%"). An explicit per-Focus "Turn off" (scale
 # exactly 0) still silences them.
-SIGNAL_DISPLAY_KINDS = frozenset()
+SIGNAL_DISPLAY_KINDS = frozenset({LED_DISPLAY_FAILURE})
 # Per-device "asks only" mutes exactly these courtesy moments -- never
 # test, escalation, weather, or low battery (documented invariants:
 # low battery is "every device at once"; blocked-on-you and emergencies
 # always break through).
 DEVICE_MUTABLE_SIGNAL_KINDS = frozenset(
     {
-        LED_DISPLAY_NOTIFICATION,
         LED_DISPLAY_QUOTA,
         LED_DISPLAY_REMINDERS,
         LED_DISPLAY_COMPLETION,
@@ -329,10 +979,6 @@ DEVICE_MUTABLE_SIGNAL_KINDS = frozenset(
         LED_DISPLAY_PEEK,
     }
 )
-# A completion may only ring/sweep while this fresh; older ones repaint
-# without celebrating (T3's TERMINAL_NOTIFICATION_FRESHNESS).
-COMPLETION_NOTIFY_FRESHNESS_SECONDS = 120.0
-
 # Story #8 (night warmth): per-channel multipliers applied 19:00-07:00
 # when the toggle is on. Red full, green -13%, blue -30% -- warm enough
 # to notice, subtle enough that status colors stay unambiguous.
@@ -376,6 +1022,116 @@ def state_for_mode(mode: AgentMode) -> StatusBarState:
     return STATE_IDLE
 
 
+def state_for_projection(projection: AttentionProjection) -> StatusBarState:
+    return {
+        LifecycleMode.IDLE: STATE_IDLE,
+        LifecycleMode.ACTIVE: STATE_WORKING,
+        LifecycleMode.WAITING: STATE_ASK,
+        LifecycleMode.COMPLETED_RECENTLY: STATE_DONE,
+        LifecycleMode.FAILED_VISIBLE: STATE_FAILED,
+        LifecycleMode.UNKNOWN: STATE_IDLE,
+    }[projection.lifecycle_mode]
+
+
+def projection_for_statuses(statuses, settings) -> AttentionProjection:
+    rows = tuple(statuses or ())
+    snapshot = MonitorSnapshot(
+        aggregate=aggregate_status(rows),
+        statuses=rows,
+        stale_statuses=(),
+        sources=(),
+        collected_at=datetime.now(timezone.utc),
+    )
+    return project_attention(snapshot, settings)
+
+
+def eligible_mailbox_completion_statuses(
+    snapshot,
+    *,
+    include_subagents: bool = False,
+) -> tuple[AgentStatus, ...]:
+    """Fresh completion rows that the mailbox may show and clear.
+
+    Primary sessions remain the public default. The mailbox projection also
+    requests terminal workers so a collapsed family preserves their outcome.
+    """
+    collected_at = snapshot.collected_at
+    current_by_id: dict[str, AgentStatus] = {}
+    for status in snapshot.statuses:
+        existing = current_by_id.get(status.agent_id)
+        if existing is None or (
+            status.updated_at,
+            status.mode != AgentMode.COMPLETED,
+        ) > (
+            existing.updated_at,
+            existing.mode != AgentMode.COMPLETED,
+        ):
+            current_by_id[status.agent_id] = status
+
+    def eligible(status: AgentStatus) -> bool:
+        return (
+            (include_subagents or not status.is_subagent)
+            and status.mode == AgentMode.COMPLETED
+            and status.event_name != "SessionEnd"
+            and is_recent(
+                collected_at,
+                status.updated_at,
+                COMPLETED_VISIBLE_SECONDS,
+            )
+        )
+
+    eligible_by_id = {
+        agent_id: status
+        for agent_id, status in current_by_id.items()
+        if eligible(status)
+    }
+    for status in getattr(snapshot, "stale_statuses", ()):
+        if status.agent_id in current_by_id or not eligible(status):
+            continue
+        existing = eligible_by_id.get(status.agent_id)
+        if existing is None or status.updated_at > existing.updated_at:
+            eligible_by_id[status.agent_id] = status
+    return tuple(
+        sorted(
+            eligible_by_id.values(),
+            key=lambda status: (-status.updated_at.timestamp(), status.agent_id),
+        )
+    )
+
+
+def mailbox_attention_statuses(snapshot) -> tuple[AgentStatus, ...]:
+    """Current lifecycle rows plus eligible promoted stale completions."""
+    eligible_completions = eligible_mailbox_completion_statuses(
+        snapshot,
+        include_subagents=True,
+    )
+    current_ids = {status.agent_id for status in snapshot.statuses}
+    eligible_current_ids = {
+        status.agent_id for status in eligible_completions
+    } & current_ids
+    current = tuple(
+        status
+        for status in snapshot.statuses
+        if status.mode != AgentMode.COMPLETED
+        or status.agent_id in eligible_current_ids
+    )
+    promoted = tuple(
+        status
+        for status in eligible_completions
+        if status.agent_id not in current_ids
+    )
+    visible = (*current, *promoted)
+    if visible:
+        return visible
+    # Preserve bounded stale-only visibility without presenting an old
+    # Working state as current activity. The source identity and original
+    # row metadata remain available, while the lifecycle projects to Recent.
+    return tuple(
+        dataclass_replace(status, mode=AgentMode.IDLE_READY)
+        for status in recent_statuses(snapshot)
+    )
+
+
 def replay_recent_debug_logs(
     monitor: LiveAgentMonitor,
     *,
@@ -407,29 +1163,70 @@ class StatusBarController(NSObject):
             return None
 
         self.settings = load_settings()
+        self.notification_client = None
+        self.notification_authorization_state = (
+            NotificationAuthorizationState.UNAVAILABLE
+        )
+        self._notification_authorization_checked = False
+        self._notification_authorization_generation = 0
+        self._notification_authorization_refresh_in_flight = False
+        self._notification_action_bindings: dict[
+            str,
+            tuple[ActionTokenBinding, SemanticEventKey],
+        ] = {}
+        self._notification_events_by_work_key: dict[
+            WorkKey,
+            CanonicalOperatorEvent,
+        ] = {}
+        self._relay_epoch = time.monotonic()
         self.monitor = self.build_monitor()
         self.transcript_monitor = self.build_transcript_monitor()
         self.transcript_watermark = None
         self.event_server = None
         self.status_item = None
         self.timer = None
-        self.lid_timer = None
-        self.device_timer = None
         self.settings_window = None
+        self._settings_window_closing = False
         self.setup_window = None
         self.colors_window = None
+        self.agent_browser_controller = None
+        self.current_operator_state = None
+        self.mailbox_preferences: tuple[MailboxPreference, ...] = ()
+        self.mailbox_preferences_dirty = False
+        self.local_triage_state = LocalTriageState(())
+        self.local_triage_dirty = False
+        self.operator_action_error: str | None = None
+        self.mailbox_preferences_saver = self._save_mailbox_preferences
+        self.operator_triage_saver = self._save_operator_triage
+        self.navigation_candidates_by_work_key = {}
+        self.native_agent_menu_registry = StableNativeMenuRegistry()
+        self.mailbox_boundary_schedule = ExactBoundarySchedule()
+        self.mailbox_boundary_timer = None
         self.settings_fields = {}
         self.settings_buttons = {}
         self.device_settings_controls = {}
         self.settings_sidebar_table = None
         self.settings_panes = {}
+        self.operator_history_range_days = 1
+        self.operator_history_reel: tuple[str, ...] = ()
+        self.operator_history_store = OperatorHistoryStore(
+            default_operator_history_path(),
+            retention_days=self.settings.operator_history_retention_days,
+        )
+        self.operator_history_projection: OperatorHistoryProjection | None = None
+        self._operator_history_retention_generation = 0
+        self._operator_history_restore_started = False
+        self._operator_history_restore_pending = False
+        self.operator_history_restore_health = OperatorHistoryRestoreHealth.MISSING
+        self._operator_history_operation_status = ""
+        self._operator_history_lock = threading.RLock()
+        self.semantic_text_scale_percent = 100
         self._device_calibration_popover = None
         # (device_id, hex) while a calibration test patch is lighting the
         # device; None otherwise. See startCalibrationTest_.
         self.calibration_test = None
         self.setup_fields = {}
         self.setup_buttons = {}
-        self.setup_demo_timer = None
         self.color_swatches = {}
         self.color_hex_labels = {}
         self.color_fields = {}
@@ -446,7 +1243,6 @@ class StatusBarController(NSObject):
         # the preview instead of showing one static frame.
         self.color_preview_wasm = {}
         self.color_preview_programs = {}
-        self.color_preview_timer = None
         # Which canned situation the preview shows -- Live Activity (the
         # default) prefers whatever's really running and only falls back to
         # a fixed demo when nothing is; any other choice always shows that
@@ -457,21 +1253,28 @@ class StatusBarController(NSObject):
         self.color_preview_scenario = colors_module.PREVIEW_SCENARIO_LIVE
         self.active_color_target = None
         self.last_snapshot = None
+        self.current_attention_projection: AttentionProjection | None = None
+        self.current_mailbox_projection: AgentMailboxProjection | None = None
+        self.mailbox_retained_order: dict[str, int] = {}
+        self.mailbox_seen_completion_ids: set[str] = set()
+        self.failure_signal_coordinator = FiniteSignalCoordinator()
+        self.failure_signal_watermark_established = False
+        self.failure_signal_timer = None
+        self.failure_signal_timer_deadline: float | None = None
+        self.status_cue_coordinator = FiniteCueCoordinator()
+        self._status_finite_cues = FiniteCueState(None, None, None, False)
+        self._status_cue_candidates = ()
+        self._status_cue_deadline = None
+        self._current_resolved_glance = None
+        self._status_emphasis_accessibility_generation = None
         self.last_battery_snapshot = None
         self.last_battery_error = None
         self.last_power_connected = None
         self.battery_preview_until = 0.0
-        # Notification blinks: cursor into the Notification Center
-        # store, the transient blink window, and a backoff so a missing
-        # FDA grant costs one failed query a minute, not one per tick.
-        self.notification_record_cursor: int | None = None
-        self.notification_blink_until = 0.0
         self.quota_blink_until = 0.0
         self.quota_blink_color = None
         self.quota_blink_label = None
         self.quota_last_percents: dict[str, float] = {}
-        self.notification_blink_color: str | None = None
-        self.notification_watch_retry_at = 0.0
         # Calendar glow: monotonic deadline of the next event's start
         # (0.0 = no upcoming event inside the lead window).
         self.calendar_glow_until = 0.0
@@ -483,24 +1286,25 @@ class StatusBarController(NSObject):
         self.reminders_glow_until = 0.0
         self.reminders_seen: dict[str, float] = {}
         self.reminders_watch_retry_at = 0.0
+        self._reminders_permission_generation = 1
+        self._reminders_permission_request_token: int | None = None
+        self._reminders_permission_failed = False
         # Weather emergency: alert active right now (state, not moment).
         self.weather_alert_active = False
         self.weather_alert_event: str | None = None
         self.weather_watch_retry_at = 0.0
-        self.weather_fetch_in_flight = False
+        self._weather_observation_generation = 1
         self.current_state = STATE_IDLE
         # None until set_status() actually confirms Idle -- avoids assuming
         # "idle since launch" if the real initial state turns out to be
         # something else once the first real snapshot arrives.
         self.idle_since_monotonic: float | None = None
         # Ask escalation: when the aggregate first entered ask/blocked
-        # (None = not blocked), the last applied stage, the menu-bar
-        # flash timer, and whether this block episode already chimed.
+        # (None = not blocked), the last applied stage, and whether this
+        # block episode already chimed.
         self.ask_blocked_since: float | None = None
         self.ask_blocked_by_agent: dict[str, float] = {}
         self.escalation_last_stage = 0
-        self.escalation_flash_timer = None
-        self.escalation_flash_on = False
         self.escalation_chimed = False
         self.led_controller = AgentLedController()
         self.battery_led_controller = BatteryLedController()
@@ -509,9 +1313,12 @@ class StatusBarController(NSObject):
         self.last_led_display_kind_by_device = {}
         self.device_errors = {}
         self.leds_enabled = True
-        self.led_sync_in_flight = False
         self.last_watched_brightness = None
         self.last_watched_focus_scale = None
+        self._accessibility_display_preferences = None
+        self._accessibility_generation = 0
+        self._accessibility_observer_center = None
+        self._accessibility_observer_generation = 0
         self.last_led_error = None
         self.last_led_display_kind = LED_DISPLAY_AGENT
         self.last_connected_device_signature = None
@@ -546,13 +1353,9 @@ class StatusBarController(NSObject):
         self.hooks_update_in_flight = False
         self.last_active_focus_ids = set()
         self.last_agent_modes = {}
-        self.led_sync_dropped = False
         self.lid_animation_thumbs = {}
-        self.lid_poll_in_flight = False
-        self.notification_poll_in_flight = False
         self.peek_until = 0.0
         self.quiet_until_monotonic = 0.0
-        self.signal_preview_timer = None
         self.status_menu_open = False
         self.studio_editor = None
         self.studio_library_popup = None
@@ -577,29 +1380,342 @@ class StatusBarController(NSObject):
         self._last_event_refresh_at = 0.0
         self._menu_rebuild_pending = None
         self._menu_signature = None
+        self.menu_last_opened_at = None
         self._pane_transition_generation = 0
         self._peek_hits = 0
-        self._peek_timer = None
+        self._presentation_scheduler_state = PresentationSchedulerState()
+        self._presentation_scheduler_inputs = None
+        self._presentation_reconcile_active = False
+        self._presentation_reconcile_pending = None
+        self._presentation_monotonic = time.monotonic
+        self._runtime_started = False
+        self._lid_observation_active = False
+        self._lid_observation_fire_at = None
+        self._device_inventory_active = False
+        self._device_inventory_fire_at = None
+        self._device_inventory_candidates: tuple[DeviceCandidate, ...] = ()
+        self._display_environment_active = False
+        self._display_environment_fire_at = None
+        self._calendar_observation_active = False
+        self._calendar_observation_fire_at = None
+        self._reminders_observation_active = False
+        self._reminders_observation_fire_at = None
+        self._weather_observation_active = False
+        self._weather_observation_fire_at = None
+        self._scheduled_reminders_cue_deadline = None
+        self._scheduled_settings_message_deadline = None
+        self._scheduled_timebox_deadline = None
+        self._scheduled_escalation_deadline = None
+        self._runtime_preview_fire_at: dict[RuntimeFeature, float] = {}
+        self._settings_message_deadline_at = 0.0
+        self._tip_highlight_view = None
+        self._tip_highlight_until = 0.0
+        self._os_poll_generation = 1
+        self._installed_agent_inventory_generation = 1
+        self._installed_agent_inventory_result = None
+        self._hardware_write_active = False
+        self._hardware_write_generation = 1
+        self._hardware_device_keys: frozenset[str] = frozenset()
+        (
+            self._runtime_worker_registry,
+            self._os_poll_worker,
+        ) = self._build_runtime_worker_registry()
+        self._runtime_timer_registry = self._build_presentation_timer_registry()
+        self.virtual_status_device.set_presentation_schedule_reconciler(
+            self.reconcile_presentation_timers
+        )
         self._provider_probe_at = 0.0
-        self._settings_message_timer = None
         self._settings_pane_container = None
         self._setup_no_hooks_warned = False
         self._signal_card_rendered = None
         self._studio_validation_cache = None
         self._timebox_off_shortcut = None
         self._trailing_refresh_timer = None
-        self._usage_refresh_in_flight = False
-        self._usage_refreshed_at = 0.0
+        self._usage_provider_states = {
+            provider_id: ProviderRefreshState(
+                source_key=source_key,
+                enabled=(
+                    bool(self.settings.codex_percent_enabled)
+                    if provider_id == "codex"
+                    else provider_id != "claude"
+                ),
+            )
+            for provider_id, source_key in CAPACITY_SOURCE_KEYS_BY_PROVIDER.items()
+        }
+        self._usage_transcript_states = {
+            source_key: ProviderRefreshState(source_key=source_key)
+            for source_key in TRANSCRIPT_SOURCE_KEYS_BY_PROVIDER.values()
+        }
+        self._capacity_refresh_keys_by_provider = {
+            provider_id: RefreshSourceKey(
+                source=source_key,
+                pool="plan",
+                account_discriminator=None,
+            )
+            for provider_id, source_key in CAPACITY_SOURCE_KEYS_BY_PROVIDER.items()
+        }
+        self._capacity_refresh_coordinator = CapacityRefreshCoordinator(
+            tuple(
+                RefreshSourceRegistration(
+                    key=refresh_key,
+                    enabled=refresh_key.source.provider_id != "claude",
+                    supported=True,
+                )
+                for refresh_key in self._capacity_refresh_keys_by_provider.values()
+            )
+        )
+        self._capacity_refresh_deadline_timers = {}
+        self._capacity_refresh_retry_timers = {}
+        self._usage_provider_models: dict[str, ProviderUsageViewModel] = {}
+        self._usage_local_scan_complete = False
+        self._usage_menu_item = None
+        self._usage_menu_view = None
+        self._usage_menu_header = None
+        self._usage_menu_labels = {}
+        self._usage_menu_secondary_labels = {}
+        self._capacity_reset_timer = None
+        self._capacity_reset_plan = ResetBoundaryPlan(None, (), ())
+        self._capacity_reset_retry_deadline: float | None = None
+        self._capacity_countdown_timer = None
+        self._capacity_countdown_deadline: float | None = None
+        self._capacity_reset_continuity = {}
+        self._attempted_capacity_boundary_keys: tuple[str, ...] = ()
         return self
 
-    def applicationDidFinishLaunching_(self, _notification):
+    def _install_accessibility_display_observer(self) -> None:
+        if self._accessibility_observer_center is not None:
+            return
         try:
-            from AppKit import NSUserNotificationCenter
+            workspace = NSWorkspace.sharedWorkspace()
+            center = workspace.notificationCenter()
+            center.addObserver_selector_name_object_(
+                self,
+                "accessibilityDisplayOptionsDidChange:",
+                NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+                None,
+            )
+        except Exception:
+            return
+        self._accessibility_observer_generation += 1
+        self._accessibility_observer_center = center
+        self._apply_accessibility_display_preferences(
+            refresh_accessibility_display_preferences(
+                self._accessibility_display_preferences,
+                workspace,
+            )
+        )
 
-            NSUserNotificationCenter.defaultUserNotificationCenter().setDelegate_(self)
+    def _remove_accessibility_display_observer(self) -> None:
+        center = self._accessibility_observer_center
+        if center is None:
+            return
+        self._accessibility_observer_center = None
+        self._accessibility_observer_generation += 1
+        try:
+            center.removeObserver_name_object_(
+                self,
+                NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+                None,
+            )
         except Exception:
             pass
+
+    def accessibilityDisplayOptionsDidChange_(self, _notification) -> None:
+        if (
+            not self._runtime_started
+            or self._accessibility_observer_center is None
+        ):
+            return
+        observer_generation = self._accessibility_observer_generation
+        preferences = refresh_accessibility_display_preferences(
+            self._accessibility_display_preferences,
+            NSWorkspace.sharedWorkspace(),
+        )
+        if (
+            not self._runtime_started
+            or observer_generation != self._accessibility_observer_generation
+        ):
+            return
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "applyAccessibilityDisplayOptions:",
+            (observer_generation, preferences),
+            False,
+        )
+
+    @objc.IBAction
+    def applyAccessibilityDisplayOptions_(self, payload) -> None:
+        if (
+            type(payload) is not tuple
+            or len(payload) != 2
+            or type(payload[0]) is not int
+            or type(payload[1]) is not AccessibilityDisplayPreferences
+            or not self._runtime_started
+            or self._accessibility_observer_center is None
+            or payload[0] != self._accessibility_observer_generation
+        ):
+            return
+        self._apply_accessibility_display_preferences(payload[1])
+
+    def _apply_accessibility_display_preferences(
+        self,
+        preferences: AccessibilityDisplayPreferences,
+    ) -> bool:
+        if (
+            type(preferences) is not AccessibilityDisplayPreferences
+            or preferences == self._accessibility_display_preferences
+        ):
+            return False
+        self._accessibility_display_preferences = preferences
+        self._accessibility_generation += 1
+        if self._current_resolved_glance is not None:
+            self._discard_status_emphasis_plan()
+        apply_preferences = getattr(
+            self.virtual_status_device,
+            "set_accessibility_display_preferences",
+            None,
+        )
+        if callable(apply_preferences):
+            apply_preferences(
+                preferences,
+                generation=self._accessibility_generation,
+            )
+        self._reconcile_current_presentation_inputs()
+        snapshot = self.last_snapshot
+        if snapshot is not None:
+            projection = self.current_attention_projection
+            mode = (
+                self.display_aggregate_mode(projection)
+                if projection is not None
+                else snapshot.aggregate.mode
+            )
+            self.sync_leds(
+                mode,
+                self.last_battery_snapshot,
+                self.active_led_display_kind(self.last_battery_snapshot),
+                tuple(snapshot.statuses),
+                projection=projection,
+            )
+        return True
+
+    def _notification_client_for_use(self):
+        client = self.notification_client
+        if client is None:
+            client = MacOSNotificationClient()
+            self.notification_client = client
+        return client
+
+    def notification_authorization_status_text(self) -> str:
+        if not self._notification_authorization_checked:
+            return "Checking permission\u2026"
+        return {
+            NotificationAuthorizationState.NOT_DETERMINED: "Not requested",
+            NotificationAuthorizationState.DENIED: "Denied by macOS",
+            NotificationAuthorizationState.AUTHORIZED: "Allowed by macOS",
+            NotificationAuthorizationState.PROVISIONAL: "Provisionally allowed",
+            NotificationAuthorizationState.UNAVAILABLE: "Unavailable in this runtime",
+        }[self.notification_authorization_state]
+
+    def refresh_notification_authorization_controls(self) -> None:
+        set_field_value(
+            self.settings_fields.get("notification_authorization_status"),
+            self.notification_authorization_status_text(),
+        )
+        button = self.settings_buttons.get("notification_permission")
+        if button is not None:
+            button.setTitle_(
+                "Retry Permission Check\u2026"
+                if self._notification_authorization_checked
+                and self.notification_authorization_state
+                is NotificationAuthorizationState.UNAVAILABLE
+                else "Enable Notifications\u2026"
+            )
+            button.setHidden_(
+                not self._notification_authorization_checked
+                or self.notification_authorization_state
+                not in {
+                    NotificationAuthorizationState.NOT_DETERMINED,
+                    NotificationAuthorizationState.UNAVAILABLE,
+                }
+            )
+
+    def start_notification_authorization_refresh(self) -> None:
+        if (
+            self._notification_authorization_checked
+            or self._notification_authorization_refresh_in_flight
+        ):
+            self.refresh_notification_authorization_controls()
+            return
+        self._notification_authorization_generation += 1
+        generation = self._notification_authorization_generation
+        self._notification_authorization_refresh_in_flight = True
+
+        def observe() -> None:
+            state = self._notification_client_for_use().authorization_state()
+            self._publish_notification_authorization_state(generation, state)
+
+        threading.Thread(target=observe, daemon=True).start()
+
+    def _publish_notification_authorization_state(
+        self,
+        generation: int,
+        state: NotificationAuthorizationState,
+    ) -> None:
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "applyNotificationAuthorizationState:",
+            {"generation": generation, "state": state},
+            False,
+        )
+
+    @objc.IBAction
+    def applyNotificationAuthorizationState_(self, payload) -> None:
+        if type(payload) is not dict or set(payload) != {"generation", "state"}:
+            return
+        generation = payload["generation"]
+        state = payload["state"]
+        if (
+            type(generation) is not int
+            or generation != self._notification_authorization_generation
+            or type(state) is not NotificationAuthorizationState
+        ):
+            return
+        self.notification_authorization_state = state
+        self._notification_authorization_checked = True
+        self._notification_authorization_refresh_in_flight = False
+        self.refresh_notification_authorization_controls()
+
+    @objc.IBAction
+    def requestNotificationPermission_(self, _sender) -> None:
+        if (
+            self._notification_authorization_checked
+            and self.notification_authorization_state
+            is NotificationAuthorizationState.UNAVAILABLE
+        ):
+            self._notification_authorization_checked = False
+            self._notification_authorization_refresh_in_flight = False
+            self.refresh_notification_authorization_controls()
+            self.start_notification_authorization_refresh()
+            self.set_settings_message("Checking macOS notification permission.")
+            return
+        self._notification_authorization_generation += 1
+        generation = self._notification_authorization_generation
+
+        def completed(state: NotificationAuthorizationState) -> None:
+            self._publish_notification_authorization_state(generation, state)
+
+        if self._notification_client_for_use().request_authorization(completed):
+            self.set_settings_message("Waiting for macOS notification permission.")
+            return
+        self._publish_notification_authorization_state(
+            generation,
+            NotificationAuthorizationState.UNAVAILABLE,
+        )
+        self.set_settings_message("Notifications are unavailable in this runtime.")
+
+    def applicationDidFinishLaunching_(self, _notification):
+        self._notification_client_for_use().set_delegate(self)
+        self.start_notification_authorization_refresh()
         NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        self.load_operator_local_state()
         log_status_bar("launching status item")
         self.start_event_server()
         self.replay_debug_logs()
@@ -613,6 +1729,10 @@ class StatusBarController(NSObject):
         button.setToolTip_("SidePulse Agent Monitor: Idle")
         log_status_bar("status item created")
 
+        self._runtime_started = True
+        self.refresh_installed_agent_inventory()
+        self._install_accessibility_display_observer()
+        self.reconcile_lid_observation()
         self.refresh_(None)
         self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             STATUS_BAR_REFRESH_SECONDS,
@@ -621,71 +1741,18 @@ class StatusBarController(NSObject):
             None,
             True,
         )
-        self.lid_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            LID_POLL_SECONDS,
-            self,
-            "pollLid:",
-            None,
-            True,
-        )
-        self.device_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            STATUS_BAR_DEVICE_POLL_SECONDS,
-            self,
-            "pollDevices:",
-            None,
-            True,
-        )
-        # Screen-brightness watcher: auto-brightness used to re-evaluate
-        # only when an agent state change happened to trigger an LED
-        # write, so dimming the screen during a steady state changed
-        # nothing -- "doesn't react at all". This cheap poll (one ctypes
-        # call) triggers a full re-sync only when the reading actually
-        # moves, so tracking feels immediate without extra LED writes.
-        self.brightness_watch_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            BRIGHTNESS_WATCH_SECONDS,
-            self,
-            "pollScreenBrightness:",
-            None,
-            True,
-        )
-        # Notification-blink watcher: silently inert until Full Disk
-        # Access is granted (see notification_watch.py).
-        self.notification_watch_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            NOTIFICATION_WATCH_SECONDS,
-            self,
-            "pollNotifications:",
-            None,
-            True,
-        )
-        # Calendar watcher: inert until the user enables the glow and
-        # grants Calendars access (see calendar_watch.py).
-        self.calendar_watch_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            CALENDAR_WATCH_SECONDS,
-            self,
-            "pollCalendar:",
-            None,
-            True,
-        )
-        # Reminders watcher: same contract, async fetches.
-        self.reminders_watch_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            REMINDERS_WATCH_SECONDS,
-            self,
-            "pollReminders:",
-            None,
-            True,
-        )
-        # Weather watcher: network fetch on a worker thread, every 10min.
-        self.weather_watch_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            WEATHER_WATCH_SECONDS,
-            self,
-            "pollWeather:",
-            None,
-            True,
-        )
+        if not hasattr(self.virtual_status_device, "presentation_scheduler_inputs"):
+            self.lid_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                LID_POLL_SECONDS,
+                self,
+                "pollLid:",
+                None,
+                True,
+            )
         # NSTimer's FIRST fire is one full interval out -- an active
         # Tornado Warning must not stay dark for 10 minutes after launch.
         if self.settings.weather_alerts_enabled:
-            self.pollWeather_(None)
+            self._weather_observation_timer_fired()
         # Rotate oversized hook/event logs off the main thread.
         threading.Thread(
             target=lambda: trim_oversized_logs(default_state_dir()),
@@ -698,295 +1765,215 @@ class StatusBarController(NSObject):
             self.virtual_status_device.hide()
 
     @objc.IBAction
-    def pollScreenBrightness_(self, _sender):
-        """The brightness/Focus watcher's tick (see the timer above): two
-        cheap readings, and a full re-sync only when something genuinely
-        moved. Screen brightness and the active Focus share one watcher
-        because they share one failure mode -- both used to apply only
-        when an agent state change happened to trigger an LED write."""
-        needs_refresh = False
-
-        if any(device.auto_brightness_enabled for device in self.settings.devices):
-            try:
-                reading = display_brightness.auto_led_brightness()
-            except display_brightness.DisplayBrightnessUnavailableError:
-                reading = None
-            if reading is not None:
-                last = self.last_watched_brightness
-                self.last_watched_brightness = reading
-                if last is not None and abs(reading - last) >= BRIGHTNESS_WATCH_MIN_DELTA:
-                    needs_refresh = True
-
-        if self.settings.focus_sync_enabled:
-            scale = self.focus_sync_scale_factor()
-            if self.last_watched_focus_scale is not None and scale != self.last_watched_focus_scale:
-                needs_refresh = True
-            self.last_watched_focus_scale = scale
-
-        # Focus -> profile automation: a NEWLY activated Focus with a
-        # rule applies its profile exactly once per activation.
-        if self.settings.focus_profile_rules:
-            try:
-                active_focus = set(focus_sync.active_focus_mode_identifiers())
-            except focus_sync.FocusSyncUnavailableError:
-                active_focus = set()
-            previous_focus = getattr(self, "last_active_focus_ids", set())
-            newly_active = active_focus - previous_focus
-            self.last_active_focus_ids = active_focus
-            for focus_id in sorted(newly_active):
-                slot = self.settings.focus_profile_rules.get(focus_id)
-                if slot:
-                    self.settings = self.settings.with_applied_calibration_profile(slot)
-                    save_settings(self.settings)
-                    self.set_settings_message(f"Focus started — applied the {slot} profile.")
-                    needs_refresh = True
-                    break
-
-        # Timebox: chime once and revert when the countdown hits zero.
-        ends_at = getattr(self, "timebox_ends_at", None)
-        if ends_at is not None and time.monotonic() >= ends_at:
-            self.timebox_ends_at = None
-            self.timebox_total_seconds = 0.0
-            # Overtime ember: hold a deepening glow until Stop.
-            self.timebox_overtime_since = time.monotonic()
-            # Story #10: the drain ending gives the Focus back.
-            self.fire_timebox_off_shortcut()
-            if self.webhook_event_enabled("timebox"):
-                self.post_webhook({"event": "sidepulse.timebox_finished"})
-            try:
-                from AppKit import NSSound
-
-                sound = NSSound.soundNamed_("Glass")
-                if sound is not None:
-                    sound.play()
-            except Exception:
-                pass
-            self.set_settings_message("Timebox finished.")
-            needs_refresh = True
-
-        # Escalation stages advance with TIME, not events -- this shared
-        # watcher tick is what promotes an ignored ask to the next stage.
-        self.apply_escalation(allow_refresh=True)
-
-        if needs_refresh:
-            self.refresh_(None)
-
-    @objc.IBAction
-    def pollNotifications_(self, _sender):
-        """Blink the LEDs in an app's color when it delivers a
-        notification, then return to agent status. All failure modes
-        (no FDA, schema drift) back off quietly -- this signal must
-        never cost the user anything when it can't work."""
-        if not self.settings.notification_blinks_enabled:
-            return
-        if not self.settings.notification_app_colors:
-            return
-        now = time.monotonic()
-        if now < self.notification_watch_retry_at:
-            return
-        # sqlite on the Notification Center store blocked the main run
-        # loop every 2s (0.5s worst case when usernoted holds the DB) --
-        # audit finding #3. Worker thread, always-post contract.
-        if getattr(self, "notification_poll_in_flight", False):
-            return
-        self.notification_poll_in_flight = True
-        primed_cursor = self.notification_record_cursor
-
-        def _work():
-            try:
-                if primed_cursor is None:
-                    # First successful read just primes the cursor --
-                    # pre-existing notifications must not replay.
-                    payload = {
-                        "ok": True,
-                        "cursor": notification_watch.latest_record_id(),
-                        "identifiers": [],
-                    }
-                else:
-                    cursor, identifiers = notification_watch.delivered_after(
-                        primed_cursor
-                    )
-                    payload = {
-                        "ok": True,
-                        "cursor": cursor,
-                        "identifiers": list(identifiers),
-                    }
-            except notification_watch.NotificationWatchUnavailableError as exc:
-                payload = {"ok": False, "error": str(exc)}
-            except Exception as exc:
-                payload = {"ok": False, "error": f"unexpected: {exc!r}"}
-            self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "notificationsChecked:", payload, False
-            )
-
-        threading.Thread(target=_work, daemon=True).start()
-
-    @objc.IBAction
-    def notificationsChecked_(self, payload):
-        self.notification_poll_in_flight = False
-        now = time.monotonic()
-        if not payload.get("ok"):
-            self.notification_watch_retry_at = now + NOTIFICATION_WATCH_RETRY_SECONDS
-            return
-        self.notification_record_cursor = payload.get("cursor")
-        identifiers = payload.get("identifiers") or []
-        if not identifiers:
-            return
-        colors_by_app = self.settings.notification_app_colors
-        matched = [colors_by_app[app] for app in identifiers if app in colors_by_app]
-        if not matched:
-            return
-        # Several at once: the newest app's color wins; the blink says
-        # "something arrived", the menu bar says what.
-        hold = signals_module.signal_hold_seconds(
-            self.settings.signal_style(signals_module.SIGNAL_NOTIFICATION)
-        )
-        self.notification_blink_color = matched[-1]
-        self.notification_blink_until = now + hold
+    def failureSignalExpired_(self, _timer):
+        self.failure_signal_timer = None
+        self.failure_signal_timer_deadline = None
+        observed_at = time.monotonic()
+        # Reconcile the finite cue before repainting. NSTimer may fire early or
+        # late, so an early callback keeps the remaining lease while a late
+        # callback can start the one bounded pending cue at its actual start.
+        self.active_failure_signal(now=observed_at)
+        self.schedule_failure_signal_refresh(observed_at)
+        # A fresh snapshot is not required to restore the underlying
+        # projection. This explicit timer invalidation repaints at the
+        # exact end of the second visible pulse.
         self.refresh_(None)
-        # One-shot revert back to the agent display when the window ends.
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            hold + 0.1,
-            self,
-            "refresh:",
-            None,
-            False,
+
+    def update_attention_projection(
+        self,
+        snapshot,
+        *,
+        now: float | None = None,
+    ) -> AttentionProjection:
+        observed_at = time.monotonic() if now is None else float(now)
+        attention_snapshot = SimpleNamespace(
+            statuses=mailbox_attention_statuses(snapshot),
+            collected_at=snapshot.collected_at,
         )
-
-    @objc.IBAction
-    def pollCalendar_(self, _sender):
-        """Keeps calendar_glow_until pointing at the next event's start
-        while one is inside the lead window. All failure paths (access
-        not granted, EventKit absent) back off quietly."""
-        if not self.settings.calendar_alerts_enabled:
-            return
-        now = time.monotonic()
-        if now < self.calendar_watch_retry_at:
-            return
-        try:
-            upcoming = calendar_watch.next_event_start(self.settings.calendar_lead_minutes)
-        except calendar_watch.CalendarUnavailableError:
-            self.calendar_watch_retry_at = now + CALENDAR_WATCH_RETRY_SECONDS
-            return
-        was_active = now < self.calendar_glow_until
-        if upcoming is None:
-            self.calendar_glow_until = 0.0
-            self.calendar_event_title = None
-            if was_active:
-                self.refresh_(None)
-            return
-        title, start = upcoming
-        from datetime import datetime, timezone
-
-        seconds_until_start = (start - datetime.now(timezone.utc)).total_seconds()
-        self.calendar_event_title = title
-        self.calendar_glow_until = now + max(0.0, seconds_until_start)
-        if not was_active:
-            self.refresh_(None)
-
-    @objc.IBAction
-    def pollWeather_(self, _sender):
-        """Fetches NWS alerts on a worker thread (urllib would block the
-        main thread for seconds on a slow network) and hops the verdict
-        back to the main thread."""
-        if not self.settings.weather_alerts_enabled:
-            return
-        now = time.monotonic()
-        if now < self.weather_watch_retry_at or self.weather_fetch_in_flight:
-            return
-        self.weather_fetch_in_flight = True
-        latitude = self.settings.weather_latitude
-        longitude = self.settings.weather_longitude
-
-        def _fetch():
-            try:
-                if latitude is not None and longitude is not None:
-                    location = (latitude, longitude)
-                else:
-                    location = weather_watch.ip_location()
-                alerts = weather_watch.active_alerts(*location)
-                payload = {"ok": True, "alerts": alerts}
-            except weather_watch.WeatherUnavailableError as exc:
-                payload = {"ok": False, "error": str(exc)}
-            except Exception as exc:
-                # A surprise here must still post a payload -- otherwise
-                # weather_fetch_in_flight stays True forever and weather
-                # alerts silently stop until the next app restart.
-                payload = {"ok": False, "error": f"unexpected: {exc!r}"}
-            self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "weatherChecked:", payload, False
-            )
-
-        threading.Thread(target=_fetch, daemon=True).start()
-
-    @objc.IBAction
-    def weatherChecked_(self, payload):
-        self.weather_fetch_in_flight = False
-        if not payload.get("ok"):
-            self.weather_watch_retry_at = time.monotonic() + WEATHER_WATCH_RETRY_SECONDS
-            return
-        alerts = list(payload.get("alerts") or [])
-        was_active = self.weather_alert_active
-        self.weather_alert_active = bool(alerts)
-        self.weather_alert_event = str(alerts[0][2]) if alerts else None
-        if self.weather_alert_active != was_active:
-            if self.weather_alert_active and self.webhook_event_enabled("weather"):
-                self.post_webhook(
-                    {
-                        "event": "sidepulse.weather",
-                        "headline": self.weather_alert_event or "",
-                    }
-                )
-            self.refresh_(None)
-
-    @objc.IBAction
-    def pollReminders_(self, _sender):
-        """Fires the amber glow once per newly-due reminder. EventKit
-        reminder fetches are async; results come back on an EventKit
-        queue and hop to the main thread via remindersDue:."""
-        if not self.settings.reminder_alerts_enabled:
-            return
-        now = time.monotonic()
-        if now < self.reminders_watch_retry_at:
-            return
-        try:
-            reminders_watch.fetch_due(
-                REMINDERS_WATCH_SECONDS * 2.0,
-                lambda items: self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    "remindersDue:", list(items), False
-                ),
-            )
-        except reminders_watch.RemindersUnavailableError:
-            self.reminders_watch_retry_at = now + REMINDERS_WATCH_RETRY_SECONDS
-            return
-
-    @objc.IBAction
-    def remindersDue_(self, items):
-        now = time.monotonic()
-        # Prune ids that fell out of the fetch lookback long ago -- the
-        # seen-map must not grow for the process's whole life.
-        horizon = now - REMINDERS_WATCH_SECONDS * 8.0
-        self.reminders_seen = {
-            identifier: seen_at
-            for identifier, seen_at in self.reminders_seen.items()
-            if seen_at >= horizon
+        projection = project_attention(attention_snapshot, self.settings)
+        self.current_attention_projection = projection
+        active_ids = {
+            row.agent_id
+            for row in projection.visible_rows
+            if row.lifecycle_mode
+            not in {LifecycleMode.COMPLETED_RECENTLY, LifecycleMode.FAILED_VISIBLE}
         }
-        fresh = [
-            (identifier, title)
-            for identifier, title in (tuple(item) for item in (items or []))
-            if identifier not in self.reminders_seen
-        ]
-        if not fresh:
+        if active_ids:
+            self.mailbox_seen_completion_ids.difference_update(active_ids)
+        mailbox = project_mailbox_for_target(projection, self)
+        self.current_mailbox_projection = mailbox
+        self.mailbox_retained_order = dict(mailbox.retained_order)
+        if not self.failure_signal_watermark_established:
+            self.failure_signal_coordinator.establish_watermark(
+                projection,
+                now=observed_at,
+            )
+            self.failure_signal_watermark_established = True
+        else:
+            self.failure_signal_coordinator.observe(projection, observed_at)
+        self.schedule_failure_signal_refresh(observed_at)
+        return projection
+
+    def active_failure_signal(self, *, now: float | None = None) -> ActiveSignal | None:
+        observed_at = time.monotonic() if now is None else float(now)
+        return self.failure_signal_coordinator.active(observed_at)
+
+    def schedule_failure_signal_refresh(self, now: float) -> None:
+        deadline = self.failure_signal_coordinator.next_deadline
+        if deadline is None:
+            if self.failure_signal_timer is not None:
+                self.failure_signal_timer.invalidate()
+            self.failure_signal_timer = None
+            self.failure_signal_timer_deadline = None
             return
-        for identifier, _title in fresh:
-            self.reminders_seen[identifier] = now
-        hold = signals_module.signal_hold_seconds(
-            self.settings.signal_style(signals_module.SIGNAL_REMINDERS)
+        if (
+            self.failure_signal_timer is not None
+            and self.failure_signal_timer_deadline == deadline
+        ):
+            return
+        if self.failure_signal_timer is not None:
+            self.failure_signal_timer.invalidate()
+        self.failure_signal_timer_deadline = deadline
+        self.failure_signal_timer = (
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                max(0.001, deadline - now),
+                self,
+                "failureSignalExpired:",
+                None,
+                False,
+            )
         )
-        self.reminders_glow_until = time.monotonic() + hold
-        self.refresh_(None)
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            hold + 0.1, self, "refresh:", None, False
+
+    def virtual_display_state(
+        self,
+        projection: AttentionProjection,
+        active_signal: ActiveSignal | None,
+    ) -> LedDisplayState:
+        return virtual_display_state_for_projection(projection, active_signal)
+
+    def resolve_presentation_glance(
+        self,
+        projection: AttentionProjection,
+        *,
+        operator_events: tuple,
+        capacity: CapacityGlance | None,
+        override_reason: GlanceOverrideReason = GlanceOverrideReason.NONE,
+        override_semantic: GlanceSemantic | None = None,
+        presentation_time: float,
+    ) -> ResolvedGlance:
+        """Resolve one canonical steady presentation before surface projection."""
+        if (
+            type(projection) is not AttentionProjection
+            or type(operator_events) is not tuple
+            or not all(type(event) is CanonicalOperatorEvent for event in operator_events)
+        ):
+            raise ValueError("invalid presentation projection")
+        if capacity is not None and type(capacity) is not CapacityGlance:
+            raise ValueError("invalid presentation capacity")
+        preferences = self._accessibility_display_preferences
+        if type(preferences) is not AccessibilityDisplayPreferences:
+            preferences = AccessibilityDisplayPreferences(
+                reduce_motion=True,
+                reduce_transparency=True,
+                increase_contrast=True,
+                differentiate_without_color=True,
+            )
+        actionable_episode_key = None
+        if projection.actionable_attention:
+            row = projection.actionable_attention[0]
+            if row.request_key is not None:
+                actionable_episode_key = f"attention:{row.request_key.request_id.value}"
+        failure = next(
+            (event for event in operator_events if event.kind is TransitionKind.FAILED),
+            None,
+        )
+        completion = next(
+            (event for event in operator_events if event.kind is TransitionKind.COMPLETED),
+            None,
+        )
+        return resolve_glance(
+            GlanceInputs(
+                actionable_episode_key=actionable_episode_key,
+                fresh_failure=(
+                    FiniteCue(
+                        "failure:" + failure.key.provider_watermark.event_token.value,
+                        GlanceSemantic.FRESH_FAILURE,
+                        2,
+                        0.4,
+                    )
+                    if failure is not None
+                    else None
+                ),
+                fresh_completion=(
+                    FiniteCue(
+                        "completion:" + completion.key.provider_watermark.event_token.value,
+                        GlanceSemantic.FRESH_COMPLETION,
+                        2,
+                        0.4,
+                    )
+                    if completion is not None
+                    else None
+                ),
+                active=projection.lifecycle_mode is LifecycleMode.ACTIVE,
+                unresolved_failure=(
+                    projection.lifecycle_mode is LifecycleMode.FAILED_VISIBLE
+                ),
+                capacity=capacity,
+                override_reason=override_reason,
+                override_semantic=override_semantic,
+            ),
+            presentation_time=presentation_time,
+            relay_epoch=self._relay_epoch,
+            preferences=preferences,
+        )
+
+    def presentation_capacity_glance(self) -> CapacityGlance | None:
+        """Withhold raw-percent capacity from the shared presentation resolver."""
+        return None
+
+    def projected_rows_for_device(
+        self,
+        projection: AttentionProjection,
+        device: StatusBarDevice,
+    ):
+        pin = self.settings.device_provider_pin(device.device_id)
+        if not pin:
+            return projection.visible_rows
+        return tuple(row for row in projection.visible_rows if row.provider == pin)
+
+    def projection_for_device(
+        self,
+        projection: AttentionProjection,
+        device: StatusBarDevice,
+    ) -> AttentionProjection:
+        # Actionable attention is global and must break through provider
+        # pins. Stable lifecycle rows follow the pin.
+        if projection.actionable_attention:
+            return projection
+        rows = self.projected_rows_for_device(projection, device)
+        if not rows:
+            return dataclass_replace(
+                projection,
+                lifecycle_mode=LifecycleMode.IDLE,
+                visible_rows=(),
+                dominant_provider=None,
+                click_target_agent_id=None,
+            )
+        priority = {
+            LifecycleMode.WAITING: 0,
+            LifecycleMode.ACTIVE: 1,
+            LifecycleMode.FAILED_VISIBLE: 2,
+            LifecycleMode.COMPLETED_RECENTLY: 3,
+            LifecycleMode.IDLE: 4,
+            LifecycleMode.UNKNOWN: 5,
+        }
+        lifecycle = min(rows, key=lambda row: priority[row.lifecycle_mode]).lifecycle_mode
+        return dataclass_replace(
+            projection,
+            lifecycle_mode=lifecycle,
+            visible_rows=rows,
+            dominant_provider=rows[0].provider,
+            click_target_agent_id=None,
         )
 
     @objc.IBAction
@@ -1011,11 +1998,18 @@ class StatusBarController(NSObject):
             return
 
         self.last_snapshot = snapshot
+        if getattr(snapshot, "operator_state", None) is not None:
+            self.current_operator_state = snapshot.operator_state
+        self.observe_operator_history_events(
+            snapshot.operator_events,
+            self.current_operator_state,
+        )
+        projection = self.update_attention_projection(snapshot)
         battery_snapshot = self.read_battery_snapshot()
-        display_mode = self.display_aggregate_mode(snapshot)
-        state = state_for_mode(display_mode)
+        display_mode = self.display_aggregate_mode(projection)
+        state = state_for_projection(projection)
         self.observe_connected_devices()
-        self.track_ask_blocked(snapshot.statuses)
+        self.track_ask_blocked(projection)
         self.track_working(snapshot.statuses)
         # Completions need the FULL timeline: the collector demotes every
         # inactive status to stale_statuses the moment ANY session is
@@ -1024,8 +2018,10 @@ class StatusBarController(NSObject):
         # fire for the LAST session alive (the missed-celebration bug,
         # reproduced live with an injected session). The transition
         # detector's own freshness gate keeps replays silent.
-        self.track_completions((*snapshot.statuses, *snapshot.stale_statuses))
-        self.maybe_refresh_usage_summary()
+        self.track_completions(
+            (*snapshot.statuses, *snapshot.stale_statuses),
+            operator_events=snapshot.operator_events,
+        )
         # A cleared session stays cleared until it comes back to LIFE --
         # removing only reactivated ids (rather than intersecting with
         # the currently-completed set) keeps a clear stable across the
@@ -1038,17 +2034,34 @@ class StatusBarController(NSObject):
                 if status.mode != AgentMode.COMPLETED
             }
             self.cleared_session_ids = cleared - active_again
+        presentation_time = self._presentation_monotonic()
+        capacity = self.presentation_capacity_glance()
+        resolved_glance = self.resolve_presentation_glance(
+            projection,
+            operator_events=snapshot.operator_events,
+            capacity=capacity,
+            presentation_time=presentation_time,
+        )
+        self.set_status_emphasis_plan(
+            resolved_glance,
+            (resolved_glance.cue,) if resolved_glance.cue is not None else (),
+        )
         self.set_status(
             state,
-            ask_count=len(ask_statuses(snapshot)),
+            ask_count=len(ask_statuses(projection)),
             done_badge=bool(unseen_completions(snapshot, self)),
         )
-        self.sync_keep_awake(snapshot.aggregate.mode)
+        self.sync_keep_awake(display_mode)
         self.sync_leds(
             display_mode,
             battery_snapshot,
             self.active_led_display_kind(battery_snapshot),
             snapshot.statuses,
+            projection=projection,
+            operator_events=snapshot.operator_events,
+            capacity=capacity,
+            presentation_time=presentation_time,
+            resolved_glance=resolved_glance,
         )
         if self.status_item is not None:
             self.update_status_menu(snapshot, state)
@@ -1060,6 +2073,10 @@ class StatusBarController(NSObject):
         re-sorting under an open menu made rows jump beneath the cursor
         (T3's inbox keeps ordering static; signals carry the changes)."""
         if getattr(self, "status_menu_open", False):
+            native = _canonical_agent_root_snapshot(snapshot, self)
+            if native is not None:
+                states, _items = native
+                self.native_agent_menu_registry.publish(states, tracking=True)
             self._menu_rebuild_pending = (snapshot, state)
             return
         signature = menu_content_signature(snapshot, state, self)
@@ -1069,57 +2086,635 @@ class StatusBarController(NSObject):
         menu = build_menu(snapshot, state, self)
         menu.setDelegate_(self)
         self.status_item.setMenu_(menu)
+        native = _canonical_agent_root_snapshot(snapshot, self, menu=menu)
+        if native is not None:
+            states, items = native
+            self.native_agent_menu_registry.install(states, items)
 
-    def maybe_refresh_usage_summary(self) -> None:
-        """Recompute the "Claude today" line on a worker thread at most
-        every 5 minutes -- the scan is warm-cache cheap (T3's per-file
-        cache) but never belongs on the main thread."""
+    def maybe_refresh_usage_summary(self, *, reason: str | None = None) -> None:
+        """Plan due provider work without putting transcript IO on AppKit."""
         now = time.monotonic()
-        if getattr(self, "_usage_refresh_in_flight", False):
-            return
-        if now - getattr(self, "_usage_refreshed_at", 0.0) < 300.0:
-            return
-        self._usage_refresh_in_flight = True
+        states = getattr(self, "_usage_provider_states", {})
+        for provider_id, state in tuple(states.items()):
+            enabled = (
+                bool(self.settings.codex_percent_enabled)
+                if provider_id == "codex"
+                else provider_id != "claude"
+            )
+            states[provider_id] = dataclass_replace(
+                state,
+                enabled=enabled,
+                visible=True,
+            )
+        transcript_states = getattr(self, "_usage_transcript_states", {})
+        for source_key, state in tuple(transcript_states.items()):
+            transcript_states[source_key] = dataclass_replace(
+                state,
+                enabled=True,
+                visible=True,
+            )
+        self._usage_provider_states = states
+        self._usage_transcript_states = transcript_states
+        low_power = runtime_render_environment(visible=True).low_power
+        plan = plan_menu_open_refresh(
+            (*transcript_states.values(), *states.values()),
+            now=now,
+            low_power=low_power,
+        )
+        if plan.invocations:
+            if reason is None:
+                self.request_usage_refresh(plan.invocations)
+            else:
+                self.request_usage_refresh(plan.invocations, reason=reason)
 
-        def _work():
+    def request_usage_refresh(
+        self,
+        source_keys: tuple[SourceKey, ...],
+        *,
+        reason: str | None = None,
+    ) -> tuple[SourceKey, ...]:
+        """Reserve exact source generations before launching provider work."""
+        now = time.monotonic()
+        cause = {
+            "menu-open": RefreshCause.MENU_OPEN,
+            "manual": RefreshCause.MANUAL,
+        }.get(reason, RefreshCause.AUTOMATIC)
+        requests: dict[SourceKey, int] = {}
+        states = getattr(self, "_usage_provider_states", {})
+        transcript_states = getattr(self, "_usage_transcript_states", {})
+        for source_key in dict.fromkeys(source_keys):
+            if type(source_key) is not SourceKey:
+                continue
+            transcript_state = transcript_states.get(source_key)
+            if transcript_state is not None:
+                if (
+                    not transcript_state.enabled
+                    or not transcript_state.visible
+                    or transcript_state.in_flight
+                    or transcript_state.retry_not_before > now
+                ):
+                    continue
+                started = mark_refresh_started(transcript_state)
+                transcript_states[source_key] = started
+                requests[source_key] = started.generation
+                continue
+            provider_id = source_key.provider_id
+            state = states.get(provider_id)
+            refresh_key = self._capacity_refresh_keys_by_provider.get(provider_id)
+            if (
+                state is None
+                or not state.enabled
+                or not state.visible
+                or refresh_key is None
+                or refresh_key.source != source_key
+            ):
+                continue
+            decision = self._capacity_refresh_coordinator.request_refresh(
+                refresh_key,
+                cause,
+                now,
+            )
+            if decision.kind is not RefreshDecisionKind.START:
+                if cause is RefreshCause.MANUAL and decision.retry_at is not None:
+                    self._schedule_capacity_refresh_retry(
+                        refresh_key,
+                        retry_at=decision.retry_at,
+                        now=now,
+                    )
+                continue
+            generation = decision.generation
+            assert generation is not None
+            self._register_capacity_refresh_start(
+                refresh_key,
+                generation,
+                now=now,
+            )
+            requests[source_key] = generation
+        if not requests:
+            return ()
+        self._usage_provider_states = states
+        self._usage_transcript_states = transcript_states
+        self.update_usage_menu_fields()
+        threading.Thread(
+            target=self._usage_refresh_worker,
+            args=(requests,),
+            daemon=True,
+        ).start()
+        return tuple(requests)
+
+    def _register_capacity_refresh_start(
+        self,
+        refresh_key: RefreshSourceKey,
+        generation: int,
+        *,
+        now: float,
+    ) -> None:
+        retry_timer = self._capacity_refresh_retry_timers.pop(refresh_key, None)
+        if retry_timer is not None:
+            retry_timer.invalidate()
+        deadline = now + CAPACITY_REFRESH_DEADLINE_SECONDS
+        self._capacity_refresh_coordinator.register_started(
+            refresh_key,
+            generation,
+            deadline,
+        )
+        timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            CAPACITY_REFRESH_DEADLINE_SECONDS,
+            self,
+            "capacityRefreshDeadline:",
+            (refresh_key, generation),
+            False,
+        )
+        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, NSRunLoopCommonModes)
+        self._capacity_refresh_deadline_timers[refresh_key] = timer
+        provider_id = refresh_key.source.provider_id
+        states = getattr(self, "_usage_provider_states", {})
+        state = states.get(provider_id)
+        if state is None:
+            state = ProviderRefreshState(source_key=refresh_key.source)
+        states[provider_id] = mark_refresh_started(state, generation=generation)
+        self._usage_provider_states = states
+
+    def _schedule_capacity_refresh_retry(
+        self,
+        refresh_key: RefreshSourceKey,
+        *,
+        retry_at: float,
+        now: float,
+    ) -> None:
+        timers = self._capacity_refresh_retry_timers
+        if refresh_key in timers:
+            return
+        timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            max(0.05, retry_at - now),
+            self,
+            "capacityRefreshRetry:",
+            refresh_key,
+            False,
+        )
+        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, NSRunLoopCommonModes)
+        timers[refresh_key] = timer
+
+    @objc.IBAction
+    def capacityRefreshRetry_(self, timer):
+        refresh_key = timer.userInfo()
+        if type(refresh_key) is not RefreshSourceKey:
+            return
+        timers = getattr(self, "_capacity_refresh_retry_timers", {})
+        if timers.get(refresh_key) is not timer:
+            return
+        timers.pop(refresh_key, None)
+        now = time.monotonic()
+        decision = self._capacity_refresh_coordinator.take_due_queued_refresh(
+            refresh_key,
+            now,
+        )
+        if decision.kind is not RefreshDecisionKind.START:
+            if decision.retry_at is not None:
+                self._schedule_capacity_refresh_retry(
+                    refresh_key,
+                    retry_at=decision.retry_at,
+                    now=now,
+                )
+            return
+        generation = decision.generation
+        assert generation is not None
+        self._register_capacity_refresh_start(
+            refresh_key,
+            generation,
+            now=now,
+        )
+        self.update_usage_menu_fields(monotonic_now=now)
+        threading.Thread(
+            target=self._usage_refresh_worker,
+            args=({refresh_key.source: generation},),
+            daemon=True,
+        ).start()
+
+    @objc.IBAction
+    def capacityRefreshDeadline_(self, timer):
+        """Expire only the exact source generation owned by this timer."""
+        user_info = timer.userInfo()
+        if not (
+            type(user_info) is tuple
+            and len(user_info) == 2
+            and type(user_info[0]) is RefreshSourceKey
+            and type(user_info[1]) is int
+        ):
+            return
+        refresh_key, generation = user_info
+        timers = getattr(self, "_capacity_refresh_deadline_timers", {})
+        if timers.get(refresh_key) is not timer:
+            return
+        commit = self._capacity_refresh_coordinator.expire_deadline(
+            refresh_key,
+            generation,
+            time.monotonic(),
+        )
+        if commit.kind is RefreshCommitKind.NOT_DUE:
+            return
+        timers.pop(refresh_key, None)
+        if commit.kind is not RefreshCommitKind.TIMED_OUT:
+            return
+        self._project_capacity_refresh_state(refresh_key, now=commit.committed_at)
+        provider_id = refresh_key.source.provider_id
+        models = getattr(self, "_usage_provider_models", {})
+        old_model = models.get(provider_id)
+        error_text = CAPACITY_REFRESH_FAILURE_COPY[RefreshFailureKind.TIMED_OUT]
+        if old_model is not None:
+            models[provider_id] = dataclass_replace(
+                old_model,
+                stale=True,
+                refreshing=False,
+                error_text=error_text,
+            )
+        else:
+            models[provider_id] = build_provider_usage_view(
+                provider_id,
+                provider_id.title(),
+                (),
+                now=commit.committed_at,
+                error_text=error_text,
+            )
+        self._usage_provider_models = models
+        self.update_usage_menu_fields(monotonic_now=commit.committed_at)
+        self.schedule_capacity_timers()
+
+    def _capacity_refresh_state(self, refresh_key, *, now):
+        return next(
+            row
+            for row in self._capacity_refresh_coordinator.snapshot_state(now).sources
+            if row.key == refresh_key
+        )
+
+    def _project_capacity_refresh_state(self, refresh_key, *, now):
+        row = self._capacity_refresh_state(refresh_key, now=now)
+        provider_id = refresh_key.source.provider_id
+        states = getattr(self, "_usage_provider_states", {})
+        state = states.get(provider_id)
+        if state is None:
+            state = ProviderRefreshState(source_key=refresh_key.source)
+        states[provider_id] = dataclass_replace(
+            state,
+            last_success_at=row.last_success_at,
+            in_flight=row.in_flight,
+            consecutive_failures=row.consecutive_failures,
+            retry_not_before=row.retry_at or 0.0,
+            error_text=(
+                CAPACITY_REFRESH_FAILURE_COPY.get(row.last_failure)
+                if row.last_failure is not None
+                else None
+            ),
+            generation=row.generation,
+        )
+        self._usage_provider_states = states
+        return row
+
+    def _finish_capacity_refresh_timer(self, refresh_key) -> None:
+        timer = self._capacity_refresh_deadline_timers.pop(refresh_key, None)
+        if timer is not None:
+            timer.invalidate()
+
+    def invalidate_usage_providers(self, provider_ids: tuple[str, ...]) -> None:
+        """Make selected providers due and obsolete any older publishers."""
+        provider_ids = tuple(dict.fromkeys(provider_ids))
+        self.clear_capacity_timers(clear_attempts=True)
+        now = time.monotonic()
+        states = getattr(self, "_usage_provider_states", {})
+        models = getattr(self, "_usage_provider_models", {})
+        for provider_id in provider_ids:
+            state = states.get(provider_id)
+            refresh_key = self._capacity_refresh_keys_by_provider.get(provider_id)
+            if state is None or refresh_key is None:
+                continue
+            for timers in (
+                self._capacity_refresh_deadline_timers,
+                self._capacity_refresh_retry_timers,
+            ):
+                timer = timers.pop(refresh_key, None)
+                if timer is not None:
+                    timer.invalidate()
+            refresh_state = self._capacity_refresh_coordinator.invalidate_source(
+                refresh_key,
+                now=now,
+            )
+            states[provider_id] = dataclass_replace(
+                state,
+                last_success_at=None,
+                in_flight=False,
+                consecutive_failures=0,
+                retry_not_before=0.0,
+                error_text=None,
+                generation=refresh_state.generation,
+            )
+            models.pop(provider_id, None)
+        self._usage_provider_states = states
+        self._usage_provider_models = models
+
+    def clear_capacity_timers(self, *, clear_attempts: bool) -> None:
+        for name in ("_capacity_reset_timer", "_capacity_countdown_timer"):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                timer.invalidate()
+            setattr(self, name, None)
+        self._capacity_reset_plan = ResetBoundaryPlan(None, (), ())
+        self._capacity_reset_retry_deadline = None
+        self._capacity_countdown_deadline = None
+        if clear_attempts:
+            self._attempted_capacity_boundary_keys = ()
+
+    def _normal_capacity_refresh_deadline(
+        self,
+        *,
+        monotonic_now: float,
+        epoch_now: float,
+    ) -> float | None:
+        low_power = runtime_render_environment(visible=True).low_power
+        fresh_seconds = LOW_POWER_FRESH_SECONDS if low_power else DEFAULT_FRESH_SECONDS
+        deadlines = []
+        for state in getattr(self, "_usage_provider_states", {}).values():
+            if not state.enabled or not state.visible:
+                continue
+            if state.in_flight:
+                deadlines.append(epoch_now)
+                continue
+            if state.last_success_at is None:
+                due_monotonic = max(monotonic_now, float(state.retry_not_before))
+            else:
+                due_monotonic = float(state.last_success_at) + fresh_seconds
+                due_monotonic = max(due_monotonic, float(state.retry_not_before))
+            deadlines.append(epoch_now + max(0.0, due_monotonic - monotonic_now))
+        return min(deadlines) if deadlines else None
+
+    def _schedule_capacity_timer(self, delay: float, selector: str):
+        timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            delay,
+            self,
+            selector,
+            None,
+            False,
+        )
+        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, NSRunLoopCommonModes)
+        return timer
+
+    def schedule_capacity_timers(self, *, epoch_now: float | None = None) -> None:
+        epoch_now = time.time() if epoch_now is None else float(epoch_now)
+        monotonic_now = time.monotonic()
+        models = getattr(self, "_usage_provider_models", {})
+        plan = plan_reset_boundary_refresh(
+            tuple(models.values()),
+            now=epoch_now,
+            normal_refresh_deadline=self._normal_capacity_refresh_deadline(
+                monotonic_now=monotonic_now,
+                epoch_now=epoch_now,
+            ),
+            attempted_boundary_keys=set(
+                getattr(self, "_attempted_capacity_boundary_keys", ())
+            ),
+        )
+        old_plan = getattr(
+            self,
+            "_capacity_reset_plan",
+            ResetBoundaryPlan(None, (), ()),
+        )
+        reset_timer = getattr(self, "_capacity_reset_timer", None)
+        retry_deadline = getattr(self, "_capacity_reset_retry_deadline", None)
+        preserve_retry = False
+        if reset_timer is not None and retry_deadline is not None and models:
+            reference_now = (
+                min(epoch_now, old_plan.deadline)
+                - DEFAULT_RESET_GRACE_SECONDS
+                - 0.001
+            )
+            current_boundary = plan_reset_boundary_refresh(
+                tuple(models.values()),
+                now=reference_now,
+                normal_refresh_deadline=None,
+            )
+            preserve_retry = (
+                current_boundary.provider_ids == old_plan.provider_ids
+                and current_boundary.boundary_keys == old_plan.boundary_keys
+            )
+        if preserve_retry:
+            pass
+        elif plan.deadline is None:
+            if reset_timer is not None:
+                reset_timer.invalidate()
+            self._capacity_reset_timer = None
+            self._capacity_reset_plan = plan
+            self._capacity_reset_retry_deadline = None
+        elif reset_timer is None or plan != old_plan:
+            if reset_timer is not None:
+                reset_timer.invalidate()
+            self._capacity_reset_plan = plan
+            self._capacity_reset_retry_deadline = None
+            self._capacity_reset_timer = self._schedule_capacity_timer(
+                max(0.05, plan.deadline - epoch_now),
+                "capacityResetBoundary:",
+            )
+
+        settings_window = getattr(self, "settings_window", None)
+        settings_visible = bool(
+            settings_window is not None
+            and callable(getattr(settings_window, "isVisible", None))
+            and settings_window.isVisible()
+            and getattr(self, "current_settings_pane", None) == "profile"
+        )
+        countdown_relevant = bool(
+            getattr(self, "status_menu_open", False) or settings_visible
+        )
+        reset_epochs = (
+            window.reset_epoch
+            for model in models.values()
+            for window in model.windows
+            if window.reset_known
+        )
+        countdown_deadline = (
+            next_countdown_deadline(reset_epochs, now=epoch_now)
+            if countdown_relevant
+            else None
+        )
+        countdown_timer = getattr(self, "_capacity_countdown_timer", None)
+        old_countdown_deadline = getattr(
+            self, "_capacity_countdown_deadline", None
+        )
+        if countdown_deadline is None:
+            if countdown_timer is not None:
+                countdown_timer.invalidate()
+            self._capacity_countdown_timer = None
+            self._capacity_countdown_deadline = None
+        elif countdown_timer is None or countdown_deadline != old_countdown_deadline:
+            if countdown_timer is not None:
+                countdown_timer.invalidate()
+            self._capacity_countdown_deadline = countdown_deadline
+            self._capacity_countdown_timer = self._schedule_capacity_timer(
+                max(0.05, countdown_deadline - epoch_now),
+                "capacityCountdown:",
+            )
+
+    def _schedule_capacity_reset_retry(
+        self,
+        plan: ResetBoundaryPlan,
+        *,
+        monotonic_now: float,
+    ) -> None:
+        delay = MINIMUM_RESET_REFRESH_DELAY_SECONDS
+        states = getattr(self, "_usage_provider_states", {})
+        for provider_id in plan.provider_ids:
+            state = states.get(provider_id)
+            if state is None:
+                continue
+            delay = max(
+                delay,
+                float(state.retry_not_before) - monotonic_now,
+            )
+        self._capacity_reset_plan = plan
+        self._capacity_reset_retry_deadline = monotonic_now + delay
+        self._capacity_reset_timer = self._schedule_capacity_timer(
+            delay,
+            "capacityResetBoundary:",
+        )
+
+    @objc.IBAction
+    def capacityResetBoundary_(self, timer):
+        if timer is not getattr(self, "_capacity_reset_timer", None):
+            return
+        self._capacity_reset_timer = None
+        self._capacity_reset_retry_deadline = None
+        plan = getattr(
+            self,
+            "_capacity_reset_plan",
+            ResetBoundaryPlan(None, (), ()),
+        )
+        epoch_now = time.time()
+        if plan.deadline is None or epoch_now + 0.05 < plan.deadline:
+            self.schedule_capacity_timers(epoch_now=epoch_now)
+            return
+
+        models = getattr(self, "_usage_provider_models", {})
+        if models:
+            reference_now = (
+                min(epoch_now, plan.deadline)
+                - DEFAULT_RESET_GRACE_SECONDS
+                - 0.001
+            )
+            current_plan = plan_reset_boundary_refresh(
+                tuple(models.values()),
+                now=reference_now,
+                normal_refresh_deadline=None,
+            )
+            if (
+                current_plan.provider_ids != plan.provider_ids
+                or current_plan.boundary_keys != plan.boundary_keys
+            ):
+                self.schedule_capacity_timers(epoch_now=epoch_now)
+                return
+
+        monotonic_now = time.monotonic()
+        states = getattr(self, "_usage_provider_states", {})
+        boundary_states = [states.get(provider_id) for provider_id in plan.provider_ids]
+        if any(
+            state is None or not state.enabled or not state.visible
+            for state in boundary_states
+        ):
+            self.schedule_capacity_timers(epoch_now=epoch_now)
+            return
+        if any(
+            state.in_flight or state.retry_not_before > monotonic_now
+            for state in boundary_states
+        ):
+            self._schedule_capacity_reset_retry(
+                plan,
+                monotonic_now=monotonic_now,
+            )
+            return
+
+        previous_attempts = getattr(
+            self, "_attempted_capacity_boundary_keys", ()
+        )
+        self._attempted_capacity_boundary_keys = retain_attempted_boundary_keys(
+            previous_attempts,
+            plan.boundary_keys,
+        )
+        source_keys = tuple(
+            CAPACITY_SOURCE_KEYS_BY_PROVIDER[provider_id]
+            for provider_id in plan.provider_ids
+            if provider_id in CAPACITY_SOURCE_KEYS_BY_PROVIDER
+        )
+        started = self.request_usage_refresh(
+            source_keys,
+            reason="reset-boundary",
+        )
+        if set(started) != set(source_keys):
+            self._attempted_capacity_boundary_keys = tuple(previous_attempts)
+            self._schedule_capacity_reset_retry(
+                plan,
+                monotonic_now=time.monotonic(),
+            )
+            return
+        self.schedule_capacity_timers(epoch_now=epoch_now)
+
+    @objc.IBAction
+    def capacityCountdown_(self, timer):
+        if timer is not getattr(self, "_capacity_countdown_timer", None):
+            return
+        self._capacity_countdown_timer = None
+        self._capacity_countdown_deadline = None
+        epoch_now = time.time()
+        self.update_usage_menu_fields(
+            monotonic_now=time.monotonic(),
+            epoch_now=epoch_now,
+        )
+        self.schedule_capacity_timers(epoch_now=epoch_now)
+
+    def _usage_refresh_worker(self, requests: dict[SourceKey, int]) -> None:
+        """Build one frozen local snapshot, then start every source independently."""
+        shared: dict[str, list] = {}
+        shared_error = None
+        totals = None
+        workers = []
+        for source_key, generation in requests.items():
+            if (
+                type(source_key) is not SourceKey
+                or source_key.capability_id == "transcript_usage"
+            ):
+                continue
+            worker = threading.Thread(
+                target=self._usage_refresh_source_worker,
+                args=(source_key, generation, None, {}, None),
+                daemon=True,
+            )
+            workers.append(worker)
+            worker.start()
+        local_sources = tuple(
+            source_key
+            for source_key in requests
+            if source_key.capability_id == "transcript_usage"
+        )
+        if local_sources:
             try:
-                midnight = datetime.now().replace(
-                    hour=0, minute=0, second=0, microsecond=0
+                graph_days = self.settings.usage_graph_days
+                period_start = (
+                    datetime.now() - timedelta(days=graph_days - 1)
+                ).replace(
+                    hour=0,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
                 )
                 totals = usage_stats.scan_usage(
                     Path.home() / ".claude" / "projects",
                     default_state_dir() / "usage-scan-cache.json",
-                    since_epoch=midnight.timestamp(),
+                    since_epoch=period_start.timestamp(),
                     codex_root=Path.home() / ".codex" / "sessions",
                 )
-                line = usage_stats.usage_summary_line(
-                    totals, self.settings.usage_display_mode
+                buckets = usage_stats.daily_buckets(
+                    totals.records,
+                    days=graph_days,
                 )
-                codex_parts = []
-                if totals.codex_sessions:
-                    codex_parts.append(
-                        f"Codex today: {len(totals.codex_sessions)} sessions "
-                        f"\u00b7 {totals.codex_tokens / 1_000_000:.0f}M tokens"
-                    )
-                limits = usage_stats.codex_rate_limits(
-                    Path.home() / ".codex" / "sessions"
-                )
-                percents = {}
-                primary = (limits or {}).get("primary") or {}
-                if primary.get("used_percent") is not None:
-                    if self.settings.codex_percent_enabled:
-                        codex_parts.append(
-                            f"weekly limit {primary['used_percent']:.0f}% used"
-                        )
-                    percents["Codex weekly"] = float(primary["used_percent"])
-                codex_line = " \u00b7 ".join(codex_parts) if codex_parts else None
-                graph_days = self.settings.usage_graph_days
-                buckets = usage_stats.daily_buckets(totals.records, days=graph_days)
                 label_stride = max(1, graph_days // 7)
-                day_bars = [
+                shared["day_bars"] = [
                     {
-                        # Sparse labels at long ranges -- a year of 365
-                        # date stamps is noise, not an axis.
                         "label": (
                             day[5:].replace("-", "/")
                             if index % label_stride == 0
@@ -1130,143 +2725,540 @@ class StatusBarController(NSObject):
                     }
                     for index, (day, bucket) in enumerate(buckets.items())
                 ]
-                hourly = usage_stats.hourly_session_counts(totals.records)
-                plan_line = None
-                if self.settings.claude_plan_limits_enabled:
-                    try:
-                        plan_windows = claude_quota.fetch_windows()
-                        plan_line = claude_quota.summary_line(plan_windows)
-                        for window in plan_windows:
-                            percents[f"Claude {window['label']}"] = float(
-                                window["utilization"]
-                            )
-                    except claude_quota.ClaudeQuotaUnavailableError as exc:
-                        log_status_bar(f"claude quota unavailable: {exc}")
-                        plan_line = "Claude plan: unavailable right now."
-                detail = (
+                shared["hourly"] = usage_stats.hourly_session_counts(
+                    totals.records
+                )
+                shared["usage_graph"] = usage_stats.usage_graph_model(
+                    totals.records,
+                    days=graph_days,
+                    metric=self.settings.usage_display_mode,
+                    provider_ids=self.settings.usage_graph_providers,
+                )
+            except Exception:
+                shared_error = "local_activity_unavailable"
+                log_status_bar("usage scan error: local_activity_unavailable")
+
+        for source_key, generation in requests.items():
+            if (
+                type(source_key) is not SourceKey
+                or source_key.capability_id != "transcript_usage"
+            ):
+                continue
+            result = self._local_usage_result(
+                source_key.provider_id,
+                totals,
+                period_label=usage_stats.usage_period_label(
+                    self.settings.usage_graph_days
+                ),
+            )
+            failure = (
+                None
+                if result is not None
+                else RefreshFailureKind.SOURCE_UNAVAILABLE
+            )
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "applyUsageSummary:",
+                {
+                    "requests": {source_key: generation},
+                    "results": (
+                        {source_key: result} if result is not None else {}
+                    ),
+                    "failures": (
+                        {source_key: failure} if failure is not None else {}
+                    ),
+                    "shared": dict(shared),
+                    "shared_error": shared_error,
+                },
+                False,
+            )
+        for worker in workers:
+            join = getattr(worker, "join", None)
+            if callable(join):
+                join()
+
+    def _local_usage_result(
+        self,
+        provider_id: str,
+        totals,
+        *,
+        period_label: str = "Today",
+    ) -> dict | None:
+        """Project one provider's local aggregate without quota authority."""
+        if totals is None:
+            return None
+        coverage = totals.source_coverage.get(provider_id)
+        partial = bool(
+            coverage is not None
+            and coverage.status is usage_stats.UsageSourceStatus.PARTIAL
+        )
+        if provider_id == "codex":
+            summary = None
+            if totals.codex_sessions:
+                count = len(totals.codex_sessions)
+                session_word = "session" if count == 1 else "sessions"
+                prefix = (
+                    "Codex today"
+                    if period_label == "Today"
+                    else f"Codex, {period_label.lower()}"
+                )
+                summary = (
+                    f"{prefix}: {count} {session_word} \u00b7 "
+                    f"{usage_stats.compact_token_count(totals.codex_tokens)} "
+                    "processed tokens"
+                )
+            return {
+                "provider_id": "codex",
+                "title": "Codex",
+                "summary_text": summary,
+                "detail_text": None,
+                "partial": partial,
+                "source_text": source_text_for_coverage(coverage),
+            }
+        if provider_id == "claude":
+            return {
+                "provider_id": "claude",
+                "title": "Claude",
+                "summary_text": usage_stats.usage_summary_line(
+                    totals,
+                    self.settings.usage_display_mode,
+                    period_label=period_label,
+                ),
+                "detail_text": (
                     f"{totals.input_tokens:,} in \u00b7 "
                     f"{totals.cached_input_tokens:,} cached \u00b7 "
                     f"{totals.output_tokens:,} out"
                     if totals.sessions
                     else None
-                )
-            except Exception as exc:
-                log_status_bar(f"usage scan error: {exc}")
-                line = None
-                detail = None
-                codex_line = None
-                day_bars = []
-                hourly = []
-                plan_line = None
-                percents = {}
-            self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "applyUsageSummary:",
-                (line, detail, codex_line, day_bars, hourly, plan_line, percents),
-                False,
-            )
+                ),
+                "partial": partial,
+                "source_text": source_text_for_coverage(coverage),
+            }
+        return None
 
-        threading.Thread(target=_work, daemon=True).start()
+    def _usage_refresh_source_worker(
+        self,
+        source_key: SourceKey,
+        generation: int,
+        totals,
+        shared: dict,
+        shared_error: str | None,
+    ) -> None:
+        """Run one source adapter and publish one exact generation."""
+        provider_id = source_key.provider_id
+        result = None
+        failure = None
+        if provider_id == "codex":
+            windows = []
+            try:
+                limits = (
+                    usage_stats.codex_rate_limits(totals)
+                    if totals is not None
+                    else usage_stats.cached_codex_rate_limits(
+                        default_state_dir() / "usage-scan-cache.json"
+                    )
+                )
+                windows = usage_stats.codex_windows_from_limits(limits)
+                if not windows:
+                    raise ValueError("local capacity evidence unavailable")
+                if not self.settings.codex_percent_enabled:
+                    windows = []
+            except Exception:
+                log_status_bar("codex usage unavailable: source_unavailable")
+                failure = RefreshFailureKind.SOURCE_UNAVAILABLE
+            result = {
+                "provider_id": "codex",
+                "title": "Codex",
+                "windows": windows,
+            }
+
+        elif provider_id == "claude":
+            windows = []
+            if self.settings.claude_plan_limits_enabled:
+                try:
+                    windows = claude_quota.fetch_windows()
+                except claude_quota.ClaudeQuotaUnavailableError:
+                    log_status_bar("claude quota unavailable: source_unavailable")
+                    failure = RefreshFailureKind.SOURCE_UNAVAILABLE
+                except Exception:
+                    log_status_bar("claude usage unavailable: source_unavailable")
+                    failure = RefreshFailureKind.SOURCE_UNAVAILABLE
+            result = {
+                "provider_id": "claude",
+                "title": "Claude",
+                "windows": windows,
+            }
+        else:
+            failure = RefreshFailureKind.SOURCE_UNAVAILABLE
+
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "applyUsageSummary:",
+            {
+                "requests": {source_key: generation},
+                "results": ({source_key: result} if result is not None else {}),
+                "failures": ({source_key: failure} if failure is not None else {}),
+                "shared": shared,
+                "shared_error": shared_error,
+            },
+            False,
+        )
 
     @objc.IBAction
     def applyUsageSummary_(self, payload):
-        self._usage_refresh_in_flight = False
-        self._usage_refreshed_at = time.monotonic()
-        line = payload[0] if payload else None
-        detail = payload[1] if payload and len(payload) > 1 else None
-        self.usage_detail_text = detail
-        self.usage_summary_text = line
-        self.codex_summary_text = payload[2] if payload and len(payload) > 2 else None
+        if not isinstance(payload, dict):
+            return
+        now = time.monotonic()
+        reset_now = time.time()
+        requests = payload.get("requests") or {}
+        results = payload.get("results") or {}
+        failures = payload.get("failures") or {}
+        models = getattr(self, "_usage_provider_models", {})
+        accepted = False
+        for source_key, generation in requests.items():
+            if type(source_key) is not SourceKey:
+                continue
+            provider_id = source_key.provider_id
+            result = results.get(source_key)
+            failure = failures.get(source_key)
+            if failure is not None and type(failure) is not RefreshFailureKind:
+                failure = RefreshFailureKind.FAILED
+            if not isinstance(result, dict) and failure is None:
+                failure = RefreshFailureKind.SOURCE_UNAVAILABLE
+            if source_key.capability_id == "transcript_usage":
+                transcript_states = getattr(self, "_usage_transcript_states", {})
+                state = transcript_states.get(source_key)
+                if not (
+                    state is not None
+                    and type(generation) is int
+                    and generation == state.generation
+                    and state.in_flight
+                ):
+                    continue
+                if failure is None:
+                    state = mark_refresh_succeeded(state, now=now)
+                else:
+                    state = mark_refresh_failed(
+                        state,
+                        now=now,
+                        error_text="Local activity unavailable",
+                    )
+                transcript_states[source_key] = state
+                self._usage_transcript_states = transcript_states
+                old_model = models.get(provider_id)
+                if failure is None:
+                    activity = LocalActivitySection(
+                        summary_text=result.get("summary_text"),
+                        detail_text=result.get("detail_text"),
+                        partial=bool(result.get("partial", False)),
+                        source_text=result.get("source_text"),
+                    )
+                    if old_model is None:
+                        models[provider_id] = build_provider_usage_view(
+                            provider_id,
+                            str(result.get("title") or provider_id.title()),
+                            (),
+                            last_success_at=state.last_success_at,
+                            now=now,
+                            reset_now=reset_now,
+                            local_activity=activity,
+                        )
+                    else:
+                        last_success_at = (
+                            old_model.last_success_at
+                            if old_model.windows
+                            else state.last_success_at
+                        )
+                        models[provider_id] = dataclass_replace(
+                            old_model,
+                            last_success_at=last_success_at,
+                            stale=(old_model.stale if old_model.windows else False),
+                            missing=False,
+                            refreshing=False,
+                            local_activity=activity,
+                        )
+                elif old_model is None:
+                    models[provider_id] = build_provider_usage_view(
+                        provider_id,
+                        provider_id.title(),
+                        (),
+                        last_success_at=state.last_success_at,
+                        now=now,
+                        reset_now=reset_now,
+                        error_text="Local activity unavailable",
+                    )
+                else:
+                    models[provider_id] = dataclass_replace(
+                        old_model,
+                        refreshing=False,
+                    )
+                accepted = True
+                continue
+            refresh_key = self._capacity_refresh_keys_by_provider.get(provider_id)
+            if refresh_key is None or refresh_key.source != source_key:
+                continue
+            if failure is None:
+                observations = result.get("capacity_observations") or ()
+                if not (
+                    type(observations) is tuple
+                    and all(
+                        type(observation) is QuotaLaneObservation
+                        for observation in observations
+                    )
+                ):
+                    failure = RefreshFailureKind.FAILED
+                else:
+                    health = CapacitySourceHealth(
+                        source=source_key,
+                        kind=SourceHealthKind.HEALTHY,
+                        observed_at=reset_now,
+                        last_attempt_at=reset_now,
+                        retry_at=None,
+                        reason_code=None,
+                        has_last_known_good=False,
+                    )
+                    snapshot = CapacitySnapshot(
+                        observed_at=reset_now,
+                        lanes=observations,
+                        source_health=(health,),
+                    )
+                    try:
+                        commit = self._capacity_refresh_coordinator.register_success(
+                            refresh_key,
+                            generation,
+                            snapshot,
+                            now,
+                        )
+                    except ValueError:
+                        failure = RefreshFailureKind.FAILED
+            if failure is not None:
+                retry_at = payload.get("retry_at")
+                try:
+                    commit = self._capacity_refresh_coordinator.register_failure(
+                        refresh_key,
+                        generation,
+                        failure,
+                        now,
+                        retry_at,
+                    )
+                except ValueError:
+                    continue
+            if commit.kind in {
+                RefreshCommitKind.STALE_GENERATION,
+                RefreshCommitKind.NOT_DUE,
+            }:
+                continue
+            if commit.kind is RefreshCommitKind.TIMED_OUT:
+                failure = RefreshFailureKind.TIMED_OUT
+            accepted = True
+            self._finish_capacity_refresh_timer(refresh_key)
+            row = self._project_capacity_refresh_state(refresh_key, now=now)
+            state = self._usage_provider_states[provider_id]
+            old_model = models.get(provider_id)
+            if failure is not None:
+                error_text = CAPACITY_REFRESH_FAILURE_COPY[failure]
+                if isinstance(result, dict):
+                    result_windows = result.get("windows") or ()
+                    if not result_windows and old_model is not None:
+                        result_windows = usage_window_payloads(old_model)
+                    models[provider_id] = build_provider_usage_view(
+                        provider_id,
+                        str(result.get("title") or provider_id.title()),
+                        result_windows,
+                        last_success_at=state.last_success_at,
+                        now=now,
+                        reset_now=reset_now,
+                        error_text=error_text,
+                        summary_text=(
+                            result.get("summary_text")
+                            if result.get("summary_text") is not None
+                            else getattr(old_model, "summary_text", None)
+                        ),
+                        detail_text=(
+                            result.get("detail_text")
+                            if result.get("detail_text") is not None
+                            else getattr(old_model, "detail_text", None)
+                        ),
+                        partial=(
+                            bool(result.get("partial"))
+                            if "partial" in result
+                            else bool(getattr(old_model, "partial", False))
+                        ),
+                        source_text=(
+                            result.get("source_text")
+                            if result.get("source_text") is not None
+                            else getattr(old_model, "source_text", None)
+                        ),
+                    )
+                elif old_model is not None:
+                    models[provider_id] = dataclass_replace(
+                        old_model,
+                        stale=True,
+                        refreshing=False,
+                        error_text=error_text,
+                    )
+                else:
+                    models[provider_id] = build_provider_usage_view(
+                        provider_id,
+                        provider_id.title(),
+                        (),
+                        last_success_at=state.last_success_at,
+                        now=now,
+                        reset_now=reset_now,
+                        error_text=error_text,
+                    )
+            elif isinstance(result, dict):
+                result_windows = result.get("windows") or ()
+                capacity_observations = tuple(result.get("capacity_observations") or ())
+                reset_decisions = {}
+                source_generation = result.get("source_generation")
+                for observation in capacity_observations:
+                    previous_continuity = self._capacity_reset_continuity.get(
+                        observation.key
+                    )
+                    decision = evaluate_reset_continuity(
+                        previous_continuity,
+                        observation,
+                        source_generation=source_generation,
+                    )
+                    self._capacity_reset_continuity[observation.key] = decision.state
+                    reset_decisions[observation.key] = decision
+                models[provider_id] = build_provider_usage_view(
+                    provider_id,
+                    str(result.get("title") or provider_id.title()),
+                    result_windows,
+                    last_success_at=row.last_success_at,
+                    now=now,
+                    reset_now=reset_now,
+                    summary_text=(
+                        result.get("summary_text")
+                        if result.get("summary_text") is not None
+                        else getattr(old_model, "summary_text", None)
+                    ),
+                    detail_text=(
+                        result.get("detail_text")
+                        if result.get("detail_text") is not None
+                        else getattr(old_model, "detail_text", None)
+                    ),
+                    partial=(
+                        bool(result.get("partial"))
+                        if "partial" in result
+                        else bool(getattr(old_model, "partial", False))
+                    ),
+                    source_text=(
+                        result.get("source_text")
+                        if result.get("source_text") is not None
+                        else getattr(old_model, "source_text", None)
+                    ),
+                    capacity_observations=capacity_observations,
+                    reset_decisions=reset_decisions,
+                )
+        if not accepted:
+            return
+        self._usage_provider_models = models
+        shared = payload.get("shared") or {}
+        if "usage_graph" in shared or payload.get("shared_error") is not None:
+            self._usage_local_scan_complete = True
+        if "day_bars" in shared:
+            self.usage_day_bars = shared.get("day_bars") or []
+        if "hourly" in shared:
+            self.usage_hourly = shared.get("hourly") or []
+        if "usage_graph" in shared:
+            self.usage_graph_model = shared["usage_graph"]
+        claude_model = models.get("claude")
+        codex_model = models.get("codex")
+        self.usage_summary_text = getattr(claude_model, "summary_text", None)
+        self.usage_detail_text = getattr(claude_model, "detail_text", None)
+        self.codex_summary_text = (
+            codex_model.settings_text if codex_model is not None else None
+        )
+        self.claude_plan_text = (
+            claude_model.settings_text if claude_model is not None else None
+        )
         fields = getattr(self, "settings_fields", None) or {}
         usage_label = fields.get("profile_usage_label")
         if usage_label is not None:
-            usage_label.setStringValue_(line or "No Claude activity yet today.")
+            usage_label.setStringValue_(
+                self.usage_summary_text
+                or (
+                    "No Claude activity in this period."
+                    if self._usage_local_scan_complete
+                    else "Loading local usage history…"
+                )
+            )
         detail_label = fields.get("profile_usage_detail")
         if detail_label is not None:
-            detail_label.setStringValue_(detail or "")
+            detail_label.setStringValue_(self.usage_detail_text or "")
         codex_label = fields.get("profile_codex_label")
         if codex_label is not None:
             codex_label.setStringValue_(self.codex_summary_text or "")
         # Stash for panes built AFTER this publish -- the first worker
         # cycle usually finishes before the settings window ever exists,
         # and the graph sat empty until the next 5-minute pass.
-        self.usage_day_bars = payload[3] if payload and len(payload) > 3 else []
-        self.usage_hourly = payload[4] if payload and len(payload) > 4 else []
         graph = fields.get("profile_usage_graph")
         if graph is not None:
-            graph.setData_hourly_(self.usage_day_bars, self.usage_hourly)
-        self.claude_plan_text = (
-            payload[5] if payload and len(payload) > 5 else None
-        )
+            graph.setModel_(
+                getattr(self, "usage_graph_model", None) or {}
+            )
+        period_label = fields.get("profile_usage_period_label")
+        if period_label is not None:
+            period_label.setStringValue_(
+                usage_stats.usage_period_label(self.settings.usage_graph_days)
+            )
         plan_label = fields.get("profile_plan_label")
         if plan_label is not None:
             plan_label.setStringValue_(self.claude_plan_text or "")
-        percents = payload[6] if payload and len(payload) > 6 else {}
-        self.track_quota_thresholds(dict(percents or {}))
+        self.update_usage_menu_fields(monotonic_now=now, epoch_now=reset_now)
+        self.schedule_capacity_timers(epoch_now=reset_now)
+
+    def update_usage_menu_fields(
+        self,
+        *,
+        monotonic_now: float | None = None,
+        epoch_now: float | None = None,
+    ) -> None:
+        labels = getattr(self, "_usage_menu_labels", {}) or {}
+        secondary_labels = (
+            getattr(self, "_usage_menu_secondary_labels", {}) or {}
+        )
+        models = getattr(self, "_usage_provider_models", {}) or {}
+        states = getattr(self, "_usage_provider_states", {}) or {}
+        now = time.monotonic() if monotonic_now is None else float(monotonic_now)
+        reset_now = time.time() if epoch_now is None else float(epoch_now)
+        for provider_id in ("codex", "claude"):
+            label = labels.get(provider_id)
+            secondary_label = secondary_labels.get(provider_id)
+            if label is None and secondary_label is None:
+                continue
+            model = models.get(provider_id)
+            state = states.get(provider_id)
+            if model is None:
+                model = build_provider_usage_view(
+                    provider_id,
+                    provider_id.title(),
+                    (),
+                    now=now,
+                    reset_now=reset_now,
+                    refreshing=bool(state and state.in_flight),
+                    error_text=getattr(state, "error_text", None),
+                )
+            elif state is not None and model.refreshing != state.in_flight:
+                model = dataclass_replace(model, refreshing=state.in_flight)
+            primary, secondary = capacity_menu_lines(
+                model,
+                monotonic_now=now,
+                epoch_now=reset_now,
+            )
+            if label is not None:
+                label.setStringValue_(primary)
+            if secondary_label is not None:
+                secondary_label.setStringValue_(secondary)
 
     def track_quota_thresholds(self, percents: dict) -> None:
-        """Edge-triggered: a blink fires only when a window CROSSES a
-        configured threshold upward -- first observations, restarts and
-        repaints stay silent (the T3 transition rule)."""
-        previous = self.quota_last_percents
-        self.quota_last_percents = percents
-        if not self.settings.quota_alerts_enabled or not percents:
-            return
-        # Quota sunrise: the moment a window RESETS, one upward sweep in
-        # the provider's color -- "you're rich again" announces itself.
-        resets = signals_module.quota_resets(previous, percents)
-        if resets and not self.courtesy_signals_held():
-            window_key = resets[-1]
-            brand = {"Claude": "#D97757", "Codex": "#10A37F"}
-            self.completion_sweep_color = next(
-                (
-                    hex_value
-                    for name, hex_value in brand.items()
-                    if window_key.startswith(name)
-                ),
-                "#00FF66",
-            )
-            hold = signals_module.signal_hold_seconds(
-                self.settings.signal_style(signals_module.SIGNAL_COMPLETION)
-            )
-            self.completion_sweep_until = time.monotonic() + hold
-            log_status_bar(f"quota sunrise: {window_key} reset")
-            if self.webhook_event_enabled("quota_sunrise"):
-                self.post_webhook(
-                    {"event": "sidepulse.quota_sunrise", "window": window_key}
-                )
-            self.refresh_(None)
-            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                hold + 0.1, self, "refresh:", None, False
-            )
-        fired = signals_module.quota_crossings(
-            previous, percents, self.settings.quota_alert_thresholds
-        )
-        if not fired or self.courtesy_signals_held():
-            return
-        window_key, threshold = fired[-1]
-        brand = {"Claude": "#D97757", "Codex": "#10A37F"}
-        self.quota_blink_color = next(
-            (hex_value for name, hex_value in brand.items() if window_key.startswith(name)),
-            None,
-        )
-        self.quota_blink_label = f"{window_key} at {threshold:.0f}%"
-        hold = signals_module.signal_hold_seconds(
-            self.settings.signal_style(signals_module.SIGNAL_QUOTA)
-        )
-        self.quota_blink_until = time.monotonic() + hold
-        log_status_bar(f"quota alert: {self.quota_blink_label}")
-        if self.webhook_event_enabled("quota_threshold"):
-            self.post_webhook(
-                {
-                    "event": "sidepulse.quota_threshold",
-                    "window": window_key,
-                    "threshold": threshold,
-                }
-            )
-        self.refresh_(None)
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            hold + 0.1, self, "refresh:", None, False
-        )
+        """Retain the legacy call shape while raw-percent effects stay disabled."""
+        del percents
+        self.quota_last_percents = {}
+        self.quota_blink_until = 0.0
+        self.quota_blink_color = None
+        self.quota_blink_label = None
 
     def release_preview_engines(self) -> None:
         """Drop EVERY preview surface's WASM engine when settings goes
@@ -1296,17 +3288,71 @@ class StatusBarController(NSObject):
 
     def windowWillClose_(self, notification):
         if notification.object() is getattr(self, "settings_window", None):
-            self.stop_colors_preview_animation()
+            self._settings_window_closing = True
+            self.reconcile_device_runtime()
             self.release_preview_engines()
+        elif notification.object() is getattr(self, "setup_window", None):
+            self._runtime_preview_fire_at.pop(RuntimeFeature.SETUP_DEMO, None)
+            self._runtime_timer_registry.invalidate(RuntimeFeature.SETUP_DEMO)
 
     def menuWillOpen_(self, _menu):
         self.status_menu_open = True
+        self.virtual_status_device.set_pointer_interaction_relevant(False)
+        snapshot = getattr(self, "last_snapshot", None)
+        if snapshot is not None and getattr(snapshot, "operator_state", None) is not None:
+            self.current_operator_state = snapshot.operator_state
+            _canonical_agent_browser_projection(snapshot, self)
         # Opening the menu is a "visit": it clears the unseen-done badge
         # (mirrors T3's lastVisitedAt read/unread model).
         self.menu_last_opened_at = datetime.now(timezone.utc)
+        projection = getattr(self, "current_attention_projection", None)
+        if projection is not None:
+            completed = sorted(
+                (
+                    row
+                    for row in projection.visible_rows
+                    if row.lifecycle_mode == LifecycleMode.COMPLETED_RECENTLY
+                    and row.source_status.event_name != "SessionEnd"
+                ),
+                key=lambda row: (-row.updated_at.timestamp(), row.agent_id),
+            )
+            current_ids = [row.agent_id for row in completed]
+            retained_ids = sorted(
+                self.mailbox_seen_completion_ids.difference(current_ids)
+            )
+            self.mailbox_seen_completion_ids = set(
+                (*current_ids, *retained_ids)[:100]
+            )
+            mailbox = project_mailbox_for_target(projection, self)
+            self.current_mailbox_projection = mailbox
+            self.mailbox_retained_order = dict(mailbox.retained_order)
+        self.schedule_capacity_timers()
+        self.maybe_refresh_usage_summary(reason="menu-open")
 
     def menuDidClose_(self, _menu):
         self.status_menu_open = False
+        settings_window = getattr(self, "settings_window", None)
+        profile_settings_visible = bool(
+            settings_window is not None
+            and callable(getattr(settings_window, "isVisible", None))
+            and settings_window.isVisible()
+            and getattr(self, "current_settings_pane", None) == "profile"
+        )
+        if profile_settings_visible:
+            self.schedule_capacity_timers()
+        else:
+            countdown_timer = getattr(self, "_capacity_countdown_timer", None)
+            if countdown_timer is not None:
+                countdown_timer.invalidate()
+            self._capacity_countdown_timer = None
+            self._capacity_countdown_deadline = None
+        self.virtual_status_device.set_pointer_interaction_relevant(
+            bool(
+                SCREEN_BAR_FEATURE_ENABLED
+                and self.settings.virtual_status_device_enabled
+            )
+        )
+        self.native_agent_menu_registry.take_deferred_after_close()
         pending = getattr(self, "_menu_rebuild_pending", None)
         self._menu_rebuild_pending = None
         if pending is not None:
@@ -1498,8 +3544,10 @@ class StatusBarController(NSObject):
         self.settings = self.settings.with_calendar_alerts_enabled(enabled)
         save_settings(self.settings)
         self.calendar_watch_retry_at = 0.0
+        self.reconcile_lid_observation()
         if not enabled:
             self.calendar_glow_until = 0.0
+            self.calendar_event_title = None
             self.set_settings_message("Calendar glow off.")
             self.refresh_(None)
             return
@@ -1510,7 +3558,7 @@ class StatusBarController(NSObject):
             return
         if status == calendar_watch.AUTH_AUTHORIZED:
             self.set_settings_message("Calendar glow on.")
-            self.pollCalendar_(None)
+            self._calendar_observation_timer_fired()
         elif status == calendar_watch.AUTH_NOT_DETERMINED:
             self.set_settings_message("Calendar glow on — asking macOS for access…")
 
@@ -1548,7 +3596,7 @@ class StatusBarController(NSObject):
     def refresh_signal_card(self, key: str) -> None:
         # Card rendering builds WASM thumbnail programs -- skip entirely
         # when the style hasn't changed since the last render (switching
-        # TO the Signals pane re-rendered all seven cards synchronously,
+        # TO the Signals pane re-rendered every card synchronously,
         # which read as "going between menus is so laggy").
         style = self.settings.signal_style(key)
         cache = getattr(self, "_signal_card_rendered", None)
@@ -1563,7 +3611,7 @@ class StatusBarController(NSObject):
     def _render_signal_card(self, key: str, style) -> None:
         """Re-renders one card's thumbnails, preview, and selection ring
         from the given style (saved, or transient mid-drag)."""
-        preview_color = _signal_preview_color(self, key)
+        preview_color = None
         thumbs = self.settings_fields.get(f"signal_thumbs:{key}")
         if isinstance(thumbs, dict):
             for pattern, thumb in thumbs.items():
@@ -1707,9 +3755,6 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def redrawSignalPreviews_(self, _timer):
         if self.settings_window is None or not self.settings_window.isVisible():
-            if getattr(self, "signal_preview_timer", None) is not None:
-                self.signal_preview_timer.invalidate()
-                self.signal_preview_timer = None
             return
         for field_key, view in self.settings_fields.items():
             if field_key.startswith("signal_preview:"):
@@ -1757,31 +3802,54 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def toggleReminderAlerts_(self, sender):
         enabled = bool(sender.state())
+        if enabled and self._reminders_permission_request_token is not None:
+            return
         self.settings = self.settings.with_reminder_alerts_enabled(enabled)
         save_settings(self.settings)
         self.reminders_watch_retry_at = 0.0
+        self._reminders_permission_failed = False
+        self.reconcile_lid_observation()
         if not enabled:
+            self._reminders_permission_generation += 1
+            self._reminders_permission_request_token = None
             self.reminders_glow_until = 0.0
+            self._reconcile_current_presentation_inputs()
             self.set_settings_message("Reminder glow off.")
             self.refresh_(None)
             return
         try:
             status = reminders_watch.authorization_status()
         except reminders_watch.RemindersUnavailableError:
+            self._mark_reminders_permission_failed()
             self.set_settings_message("Reminders access is unavailable on this system.")
             return
         if status == reminders_watch.AUTH_AUTHORIZED:
             self.set_settings_message("Reminder glow on.")
+            self._reminders_observation_timer_fired()
         elif status == reminders_watch.AUTH_NOT_DETERMINED:
             self.set_settings_message("Reminder glow on — asking macOS for access…")
+            if threading.current_thread() is not threading.main_thread():
+                raise RuntimeError("Reminders permission request must run on main")
+            token = self._reminders_permission_generation
+            self._reminders_permission_request_token = token
 
             def _granted(ok):
                 self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    "reminderAccessResolved:", bool(ok), False
+                    "reminderAccessResolved:",
+                    {"token": token, "granted": bool(ok)},
+                    False,
                 )
 
-            reminders_watch.request_access(_granted)
+            try:
+                reminders_watch.request_access(_granted)
+            except reminders_watch.RemindersUnavailableError:
+                self._reminders_permission_request_token = None
+                self._mark_reminders_permission_failed()
+                self.set_settings_message(
+                    "Reminders access is unavailable on this system."
+                )
         else:
+            self._mark_reminders_permission_failed()
             self.set_settings_message(
                 "Reminders access is denied — enable SidePulse under "
                 "Privacy & Security → Reminders."
@@ -1795,7 +3863,7 @@ class StatusBarController(NSObject):
         return style_to_program(
             self.settings.signal_style(key),
             brightness,
-            color=_signal_preview_color(self, key),
+            color=None,
             led_count=led_count,
         )
 
@@ -1959,15 +4027,14 @@ class StatusBarController(NSObject):
         self.test_signal_key = "__studio__"
         self.test_signal_until = time.monotonic() + 12.0
         self.refresh_(None)
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            12.1, self, "refresh:", None, False
-        )
+        self._reconcile_current_presentation_inputs()
         self.set_settings_message("Studio: playing your program on everything for 12s.")
 
     @objc.IBAction
     def stopStudioProgram_(self, _sender):
         self.test_signal_until = 0.0
         self.test_signal_key = None
+        self._reconcile_current_presentation_inputs()
         self.refresh_(None)
         self.set_settings_message("Studio preview stopped.")
 
@@ -2001,9 +4068,7 @@ class StatusBarController(NSObject):
         self.test_signal_key = key
         self.test_signal_until = time.monotonic() + SIGNAL_TEST_SECONDS
         self.refresh_(None)
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            SIGNAL_TEST_SECONDS + 0.1, self, "refresh:", None, False
-        )
+        self._reconcile_current_presentation_inputs()
         self.set_settings_message(
             f"Testing the {key.replace('_', ' ')} signal on every surface…"
         )
@@ -2123,11 +4188,11 @@ class StatusBarController(NSObject):
         self.weather_watch_retry_at = 0.0
         if enabled:
             self.set_settings_message("Weather warnings on — checking your area…")
-            self.pollWeather_(None)
         else:
-            self.weather_alert_active = False
             self.set_settings_message("Weather warnings off.")
-            self.refresh_(None)
+        self.reconcile_lid_observation()
+        if enabled:
+            self._weather_observation_timer_fired()
 
     @objc.IBAction
     def applyWeatherLocation_(self, _sender):
@@ -2162,6 +4227,8 @@ class StatusBarController(NSObject):
         save_settings(self.settings)
         # Re-check alerts for the new location right away.
         self.weather_watch_retry_at = 0.0
+        self._advance_weather_observation_generation()
+        self._weather_observation_timer_fired()
         if latitude is None:
             self.set_settings_message("Weather location: automatic (network address).")
         else:
@@ -2172,10 +4239,34 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def reminderAccessResolved_(self, granted):
-        if granted:
+        payload = granted if isinstance(granted, dict) else {}
+        token = payload.get("token")
+        if (
+            type(token) is not int
+            or token != self._reminders_permission_request_token
+            or token != self._reminders_permission_generation
+        ):
+            return
+        self._reminders_permission_request_token = None
+        inputs = self._presentation_scheduler_inputs
+        lifecycle_active = bool(
+            self._runtime_started
+            and self.settings.reminder_alerts_enabled
+            and self._reminders_observation_active
+            and inputs is not None
+            and not inputs.display_asleep
+            and not inputs.app_terminating
+        )
+        if not lifecycle_active:
+            return
+        if bool(payload.get("granted")):
+            self._reminders_permission_failed = False
             self.set_settings_message("Reminders access granted.")
             self.reminders_watch_retry_at = 0.0
+            self._reconcile_current_presentation_inputs()
+            self._reminders_observation_timer_fired()
         else:
+            self._mark_reminders_permission_failed()
             self.set_settings_message(
                 "Reminders access was declined — the glow stays off until "
                 "it's granted in Privacy & Security → Reminders."
@@ -2186,7 +4277,8 @@ class StatusBarController(NSObject):
         if granted:
             self.set_settings_message("Calendar access granted.")
             self.calendar_watch_retry_at = 0.0
-            self.pollCalendar_(None)
+            self.reconcile_lid_observation()
+            self._calendar_observation_timer_fired()
         else:
             self.set_settings_message(
                 "Calendar access was declined — the glow stays off until "
@@ -2207,6 +4299,9 @@ class StatusBarController(NSObject):
         save_settings(self.settings)
         field.setStringValue_(f"{self.settings.calendar_lead_minutes:g}")
         self.calendar_watch_retry_at = 0.0
+        previous_generation = self._os_poll_generation
+        self._os_poll_generation += 1
+        self._os_poll_worker.cancel_generation(previous_generation)
         self.set_settings_message(
             f"Calendar glow starts {self.settings.calendar_lead_minutes:g} minutes before events."
         )
@@ -2219,35 +4314,6 @@ class StatusBarController(NSObject):
         self.set_settings_message(
             "Completion sweep on." if enabled else "Completion sweep off."
         )
-
-    @objc.IBAction
-    def toggleNotificationBlinks_(self, sender):
-        enabled = bool(sender.state())
-        self.settings = self.settings.with_notification_blinks_enabled(enabled)
-        save_settings(self.settings)
-        self.set_settings_message(
-            "Notification blinks on." if enabled else "Notification blinks off."
-        )
-
-    @objc.IBAction
-    def applyNotificationColors_(self, _sender):
-        for bundle_id in DEFAULT_NOTIFICATION_APP_COLORS:
-            field = self.settings_fields.get(f"notification_color:{bundle_id}")
-            if field is None:
-                continue
-            raw = str(field.stringValue()).strip()
-            self.settings = self.settings.with_notification_app_color(
-                bundle_id, raw or None
-            )
-        save_settings(self.settings)
-        # Reflect normalization (or a rejected value) back into the UI.
-        for bundle_id in DEFAULT_NOTIFICATION_APP_COLORS:
-            field = self.settings_fields.get(f"notification_color:{bundle_id}")
-            if field is not None:
-                field.setStringValue_(
-                    self.settings.notification_app_colors.get(bundle_id, "")
-                )
-        self.set_settings_message("Notification colors saved.")
 
     @objc.IBAction
     def openTipPane_(self, sender):
@@ -2279,21 +4345,27 @@ class StatusBarController(NSObject):
 
             accent = NSColor.controlAccentColor().colorWithAlphaComponent_(0.28)
             layer.setBackgroundColor_(accent.CGColor())
-            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                0.9, self, "clearFlash:", view, False
-            )
+            prior_view = self._tip_highlight_view
+            if prior_view is not None and prior_view is not view:
+                self._clear_tip_highlight()
+            self._tip_highlight_view = view
+            self._tip_highlight_until = time.monotonic() + 0.9
+            self._reconcile_current_presentation_inputs()
         except Exception:
             pass
 
     @objc.IBAction
     def clearFlash_(self, timer):
-        view = timer.userInfo()
+        view = self._tip_highlight_view if timer is None else timer.userInfo()
         try:
             layer = view.layer()
             if layer is not None:
                 layer.setBackgroundColor_(None)
         except Exception:
             pass
+        if view is self._tip_highlight_view:
+            self._tip_highlight_view = None
+            self._tip_highlight_until = 0.0
 
     @objc.IBAction
     def dismissTip_(self, sender):
@@ -2375,14 +4447,14 @@ class StatusBarController(NSObject):
         except ValueError:
             return
         save_settings(self.settings)
-        self._usage_refreshed_at = 0.0
+        self.invalidate_usage_providers(("codex", "claude"))
         self.maybe_refresh_usage_summary()
 
     @objc.IBAction
     def toggleCodexPercent_(self, sender):
         self.settings = self.settings.with_codex_percent_enabled(checkbox_is_on(sender))
         save_settings(self.settings)
-        self._usage_refreshed_at = 0.0
+        self.invalidate_usage_providers(("codex",))
         self.maybe_refresh_usage_summary()
 
     @objc.IBAction
@@ -2396,7 +4468,30 @@ class StatusBarController(NSObject):
             return
         save_settings(self.settings)
         # Rescan now -- the warm cache makes a year-range rebuild cheap.
-        self._usage_refreshed_at = 0.0
+        self.invalidate_usage_providers(("codex", "claude"))
+        self.maybe_refresh_usage_summary()
+
+    @objc.IBAction
+    def toggleUsageGraphProvider_(self, sender):
+        provider_id = str(sender.identifier() or "")
+        if provider_id not in {"claude", "codex"}:
+            return
+        selected = list(self.settings.usage_graph_providers)
+        if checkbox_is_on(sender):
+            if provider_id not in selected:
+                selected.append(provider_id)
+        else:
+            selected = [value for value in selected if value != provider_id]
+        if not selected:
+            sender.setState_(1)
+            self.set_settings_message("Keep at least one usage source selected.")
+            return
+        ordered = tuple(
+            value for value in ("claude", "codex") if value in selected
+        )
+        self.settings = self.settings.with_usage_graph_providers(ordered)
+        save_settings(self.settings)
+        self.invalidate_usage_providers(("codex", "claude"))
         self.maybe_refresh_usage_summary()
 
     @objc.IBAction
@@ -2472,7 +4567,7 @@ class StatusBarController(NSObject):
         )
         save_settings(self.settings)
         # Refresh immediately so the line appears without the 5-min wait.
-        self._usage_refreshed_at = 0.0
+        self.invalidate_usage_providers(("claude",))
         self.maybe_refresh_usage_summary()
         self.refresh_(None)
 
@@ -2811,7 +4906,7 @@ class StatusBarController(NSObject):
         if os.getppid() == 1:
             subprocess.Popen(
                 [
-                    "launchctl",
+                    str(trusted_system_tool("launchctl")),
                     "bootout",
                     f"gui/{os.getuid()}/{LAUNCH_AGENT_LABEL}",
                 ],
@@ -2824,22 +4919,61 @@ class StatusBarController(NSObject):
     def applicationWillTerminate_(self, _notification):
         # Repeating NSTimers retain their target; left running they keep
         # the controller alive and firing through launchd teardown.
+        self._runtime_started = False
+        previous_inventory_generation = self._installed_agent_inventory_generation
+        self._installed_agent_inventory_generation += 1
+        cancel_inventory = getattr(self._os_poll_worker, "cancel_generation", None)
+        if callable(cancel_inventory):
+            cancel_inventory(previous_inventory_generation)
+        notification_client = getattr(self, "notification_client", None)
+        if notification_client is not None:
+            notification_client.set_delegate(None)
+            close_notifications = getattr(notification_client, "close", None)
+            if callable(close_notifications):
+                close_notifications(timeout_seconds=1.0)
+        self._notification_action_bindings.clear()
+        self._notification_events_by_work_key.clear()
+        self._remove_accessibility_display_observer()
+        self._status_cue_deadline = None
+        self._status_cue_candidates = ()
+        self._status_finite_cues = FiniteCueState(None, None, None, False)
+        self._current_resolved_glance = None
+        self._status_emphasis_accessibility_generation = None
+        self.virtual_status_device.terminate()
+        self._set_lid_observation_active(False)
+        self._set_display_environment_active(False)
+        self._set_calendar_observation_active(False)
+        self._set_reminders_observation_active(False)
+        self._set_weather_observation_active(False)
+        self._runtime_preview_fire_at.clear()
+        self._reminders_permission_generation += 1
+        self._reminders_permission_request_token = None
+        self._runtime_timer_registry.invalidate_all()
+        self._runtime_worker_registry.close_all(timeout_seconds=1.0)
         for name in (
             "timer",
-            "lid_timer",
-            "device_timer",
-            "brightness_watch_timer",
-            "notification_watch_timer",
-            "calendar_watch_timer",
-            "reminders_watch_timer",
-            "weather_watch_timer",
-            "color_preview_timer",
-            "signal_preview_timer",
-            "setup_demo_timer",
+            "failure_signal_timer",
+            "_capacity_reset_timer",
+            "_capacity_countdown_timer",
         ):
             active_timer = getattr(self, name, None)
             if active_timer is not None:
                 active_timer.invalidate()
+        self._capacity_reset_timer = None
+        self._capacity_countdown_timer = None
+        for name in (
+            "_capacity_refresh_deadline_timers",
+            "_capacity_refresh_retry_timers",
+        ):
+            timers = getattr(self, name, {})
+            for active_timer in tuple(timers.values()):
+                active_timer.invalidate()
+            timers.clear()
+        self._capacity_reset_plan = ResetBoundaryPlan(None, (), ())
+        self._capacity_reset_retry_deadline = None
+        self._capacity_countdown_deadline = None
+        self._attempted_capacity_boundary_keys = ()
+        self.release_preview_engines()
         monitor = getattr(self, "monitor", None)
         if monitor is not None and hasattr(monitor, "write_latest_state"):
             # The per-event path is debounced; flush the tail on quit.
@@ -2850,19 +4984,19 @@ class StatusBarController(NSObject):
 
     # --- Ask escalation ------------------------------------------------
 
-    def track_ask_blocked(self, statuses) -> None:
+    def track_ask_blocked(self, projection) -> None:
         """Per-agent ask/blocked episode tracking. Escalation follows the
         OLDEST currently-unanswered ask -- aggregate-level tracking let a
         brand-new ask inherit a stage-3 chime from a different, already
         answered agent's long episode. Pass an empty tuple to clear
         (e.g. the refresh error path, where no state can be confirmed)."""
         now = time.monotonic()
+        if not isinstance(projection, AttentionProjection):
+            projection = projection_for_statuses(projection, self.settings)
         current = {
-            status.agent_id
-            for status in (statuses or ())
-            # HARD asks from MAIN sessions only: soft question-heuristic
-            # asks and sub-agent noise must never ramp toward a chime.
-            if status.agent_id and status.is_hard_ask and not status.is_subagent
+            row.agent_id
+            for row in projection.actionable_attention
+            if row.agent_id
         }
         tracked = getattr(self, "ask_blocked_by_agent", {})
         updated = {agent_id: tracked.get(agent_id, now) for agent_id in current}
@@ -2879,6 +5013,7 @@ class StatusBarController(NSObject):
         else:
             self.ask_blocked_since = None
         self.apply_escalation()
+        self.reconcile_lid_observation()
 
     def track_working(self, statuses) -> None:
         """When the OLDEST currently-working agent started -- the clock
@@ -2904,55 +5039,47 @@ class StatusBarController(NSObject):
             else None
         )
 
-    def track_completions(self, statuses) -> None:
-        """Fires the completion sweep when an agent TRANSITIONS into
-        Completed from an active state -- the aggregate hides these
-        whenever another agent's Working outranks them. The sweep runs
-        in the finishing agent's identity color when several sessions
-        are live."""
+    def track_completions(self, statuses, *, operator_events=()) -> None:
+        """Detect completion transitions once and route each channel."""
+        statuses = tuple(statuses or ())
+        operator_events = tuple(operator_events or ())
+        if not all(type(event) is CanonicalOperatorEvent for event in operator_events):
+            operator_events = ()
+        completion_events = {
+            event.subject_key: event
+            for event in operator_events
+            if event.kind is TransitionKind.COMPLETED
+            and type(event.subject_key) is WorkKey
+            and event.interruption_class
+            in {
+                InterruptionClass.IMPORTANT_OUTCOME,
+                InterruptionClass.COURTESY,
+            }
+        }
+        self._notification_events_by_work_key = dict(
+            sorted(
+                completion_events.items(),
+                key=lambda item: item[1].occurred_at_epoch,
+                reverse=True,
+            )[:MAX_NOTIFICATION_ACTION_BINDINGS]
+        )
         previous_modes = getattr(self, "last_agent_modes", {})
+        statuses_by_id = canonical_current_statuses(statuses)
         current_modes = {
-            status.agent_id: status.mode
-            for status in (statuses or ())
-            # Sweep on MAIN agents finishing; a Claude session can burn
-            # through a dozen Task workers and the green sweep would
-            # never stop firing.
-            if status.agent_id and not status.is_subagent
+            agent_id: status.mode for agent_id, status in statuses_by_id.items()
         }
         self.last_agent_modes = current_modes
-        if not self.settings.completion_sweep_enabled:
-            return
-        active_before = (
-            AgentMode.WORKING,
-            AgentMode.TOOL_RUNNING,
-            AgentMode.LONG_TASK_PROGRESS,
-            AgentMode.WAITING_FOR_INPUT,
-            AgentMode.BLOCKED_ERROR,
+        batch = detect_completion_batch(
+            previous_modes,
+            tuple(statuses_by_id.values()),
+            datetime.now(timezone.utc),
         )
-        statuses_by_id = {
-            status.agent_id: status
-            for status in (statuses or ())
-            if status.agent_id and not status.is_subagent
-        }
-        finished = [
-            agent_id
-            for agent_id, mode in current_modes.items()
-            if mode == AgentMode.COMPLETED
-            and previous_modes.get(agent_id) in active_before
-            # Closing a terminal (SessionEnd) is the USER'S own act --
-            # sweeping green and posting "finished" for it turned every
-            # window close into a phantom celebration.
-            and statuses_by_id[agent_id].event_name != "SessionEnd"
-            # T3's freshness window: only a completion under 2 minutes
-            # old may CELEBRATE -- replayed transcripts and restarts
-            # repaint silently. (Display visibility is a separate,
-            # longer clock: COMPLETED_VISIBLE_SECONDS in collector.)
-            and statuses_by_id[agent_id].age_seconds()
-            <= COMPLETION_NOTIFY_FRESHNESS_SECONDS
-        ]
-        if not finished:
+        if not batch:
             return
-        log_status_bar(f"completion sweep: {finished[-1][:60]}")
+        log_status_bar(
+            "completion batch: "
+            + ", ".join(status.agent_id[:60] for status in batch.statuses)
+        )
         ordered_ids = sorted(current_modes)
         identity = (
             colors_module.identity_colors_for_agents(
@@ -2964,27 +5091,52 @@ class StatusBarController(NSObject):
             if len(ordered_ids) > 1
             else {}
         )
-        agent_id = finished[-1]
-        self.completion_sweep_color = (
-            self.settings.colors.session_color(agent_id)
-            or identity.get(agent_id)
-            or self.settings.signal_style(signals_module.SIGNAL_COMPLETION).color
-        )
+
+        def completion_color(status) -> str:
+            return (
+                self.settings.colors.session_color(status.agent_id)
+                or identity.get(status.agent_id)
+                or self.settings.signal_style(
+                    signals_module.SIGNAL_COMPLETION
+                ).color
+            )
+
+        if self.settings.completion_notification_enabled:
+            for status in batch.statuses:
+                try:
+                    self.post_completion_notification(status)
+                except Exception as exc:
+                    log_status_bar(
+                        "completion notification routing failed "
+                        f"({status.agent_id[:60]}): {exc}"
+                    )
+
+        if self.webhook_event_enabled("completion"):
+            for status in batch.statuses:
+                try:
+                    self.post_webhook(
+                        {
+                            "event": "sidepulse.completion",
+                            "provider": status.provider,
+                            "label": status.display_name[:80],
+                            "color": completion_color(status),
+                        }
+                    )
+                except Exception as exc:
+                    log_status_bar(
+                        "completion webhook routing failed "
+                        f"({status.agent_id[:60]}): {exc}"
+                    )
+
+        if not self.settings.completion_sweep_enabled:
+            return
+
+        visual_status = batch.statuses[0]
+        self.completion_sweep_color = completion_color(visual_status)
         hold = signals_module.signal_hold_seconds(
             self.settings.signal_style(signals_module.SIGNAL_COMPLETION)
         )
         self.completion_sweep_until = time.monotonic() + hold
-        self.post_completion_notification(statuses_by_id.get(agent_id))
-        if self.webhook_event_enabled("completion"):
-            finished_status = statuses_by_id.get(agent_id)
-            self.post_webhook(
-                {
-                    "event": "sidepulse.completion",
-                    "provider": finished_status.provider if finished_status else "",
-                    "label": (finished_status.display_name[:80] if finished_status else ""),
-                    "color": self.completion_sweep_color,
-                }
-            )
         # The Exhale: when the LAST working session just finished and
         # nothing needs you, the bar takes one slow warm breath after
         # the sweep -- "you're free" as a felt moment, not a light that
@@ -2993,16 +5145,11 @@ class StatusBarController(NSObject):
         all_done = all(
             mode == AgentMode.COMPLETED for mode in current_modes.values()
         )
-        snapshot = getattr(self, "last_snapshot", None)
-        no_asks = snapshot is None or not ask_statuses(snapshot)
+        projection = getattr(self, "current_attention_projection", None)
+        no_asks = projection is None or not projection.actionable_attention
         if all_done and no_asks:
             self.all_clear_until = self.completion_sweep_until + 3.6
-            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                hold + 3.8, self, "refresh:", None, False
-            )
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            hold + 0.1, self, "refresh:", None, False
-        )
+        self._reconcile_current_presentation_inputs()
 
     def active_focus_summary(self) -> str:
         """Plain-language "which Focus is on and what we're doing about
@@ -3046,10 +5193,8 @@ class StatusBarController(NSObject):
 
     def hard_ask_live(self) -> bool:
         """A tracked blocked-on-you request is waiting right now."""
-        snapshot = getattr(self, "last_snapshot", None)
-        if snapshot is None:
-            return False
-        return any(status.is_hard_ask for status in ask_statuses(snapshot))
+        projection = getattr(self, "current_attention_projection", None)
+        return bool(projection and projection.actionable_attention)
 
     def hard_ask_renders_on_device(self, device: StatusBarDevice) -> bool:
         """Would THIS device actually show the live ask? Weather may
@@ -3059,13 +5204,13 @@ class StatusBarController(NSObject):
         emergency while showing nothing blocked-on-you in its place."""
         if device.display != LED_DISPLAY_AGENT:
             return False
-        snapshot = getattr(self, "last_snapshot", None)
-        if snapshot is None:
+        projection = getattr(self, "current_attention_projection", None)
+        if projection is None:
             return False
         pin = self.settings.device_provider_pin(device.device_id)
         return any(
-            status.is_hard_ask and (not pin or status.provider == pin)
-            for status in ask_statuses(snapshot)
+            not pin or row.provider == pin
+            for row in projection.actionable_attention
         )
 
     def quiet_active(self) -> bool:
@@ -3114,10 +5259,17 @@ class StatusBarController(NSObject):
         if snapshot is None:
             return
         cleared = set(getattr(self, "cleared_session_ids", set()))
-        for status in snapshot.statuses:
-            if not status.is_subagent and status.mode == AgentMode.COMPLETED:
-                cleared.add(status.agent_id)
+        cleared.update(
+            status.agent_id
+            for status in eligible_mailbox_completion_statuses(snapshot)
+        )
         self.cleared_session_ids = cleared
+        self.mailbox_retained_order = {
+            agent_id: stable_order
+            for agent_id, stable_order in self.mailbox_retained_order.items()
+            if agent_id not in cleared
+        }
+        self.mailbox_seen_completion_ids.difference_update(cleared)
         self._menu_signature = None
         self.refresh_(None)
 
@@ -3186,7 +5338,7 @@ class StatusBarController(NSObject):
         def _run() -> None:
             try:
                 result = subprocess.run(
-                    ["shortcuts", "run", name],
+                    [str(trusted_system_tool("shortcuts")), "run", name],
                     capture_output=True,
                     text=True,
                     timeout=30,
@@ -3217,6 +5369,7 @@ class StatusBarController(NSObject):
         self._timebox_off_shortcut = off_name or None
         if on_name:
             self.run_shortcut_named(on_name)
+        self.reconcile_lid_observation()
         self.refresh_(None)
         message = f"Timebox: {minutes:g} minutes on the bar."
         if on_name:
@@ -3229,6 +5382,7 @@ class StatusBarController(NSObject):
         self.timebox_ends_at = None
         self.timebox_total_seconds = 0.0
         self.fire_timebox_off_shortcut()
+        self.reconcile_lid_observation()
         self.refresh_(None)
         self.set_settings_message("Timebox stopped.")
 
@@ -3247,27 +5401,10 @@ class StatusBarController(NSObject):
         )
 
     def apply_escalation(self, *, allow_refresh: bool = False) -> None:
-        """Starts/stops the stage-2 menu-bar flash, fires the stage-3
-        chime once per episode, and (when invoked from the watcher tick,
-        where recursion is impossible) triggers a resync so stage
-        changes reach the light surfaces promptly."""
+        """Apply one semantic escalation stage and its finite deliveries."""
         stage = self.current_escalation_stage()
         changed = stage != self.escalation_last_stage
         self.escalation_last_stage = stage
-
-        if stage >= 2:
-            if self.escalation_flash_timer is None:
-                self.escalation_flash_timer = (
-                    NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                        0.6, self, "escalationFlashTick:", None, True
-                    )
-                )
-        elif self.escalation_flash_timer is not None:
-            self.escalation_flash_timer.invalidate()
-            self.escalation_flash_timer = None
-            self.escalation_flash_on = False
-            # Restore the honest title/icon.
-            self.set_status(self.current_state)
 
         if (
             stage >= 3
@@ -3295,42 +5432,29 @@ class StatusBarController(NSObject):
                 except Exception:
                     pass
             if self.active_focus_policy() != "silent":
-                snapshot = getattr(self, "last_snapshot", None)
-                asks = ask_statuses(snapshot) if snapshot is not None else []
-                oldest = asks[0] if asks else None
-                try:
-                    deliver_macos_notification(
-                        "Agent needs you",
+                state = getattr(self, "current_operator_state", None)
+                if type(state) is CanonicalOperatorState:
+                    request = next(
                         (
-                            f"{oldest.provider.title()}: {oldest.display_name[:100]}"
-                            if oldest is not None
-                            else "A session has been blocked on you for minutes."
+                            candidate
+                            for candidate in state.requests
+                            if candidate.phase is RequestPhase.LIVE_UNACKNOWLEDGED
+                            and candidate.next_actor is NextActor.USER
+                            and candidate.source_freshness is SourceFreshness.FRESH
                         ),
-                        user_info=(
-                            {"agent_id": oldest.agent_id} if oldest is not None else None
-                        ),
+                        None,
                     )
-                except Exception as exc:
-                    log_status_bar(f"escalation notification failed: {exc}")
+                    if request is not None:
+                        self._deliver_semantic_notification(
+                            request.semantic_event_key,
+                            InterruptionClass.ACTION_REQUIRED,
+                            prefix="attention",
+                            request_key=request.key,
+                        )
             self.fire_escalation_webhook(stage)
 
         if changed and allow_refresh:
             self.refresh_(None)
-
-    @objc.IBAction
-    def escalationFlashTick_(self, _timer):
-        if self.status_item is None:
-            return
-        button = self.status_item.button()
-        if button is None:
-            return
-        self.escalation_flash_on = not self.escalation_flash_on
-        if self.escalation_flash_on:
-            button.setTitle_(f" {STATE_ASK.label}")
-            button.setImage_(image_for_symbol(STATE_ASK.symbol, STATE_ASK.label))
-        else:
-            button.setTitle_("")
-            button.setImage_(image_for_symbol(self.current_state.symbol, self.current_state.label))
 
     def escalation_takeover_program(self, brightness: float, led_count: int = 8) -> str:
         """Fast full-bar strobe in the ask color -- the opt-in "don't
@@ -3406,44 +5530,170 @@ class StatusBarController(NSObject):
 
         threading.Thread(target=_post, daemon=True).start()
 
+    def _prune_notification_action_bindings(self, *, now: float) -> None:
+        state = getattr(self, "current_operator_state", None)
+        current_generation = state.generation if type(state) is CanonicalOperatorState else -1
+        retained = {
+            token: value
+            for token, value in self._notification_action_bindings.items()
+            if value[0].expires_at_epoch > now
+            and value[0].operator_generation == current_generation
+        }
+        if len(retained) > MAX_NOTIFICATION_ACTION_BINDINGS:
+            ordered = sorted(
+                retained.items(),
+                key=lambda item: (
+                    item[1][0].expires_at_epoch,
+                    item[0],
+                ),
+                reverse=True,
+            )
+            retained = dict(ordered[:MAX_NOTIFICATION_ACTION_BINDINGS])
+        self._notification_action_bindings = retained
+
+    def _issue_notification_action(
+        self,
+        event_key: SemanticEventKey,
+    ) -> ActionTokenBinding | None:
+        state = getattr(self, "current_operator_state", None)
+        if type(event_key) is not SemanticEventKey or type(state) is not CanonicalOperatorState:
+            return None
+        now = time.time()
+        self._prune_notification_action_bindings(now=now)
+        binding = issue_action_token(
+            randomness=secrets.token_bytes(32),
+            event_key=event_key,
+            operator_generation=state.generation,
+            now=now,
+            ttl_seconds=NOTIFICATION_ACTION_TTL_SECONDS,
+        )
+        if len(self._notification_action_bindings) >= MAX_NOTIFICATION_ACTION_BINDINGS:
+            oldest = min(
+                self._notification_action_bindings,
+                key=lambda token: (
+                    self._notification_action_bindings[token][0].expires_at_epoch,
+                    token,
+                ),
+            )
+            self._notification_action_bindings.pop(oldest, None)
+        self._notification_action_bindings[binding.token] = (binding, event_key)
+        return binding
+
+    def _deliver_semantic_notification(
+        self,
+        event_key: SemanticEventKey,
+        interruption_class: InterruptionClass,
+        *,
+        prefix: str,
+        request_key: RequestKey | None = None,
+    ) -> bool:
+        if (
+            type(event_key) is not SemanticEventKey
+            or type(interruption_class) is not InterruptionClass
+            or type(prefix) is not str
+            or prefix not in {"completion", "attention"}
+            or (request_key is not None and type(request_key) is not RequestKey)
+        ):
+            return False
+        binding = self._issue_notification_action(event_key)
+        if binding is None:
+            return False
+        route = InterruptionRoute(
+            event_key=event_key,
+            interruption_class=interruption_class,
+            request_key=request_key,
+            deliveries=(),
+            static_visibility_required=False,
+        )
+        copy = generic_notification_copy(route)
+        delivered = self._notification_client_for_use().deliver(
+            f"{prefix}.{binding.event_fingerprint}",
+            copy.title,
+            copy.body,
+            action_token_metadata(binding),
+        )
+        if not delivered:
+            self._notification_action_bindings.pop(binding.token, None)
+        return delivered
+
+    def _activate_notification_action(self, token: object) -> bool:
+        if type(token) is not str:
+            return False
+        stored = self._notification_action_bindings.pop(token, None)
+        state = getattr(self, "current_operator_state", None)
+        if stored is None or type(state) is not CanonicalOperatorState:
+            return False
+        binding, event_key = stored
+        resolved = resolve_action_token(
+            binding,
+            presented_token=token,
+            candidate_event_keys=(event_key,),
+            current_generation=state.generation,
+            now=time.time(),
+        )
+        if resolved is None:
+            return False
+        subject = resolved.subject_key
+        work_key = subject if type(subject) is WorkKey else subject.work_key
+        snapshot = getattr(self, "last_snapshot", None)
+        if snapshot is None:
+            return False
+        statuses = (*snapshot.statuses, *getattr(snapshot, "stale_statuses", ()))
+        status = next(
+            (
+                candidate
+                for candidate in statuses
+                if getattr(candidate, "work_key", None) == work_key
+            ),
+            None,
+        )
+        if status is None:
+            return False
+        self.open_session(status, None, remember=False)
+        return True
+
     def post_completion_notification(self, status) -> None:
-        """An opt-in macOS banner when a MAIN session finishes -- rides
-        the same fresh, edge-triggered path as the sweep, so restarts
-        and replays never post. Quiet Hour and Focus policies hold it
-        like every other courtesy signal."""
+        """Deliver one content-free banner for an exact canonical edge."""
         if (
             status is None
             or not self.settings.completion_notification_enabled
             or self.courtesy_signals_held()
         ):
             return
+        work_key = getattr(status, "work_key", None)
+        event = self._notification_events_by_work_key.get(work_key)
+        if event is None:
+            return
+        self._deliver_semantic_notification(
+            event.key,
+            event.interruption_class,
+            prefix="completion",
+        )
+
+    @objc.typedSelector(b"v@:@@@?")
+    def userNotificationCenter_willPresentNotification_withCompletionHandler_(
+        self,
+        _center,
+        _notification,
+        completion_handler,
+    ) -> None:
+        completion_handler(NOTIFICATION_FOREGROUND_PRESENTATION_OPTIONS)
+
+    @objc.typedSelector(b"v@:@@@?")
+    def userNotificationCenter_didReceiveNotificationResponse_withCompletionHandler_(
+        self,
+        _center,
+        response,
+        completion_handler,
+    ) -> None:
         try:
-            deliver_macos_notification(
-                f"{status.provider.title()} finished",
-                status.display_name[:120],
-                user_info={"agent_id": status.agent_id},
-            )
-        except Exception as exc:
-            log_status_bar(f"completion notification failed: {exc}")
-
-    def userNotificationCenter_shouldPresentNotification_(self, _center, _notification):
-        # Present even while an app of ours is frontmost -- the whole
-        # point is eyes-on-another-screen.
-        return True
-
-    def userNotificationCenter_didActivateNotification_(self, _center, notification):
-        """Clicking a banner jumps to the session that posted it."""
-        info = notification.userInfo() or {}
-        agent_id = str(info.get("agent_id", ""))
-        if not agent_id:
-            return
-        snapshot = getattr(self, "last_snapshot", None)
-        if snapshot is None:
-            return
-        pool = (*snapshot.statuses, *getattr(snapshot, "stale_statuses", ()))
-        status = next((s for s in pool if s.agent_id == agent_id), None)
-        if status is not None:
-            self.open_session(status, None, remember=False)
+            metadata = response.notification().request().content().userInfo() or {}
+            token = metadata.get("action_token") if type(metadata) is dict else None
+            self._activate_notification_action(token)
+        except Exception:
+            pass
+        finally:
+            completion_handler()
 
     def webhook_event_enabled(self, key: str) -> bool:
         """Moment events are opt-in per key; stage-3 escalation always
@@ -3460,8 +5710,8 @@ class StatusBarController(NSObject):
         if not url or getattr(self, "escalation_webhooked", False):
             return
         self.escalation_webhooked = True
-        snapshot = getattr(self, "last_snapshot", None)
-        asks = ask_statuses(snapshot) if snapshot is not None else []
+        projection = getattr(self, "current_attention_projection", None)
+        asks = ask_statuses(projection) if projection is not None else []
         oldest_age = 0.0
         if getattr(self, "ask_blocked_since", None) is not None:
             oldest_age = max(0.0, time.monotonic() - self.ask_blocked_since)
@@ -3484,6 +5734,121 @@ class StatusBarController(NSObject):
             and self.current_escalation_stage() >= 3
         )
 
+    def reconcile_status_emphasis(
+        self,
+        glance: ResolvedGlance,
+        cues: tuple,
+        *,
+        now: float,
+        sleeping: bool,
+    ) -> FiniteCueState:
+        if (
+            not self._runtime_started
+            or type(glance) is not ResolvedGlance
+            or type(cues) is not tuple
+            or type(sleeping) is not bool
+        ):
+            return self._status_finite_cues
+        preferences = self._accessibility_display_preferences
+        play_motion = not sleeping and not bool(
+            preferences is not None and preferences.reduce_motion
+        )
+        previous_deadline = self._status_cue_deadline
+        finite_cues = self.status_cue_coordinator.observe(
+            cues,
+            now=now,
+            play_motion=play_motion,
+        )
+        self._status_finite_cues = finite_cues
+        self._status_cue_candidates = cues
+        self._status_cue_deadline = finite_cues.next_deadline
+        self._current_resolved_glance = glance
+        self._status_emphasis_accessibility_generation = (
+            self._accessibility_generation
+        )
+        self._apply_status_accessibility_text(glance, finite_cues)
+        if finite_cues.next_deadline != previous_deadline:
+            self._reconcile_current_presentation_inputs()
+        return finite_cues
+
+    def set_status_emphasis_plan(
+        self,
+        glance: ResolvedGlance,
+        cues: tuple,
+    ) -> bool:
+        current = self._current_resolved_glance
+        if (
+            not self._runtime_started
+            or type(glance) is not ResolvedGlance
+            or not isinstance(glance.semantic, GlanceSemantic)
+            or not isinstance(glance.glyph, SemanticGlyph)
+            or not isinstance(glance.override_reason, GlanceOverrideReason)
+            or not valid_presentation_time(glance.relay_epoch)
+            or (
+                glance.next_visual_change_at is not None
+                and not valid_presentation_time(glance.next_visual_change_at)
+            )
+            or (glance.cue is not None and not valid_finite_cue(glance.cue))
+            or type(cues) is not tuple
+            or len(cues) > 2
+            or any(type(cue) is not FiniteCue or not valid_finite_cue(cue) for cue in cues)
+            or len({cue.event_key for cue in cues}) != len(cues)
+            or (
+                type(current) is ResolvedGlance
+                and float(glance.relay_epoch) < float(current.relay_epoch)
+            )
+        ):
+            return False
+        self._current_resolved_glance = glance
+        self._status_cue_candidates = cues
+        self._status_emphasis_accessibility_generation = (
+            self._accessibility_generation
+        )
+        return True
+
+    def _discard_status_emphasis_plan(self) -> None:
+        glance = self._current_resolved_glance
+        finite_cues = self.status_cue_coordinator.observe(
+            self._status_cue_candidates,
+            now=self._presentation_monotonic(),
+            play_motion=False,
+        )
+        self._status_finite_cues = finite_cues
+        self._status_cue_deadline = None
+        self._status_cue_candidates = ()
+        self._current_resolved_glance = None
+        self._status_emphasis_accessibility_generation = None
+        if type(glance) is ResolvedGlance:
+            self._apply_status_accessibility_text(glance, finite_cues)
+        self._reconcile_current_presentation_inputs()
+
+    def _apply_status_accessibility_text(
+        self,
+        glance: ResolvedGlance,
+        finite_cues: FiniteCueState,
+    ) -> None:
+        state = self.current_operator_state
+        if type(state) is not CanonicalOperatorState or self.status_item is None:
+            return
+        button = self.status_item.button()
+        if button is None:
+            return
+        text = status_item_accessibility(
+            state,
+            glance,
+            finite_cues=finite_cues,
+        )
+        button.setTitle_(f" {text.value}")
+        for selector, value in (
+            ("setAccessibilityLabel_", text.label),
+            ("setAccessibilityValue_", text.value),
+            ("setAccessibilityHelp_", text.help),
+        ):
+            setter = getattr(button, selector, None)
+            if callable(setter):
+                setter(value)
+        button.setToolTip_(text.help)
+
     def set_status(
         self, state: StatusBarState, *, ask_count: int = 0, done_badge: bool = False
     ) -> None:
@@ -3496,6 +5861,26 @@ class StatusBarController(NSObject):
                 self.idle_since_monotonic = time.monotonic()
         else:
             self.idle_since_monotonic = None
+        glance = self._current_resolved_glance
+        if type(glance) is ResolvedGlance and (
+            not self._runtime_started
+            or self._status_emphasis_accessibility_generation
+            != self._accessibility_generation
+        ):
+            self._discard_status_emphasis_plan()
+            glance = None
+        if type(glance) is ResolvedGlance:
+            inputs = self._presentation_scheduler_inputs
+            sleeping = bool(
+                inputs is not None
+                and (inputs.display_asleep or inputs.app_terminating)
+            )
+            self.reconcile_status_emphasis(
+                glance,
+                self._status_cue_candidates,
+                now=self._presentation_monotonic(),
+                sleeping=sleeping,
+            )
         if self.status_item is None:
             return
         button = self.status_item.button()
@@ -3515,9 +5900,20 @@ class StatusBarController(NSObject):
             # "Something finished since you last looked" -- cleared the
             # moment the menu opens (the T3 lastVisitedAt read model).
             title = f"{title} \u2713" if title else " \u2713"
+        operator_state = self.current_operator_state
+        if (
+            type(glance) is ResolvedGlance
+            and type(operator_state) is CanonicalOperatorState
+        ):
+            title = f" {status_item_accessibility(operator_state, glance, finite_cues=self._status_finite_cues).value}"
         button.setTitle_(title)
         button.setImage_(image_for_symbol(state.symbol, state.label))
         button.setToolTip_(f"SidePulse Agent Monitor: {state.label}")
+        if type(glance) is ResolvedGlance:
+            self._apply_status_accessibility_text(
+                glance,
+                self._status_finite_cues,
+            )
         if previous != state:
             log_status_bar(f"state={state.label}")
 
@@ -3583,6 +5979,7 @@ class StatusBarController(NSObject):
             self.monitor.ingest_record(record)
             if newest is None or record.logged_at > newest:
                 newest = record.logged_at
+        self.monitor.statuses_by_key = self.monitor.current_statuses_by_key()
         self.transcript_watermark = newest
         self.transcript_fallback_signature = signature
 
@@ -3607,17 +6004,23 @@ class StatusBarController(NSObject):
             self.event_server.stop()
             self.event_server = None
 
-    def handle_hook_event_message(self, provider: str, line: dict) -> None:
+    def handle_hook_event_message(self, hint: ProviderRefreshHint) -> None:
+        """Reconcile one authenticated hint from the persisted normalized log.
+
+        Hook processes deliberately send no lifecycle payload over IPC. The
+        socket message is only a bounded wake-up hint; the registered private
+        log remains the authority that the live monitor rereads here.
+        """
+        if type(hint) is not ProviderRefreshHint:
+            return
         try:
-            record = parse_log_line(
-                provider,
-                json.dumps(line, separators=(",", ":"), ensure_ascii=False),
+            self.monitor.reconcile_refresh_hint(
+                hint,
+                log_path=detect_log_path(hint.source_key.provider_id),
             )
-            if record is not None:
-                self.monitor.ingest_record(record)
-                self.schedule_event_refresh()
-        except Exception as exc:
-            log_status_bar(f"event_server ingest error: {exc}")
+            self.schedule_event_refresh()
+        except Exception:
+            log_status_bar("event_server reconciliation error")
 
     def schedule_event_refresh(self) -> None:
         if self.event_refresh_pending:
@@ -3688,6 +6091,17 @@ class StatusBarController(NSObject):
         panes[key] = pane
         self.settings_fields.update(fields)
         self.settings_buttons.update(buttons)
+        if key == "led_behavior":
+            self.refresh_notification_authorization_controls()
+            self.start_notification_authorization_refresh()
+        if key == "history":
+            self.start_operator_history_restore()
+            self.refresh_operator_history_projection()
+        if key == "installed_agents":
+            self.refresh_installed_agents_settings_projection()
+            self.reconcile_installed_agent_inventory()
+        if key == "capacity":
+            self.refresh_capacity_settings_projection()
 
     def ensure_all_settings_panes(self) -> None:
         """Every pane, built now -- for tests and any caller that needs
@@ -3700,32 +6114,717 @@ class StatusBarController(NSObject):
         self.refresh_settings_window()
 
     def show_settings_window(self) -> None:
+        self._settings_window_closing = False
         if self.settings_window is None:
+            selected_key = self.current_settings_pane or DEFAULT_SETTINGS_PANE
             self.settings_window = build_settings_window(self)
             if self.settings_sidebar_table is not None:
-                default_row = next(
+                selected_row = next(
                     index
                     for index, (key, _label) in enumerate(SETTINGS_SIDEBAR_ITEMS)
-                    if key == DEFAULT_SETTINGS_PANE
+                    if key == selected_key
                 )
                 self.settings_sidebar_table.selectRowIndexes_byExtendingSelection_(
-                    NSIndexSet.indexSetWithIndex_(default_row), False
+                    NSIndexSet.indexSetWithIndex_(selected_row), False
                 )
         self.refresh_settings_window()
-        # Animate the Signals pane's pattern thumbnails and previews
-        # while the window is visible (self-invalidating on close, same
-        # pattern as the welcome demo timer).
-        if getattr(self, "signal_preview_timer", None) is None:
-            # 12Hz, not 30: every tick steps ~24 WASM preview engines
-            # (JavaScriptCore call + JSON round-trip each); pattern
-            # thumbnails read fine at 12 and the CPU cost drops by ~60%.
-            self.signal_preview_timer = (
-                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                    1.0 / 8.0, self, "redrawSignalPreviews:", None, True
+        self.maybe_refresh_usage_summary()
+        self.settings_window.makeKeyAndOrderFront_(None)
+        self._reconcile_current_presentation_inputs()
+        NSApp.activateIgnoringOtherApps_(True)
+
+    @objc.IBAction
+    def openAgentBrowser_(self, sender) -> bool:
+        payload = sender.representedObject() if sender is not None else None
+        if type(payload) is not AgentBrowserOpenPayload:
+            return False
+        snapshot = getattr(self, "last_snapshot", None)
+        if snapshot is None:
+            return False
+        projection = _canonical_agent_browser_projection(
+            snapshot,
+            self,
+            shelf=payload.shelf,
+            family_key=payload.family_key,
+        )
+        if projection is None or projection.generation != payload.generation:
+            return False
+        controller = getattr(self, "agent_browser_controller", None)
+        if controller is None:
+            controller = AgentBrowserWindowController.alloc().init()
+            self.agent_browser_controller = controller
+        controller.action_handler = self.performAgentBrowserPayload_
+        controller.visit_handler = self.recordAgentBrowserVisit_
+        controller.worker_scope = payload.family_key
+        controller.shelf_scope = payload.shelf
+        controller.query_handler = lambda text, *, family_key, selected_work_key: (
+            _canonical_agent_browser_projection(
+                self.last_snapshot,
+                self,
+                text=text,
+                shelf=payload.shelf if family_key is None else None,
+                family_key=family_key,
+                selected_work_key=selected_work_key,
+            )
+        )
+        controller.open_with_projection(
+            projection,
+            actions_by_work_key=_canonical_operator_actions(
+                self.current_operator_state,
+                self,
+            ),
+            error_message=self.operator_action_error,
+        )
+        NSApp.activateIgnoringOtherApps_(True)
+        return True
+
+    @objc.IBAction
+    def performBrowserAction_(self, sender) -> bool:
+        payload = sender.representedObject() if sender is not None else None
+        performed = self.performAgentBrowserPayload_(payload)
+        if performed and type(payload) is AgentBrowserActionPayload:
+            self.recordAgentBrowserVisit_(payload.work_key)
+        return performed
+
+    def performAgentBrowserPayload_(self, payload) -> bool:
+        if type(payload) is not AgentBrowserActionPayload:
+            return False
+        state = getattr(self, "current_operator_state", None)
+        if state is None or payload.generation != state.generation:
+            return False
+        work = next((item for item in state.works if item.key == payload.work_key), None)
+        if work is None:
+            return False
+        descriptors = _canonical_operator_actions(state, self).get(payload.work_key, ())
+        if not any(item.kind is payload.kind and item.enabled for item in descriptors):
+            return False
+        if payload.kind is OperatorActionKind.OPEN:
+            resolution = resolve_navigation(
+                work.key,
+                "open:primary",
+                getattr(self, "navigation_candidates_by_work_key", {}).get(
+                    work.key,
+                    (),
+                ),
+            )
+            return activate_navigation_resolution(
+                resolution,
+                open_url=open_url,
+                open_terminal_command=open_terminal_command,
+            )
+        if payload.kind in {
+            OperatorActionKind.ACKNOWLEDGE,
+            OperatorActionKind.RESUME_ESCALATION,
+        }:
+            return self._apply_triage_action(payload, state)
+        return self._apply_preference_action(payload)
+
+    def recordAgentBrowserVisit_(self, work_key) -> bool:
+        state = getattr(self, "current_operator_state", None)
+        if state is None or not any(work.key == work_key for work in state.works):
+            return False
+        family_key = _family_work_key(state, work_key)
+        if family_key is None:
+            return False
+        preference = _preference_for_work_key(self.mailbox_preferences, family_key)
+        updated = dataclass_replace(
+            preference or MailboxPreference(family_key),
+            last_visited_at=time.time(),
+        )
+        self._publish_mailbox_preferences(
+            _replace_mailbox_preference(self.mailbox_preferences, updated)
+        )
+        return True
+
+    def _apply_preference_action(self, payload: AgentBrowserActionPayload) -> bool:
+        family_key = _family_work_key(
+            self.current_operator_state,
+            payload.work_key,
+        )
+        if family_key is None:
+            return False
+        preferences = self.mailbox_preferences
+        existing = _preference_for_work_key(preferences, family_key)
+        preference = existing or MailboxPreference(family_key)
+        if payload.kind is OperatorActionKind.WATCH:
+            preference = dataclass_replace(
+                preference,
+                mode=MailboxPreferenceMode.WATCHED,
+                pin_order=None,
+            )
+        elif payload.kind is OperatorActionKind.UNWATCH:
+            preference = dataclass_replace(
+                preference,
+                mode=MailboxPreferenceMode.DEFAULT,
+            )
+        elif payload.kind is OperatorActionKind.PIN:
+            pin_orders = [
+                item.pin_order
+                for item in preferences
+                if item.mode is MailboxPreferenceMode.PINNED
+                and item.pin_order is not None
+            ]
+            preference = dataclass_replace(
+                preference,
+                mode=MailboxPreferenceMode.PINNED,
+                pin_order=(max(pin_orders, default=-1) + 1),
+            )
+        elif payload.kind is OperatorActionKind.UNPIN:
+            preference = dataclass_replace(
+                preference,
+                mode=MailboxPreferenceMode.DEFAULT,
+                pin_order=None,
+            )
+        elif payload.kind in {
+            OperatorActionKind.MOVE_PIN_UP,
+            OperatorActionKind.MOVE_PIN_DOWN,
+        }:
+            moved = _move_pinned_preference(
+                preferences,
+                family_key,
+                delta=-1 if payload.kind is OperatorActionKind.MOVE_PIN_UP else 1,
+            )
+            if moved is None:
+                return False
+            self._publish_mailbox_preferences(moved)
+            return True
+        elif payload.kind is OperatorActionKind.SNOOZE:
+            duration = {
+                "15-minutes": 900.0,
+                "1-hour": 3_600.0,
+                "tomorrow": 86_400.0,
+            }.get(payload.snooze_preset)
+            if duration is None:
+                return False
+            now = time.time()
+            preference = dataclass_replace(
+                preference,
+                snoozed_at=now,
+                snoozed_until=now + duration,
+            )
+        elif payload.kind is OperatorActionKind.UNSNOOZE:
+            preference = dataclass_replace(
+                preference,
+                snoozed_at=None,
+                snoozed_until=None,
+            )
+        else:
+            return False
+        self._publish_mailbox_preferences(
+            _replace_mailbox_preference(preferences, preference)
+        )
+        return True
+
+    def _apply_triage_action(self, payload, state) -> bool:
+        request = _request_for_work(state, payload.work_key)
+        if request is None:
+            return False
+        mutation = (
+            LocalTriageMutationKind.ACKNOWLEDGE
+            if payload.kind is OperatorActionKind.ACKNOWLEDGE
+            else LocalTriageMutationKind.RESUME_ESCALATION
+        )
+        occurred_at = time.time()
+        try:
+            updated = apply_local_triage_mutation(
+                self.local_triage_state,
+                request=request,
+                mutation=mutation,
+                now=occurred_at,
+            )
+        except ValueError:
+            return False
+        self.local_triage_state = updated
+        self.local_triage_dirty = True
+        try:
+            self.operator_triage_saver(updated)
+        except OSError:
+            self.operator_action_error = (
+                "Could not save acknowledgement. SidePulse will retry."
+            )
+        else:
+            self.local_triage_dirty = False
+            self.operator_action_error = None
+        self.observe_operator_history_triage(
+            request,
+            mutation,
+            occurred_at=occurred_at,
+            state=state,
+        )
+        self._republish_operator_surfaces()
+        return True
+
+    def _publish_mailbox_preferences(self, preferences) -> None:
+        self.mailbox_preferences = tuple(preferences)
+        self.mailbox_preferences_dirty = True
+        try:
+            self.mailbox_preferences_saver(self.mailbox_preferences)
+        except OSError:
+            self.operator_action_error = (
+                "Could not save mailbox change. SidePulse will retry."
+            )
+        else:
+            self.mailbox_preferences_dirty = False
+            self.operator_action_error = None
+        self._republish_operator_surfaces()
+
+    def _republish_operator_surfaces(self) -> None:
+        snapshot = getattr(self, "last_snapshot", None)
+        if snapshot is None or getattr(snapshot, "operator_state", None) is None:
+            return
+        browser = getattr(self, "agent_browser_controller", None)
+        if browser is not None:
+            projection = _canonical_agent_browser_projection(
+                snapshot,
+                self,
+                text=str(browser.search_field.stringValue()),
+                shelf=(
+                    browser.shelf_scope
+                    if browser.worker_scope is None
+                    else None
+                ),
+                family_key=browser.worker_scope,
+                selected_work_key=browser.selected_work_key,
+            )
+            if projection is not None:
+                browser.publish_projection(
+                    projection,
+                    actions_by_work_key=_canonical_operator_actions(
+                        self.current_operator_state,
+                        self,
+                    ),
+                    error_message=self.operator_action_error,
+                )
+        self._menu_signature = None
+        if self.status_item is not None:
+            self.update_status_menu(snapshot, self.current_state)
+
+    def schedule_mailbox_boundary(self, deadline_epoch) -> None:
+        if deadline_epoch is None:
+            timer = self.mailbox_boundary_timer
+            if timer is not None:
+                timer.invalidate()
+            self.mailbox_boundary_timer = None
+            self.mailbox_boundary_schedule.clear()
+            return
+        if self.mailbox_boundary_schedule.deadline_epoch == deadline_epoch:
+            return
+        timer = self.mailbox_boundary_timer
+        if timer is not None:
+            timer.invalidate()
+        token = self.mailbox_boundary_schedule.replace(deadline_epoch)
+        timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
+            max(0.05, deadline_epoch - time.time()),
+            self,
+            "mailboxBoundary:",
+            token,
+            False,
+        )
+        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, NSRunLoopCommonModes)
+        self.mailbox_boundary_timer = timer
+
+    @objc.IBAction
+    def mailboxBoundary_(self, timer) -> None:
+        token = timer.userInfo()
+        if not self.mailbox_boundary_schedule.callback_due(
+            token,
+            now_epoch=time.time(),
+        ):
+            return
+        self.mailbox_boundary_timer = None
+        snapshot = getattr(self, "last_snapshot", None)
+        if snapshot is None:
+            return
+        _canonical_agent_browser_projection(snapshot, self)
+        self._menu_signature = None
+        if self.status_item is not None:
+            self.update_status_menu(snapshot, self.current_state)
+
+    def load_operator_local_state(self) -> None:
+        state_dir = default_state_dir()
+        document = load_mailbox_preference_document(
+            state_dir / "mailbox-preferences.json"
+        )
+        if document.version == 2 and not document.degraded:
+            self.mailbox_preferences = document.preferences
+        self.local_triage_state = load_operator_triage(
+            state_dir / "operator-triage.json"
+        )
+
+    def _operator_history_timezone_offset_minutes(self) -> int:
+        offset = datetime.now().astimezone().utcoffset()
+        return 0 if offset is None else int(offset.total_seconds() // 60)
+
+    def _set_operator_history_status(self, message: str) -> None:
+        self._operator_history_operation_status = message
+        set_field_value(
+            self.settings_fields.get("history_operation_status"),
+            message or "No history operation in progress.",
+        )
+
+    def refresh_operator_history_projection(self) -> None:
+        projection = self.operator_history_store.project(
+            range_days=self.operator_history_range_days,
+            now=time.time(),
+            timezone_offset_minutes=self._operator_history_timezone_offset_minutes(),
+        )
+        self.operator_history_projection = projection
+        set_field_value(
+            self.settings_fields.get("history_summary"),
+            (
+                "Operator history is being restored."
+                if self._operator_history_restore_pending
+                else " ".join(projection.summary_sentences)
+            ),
+        )
+        set_field_value(
+            self.settings_fields.get("history_health"),
+            (
+                "History loading"
+                if self._operator_history_restore_pending
+                else projection.health_label
+            ),
+        )
+        set_field_value(
+            self.settings_fields.get("history_semantic_reel"),
+            "\n".join(self.operator_history_reel) or "No current-run events.",
+        )
+        retention_controls = self.settings_fields.get(
+            "history_retention_controls",
+            {},
+        )
+        for retention, control in retention_controls.items():
+            control.setState_(
+                1
+                if retention == self.settings.operator_history_retention_days
+                else 0
+            )
+        range_controls = self.settings_fields.get("history_range_controls", {})
+        for range_days, control in range_controls.items():
+            control.setState_(1 if range_days == self.operator_history_range_days else 0)
+
+    def start_operator_history_restore(self) -> None:
+        if (
+            self._operator_history_restore_started
+            or self.settings.operator_history_retention_days == 0
+        ):
+            return
+        self._operator_history_restore_started = True
+        self._operator_history_restore_pending = True
+        self._operator_history_retention_generation += 1
+        generation = self._operator_history_retention_generation
+        path = self.operator_history_store.path
+
+        def _restore() -> None:
+            store = OperatorHistoryStore(
+                path,
+                retention_days=self.settings.operator_history_retention_days,
+            )
+            restored = store.restore()
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "applyOperatorHistoryRestore:",
+                (generation, store, restored.health),
+                False,
+            )
+
+        threading.Thread(
+            target=_restore,
+            daemon=True,
+            name="sidepulse-operator-history-restore",
+        ).start()
+
+    @objc.IBAction
+    def applyOperatorHistoryRestore_(self, payload) -> None:
+        if not (
+            type(payload) is tuple
+            and len(payload) == 3
+            and payload[0] == self._operator_history_retention_generation
+            and type(payload[1]) is OperatorHistoryStore
+            and type(payload[2]) is OperatorHistoryRestoreHealth
+        ):
+            return
+        with self._operator_history_lock:
+            self.operator_history_store = payload[1]
+            self.operator_history_restore_health = payload[2]
+            self._operator_history_restore_pending = False
+        self.refresh_operator_history_projection()
+
+    @objc.IBAction
+    def changeOperatorHistoryRange_(self, sender) -> None:
+        value = sender.representedObject() if sender is not None else None
+        if type(value) is not int or value not in {1, 7, 30}:
+            return
+        self.operator_history_range_days = value
+        self.refresh_operator_history_projection()
+
+    @objc.IBAction
+    def changeOperatorHistoryRetention_(self, sender) -> None:
+        value = sender.representedObject() if sender is not None else None
+        if type(value) is int:
+            self.start_operator_history_retention_change(value)
+
+    def start_operator_history_retention_change(self, retention_days: int) -> None:
+        if type(retention_days) is not int or retention_days not in {0, 7, 30, 90}:
+            return
+        self._operator_history_retention_generation += 1
+        generation = self._operator_history_retention_generation
+        candidate_settings = dataclass_replace(
+            self.settings,
+            operator_history_retention_days=retention_days,
+        )
+        self._set_operator_history_status("Updating history retention.")
+
+        def _change() -> None:
+            try:
+                with self._operator_history_lock:
+                    if generation != self._operator_history_retention_generation:
+                        return
+                    current_state = self.operator_history_store.state
+                    path = self.operator_history_store.path
+                    save_settings(candidate_settings)
+                    state = save_operator_history(
+                        path,
+                        current_state,
+                        retention_days=retention_days,
+                        now=time.time(),
+                    )
+                    store = OperatorHistoryStore(
+                        path,
+                        retention_days=retention_days,
+                    )
+                    store.state = state
+                payload = (generation, retention_days, candidate_settings, store, None)
+            except Exception:
+                payload = (generation, retention_days, None, None, "History setting could not be saved.")
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "applyOperatorHistoryRetentionResult:",
+                payload,
+                False,
+            )
+
+        threading.Thread(
+            target=_change,
+            daemon=True,
+            name="sidepulse-operator-history-retention",
+        ).start()
+
+    @objc.IBAction
+    def applyOperatorHistoryRetentionResult_(self, payload) -> None:
+        if not (
+            type(payload) is tuple
+            and len(payload) == 5
+            and payload[0] == self._operator_history_retention_generation
+        ):
+            return
+        _generation, retention, settings, store, error = payload
+        self._operator_history_restore_pending = False
+        if error is not None:
+            self._set_operator_history_status(error)
+            self.refresh_operator_history_projection()
+            return
+        self.settings = settings
+        with self._operator_history_lock:
+            self.operator_history_store = store
+            self.operator_history_restore_health = (
+                OperatorHistoryRestoreHealth.MISSING
+                if retention == 0
+                else OperatorHistoryRestoreHealth.HEALTHY
+            )
+        self._set_operator_history_status(
+            "History is off."
+            if retention == 0
+            else f"History retention is {retention} days."
+        )
+        self.refresh_operator_history_projection()
+
+    @objc.IBAction
+    def confirmClearOperatorHistory_(self, _sender) -> bool:
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Clear operator history?")
+        alert.setInformativeText_(
+            "This removes only the private derived operator-history file. "
+            "Mailbox preferences, capacity observations, and settings remain."
+        )
+        alert.addButtonWithTitle_("Clear History")
+        alert.addButtonWithTitle_("Cancel")
+        return alert.runModal() == NSAlertFirstButtonReturn
+
+    @objc.IBAction
+    def clearOperatorHistory_(self, sender) -> None:
+        if not self.confirmClearOperatorHistory_(sender):
+            return
+        try:
+            with self._operator_history_lock:
+                self.operator_history_store.clear()
+        except Exception:
+            self._set_operator_history_status("History could not be cleared.")
+            return
+        self._set_operator_history_status("History cleared.")
+        self.refresh_operator_history_projection()
+
+    def append_operator_history_reel(self, phrase: str, _semantic_key=None) -> None:
+        allowed = {
+            "Agent became active",
+            "Agent became idle",
+            "Agent completed",
+            "Agent failed",
+            "Request opened",
+            "Request resolved",
+            "Source degraded",
+            "Source recovered",
+            "Request acknowledged locally",
+            "Request escalation resumed",
+        }
+        if type(phrase) is not str or phrase not in allowed:
+            return
+        self.operator_history_reel = (*self.operator_history_reel, phrase)[-50:]
+        set_field_value(
+            self.settings_fields.get("history_semantic_reel"),
+            "\n".join(self.operator_history_reel),
+        )
+
+    def _enqueue_operator_history_events(
+        self,
+        events: tuple[RuntimeHistoryEvent, ...],
+    ) -> None:
+        if not events or self.operator_history_store.retention_days == 0:
+            return
+        aggregated = aggregate_operator_history(
+            events,
+            timezone_offset_at=lambda _epoch: self._operator_history_timezone_offset_minutes(),
+        )
+
+        def _persist() -> None:
+            try:
+                with self._operator_history_lock:
+                    self.operator_history_store.add_rows(aggregated)
+                    self.operator_history_store.flush(now=time.time())
+            except Exception:
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "applyOperatorHistoryPersistenceFailure:",
+                    None,
+                    False,
+                )
+                return
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "applyOperatorHistoryProjection:",
+                None,
+                False,
+            )
+
+        threading.Thread(
+            target=_persist,
+            daemon=True,
+            name="sidepulse-operator-history-write",
+        ).start()
+
+    def observe_operator_history_triage(
+        self,
+        request,
+        mutation: LocalTriageMutationKind,
+        *,
+        occurred_at: float,
+        state: CanonicalOperatorState,
+    ) -> None:
+        if mutation is LocalTriageMutationKind.ACKNOWLEDGE:
+            phrase = "Request acknowledged locally"
+            kind = HistoryEventKind.REQUEST_ACKNOWLEDGED
+        elif mutation is LocalTriageMutationKind.RESUME_ESCALATION:
+            phrase = "Request escalation resumed"
+            kind = HistoryEventKind.REQUEST_RESUMED
+        else:
+            return
+        event_key = request.semantic_event_key
+        if event_key.subject_key != request.key:
+            return
+        primary_count = sum(work.parent_key is None for work in state.works)
+        worker_count = len(state.works) - primary_count
+        self.append_operator_history_reel(phrase, request.key)
+        self._enqueue_operator_history_events(
+            (
+                RuntimeHistoryEvent(
+                    event_key,
+                    ProviderIdentifier(request.key.work_key.source_key.provider_id),
+                    kind,
+                    occurred_at,
+                    None,
+                    None,
+                    primary_count,
+                    worker_count,
+                ),
+            )
+        )
+
+    def observe_operator_history_events(
+        self,
+        events: tuple[CanonicalOperatorEvent, ...],
+        state: CanonicalOperatorState | None,
+    ) -> None:
+        phrases = {
+            TransitionKind.BECAME_ACTIVE: "Agent became active",
+            TransitionKind.BECAME_IDLE: "Agent became idle",
+            TransitionKind.REQUEST_OPENED: "Request opened",
+            TransitionKind.REQUEST_RESOLVED: "Request resolved",
+            TransitionKind.COMPLETED: "Agent completed",
+            TransitionKind.FAILED: "Agent failed",
+            TransitionKind.SOURCE_DEGRADED: "Source degraded",
+            TransitionKind.SOURCE_RECOVERED: "Source recovered",
+        }
+        history_kinds = {
+            TransitionKind.BECAME_ACTIVE: HistoryEventKind.STARTED,
+            TransitionKind.REQUEST_OPENED: HistoryEventKind.NEEDS_USER,
+            TransitionKind.COMPLETED: HistoryEventKind.COMPLETED,
+            TransitionKind.FAILED: HistoryEventKind.FAILED,
+            TransitionKind.SOURCE_DEGRADED: HistoryEventKind.SOURCE_DEGRADED,
+            TransitionKind.SOURCE_RECOVERED: HistoryEventKind.SOURCE_RECOVERED,
+        }
+        primary_count = 0
+        worker_count = 0
+        if type(state) is CanonicalOperatorState:
+            primary_count = sum(work.parent_key is None for work in state.works)
+            worker_count = len(state.works) - primary_count
+        rows: list[RuntimeHistoryEvent] = []
+        for event in events:
+            phrase = phrases.get(event.kind)
+            if phrase is not None:
+                self.append_operator_history_reel(phrase, event.key)
+            kind = history_kinds.get(event.kind)
+            if kind is None:
+                continue
+            subject = event.subject_key
+            source = subject.source_key if type(subject) is WorkKey else subject.work_key.source_key
+            rows.append(
+                RuntimeHistoryEvent(
+                    event.key,
+                    ProviderIdentifier(source.provider_id),
+                    kind,
+                    event.occurred_at_epoch,
+                    None,
+                    None,
+                    primary_count,
+                    worker_count,
                 )
             )
-        self.settings_window.makeKeyAndOrderFront_(None)
-        NSApp.activateIgnoringOtherApps_(True)
+        self._enqueue_operator_history_events(tuple(rows))
+
+    @objc.IBAction
+    def applyOperatorHistoryPersistenceFailure_(self, _payload) -> None:
+        self._set_operator_history_status("History could not be saved.")
+
+    @objc.IBAction
+    def applyOperatorHistoryProjection_(self, _payload) -> None:
+        self.refresh_operator_history_projection()
+
+    @staticmethod
+    def _save_mailbox_preferences(preferences) -> None:
+        save_mailbox_preferences_v2(
+            default_state_dir() / "mailbox-preferences.json",
+            preferences,
+        )
+
+    @staticmethod
+    def _save_operator_triage(state) -> None:
+        save_operator_triage(default_state_dir() / "operator-triage.json", state)
 
     # --- Settings sidebar (NSTableViewDataSource / NSTableViewDelegate) ---
     #
@@ -3775,6 +6874,12 @@ class StatusBarController(NSObject):
         self.ensure_settings_pane(selected_key)
         outgoing_key = getattr(self, "current_settings_pane", None)
         self.current_settings_pane = selected_key
+        if self.settings_window is not None:
+            self.settings_window.setTitle_(
+                f"SidePulse Settings: {dict(SETTINGS_SIDEBAR_ITEMS)[selected_key]}"
+            )
+        self.reconcile_device_runtime()
+        self.reconcile_installed_agent_inventory()
         # Crossfade instead of a hard swap -- and a generation counter so
         # rapid pane-hopping never queues stale hide callbacks.
         generation = getattr(self, "_pane_transition_generation", 0) + 1
@@ -3940,16 +7045,16 @@ class StatusBarController(NSObject):
         return controller
 
     def start_colors_preview_animation(self) -> None:
-        if self.color_preview_timer is not None:
-            return
-        self.color_preview_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            1.0 / 12.0, self, "animateColorsPreviewTick:", None, True
-        )
+        self._reconcile_current_presentation_inputs()
 
     def stop_colors_preview_animation(self) -> None:
-        if self.color_preview_timer is not None:
-            self.color_preview_timer.invalidate()
-            self.color_preview_timer = None
+        self._runtime_preview_fire_at.pop(
+            RuntimeFeature.SETTINGS_COLOR_PREVIEW,
+            None,
+        )
+        self._runtime_timer_registry.invalidate(
+            RuntimeFeature.SETTINGS_COLOR_PREVIEW
+        )
 
     @objc.IBAction
     def animateColorsPreviewTick_(self, _sender):
@@ -4419,25 +7524,14 @@ class StatusBarController(NSObject):
     def show_setup_window(self) -> None:
         if self.setup_window is None:
             self.setup_window = build_setup_window(self)
-        if self.setup_demo_timer is None:
-            # Drives the welcome hero's live LED demo -- the view animates
-            # itself from monotonic time on each draw, so the timer only
-            # needs to mark it dirty, and only while the window shows.
-            self.setup_demo_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                1.0 / 30.0, self, "redrawSetupDemo:", None, True
-            )
         self.refresh_setup_window()
         self.setup_window.makeKeyAndOrderFront_(None)
+        self._reconcile_current_presentation_inputs()
         NSApp.activateIgnoringOtherApps_(True)
 
     @objc.IBAction
     def redrawSetupDemo_(self, _sender):
         if self.setup_window is None or not self.setup_window.isVisible():
-            # The window closed: stop the 30 Hz timer instead of ticking
-            # forever (show_setup_window re-creates it next time).
-            if self.setup_demo_timer is not None:
-                self.setup_demo_timer.invalidate()
-                self.setup_demo_timer = None
             return
         demo_view = self.setup_fields.get("demo_view")
         if demo_view is not None:
@@ -4641,6 +7735,12 @@ class StatusBarController(NSObject):
                     install_button.setHidden_(installed)
                 if uninstall_button is not None:
                     uninstall_button.setHidden_(not installed)
+        if current_pane == "history":
+            self.refresh_operator_history_projection()
+        if current_pane == "installed_agents":
+            self.refresh_installed_agents_settings_projection()
+        if current_pane == "capacity":
+            self.refresh_capacity_settings_projection()
         set_field_value(
             self.settings_fields.get("settings_path"),
             f"Settings: {default_settings_path()}",
@@ -4693,6 +7793,7 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("completion_notification"),
             self.settings.completion_notification_enabled,
         )
+        self.refresh_notification_authorization_controls()
         for device_id, controls in self.device_settings_controls.items():
             self.refresh_device_settings_controls(device_id, controls)
         set_checkbox_state(
@@ -4720,18 +7821,9 @@ class StatusBarController(NSObject):
             f"{self.settings.low_battery_threshold_percent:g}",
         )
         set_checkbox_state(
-            self.settings_buttons.get("notification_blinks_enabled"),
-            self.settings.notification_blinks_enabled,
-        )
-        set_checkbox_state(
             self.settings_buttons.get("completion_sweep_enabled"),
             self.settings.completion_sweep_enabled,
         )
-        for bundle_id in DEFAULT_NOTIFICATION_APP_COLORS:
-            set_field_value(
-                self.settings_fields.get(f"notification_color:{bundle_id}"),
-                self.settings.notification_app_colors.get(bundle_id, ""),
-            )
         set_checkbox_state(
             self.settings_buttons.get("calendar_alerts_enabled"),
             self.settings.calendar_alerts_enabled,
@@ -4958,19 +8050,13 @@ class StatusBarController(NSObject):
         # zero of them changed.
         if label is not None:
             label.setAlphaValue_(1.0)
-            timer = getattr(self, "_settings_message_timer", None)
-            if timer is not None:
-                timer.invalidate()
-            if message:
-                self._settings_message_timer = (
-                    NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                        3.5, self, "dismissSettingsMessage:", None, False
-                    )
-                )
+            self._settings_message_deadline_at = (
+                self._presentation_monotonic() + 3.5 if message else 0.0
+            )
+            self._reconcile_current_presentation_inputs()
 
     @objc.IBAction
     def dismissSettingsMessage_(self, _timer):
-        self._settings_message_timer = None
         label = self.settings_fields.get("message")
         if label is None:
             return
@@ -5003,6 +8089,92 @@ class StatusBarController(NSObject):
             self.set_settings_message(f"Debug export failed: {exc}")
             return
         self.set_settings_message(f"Exported {count} debug events to {path}.")
+
+    @objc.IBAction
+    def exportOperatorHistory_(self, _sender) -> None:
+        path = choose_operator_export_path("history")
+        if path is None:
+            return
+        try:
+            payload = encode_history_export(
+                HistoryExportV1(
+                    time.time(),
+                    self.settings.operator_history_retention_days,
+                    self.operator_history_store.state.rows,
+                )
+            )
+            write_private_export(
+                path,
+                payload,
+                max_bytes=MAX_HISTORY_EXPORT_BYTES,
+            )
+        except Exception:
+            self._set_operator_history_status("Export could not be saved.")
+            return
+        self._set_operator_history_status("History export saved as a local file.")
+
+    def _operator_debug_export(self) -> DebugExportV1:
+        try:
+            from importlib.metadata import version as package_version
+
+            app_version = package_version("sidepulse")
+        except Exception:
+            app_version = "dev"
+        health_counts: dict[str, int] = {}
+        state = self.current_operator_state
+        if type(state) is CanonicalOperatorState:
+            freshness_to_health = {
+                SourceFreshness.FRESH: "healthy",
+                SourceFreshness.RESTORED: "healthy",
+                SourceFreshness.PARTIAL: "partial",
+                SourceFreshness.TIMING_UNCERTAIN: "partial",
+                SourceFreshness.STALE: "partial",
+                SourceFreshness.UNAVAILABLE: "unavailable",
+            }
+            by_source = {
+                work.key.source_key: work.source_freshness for work in state.works
+            }
+            for freshness in by_source.values():
+                label = freshness_to_health[freshness]
+                health_counts[label] = health_counts.get(label, 0) + 1
+        device_counts = (
+            (("write_failed", len(self.device_errors)),)
+            if self.device_errors
+            else ()
+        )
+        history_health = (
+            "disabled"
+            if self.settings.operator_history_retention_days == 0
+            else self.operator_history_restore_health.value
+        )
+        return DebugExportV1(
+            time.time(),
+            app_version,
+            "unknown" if running_inside_bundle() else "source_checkout",
+            tuple(sorted(health_counts.items())),
+            (),
+            device_counts,
+            history_health,
+        )
+
+    @objc.IBAction
+    def exportOperatorDiagnostics_(self, _sender) -> None:
+        path = choose_operator_export_path("diagnostics")
+        if path is None:
+            return
+        try:
+            payload = encode_debug_export(self._operator_debug_export())
+            write_private_export(
+                path,
+                payload,
+                max_bytes=MAX_DEBUG_EXPORT_BYTES,
+            )
+        except Exception:
+            self._set_operator_history_status("Export could not be saved.")
+            return
+        self._set_operator_history_status(
+            "Diagnostics export saved as a local file."
+        )
 
     def update_hooks(self, provider: str, *, install: bool) -> None:
         """Installer runs on a worker thread: the Codex trust refresh
@@ -5249,6 +8421,7 @@ class StatusBarController(NSObject):
             except Exception as exc:
                 self.set_settings_message(f"Could not disable Screen Bar: {exc}")
                 return
+            self.virtual_status_device.set_pointer_interaction_relevant(False)
             self.virtual_status_device.hide()
             self.set_settings_message("Screen Bar is disabled for now.")
             self.refresh_(None)
@@ -5267,8 +8440,12 @@ class StatusBarController(NSObject):
             self.set_settings_message(f"Could not save Screen Bar: {exc}")
             return
         if enabled:
+            self.virtual_status_device.set_pointer_interaction_relevant(
+                not self.status_menu_open
+            )
             self.virtual_status_device.show()
         else:
+            self.virtual_status_device.set_pointer_interaction_relevant(False)
             self.virtual_status_device.hide()
         self.refresh_(None)
 
@@ -5669,6 +8846,10 @@ class StatusBarController(NSObject):
         discover_devices never see a stale cache from a previous patch."""
         discover = discover_devices
         cached = getattr(self, "_device_discovery_cache", None)
+        if getattr(self, "_runtime_started", False):
+            if cached is not None and cached[0] is discover:
+                return cached[2]
+            return list(getattr(self, "_device_inventory_candidates", ()))
         now = time.monotonic()
         if cached is not None and cached[0] is discover:
             if now - cached[1] >= DEVICE_DISCOVERY_CACHE_SECONDS and not getattr(
@@ -5889,13 +9070,8 @@ class StatusBarController(NSObject):
             ),
             (LED_DISPLAY_LOW_BATTERY, lambda: self.low_power_active(battery_snapshot)),
             (
-                LED_DISPLAY_NOTIFICATION,
-                lambda: (
-                    self.settings.notification_blinks_enabled
-                    and not self.courtesy_signals_held()
-                    and self.notification_blink_color is not None
-                    and now < self.notification_blink_until
-                ),
+                LED_DISPLAY_FAILURE,
+                lambda: self.active_failure_signal(now=now) is not None,
             ),
             (
                 LED_DISPLAY_QUOTA,
@@ -5963,7 +9139,10 @@ class StatusBarController(NSObject):
             ),
             (
                 LED_DISPLAY_QUOTA_RUNWAY,
-                lambda: device.display == LED_DISPLAY_QUOTA_RUNWAY,
+                lambda: (
+                    device.display == LED_DISPLAY_QUOTA_RUNWAY
+                    and self.quota_runway_state() is not None
+                ),
             ),
         )
         # Per-device "asks only" (backlog #21): this device skips the
@@ -6001,39 +9180,89 @@ class StatusBarController(NSObject):
         battery_snapshot: BatterySnapshot | None,
         display_kind: str,
         statuses: tuple[AgentStatus, ...] = (),
+        *,
+        projection: AttentionProjection | None = None,
+        operator_events: tuple[CanonicalOperatorEvent, ...] = (),
+        capacity: CapacityGlance | None = None,
+        presentation_time: float | None = None,
+        resolved_glance: ResolvedGlance | None = None,
     ) -> None:
         if not self.leds_enabled:
             return
 
-        if not self.has_connected_physical_device():
-            # Nothing physical to stay phase-locked to -- update the Screen
-            # Bar immediately, same as before this device had a fix for
-            # syncing to real hardware. When a physical device IS connected,
-            # this update is deferred until that write actually completes
-            # (see sync_leds_now/schedule_screen_bar_sync) so the two clocks
-            # start from the same real-world instant instead of drifting.
-            self.sync_virtual_status_device(mode, battery_snapshot, statuses)
+        if resolved_glance is not None and type(resolved_glance) is not ResolvedGlance:
+            raise ValueError("invalid resolved presentation")
+        if projection is not None and resolved_glance is None:
+            if presentation_time is None:
+                presentation_time = self._presentation_monotonic()
+            resolved_glance = self.resolve_presentation_glance(
+                projection,
+                operator_events=operator_events,
+                capacity=capacity,
+                presentation_time=presentation_time,
+            )
+            cues = (
+                (resolved_glance.cue,)
+                if resolved_glance.cue is not None
+                else ()
+            )
+            self.set_status_emphasis_plan(resolved_glance, cues)
+
+        devices = tuple(
+            sorted(
+                (
+                    device
+                    for device in self.status_bar_devices(remember=False)
+                    if device.connected and device.device_id != VIRTUAL_DEVICE_ID
+                ),
+                key=lambda device: device.device_id,
+            )[:MAX_RUNTIME_PHYSICAL_DEVICES]
+        )
+        self.sync_virtual_status_device(
+            mode,
+            battery_snapshot,
+            statuses,
+            projection=projection,
+            resolved_glance=resolved_glance,
+            presentation_time=presentation_time,
+            capacity_remaining_fraction=(
+                capacity.remaining_fraction if capacity is not None else None
+            ),
+        )
+        if not devices:
+            return
 
         if time.monotonic() < self.led_animation_until_monotonic:
             return
-
-        if self.led_sync_in_flight:
-            # Coalesce, don't drop: a slow device write used to swallow
-            # the newest state entirely, leaving stale LEDs until the
-            # next event or the 15s poll. The worker triggers one fresh
-            # refresh when it finishes.
-            self.led_sync_dropped = True
+        if not self._hardware_write_active:
             return
-        self.led_sync_in_flight = True
-        thread = threading.Thread(
-            target=self.sync_leds_worker,
-            args=(mode, battery_snapshot, display_kind, statuses),
-            daemon=True,
-        )
-        # Tracked so tests can JOIN it before tempdir teardown -- a
-        # daemon write racing shutil.rmtree was a recurring test flake.
-        self.led_worker_thread = thread
-        thread.start()
+
+        relay_elapsed_seconds = max(0.0, time.monotonic() - self._relay_epoch)
+        now = self._runtime_worker_monotonic()
+        for device in devices:
+            request = HardwareWriteRequest(
+                device=device,
+                mode=mode,
+                battery_snapshot=battery_snapshot,
+                statuses=statuses,
+                projection=projection,
+                relay_elapsed_seconds=relay_elapsed_seconds,
+                accessibility_preferences=self._accessibility_display_preferences,
+                resolved_glance=resolved_glance,
+                presentation_time=presentation_time,
+                capacity_remaining_fraction=(
+                    capacity.remaining_fraction if capacity is not None else None
+                ),
+            )
+            self._hardware_write_worker.submit(
+                RuntimeWorkCommand(
+                    domain=RuntimeWorkerDomain.HARDWARE_WRITE,
+                    key=self._hardware_worker_key(device),
+                    generation=self._hardware_write_generation,
+                    deadline=now + max(5.0, STATUS_BAR_REFRESH_SECONDS * 2.0),
+                    payload=request,
+                )
+            )
 
     def has_connected_physical_device(self) -> bool:
         return any(
@@ -6048,12 +9277,23 @@ class StatusBarController(NSObject):
         statuses: tuple[AgentStatus, ...] = (),
         *,
         started_at: float | None = None,
+        projection: AttentionProjection | None = None,
+        relay_elapsed_seconds: float | None = None,
+        resolved_glance: ResolvedGlance | None = None,
+        presentation_time: float | None = None,
+        capacity_remaining_fraction: float | None = None,
     ) -> None:
         if not SCREEN_BAR_FEATURE_ENABLED:
+            self.virtual_status_device.set_pointer_interaction_relevant(False)
             self.virtual_status_device.hide()
             return
         if not self.settings.virtual_status_device_enabled:
+            self.virtual_status_device.set_pointer_interaction_relevant(False)
             return
+        if relay_elapsed_seconds is None:
+            relay_elapsed_seconds = max(0.0, time.monotonic() - self._relay_epoch)
+        if resolved_glance is not None and started_at is None:
+            started_at = resolved_glance.relay_epoch
         # Kept fresh here rather than scattered across every settings-mutation
         # call site -- always current right before any (re)positioning below.
         self.virtual_status_device.set_wraps_menu_bar(
@@ -6067,20 +9307,16 @@ class StatusBarController(NSObject):
         self.virtual_status_device.set_follow_alcove(
             self.settings.screen_bar_follow_alcove
         )
-        # Story #14: the wing tips as standing micro-gauges -- the left
-        # tip's quota ember tracks the worst window (fades in past 50%),
-        # the right tip holds unseen-done green until the menu opens.
+        # The right tip may retain the independent completion gauge. Capacity
+        # stays empty while release authority is withheld.
         if self.settings.screen_bar_gauges_enabled:
-            percents = getattr(self, "quota_last_percents", None) or {}
-            worst = max(percents.values(), default=0.0)
-            left_level = max(0.0, min(1.0, (float(worst) - 50.0) / 50.0))
             snapshot = getattr(self, "last_snapshot", None)
             right_on = (
                 bool(unseen_completions(snapshot, self))
                 if snapshot is not None
                 else False
             )
-            self.virtual_status_device.set_standing_gauges(left_level, right_on)
+            self.virtual_status_device.set_standing_gauges(0.0, right_on)
         else:
             self.virtual_status_device.set_standing_gauges(0.0, False)
         # Click-to-answer: while an ask is live, the glowing bar itself
@@ -6088,7 +9324,9 @@ class StatusBarController(NSObject):
         # oldest unanswered ask's terminal comes forward. With no ask,
         # the window stays fully click-through (mouse events ignored),
         # exactly as before.
-        self.ensure_peek_timer()
+        self.virtual_status_device.set_pointer_interaction_relevant(
+            not self.status_menu_open
+        )
         click_target = self.screen_bar_click_status()
         if click_target is not None:
             self.virtual_status_device.set_click_handler(
@@ -6123,33 +9361,69 @@ class StatusBarController(NSObject):
         ):
             brightness = self.effective_signal_brightness_for_device(device)
 
-        def _set_virtual(program: str) -> None:
+        def _set_virtual(program: str, presentation=None) -> None:
             # The Screen Bar honors ITS calibration exactly like a
             # physical device -- gains applied at the write boundary
             # (the Colors-window previews stay uncorrected "true" hex).
-            self.virtual_status_device.set_program(
-                apply_channel_gain_to_program(
-                    # Ember first, calibration second -- same order as
-                    # AgentLedController. Without this the Screen Bar's
-                    # Resting glow slider was a silent no-op.
-                    apply_resting_glow_to_program(program, device.resting_glow),
+            def transform(value: str) -> str:
+                return apply_channel_gain_to_program(
+                    apply_resting_glow_to_program(value, device.resting_glow),
                     device.channel_gains,
+                )
+
+            continuity = (
+                continuous_presentation_identity(presentation)
+                if presentation is not None
+                else None
+            )
+            playback_anchor = started_at
+            if (
+                presentation is not None
+                and valid_presentation_time(presentation.playback_anchor)
+            ):
+                playback_anchor = float(presentation.playback_anchor)
+            self.virtual_status_device.set_program(
+                transform(program),
+                started_at=playback_anchor,
+                motion=(
+                    presentation.motion
+                    if presentation is not None
+                    else MotionClass.CONTINUOUS
                 ),
-                started_at=started_at,
+                static_fallback_program=(
+                    transform(
+                        apply_brightness(
+                            presentation.static_fallback_dsl,
+                            brightness,
+                        )
+                    )
+                    if presentation is not None
+                    else "off"
+                ),
+                next_visual_change_at=(
+                    presentation.next_visual_change_at
+                    if presentation is not None
+                    else None
+                ),
+                dedupe_token=continuity,
             )
 
-        if display == LED_DISPLAY_TEST:
+        projection = projection or getattr(self, "current_attention_projection", None)
+        if display == LED_DISPLAY_FAILURE:
+            active = self.active_failure_signal()
+            if active is not None:
+                _set_virtual(
+                    failure_signal_program(
+                        self.settings.colors.mode_color("ask"),
+                        active,
+                        brightness=brightness,
+                        led_count=8,
+                    )
+                )
+        elif display == LED_DISPLAY_TEST:
             _set_virtual(self.test_signal_program(brightness))
         elif display == LED_DISPLAY_ESCALATION:
             _set_virtual(self.escalation_takeover_program(brightness))
-        elif display == LED_DISPLAY_NOTIFICATION and self.notification_blink_color:
-            _set_virtual(
-                style_to_program(
-                    self.settings.signal_style(signals_module.SIGNAL_NOTIFICATION),
-                    brightness,
-                    color=self.notification_blink_color,
-                )
-            )
         elif display == LED_DISPLAY_COMPLETION:
             _set_virtual(
                 style_to_program(
@@ -6223,32 +9497,71 @@ class StatusBarController(NSObject):
             override = self.settings.device_blend_mode(VIRTUAL_DEVICE_ID)
             if override:
                 colors_for_render = colors_for_render.with_blend_mode(override)
-            _, program = program_for_snapshot(
-                statuses,
-                led_count=8,
-                colors=colors_for_render,
-                brightness=brightness,
-                fallback_mode=mode,
-            )
-            _set_virtual(program)
+            presentation = None
+            if resolved_glance is not None:
+                preferences = self._accessibility_display_preferences
+                if type(preferences) is not AccessibilityDisplayPreferences:
+                    preferences = AccessibilityDisplayPreferences(
+                        reduce_motion=True,
+                        reduce_transparency=True,
+                        increase_contrast=True,
+                        differentiate_without_color=True,
+                    )
+                presentation = compose_presentation_program(
+                    resolved_glance,
+                    presentation_time=presentation_time,
+                    led_count=8,
+                    color=color_for_resolved_glance(
+                        colors_for_render,
+                        resolved_glance,
+                    ),
+                    preferences=preferences,
+                    capacity_remaining_fraction=capacity_remaining_fraction,
+                )
+                program = apply_brightness(presentation.dsl, brightness)
+            elif projection is not None:
+                _, program = program_for_projection(
+                    projection,
+                    active_signal=self.active_failure_signal(),
+                    led_count=8,
+                    colors=colors_for_render,
+                    brightness=brightness,
+                    relay_elapsed_seconds=relay_elapsed_seconds,
+                )
+            else:
+                _, program = program_for_snapshot(
+                    statuses,
+                    led_count=8,
+                    colors=colors_for_render,
+                    brightness=brightness,
+                    fallback_mode=mode,
+                    relay_elapsed_seconds=relay_elapsed_seconds,
+                )
+            _set_virtual(program, presentation)
 
     def schedule_screen_bar_sync(
         self,
         mode: AgentMode,
         battery_snapshot: BatterySnapshot | None,
         statuses: tuple[AgentStatus, ...],
-        started_at: float,
+        started_at: float | None,
+        projection: AttentionProjection | None = None,
+        relay_elapsed_seconds: float = 0.0,
     ) -> None:
-        """Called from the LED worker thread right after a real device write
-        completes. Dispatches back to the main thread (Screen Bar is an
-        NSView and must be touched there) with the write's own completion
-        time as phase-zero, so the on-screen replica's animation starts in
-        lockstep with the physical device instead of independently."""
+        """Dispatch a physical episode's Screen Bar render to the main thread.
+
+        ``started_at`` is the physical write's completion time when a write
+        occurred. A deduped physical program passes ``None`` so the virtual
+        surface can update independently without inventing a new hardware
+        phase anchor.
+        """
         payload = {
             "mode": mode,
             "battery_snapshot": battery_snapshot,
             "statuses": statuses,
             "started_at": started_at,
+            "projection": projection,
+            "relay_elapsed_seconds": relay_elapsed_seconds,
         }
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "applyScreenBarSync:",
@@ -6263,27 +9576,9 @@ class StatusBarController(NSObject):
             payload["battery_snapshot"],
             payload["statuses"],
             started_at=payload["started_at"],
+            projection=payload.get("projection"),
+            relay_elapsed_seconds=payload.get("relay_elapsed_seconds", 0.0),
         )
-
-    def sync_leds_worker(
-        self,
-        mode: AgentMode,
-        battery_snapshot: BatterySnapshot | None,
-        display_kind: str,
-        statuses: tuple[AgentStatus, ...] = (),
-    ) -> None:
-        try:
-            self.sync_leds_now(mode, battery_snapshot, display_kind, statuses)
-        finally:
-            self.led_sync_in_flight = False
-            if getattr(self, "led_sync_dropped", False):
-                # A newer state arrived mid-write; re-derive the freshest
-                # state on the main thread rather than replaying the
-                # (already stale) dropped payload.
-                self.led_sync_dropped = False
-                self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    "refresh:", None, False
-                )
 
     def validate_studio_program(
         self, program: str, *, strict: bool = False
@@ -6310,17 +9605,2019 @@ class StatusBarController(NSObject):
             return None
         return f"{result.error_name} at line {result.line}, column {result.column}"
 
-    def ensure_peek_timer(self) -> None:
-        """A 5Hz NSEvent.mouseLocation() poll (class method, zero
-        permissions -- NOT an event tap) while the Screen Bar is shown:
-        dwell on the bar for ~0.6s and it answers with a 4s vitals
-        readout. An NSTrackingArea can't work here -- the window
-        deliberately ignores mouse events."""
-        if getattr(self, "_peek_timer", None) is not None:
-            return
-        self._peek_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            0.2, self, "peekTick:", None, True
+    def _build_presentation_timer_registry(
+        self,
+        *,
+        timer_factory=None,
+        monotonic=None,
+    ) -> AppKitTimerRegistry:
+        options = {}
+        if timer_factory is not None:
+            options["timer_factory"] = timer_factory
+        options["monotonic"] = (
+            self._presentation_monotonic if monotonic is None else monotonic
         )
+        return AppKitTimerRegistry(
+            {
+                RuntimeFeature.PRESENTATION_FRAME_FALLBACK: (
+                    self._presentation_frame_fallback_fired
+                ),
+                RuntimeFeature.PRESENTATION_STATIC_DEADLINE: (
+                    self._presentation_static_deadline_fired
+                ),
+                RuntimeFeature.ALCOVE_OBSERVATION: (
+                    self._presentation_alcove_observation_fired
+                ),
+                RuntimeFeature.POINTER_PEEK: self._presentation_pointer_peek_fired,
+                RuntimeFeature.LID_OBSERVATION: (
+                    self._lid_observation_timer_fired
+                ),
+                RuntimeFeature.DEVICE_INVENTORY: (
+                    self._device_inventory_timer_fired
+                ),
+                RuntimeFeature.DISPLAY_ENVIRONMENT: (
+                    self._display_environment_timer_fired
+                ),
+                RuntimeFeature.CALENDAR_OBSERVATION: (
+                    self._calendar_observation_timer_fired
+                ),
+                RuntimeFeature.REMINDERS_OBSERVATION: (
+                    self._reminders_observation_timer_fired
+                ),
+                RuntimeFeature.WEATHER_OBSERVATION: (
+                    self._weather_observation_timer_fired
+                ),
+                RuntimeFeature.SETTINGS_SIGNAL_PREVIEW: (
+                    self._settings_signal_preview_fired
+                ),
+                RuntimeFeature.SETTINGS_COLOR_PREVIEW: (
+                    self._settings_color_preview_fired
+                ),
+                RuntimeFeature.SETUP_DEMO: self._setup_demo_fired,
+                RuntimeFeature.SETTINGS_MESSAGE_DEADLINE: (
+                    self._settings_message_deadline_fired
+                ),
+                RuntimeFeature.TEST_SIGNAL_DEADLINE: (
+                    self._finite_ui_deadline_fired
+                ),
+                RuntimeFeature.TIMEBOX_DEADLINE: self._timebox_deadline_fired,
+                RuntimeFeature.ESCALATION_DEADLINE: (
+                    self._escalation_deadline_fired
+                ),
+            },
+            **options,
+        )
+
+    def _build_runtime_worker_registry(
+        self,
+        *,
+        monotonic=None,
+        dispatch_main=None,
+    ) -> tuple[RuntimeWorkerRegistry, LatestWinsWorker]:
+        clock = time.monotonic if monotonic is None else monotonic
+        self._runtime_worker_monotonic = clock
+        dispatcher = (
+            self._dispatch_runtime_worker_result
+            if dispatch_main is None
+            else dispatch_main
+        )
+        registry = RuntimeWorkerRegistry(monotonic=clock)
+        worker = LatestWinsWorker(
+            RuntimeWorkerDomain.OS_POLL,
+            executor=self._execute_os_poll_command,
+            result_handler=self._apply_os_poll_result,
+            dispatch_main=dispatcher,
+            monotonic=clock,
+        )
+        registry.register(RuntimeWorkerDomain.OS_POLL, worker)
+        hardware_worker = LatestWinsWorker(
+            RuntimeWorkerDomain.HARDWARE_WRITE,
+            executor=self._execute_hardware_write_command,
+            result_handler=self._apply_hardware_write_result,
+            dispatch_main=dispatcher,
+            monotonic=clock,
+        )
+        registry.register(
+            RuntimeWorkerDomain.HARDWARE_WRITE,
+            hardware_worker,
+        )
+        self._hardware_write_worker = hardware_worker
+        weather_worker = LatestWinsWorker(
+            RuntimeWorkerDomain.WEATHER_FETCH,
+            executor=self._execute_weather_command,
+            result_handler=self._apply_weather_result,
+            dispatch_main=dispatcher,
+            monotonic=clock,
+        )
+        self._weather_worker = weather_worker
+        self._weather_worker_registered = False
+        return registry, worker
+
+    def _dispatch_runtime_worker_result(self, drain) -> None:
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "drainRuntimeWorker:",
+            drain,
+            False,
+        )
+
+    @objc.IBAction
+    def drainRuntimeWorker_(self, drain) -> None:
+        if callable(drain):
+            drain()
+
+    def _installed_agents_pane_visible(self) -> bool:
+        window = getattr(self, "settings_window", None)
+        return bool(
+            window is not None
+            and not getattr(self, "_settings_window_closing", False)
+            and callable(getattr(window, "isVisible", None))
+            and window.isVisible()
+            and getattr(self, "current_settings_pane", None) == "installed_agents"
+        )
+
+    @objc.IBAction
+    def refreshInstalledAgents_(self, _sender) -> None:
+        if self.refresh_installed_agent_inventory():
+            fields = getattr(self, "settings_fields", None) or {}
+            status = fields.get("installed_agents_refresh_status")
+            if status is not None:
+                status.setStringValue_("Checking installed coding agents…")
+
+    @objc.IBAction
+    def refreshCapacitySources_(self, _sender) -> None:
+        self.maybe_refresh_usage_summary(reason="manual")
+
+    def refresh_installed_agents_settings_projection(self) -> None:
+        fields = getattr(self, "settings_fields", None) or {}
+        status_fields = fields.get("installed_agent_status_fields") or {}
+        if not status_fields:
+            return
+        result = getattr(self, "_installed_agent_inventory_result", None)
+        observations = (
+            {row.key: row for row in result.reduction.observations}
+            if type(result) is InstalledAgentInventoryResult
+            else {}
+        )
+        for registration in installed_surface_registrations():
+            label = status_fields.get((registration.provider_id, registration.surface_id))
+            if label is None:
+                continue
+            observation = observations.get(registration.key)
+            if observation is None or observation.presence is SurfacePresence.ABSENT:
+                presence = "Not detected"
+            elif observation.presence is SurfacePresence.CONFIGURED:
+                presence = "Configured"
+            elif observation.presence is SurfacePresence.INSTALLED:
+                presence = "Installed"
+            elif observation.presence is SurfacePresence.MIGRATION_REQUIRED:
+                presence = "Migration required"
+            else:
+                presence = "Unsupported version"
+            if registration.support in {
+                SurfaceSupportLevel.FULL,
+                SurfaceSupportLevel.LIFECYCLE,
+            }:
+                monitoring = (
+                    "Monitoring"
+                    if observation is not None
+                    and observation.presence is SurfacePresence.CONFIGURED
+                    else "Monitoring available"
+                )
+            elif registration.support is SurfaceSupportLevel.CAPACITY:
+                monitoring = "Capacity available"
+            elif registration.support is SurfaceSupportLevel.INVENTORY:
+                monitoring = "Detection only"
+            else:
+                monitoring = "Unsupported"
+            label.setStringValue_(f"{presence} · {monitoring}")
+        status = fields.get("installed_agents_refresh_status")
+        if status is not None:
+            status.setStringValue_(
+                "Inventory ready"
+                if type(result) is InstalledAgentInventoryResult
+                else "Open this pane to check installed coding agents."
+            )
+
+    def refresh_capacity_settings_projection(self) -> None:
+        fields = getattr(self, "settings_fields", None) or {}
+        live_fields = fields.get("capacity_live_fields") or {}
+        codex = live_fields.get("codex")
+        if codex is not None:
+            codex.setStringValue_(
+                getattr(self, "codex_summary_text", None) or "Not observed yet"
+            )
+        claude = live_fields.get("claude")
+        if claude is not None:
+            claude.setStringValue_(
+                getattr(self, "claude_plan_text", None) or "Not observed yet"
+            )
+
+    def reconcile_installed_agent_inventory(self) -> None:
+        """Refresh only while the future Installed Agents pane is visible."""
+        if self._installed_agents_pane_visible():
+            self.refresh_installed_agent_inventory()
+
+    def refresh_installed_agent_inventory(self) -> bool:
+        """Submit one latest-wins, generation-fenced host inventory request."""
+        if not self._runtime_started:
+            return False
+        # LatestWinsWorker cancellation is domain-wide, not key-local.  Keep
+        # this pane's fence at or above the shared OS-poll generation and let
+        # the worker's exact key replace older pending inventory requests.
+        # Cancelling the pane's private generation here can otherwise advance
+        # the shared watermark past it, silently refusing every later scan.
+        self._installed_agent_inventory_generation = max(
+            self._installed_agent_inventory_generation + 1,
+            self._os_poll_generation,
+        )
+        roots_factory = getattr(
+            self,
+            "_installed_agent_inventory_roots",
+            default_inventory_roots,
+        )
+        try:
+            roots = roots_factory()
+        except Exception:
+            return False
+        if type(roots) is not tuple:
+            return False
+        command = RuntimeWorkCommand(
+            RuntimeWorkerDomain.OS_POLL,
+            "installed-agent-inventory",
+            self._installed_agent_inventory_generation,
+            self._runtime_worker_monotonic() + 5.0,
+            roots,
+        )
+        try:
+            disposition = self._os_poll_worker.submit(command)
+        except Exception:
+            return False
+        return disposition is not SubmissionDisposition.REFUSED
+
+    def _execute_os_poll_command(self, command: RuntimeWorkCommand) -> object:
+        if command.domain is not RuntimeWorkerDomain.OS_POLL:
+            raise ValueError("invalid OS poll command")
+        if command.key == "installed-agent-inventory":
+            return execute_inventory_command(command)
+        if command.key == "lid-observation" and type(command.payload) is LidObservationRequest:
+            try:
+                return LidObservationResult(
+                    ok=True,
+                    closed=read_lid_closed(),
+                    error=None,
+                )
+            except Exception:
+                return LidObservationResult(
+                    ok=False,
+                    closed=None,
+                    error="lid observation unavailable",
+                )
+        if command.key == "device-inventory" and type(command.payload) is DeviceInventoryRequest:
+            try:
+                candidates = tuple(discover_devices())[:MAX_RUNTIME_PHYSICAL_DEVICES]
+            except Exception:
+                return DeviceInventoryResult((), "device inventory unavailable")
+            return DeviceInventoryResult(candidates)
+        if (
+            command.key == "display-environment"
+            and type(command.payload) is DisplayEnvironmentRequest
+        ):
+            request = command.payload
+            brightness = None
+            if request.read_brightness:
+                try:
+                    brightness = display_brightness.auto_led_brightness()
+                except display_brightness.DisplayBrightnessUnavailableError:
+                    pass
+            active_focus_ids = None
+            if request.read_focus:
+                try:
+                    active_focus_ids = tuple(
+                        focus_sync.active_focus_mode_identifiers()
+                    )
+                except focus_sync.FocusSyncUnavailableError:
+                    active_focus_ids = ()
+            preferences = None
+            if request.read_accessibility:
+                preferences = refresh_accessibility_display_preferences(
+                    request.previous_accessibility_preferences
+                )
+            return DisplayEnvironmentResult(
+                brightness=brightness,
+                active_focus_ids=active_focus_ids,
+                accessibility_preferences=preferences,
+            )
+        if (
+            command.key == "calendar-observation"
+            and type(command.payload) is CalendarObservationRequest
+        ):
+            try:
+                upcoming = calendar_watch.next_event_start(
+                    command.payload.lead_minutes
+                )
+                if upcoming is None:
+                    return CalendarObservationResult(
+                        available=True,
+                        starts_in_seconds=None,
+                    )
+                _private_title, starts_at = upcoming
+                starts_in_seconds = max(
+                    0.0,
+                    (starts_at - datetime.now(timezone.utc)).total_seconds(),
+                )
+                return CalendarObservationResult(
+                    available=True,
+                    starts_in_seconds=starts_in_seconds,
+                )
+            except Exception:
+                return CalendarObservationResult(
+                    available=False,
+                    starts_in_seconds=None,
+                )
+        if (
+            command.key == "reminders-observation"
+            and type(command.payload) is RemindersObservationRequest
+        ):
+            completed = threading.Event()
+            observed: list[tuple[object, object]] = []
+
+            def _capture(items) -> None:
+                for item in items or ():
+                    if len(observed) >= MAX_REMINDER_OBSERVATION_IDENTIFIERS:
+                        break
+                    try:
+                        identifier, title = tuple(item)
+                    except (TypeError, ValueError):
+                        continue
+                    observed.append((identifier, title))
+                completed.set()
+
+            try:
+                reminders_watch.fetch_due(
+                    command.payload.lookback_seconds,
+                    _capture,
+                )
+                remaining = max(
+                    0.0,
+                    command.deadline - self._runtime_worker_monotonic(),
+                )
+                if not completed.wait(
+                    min(REMINDERS_FETCH_TIMEOUT_SECONDS, remaining)
+                ):
+                    return RemindersObservationResult(False, ())
+            except Exception:
+                return RemindersObservationResult(False, ())
+            identifiers = tuple(
+                dict.fromkeys(
+                    hashlib.sha256(str(identifier).encode("utf-8")).hexdigest()
+                    for identifier, _title in observed
+                    if str(identifier)
+                )
+            )
+            return RemindersObservationResult(True, identifiers)
+        raise ValueError("invalid OS poll command")
+
+    def _execute_weather_command(
+        self,
+        command: RuntimeWorkCommand,
+    ) -> WeatherObservationResult:
+        if (
+            command.domain is not RuntimeWorkerDomain.WEATHER_FETCH
+            or command.key != WEATHER_WORKER_KEY
+            or type(command.payload) is not WeatherObservationRequest
+        ):
+            raise ValueError("invalid weather command")
+        request = command.payload
+        try:
+            if request.latitude is None:
+                latitude, longitude = weather_watch.ip_location()
+                location = WeatherObservationRequest(latitude, longitude)
+            else:
+                location = request
+            alerts = weather_watch.active_alerts(
+                location.latitude,
+                location.longitude,
+            )
+            first = next(iter(alerts), None)
+            if first is None:
+                return WeatherObservationResult(True, False, None)
+            _private_identifier, severity, event = first
+            return WeatherObservationResult(
+                True,
+                True,
+                _weather_classification(severity, event),
+            )
+        except Exception:
+            return WeatherObservationResult(False, False, None)
+
+    def _apply_weather_result(
+        self,
+        command: RuntimeWorkCommand,
+        result: object,
+    ) -> None:
+        inputs = self._presentation_scheduler_inputs
+        if (
+            command.domain is RuntimeWorkerDomain.WEATHER_FETCH
+            and command.key == WEATHER_WORKER_KEY
+            and type(command.payload) is WeatherObservationRequest
+            and type(result) is WeatherObservationResult
+            and command.generation == self._weather_observation_generation
+            and command.deadline > self._runtime_worker_monotonic()
+            and self._weather_observation_active
+            and self._runtime_started
+            and self.settings.weather_alerts_enabled
+            and inputs is not None
+            and not inputs.display_asleep
+            and not inputs.app_terminating
+        ):
+            self._apply_weather_observation_result(result)
+
+    def _apply_weather_observation_result(
+        self,
+        result: WeatherObservationResult,
+    ) -> None:
+        was_active = self.weather_alert_active
+        if not result.available:
+            self.weather_watch_retry_at = (
+                self._runtime_worker_monotonic() + WEATHER_WATCH_RETRY_SECONDS
+            )
+            self._weather_observation_fire_at = self.weather_watch_retry_at
+            self.weather_alert_active = False
+            self.weather_alert_event = None
+            self._reconcile_current_presentation_inputs()
+            if was_active:
+                self.refresh_(None)
+            return
+        self.weather_watch_retry_at = 0.0
+        self.weather_alert_active = result.active
+        self.weather_alert_event = result.classification
+        if self.weather_alert_active != was_active:
+            if self.weather_alert_active and self.webhook_event_enabled("weather"):
+                self.post_webhook(
+                    {
+                        "event": "sidepulse.weather",
+                        "headline": self.weather_alert_event or "",
+                    }
+                )
+            self.refresh_(None)
+
+    def _apply_os_poll_result(
+        self,
+        command: RuntimeWorkCommand,
+        result: object,
+    ) -> None:
+        if command.domain is not RuntimeWorkerDomain.OS_POLL:
+            return
+        if (
+            command.key == "installed-agent-inventory"
+            and type(command.payload) is tuple
+            and type(result) is InstalledAgentInventoryResult
+            and command.generation == self._installed_agent_inventory_generation
+            and command.deadline > self._runtime_worker_monotonic()
+            and self._runtime_started
+        ):
+            self._installed_agent_inventory_result = result
+            self.refresh_installed_agents_settings_projection()
+            return
+        if (
+            command.key == "lid-observation"
+            and type(command.payload) is LidObservationRequest
+            and type(result) is LidObservationResult
+            and command.generation == self._os_poll_generation
+            and self._lid_observation_active
+        ):
+            self._apply_lid_observation(result)
+            return
+        if (
+            command.key == "device-inventory"
+            and type(command.payload) is DeviceInventoryRequest
+            and type(result) is DeviceInventoryResult
+            and command.generation == self._os_poll_generation
+            and self._device_inventory_active
+        ):
+            self._apply_device_inventory_result(result)
+            return
+        if (
+            command.key == "display-environment"
+            and type(command.payload) is DisplayEnvironmentRequest
+            and type(result) is DisplayEnvironmentResult
+            and command.generation == self._os_poll_generation
+            and self._display_environment_active
+        ):
+            self._apply_display_environment_result(result)
+            return
+        inputs = self._presentation_scheduler_inputs
+        if (
+            command.key == "calendar-observation"
+            and type(command.payload) is CalendarObservationRequest
+            and type(result) is CalendarObservationResult
+            and command.generation == self._os_poll_generation
+            and command.deadline > self._runtime_worker_monotonic()
+            and self._calendar_observation_active
+            and self._runtime_started
+            and self.settings.calendar_alerts_enabled
+            and inputs is not None
+            and not inputs.display_asleep
+            and not inputs.app_terminating
+        ):
+            self._apply_calendar_observation_result(result)
+            return
+        if (
+            command.key == "reminders-observation"
+            and type(command.payload) is RemindersObservationRequest
+            and type(result) is RemindersObservationResult
+            and command.generation == self._os_poll_generation
+            and command.deadline > self._runtime_worker_monotonic()
+            and self._reminders_observation_active
+            and self._runtime_started
+            and self.settings.reminder_alerts_enabled
+            and inputs is not None
+            and not inputs.display_asleep
+            and not inputs.app_terminating
+        ):
+            self._apply_reminders_observation_result(result)
+
+    def _apply_reminders_observation_result(
+        self,
+        result: RemindersObservationResult,
+    ) -> None:
+        now = self._runtime_worker_monotonic()
+        if not result.available:
+            was_active = now < self.reminders_glow_until
+            self.reminders_watch_retry_at = now + REMINDERS_WATCH_RETRY_SECONDS
+            self.reminders_glow_until = 0.0
+            self._reconcile_current_presentation_inputs()
+            if was_active:
+                self.refresh_(None)
+            return
+        horizon = now - REMINDERS_WATCH_SECONDS * 8.0
+        retained = {
+            identifier: seen_at
+            for identifier, seen_at in self.reminders_seen.items()
+            if seen_at >= horizon
+        }
+        fresh = tuple(
+            identifier
+            for identifier in result.identifiers
+            if identifier not in retained
+        )
+        if not fresh:
+            self.reminders_seen = retained
+            return
+        for identifier in fresh:
+            retained[identifier] = now
+        self.reminders_seen = dict(
+            sorted(retained.items(), key=lambda item: (item[1], item[0]))[
+                -MAX_REMINDER_OBSERVATION_IDENTIFIERS:
+            ]
+        )
+        hold = signals_module.signal_hold_seconds(
+            self.settings.signal_style(signals_module.SIGNAL_REMINDERS)
+        )
+        self.reminders_glow_until = now + hold
+        self._reconcile_current_presentation_inputs()
+        self.refresh_(None)
+
+    def _reconcile_current_presentation_inputs(self) -> None:
+        inputs = self._presentation_scheduler_inputs
+        if inputs is not None:
+            self._presentation_scheduler_inputs = None
+            self.reconcile_presentation_timers(inputs)
+
+    def _mark_reminders_permission_failed(self) -> None:
+        was_active = self._runtime_worker_monotonic() < self.reminders_glow_until
+        self._reminders_permission_failed = True
+        self._reconcile_current_presentation_inputs()
+        if was_active:
+            self.refresh_(None)
+
+    def _apply_calendar_observation_result(
+        self,
+        result: CalendarObservationResult,
+    ) -> None:
+        now = self._runtime_worker_monotonic()
+        was_active = now < self.calendar_glow_until
+        self.calendar_event_title = None
+        if not result.available:
+            self.calendar_watch_retry_at = now + CALENDAR_WATCH_RETRY_SECONDS
+            self.calendar_glow_until = 0.0
+            if was_active:
+                self.refresh_(None)
+            return
+        if result.starts_in_seconds is None:
+            self.calendar_glow_until = 0.0
+            if was_active:
+                self.refresh_(None)
+            return
+        self.calendar_glow_until = now + result.starts_in_seconds
+        if not was_active:
+            self.refresh_(None)
+
+    def _apply_display_environment_result(
+        self,
+        result: DisplayEnvironmentResult,
+    ) -> None:
+        needs_refresh = False
+        if result.brightness is not None:
+            previous_brightness = self.last_watched_brightness
+            self.last_watched_brightness = result.brightness
+            if (
+                previous_brightness is not None
+                and abs(result.brightness - previous_brightness)
+                >= BRIGHTNESS_WATCH_MIN_DELTA
+            ):
+                needs_refresh = True
+
+        if result.active_focus_ids is not None:
+            active_focus_ids = set(result.active_focus_ids)
+            previous_focus_ids = set(self.last_active_focus_ids)
+            self.last_active_focus_ids = active_focus_ids
+            self._focus_ids_cache = (
+                self._runtime_worker_monotonic(),
+                list(result.active_focus_ids),
+            )
+            focus_scale = (
+                min(
+                    self.settings.focus_dim_fraction(identifier)
+                    for identifier in active_focus_ids
+                )
+                if self.settings.focus_sync_enabled and active_focus_ids
+                else 1.0
+            )
+            if (
+                self.last_watched_focus_scale is not None
+                and focus_scale != self.last_watched_focus_scale
+            ):
+                needs_refresh = True
+            self.last_watched_focus_scale = focus_scale
+            for focus_id in sorted(active_focus_ids - previous_focus_ids):
+                slot = self.settings.focus_profile_rules.get(focus_id)
+                if slot:
+                    self.settings = self.settings.with_applied_calibration_profile(slot)
+                    save_settings(self.settings)
+                    self.set_settings_message(
+                        f"Focus started — applied the {slot} profile."
+                    )
+                    needs_refresh = True
+                    break
+
+        if (
+            result.accessibility_preferences is not None
+            and result.accessibility_preferences
+            != self._accessibility_display_preferences
+        ):
+            needs_refresh = self._apply_accessibility_display_preferences(
+                result.accessibility_preferences
+            ) or needs_refresh
+
+        if needs_refresh:
+            self.refresh_(None)
+
+    def _apply_device_inventory_result(self, result: DeviceInventoryResult) -> None:
+        if result.error is not None:
+            log_status_bar(result.error)
+            return
+        same_candidates = result.candidates == self._device_inventory_candidates
+        self._device_inventory_candidates = result.candidates
+        self._device_discovery_cache = (
+            discover_devices,
+            time.monotonic(),
+            list(result.candidates),
+        )
+        devices = tuple(
+            sorted(
+                (
+                    device
+                    for device in self.status_bar_devices(remember=False)
+                    if device.connected and device.device_id != VIRTUAL_DEVICE_ID
+                ),
+                key=lambda device: device.device_id,
+            )[:MAX_RUNTIME_PHYSICAL_DEVICES]
+        )
+        signature = device_connection_signature(list(devices))
+        if same_candidates and signature == self.last_connected_device_signature:
+            return
+        previous_generation = self._hardware_write_generation
+        self._hardware_write_generation += 1
+        self._hardware_device_keys = frozenset(
+            self._hardware_worker_key(device) for device in devices
+        )
+        self._hardware_write_worker.cancel_generation(previous_generation)
+        if not self.observe_connected_devices():
+            return
+        self.rebuild_devices_pane()
+        if self.last_snapshot is not None:
+            self.refresh_(None)
+
+    @staticmethod
+    def _hardware_worker_key(device: StatusBarDevice) -> str:
+        if (
+            type(device) is not StatusBarDevice
+            or not device.connected
+            or device.device_id == VIRTUAL_DEVICE_ID
+            or type(device.device_id) is not str
+            or not device.device_id
+            or len(device.device_id.encode("utf-8")) > 1024
+            or "\x00" in device.device_id
+            or device.target.name.upper() != DEFAULT_FILE_NAME
+        ):
+            raise ValueError("invalid hardware device identity")
+        digest = hashlib.sha256(device.device_id.encode("utf-8")).hexdigest()[:32]
+        return f"device-{digest}"
+
+    def _execute_hardware_write_command(
+        self,
+        command: RuntimeWorkCommand,
+    ) -> HardwareWriteResult:
+        if (
+            command.domain is not RuntimeWorkerDomain.HARDWARE_WRITE
+            or type(command.payload) is not HardwareWriteRequest
+            or command.key != self._hardware_worker_key(command.payload.device)
+        ):
+            raise ValueError("invalid hardware write command")
+        if (
+            not self._hardware_write_active
+            or command.generation != self._hardware_write_generation
+        ):
+            raise ValueError("stale hardware write command")
+        return self._sync_hardware_device(command.payload)
+
+    def _sync_hardware_device(
+        self,
+        request: HardwareWriteRequest,
+    ) -> HardwareWriteResult:
+        device = request.device
+        device_display_kind = self.active_led_display_kind_for_device(
+            device,
+            request.battery_snapshot,
+        )
+        if self.last_led_display_kind_by_device.get(device.device_id) != device_display_kind:
+            self.reset_led_controllers_for_device(device.device_id)
+            self.last_led_display_kind_by_device[device.device_id] = device_display_kind
+
+        device_led_count = led_count_for_target(device.target)
+        entry = self.signal_display_entries().get(device_display_kind)
+        label = ""
+        agent_display_rendered = False
+        if entry is not None:
+            factory, led_state, label_factory = entry
+            controller = self.agent_controller_for_device(device)
+            ambient_kinds = (
+                LED_DISPLAY_TIMER,
+                LED_DISPLAY_STUDIO,
+                LED_DISPLAY_QUOTA_RUNWAY,
+            )
+            render_brightness = (
+                controller.brightness
+                if device_display_kind in ambient_kinds
+                else self.effective_signal_brightness_for_device(device)
+            )
+            program = factory(render_brightness, device_led_count)
+            label = label_factory(device, request.battery_snapshot)
+            if program is not None:
+                write = controller.sync_program(program, led_state)
+            else:
+                write = LedStatusWrite(
+                    state=led_state,
+                    target=controller.last_target,
+                    program="",
+                    changed=False,
+                )
+        elif (
+            device_display_kind == LED_DISPLAY_BATTERY
+            and request.battery_snapshot is not None
+        ):
+            battery_write = self.battery_controller_for_device(device).sync_snapshot(
+                request.battery_snapshot
+            )
+            write = LedStatusWrite(
+                state=LedDisplayState.WORKING,
+                target=battery_write.target,
+                program=battery_write.program,
+                changed=battery_write.changed,
+                error=battery_write.error,
+            )
+            label = (
+                f"{device.name} Battery {request.battery_snapshot.percent}% "
+                f"{format_watts(request.battery_snapshot.adapter_power)}"
+            )
+        else:
+            agent_display_rendered = True
+            colors_for_render = self.agent_render_colors()
+            override = self.settings.device_blend_mode(device.device_id)
+            if override:
+                colors_for_render = colors_for_render.with_blend_mode(override)
+            statuses_for_device = request.statuses
+            fallback_for_device = request.mode
+            pin = self.settings.device_provider_pin(device.device_id)
+            if pin:
+                statuses_for_device = tuple(
+                    status
+                    for status in request.statuses
+                    if status.provider == pin
+                )
+                if not statuses_for_device:
+                    fallback_for_device = AgentMode.IDLE_READY
+            controller = self.agent_controller_for_device(device)
+            if request.resolved_glance is not None:
+                preferences = request.accessibility_preferences
+                if type(preferences) is not AccessibilityDisplayPreferences:
+                    preferences = AccessibilityDisplayPreferences(
+                        reduce_motion=True,
+                        reduce_transparency=True,
+                        increase_contrast=True,
+                        differentiate_without_color=True,
+                    )
+                presentation = compose_presentation_program(
+                    request.resolved_glance,
+                    presentation_time=request.presentation_time,
+                    led_count=device_led_count,
+                    color=color_for_resolved_glance(
+                        colors_for_render,
+                        request.resolved_glance,
+                    ),
+                    preferences=preferences,
+                    capacity_remaining_fraction=request.capacity_remaining_fraction,
+                )
+                continuity = continuous_presentation_identity(presentation)
+                if continuity is not None:
+                    continuity = (
+                        *continuity,
+                        controller.brightness,
+                        controller.channel_gains,
+                        getattr(controller, "resting_glow", 0.0),
+                    )
+                write = controller.sync_program(
+                    apply_brightness(presentation.dsl, controller.brightness),
+                    display_state_for_resolved_glance(request.resolved_glance),
+                    dedupe_token=continuity,
+                )
+            elif request.projection is not None:
+                write = controller.sync_projection(
+                    self.projection_for_device(request.projection, device),
+                    colors_for_render,
+                    active_signal=self.active_failure_signal(),
+                    relay_elapsed_seconds=request.relay_elapsed_seconds,
+                )
+            else:
+                write = controller.sync_snapshot(
+                    statuses_for_device,
+                    colors_for_render,
+                    fallback_mode=fallback_for_device,
+                    relay_elapsed_seconds=request.relay_elapsed_seconds,
+                )
+            label = f"{device.name} {write.label}"
+        return HardwareWriteResult(
+            request=request,
+            write=write,
+            label=label,
+            agent_display_rendered=agent_display_rendered,
+            completed_at=self._runtime_worker_monotonic(),
+        )
+
+    def _apply_hardware_write_result(
+        self,
+        command: RuntimeWorkCommand,
+        result: object,
+    ) -> None:
+        if (
+            command.domain is not RuntimeWorkerDomain.HARDWARE_WRITE
+            or type(command.payload) is not HardwareWriteRequest
+            or type(result) is not HardwareWriteResult
+            or result.request != command.payload
+            or command.generation != self._hardware_write_generation
+            or not self._hardware_write_active
+            or command.key != self._hardware_worker_key(result.request.device)
+        ):
+            return
+        device = result.request.device
+        write = result.write
+        if write.error is not None:
+            previous_error = self.device_errors.get(device.device_id)
+            self.device_errors[device.device_id] = write.error
+            if write.error != previous_error:
+                log_status_bar(f"led error {device.name}: {write.error}")
+        else:
+            self.device_errors.pop(device.device_id, None)
+            if write.changed:
+                target = write.target if write.target is not None else "-"
+                log_status_bar(f"leds={result.label} target={target}")
+        self.last_led_error = next(iter(self.device_errors.values()), None)
+
+        presentation_sync = hardware_presentation_sync_for_result(result)
+        if (
+            presentation_sync is not None
+            and presentation_sync.request.resolved_glance is None
+        ):
+            request = presentation_sync.request
+            self.schedule_screen_bar_sync(
+                request.mode,
+                request.battery_snapshot,
+                request.statuses,
+                presentation_sync.started_at,
+                request.projection,
+                request.relay_elapsed_seconds,
+            )
+
+    def _lid_observation_relevant(self) -> bool:
+        if self.settings.closed_lid_awake_policy != CLOSED_LID_AWAKE_NEVER:
+            return True
+        if bool(getattr(self.keep_awake, "holding_requested", False)):
+            return True
+        if not self.leds_enabled:
+            return False
+        return any(
+            bool(self.settings.lid_animation(kind).program.strip())
+            for kind in (
+                LID_ANIMATION_CLOSED,
+                LID_ANIMATION_OPEN,
+                LID_ANIMATION_CLOSED_ACTIVE,
+                LID_ANIMATION_OPEN_ACTIVE,
+            )
+        )
+
+    def _lid_observation_should_run(
+        self,
+        inputs: PresentationSchedulerInputs,
+    ) -> bool:
+        return bool(
+            self._runtime_started
+            and not inputs.display_asleep
+            and not inputs.app_terminating
+            and self._lid_observation_relevant()
+        )
+
+    def _devices_pane_requests_inventory(self) -> bool:
+        window = getattr(self, "settings_window", None)
+        return bool(
+            window is not None
+            and not getattr(self, "_settings_window_closing", False)
+            and window.isVisible()
+            and getattr(self, "current_settings_pane", None) == "devices"
+        )
+
+    def _device_inventory_should_run(
+        self,
+        inputs: PresentationSchedulerInputs,
+    ) -> bool:
+        return bool(
+            self._runtime_started
+            and not inputs.display_asleep
+            and not inputs.app_terminating
+            and (self.leds_enabled or self._devices_pane_requests_inventory())
+        )
+
+    def _hardware_write_should_run(
+        self,
+        inputs: PresentationSchedulerInputs,
+    ) -> bool:
+        return bool(
+            self._runtime_started
+            and self.leds_enabled
+            and not inputs.display_asleep
+            and not inputs.app_terminating
+        )
+
+    def _display_environment_should_run(
+        self,
+        inputs: PresentationSchedulerInputs,
+    ) -> bool:
+        setting_relevant = bool(
+            any(device.auto_brightness_enabled for device in self.settings.devices)
+            or self.settings.focus_sync_enabled
+            or self.settings.focus_profile_rules
+        )
+        presentation_relevant = inputs.screen_bar_enabled and inputs.visible
+        return bool(
+            self._runtime_started
+            and (setting_relevant or presentation_relevant)
+            and not inputs.display_asleep
+            and not inputs.app_terminating
+        )
+
+    def _calendar_observation_should_run(
+        self,
+        inputs: PresentationSchedulerInputs,
+    ) -> bool:
+        return bool(
+            self._runtime_started
+            and self.settings.calendar_alerts_enabled
+            and not inputs.display_asleep
+            and not inputs.app_terminating
+        )
+
+    def _reminders_observation_should_run(
+        self,
+        inputs: PresentationSchedulerInputs,
+    ) -> bool:
+        return bool(
+            self._runtime_started
+            and self.settings.reminder_alerts_enabled
+            and not self._reminders_permission_failed
+            and not inputs.display_asleep
+            and not inputs.app_terminating
+        )
+
+    def _weather_observation_should_run(
+        self,
+        inputs: PresentationSchedulerInputs,
+    ) -> bool:
+        return bool(
+            self._runtime_started
+            and self.settings.weather_alerts_enabled
+            and not inputs.display_asleep
+            and not inputs.app_terminating
+        )
+
+    def _preview_should_run(
+        self,
+        feature: RuntimeFeature,
+        inputs: PresentationSchedulerInputs,
+    ) -> bool:
+        preferences = self._accessibility_display_preferences
+        if (
+            not self._runtime_started
+            or inputs.display_asleep
+            or inputs.app_terminating
+            or bool(preferences is not None and preferences.reduce_motion)
+        ):
+            return False
+        if feature is RuntimeFeature.SETUP_DEMO:
+            window = self.setup_window
+            return bool(window is not None and window.isVisible())
+        if feature not in {
+            RuntimeFeature.SETTINGS_SIGNAL_PREVIEW,
+            RuntimeFeature.SETTINGS_COLOR_PREVIEW,
+        }:
+            raise ValueError("invalid preview runtime feature")
+        window = self.settings_window
+        if (
+            window is None
+            or self._settings_window_closing
+            or not window.isVisible()
+        ):
+            return False
+        pane = self.current_settings_pane
+        if feature is RuntimeFeature.SETTINGS_SIGNAL_PREVIEW:
+            return pane == "led_behavior"
+        return pane in {"color_studio", "animations"}
+
+    def _set_preview_active(
+        self,
+        feature: RuntimeFeature,
+        active: bool,
+        *,
+        now: float,
+        interval: float,
+    ) -> None:
+        was_active = feature in self._runtime_preview_fire_at
+        if active:
+            if not was_active:
+                self._runtime_preview_fire_at[feature] = now + interval
+            return
+        self._runtime_preview_fire_at.pop(feature, None)
+        if was_active and feature in {
+            RuntimeFeature.SETTINGS_SIGNAL_PREVIEW,
+            RuntimeFeature.SETTINGS_COLOR_PREVIEW,
+        }:
+            self.release_preview_engines()
+
+    def _timebox_deadline(
+        self,
+        inputs: PresentationSchedulerInputs,
+    ) -> float | None:
+        deadline = self.timebox_ends_at
+        if (
+            not self._runtime_started
+            or inputs.display_asleep
+            or inputs.app_terminating
+            or not isinstance(deadline, (int, float))
+            or isinstance(deadline, bool)
+            or not math.isfinite(float(deadline))
+            or float(deadline) <= 0.0
+        ):
+            return None
+        return float(deadline)
+
+    def _escalation_deadline(
+        self,
+        inputs: PresentationSchedulerInputs,
+    ) -> float | None:
+        blocked_since = self.ask_blocked_since
+        if (
+            not self._runtime_started
+            or inputs.display_asleep
+            or inputs.app_terminating
+            or not isinstance(blocked_since, (int, float))
+            or isinstance(blocked_since, bool)
+            or not math.isfinite(float(blocked_since))
+        ):
+            return None
+        thresholds = [self.settings.escalation_ramp_seconds]
+        if self.settings.escalation_tier != signals_module.ESCALATION_TIER_LIGHT:
+            thresholds.append(self.settings.escalation_menu_bar_seconds)
+        if self.settings.escalation_tier in (
+            signals_module.ESCALATION_TIER_CHIME,
+            signals_module.ESCALATION_TIER_TAKEOVER,
+        ):
+            thresholds.append(self.settings.escalation_final_seconds)
+        now = self._presentation_monotonic()
+        deadlines = (
+            float(blocked_since) + float(threshold) for threshold in thresholds
+        )
+        return next((deadline for deadline in deadlines if deadline > now), None)
+
+    def _settings_message_deadline(
+        self,
+        inputs: PresentationSchedulerInputs,
+    ) -> float | None:
+        deadline = self._settings_message_deadline_at
+        now = self._presentation_monotonic()
+        if (
+            isinstance(deadline, (int, float))
+            and not isinstance(deadline, bool)
+            and math.isfinite(float(deadline))
+            and 0.0 < float(deadline) <= now
+        ):
+            self._settings_message_deadline_at = 0.0
+            label = self.settings_fields.get("message")
+            if label is not None:
+                label.setAlphaValue_(0.0)
+            return None
+        if (
+            not self._runtime_started
+            or inputs.display_asleep
+            or inputs.app_terminating
+            or not isinstance(deadline, (int, float))
+            or isinstance(deadline, bool)
+            or not math.isfinite(float(deadline))
+            or float(deadline) <= now
+        ):
+            return None
+        window = self.settings_window
+        if (
+            window is None
+            or self._settings_window_closing
+            or not window.isVisible()
+            or self.settings_fields.get("message") is None
+        ):
+            return None
+        return float(deadline)
+
+    def _clear_tip_highlight(self) -> None:
+        view = self._tip_highlight_view
+        self._tip_highlight_view = None
+        self._tip_highlight_until = 0.0
+        if view is None:
+            return
+        try:
+            layer = view.layer()
+            if layer is not None:
+                layer.setBackgroundColor_(None)
+        except Exception:
+            pass
+
+    def _retire_elapsed_ui_deadlines(
+        self,
+        inputs: PresentationSchedulerInputs,
+        *,
+        now: float,
+    ) -> bool:
+        changed = False
+        withdraw_all = inputs.display_asleep or inputs.app_terminating
+        for field_name in (
+            "test_signal_until",
+            "completion_sweep_until",
+            "all_clear_until",
+            "quota_blink_until",
+            "battery_preview_until",
+            "reminders_glow_until",
+        ):
+            deadline = getattr(self, field_name, 0.0)
+            if isinstance(deadline, (int, float)) and not isinstance(deadline, bool):
+                if float(deadline) > 0.0 and (withdraw_all or float(deadline) <= now):
+                    setattr(self, field_name, 0.0)
+                    changed = True
+        if self.test_signal_until <= 0.0 and self.test_signal_key is not None:
+            self.test_signal_key = None
+            changed = True
+        tip_until = self._tip_highlight_until
+        if tip_until > 0.0 and (withdraw_all or tip_until <= now):
+            self._clear_tip_highlight()
+            changed = True
+        return changed
+
+    def _finite_ui_deadline(
+        self,
+        inputs: PresentationSchedulerInputs,
+    ) -> float | None:
+        now = self._presentation_monotonic()
+        self._retire_elapsed_ui_deadlines(inputs, now=now)
+        glance = self._current_resolved_glance
+        if (
+            type(glance) is ResolvedGlance
+            and (inputs.display_asleep or inputs.app_terminating)
+        ):
+            finite_cues = self.status_cue_coordinator.observe(
+                self._status_cue_candidates,
+                now=now,
+                play_motion=False,
+            )
+            self._status_finite_cues = finite_cues
+            self._status_cue_deadline = finite_cues.next_deadline
+            self._apply_status_accessibility_text(glance, finite_cues)
+        if not self._runtime_started or inputs.display_asleep or inputs.app_terminating:
+            return None
+        deadlines = [
+            self.test_signal_until,
+            self.completion_sweep_until,
+            self.all_clear_until,
+            self.quota_blink_until,
+            self.battery_preview_until,
+            self._tip_highlight_until,
+            self._status_cue_deadline,
+        ]
+        if self.settings.reminder_alerts_enabled and not self._reminders_permission_failed:
+            deadlines.append(self.reminders_glow_until)
+        valid = (
+            float(deadline)
+            for deadline in deadlines
+            if isinstance(deadline, (int, float))
+            and not isinstance(deadline, bool)
+            and math.isfinite(float(deadline))
+            and float(deadline) > now
+        )
+        return min(valid, default=None)
+
+    def _set_lid_observation_active(
+        self,
+        active: bool,
+        *,
+        now: float | None = None,
+    ) -> None:
+        desired = bool(active)
+        if desired == self._lid_observation_active:
+            return
+        previous_generation = self._os_poll_generation
+        self._lid_observation_active = desired
+        self._lid_observation_fire_at = (
+            (self._presentation_monotonic() if now is None else float(now))
+            + LID_POLL_SECONDS
+            if desired
+            else None
+        )
+        self._os_poll_generation += 1
+        self._os_poll_worker.cancel_generation(previous_generation)
+
+    def _set_device_inventory_active(
+        self,
+        active: bool,
+        *,
+        now: float | None = None,
+    ) -> None:
+        desired = bool(active)
+        if desired == self._device_inventory_active:
+            return
+        previous_generation = self._os_poll_generation
+        self._device_inventory_active = desired
+        self._device_inventory_fire_at = (
+            (self._presentation_monotonic() if now is None else float(now))
+            + STATUS_BAR_DEVICE_POLL_SECONDS
+            if desired
+            else None
+        )
+        self._os_poll_generation += 1
+        self._os_poll_worker.cancel_generation(previous_generation)
+
+    def _set_display_environment_active(
+        self,
+        active: bool,
+        *,
+        now: float | None = None,
+    ) -> None:
+        desired = bool(active)
+        if desired == self._display_environment_active:
+            return
+        previous_generation = self._os_poll_generation
+        self._display_environment_active = desired
+        self._display_environment_fire_at = (
+            (self._presentation_monotonic() if now is None else float(now))
+            + BRIGHTNESS_WATCH_SECONDS
+            if desired
+            else None
+        )
+        self._os_poll_generation += 1
+        self._os_poll_worker.cancel_generation(previous_generation)
+
+    def _set_calendar_observation_active(
+        self,
+        active: bool,
+        *,
+        now: float | None = None,
+    ) -> None:
+        desired = bool(active)
+        if desired == self._calendar_observation_active:
+            return
+        previous_generation = self._os_poll_generation
+        self._calendar_observation_active = desired
+        self._calendar_observation_fire_at = (
+            (self._presentation_monotonic() if now is None else float(now))
+            + CALENDAR_WATCH_SECONDS
+            if desired
+            else None
+        )
+        self._os_poll_generation += 1
+        self._os_poll_worker.cancel_generation(previous_generation)
+
+    def _set_reminders_observation_active(
+        self,
+        active: bool,
+        *,
+        now: float | None = None,
+    ) -> None:
+        desired = bool(active)
+        if desired == self._reminders_observation_active:
+            return
+        previous_generation = self._os_poll_generation
+        self._reminders_observation_active = desired
+        if not desired:
+            self.reminders_glow_until = 0.0
+            self._scheduled_reminders_cue_deadline = None
+        self._reminders_observation_fire_at = (
+            (self._presentation_monotonic() if now is None else float(now))
+            + REMINDERS_WATCH_SECONDS
+            if desired
+            else None
+        )
+        self._os_poll_generation += 1
+        self._os_poll_worker.cancel_generation(previous_generation)
+
+    def _set_weather_observation_active(
+        self,
+        active: bool,
+        *,
+        now: float | None = None,
+    ) -> None:
+        desired = bool(active)
+        if desired == self._weather_observation_active:
+            return
+        was_alert_active = self.weather_alert_active
+        if desired and not self._weather_worker_registered:
+            self._runtime_worker_registry.register(
+                RuntimeWorkerDomain.WEATHER_FETCH,
+                self._weather_worker,
+            )
+            self._weather_worker_registered = True
+        self._weather_observation_active = desired
+        self._weather_observation_fire_at = (
+            (self._presentation_monotonic() if now is None else float(now))
+            + WEATHER_WATCH_SECONDS
+            if desired
+            else None
+        )
+        self._advance_weather_observation_generation()
+        if not desired:
+            self.weather_alert_active = False
+            self.weather_alert_event = None
+            if was_alert_active:
+                self.refresh_(None)
+
+    def _advance_weather_observation_generation(self) -> None:
+        previous_generation = self._weather_observation_generation
+        self._weather_observation_generation += 1
+        self._weather_worker.cancel_generation(previous_generation)
+
+    def _set_hardware_write_active(self, active: bool) -> None:
+        desired = bool(active)
+        if desired == self._hardware_write_active:
+            return
+        previous_generation = self._hardware_write_generation
+        self._hardware_write_active = desired
+        self._hardware_write_generation += 1
+        self._hardware_write_worker.cancel_generation(previous_generation)
+
+    def reconcile_lid_observation(self) -> None:
+        if not hasattr(self.virtual_status_device, "presentation_scheduler_inputs"):
+            return
+        self.reconcile_presentation_timers(
+            self.virtual_status_device.presentation_scheduler_inputs()
+        )
+
+    def reconcile_device_runtime(self) -> None:
+        self.reconcile_lid_observation()
+
+    def reconcile_presentation_timers(
+        self,
+        inputs: PresentationSchedulerInputs,
+    ) -> None:
+        if type(inputs) is not PresentationSchedulerInputs:
+            raise ValueError("invalid presentation scheduler inputs")
+        if self._presentation_reconcile_active:
+            self._presentation_reconcile_pending = inputs
+            return
+        current_timebox_end = self.timebox_ends_at
+        current_time = self._presentation_monotonic()
+        if (
+            self._runtime_started
+            and not inputs.display_asleep
+            and not inputs.app_terminating
+            and current_timebox_end is not None
+            and current_time >= current_timebox_end
+        ):
+            self._complete_timebox(current_time)
+        lid_active = self._lid_observation_should_run(inputs)
+        device_inventory_active = self._device_inventory_should_run(inputs)
+        hardware_write_active = self._hardware_write_should_run(inputs)
+        display_environment_active = self._display_environment_should_run(inputs)
+        calendar_observation_active = self._calendar_observation_should_run(inputs)
+        reminders_observation_active = self._reminders_observation_should_run(inputs)
+        weather_observation_active = self._weather_observation_should_run(inputs)
+        signal_preview_active = self._preview_should_run(
+            RuntimeFeature.SETTINGS_SIGNAL_PREVIEW,
+            inputs,
+        )
+        color_preview_active = self._preview_should_run(
+            RuntimeFeature.SETTINGS_COLOR_PREVIEW,
+            inputs,
+        )
+        setup_demo_active = self._preview_should_run(
+            RuntimeFeature.SETUP_DEMO,
+            inputs,
+        )
+        timebox_deadline = self._timebox_deadline(inputs)
+        escalation_deadline = self._escalation_deadline(inputs)
+        settings_message_deadline = self._settings_message_deadline(inputs)
+        finite_ui_deadline = self._finite_ui_deadline(inputs)
+        if (
+            inputs == self._presentation_scheduler_inputs
+            and lid_active == self._lid_observation_active
+            and device_inventory_active == self._device_inventory_active
+            and hardware_write_active == self._hardware_write_active
+            and display_environment_active == self._display_environment_active
+            and calendar_observation_active == self._calendar_observation_active
+            and reminders_observation_active
+            == self._reminders_observation_active
+            and weather_observation_active == self._weather_observation_active
+            and signal_preview_active
+            == (
+                RuntimeFeature.SETTINGS_SIGNAL_PREVIEW
+                in self._runtime_preview_fire_at
+            )
+            and color_preview_active
+            == (
+                RuntimeFeature.SETTINGS_COLOR_PREVIEW
+                in self._runtime_preview_fire_at
+            )
+            and setup_demo_active
+            == (RuntimeFeature.SETUP_DEMO in self._runtime_preview_fire_at)
+            and timebox_deadline == self._scheduled_timebox_deadline
+            and escalation_deadline == self._scheduled_escalation_deadline
+            and finite_ui_deadline
+            == self._scheduled_reminders_cue_deadline
+            and settings_message_deadline == getattr(
+                self,
+                "_scheduled_settings_message_deadline",
+                None,
+            )
+        ):
+            return
+
+        self._presentation_reconcile_active = True
+        current = inputs
+        try:
+            while current is not None:
+                self._presentation_reconcile_pending = None
+                current_lid_active = self._lid_observation_should_run(current)
+                current_device_inventory_active = self._device_inventory_should_run(
+                    current
+                )
+                current_hardware_write_active = self._hardware_write_should_run(current)
+                current_display_environment_active = (
+                    self._display_environment_should_run(current)
+                )
+                current_calendar_observation_active = (
+                    self._calendar_observation_should_run(current)
+                )
+                current_reminders_observation_active = (
+                    self._reminders_observation_should_run(current)
+                )
+                current_weather_observation_active = (
+                    self._weather_observation_should_run(current)
+                )
+                current_signal_preview_active = self._preview_should_run(
+                    RuntimeFeature.SETTINGS_SIGNAL_PREVIEW,
+                    current,
+                )
+                current_color_preview_active = self._preview_should_run(
+                    RuntimeFeature.SETTINGS_COLOR_PREVIEW,
+                    current,
+                )
+                current_setup_demo_active = self._preview_should_run(
+                    RuntimeFeature.SETUP_DEMO,
+                    current,
+                )
+                current_timebox_deadline = self._timebox_deadline(current)
+                current_escalation_deadline = self._escalation_deadline(current)
+                current_settings_message_deadline = (
+                    self._settings_message_deadline(current)
+                )
+                current_finite_ui_deadline = self._finite_ui_deadline(current)
+                if (
+                    current != self._presentation_scheduler_inputs
+                    or current_lid_active != self._lid_observation_active
+                    or current_device_inventory_active
+                    != self._device_inventory_active
+                    or current_hardware_write_active
+                    != self._hardware_write_active
+                    or current_display_environment_active
+                    != self._display_environment_active
+                    or current_calendar_observation_active
+                    != self._calendar_observation_active
+                    or current_reminders_observation_active
+                    != self._reminders_observation_active
+                    or current_weather_observation_active
+                    != self._weather_observation_active
+                    or current_signal_preview_active
+                    != (
+                        RuntimeFeature.SETTINGS_SIGNAL_PREVIEW
+                        in self._runtime_preview_fire_at
+                    )
+                    or current_color_preview_active
+                    != (
+                        RuntimeFeature.SETTINGS_COLOR_PREVIEW
+                        in self._runtime_preview_fire_at
+                    )
+                    or current_setup_demo_active
+                    != (RuntimeFeature.SETUP_DEMO in self._runtime_preview_fire_at)
+                    or current_timebox_deadline
+                    != self._scheduled_timebox_deadline
+                    or current_escalation_deadline
+                    != self._scheduled_escalation_deadline
+                    or current_finite_ui_deadline
+                    != self._scheduled_reminders_cue_deadline
+                    or current_settings_message_deadline
+                    != getattr(
+                        self,
+                        "_scheduled_settings_message_deadline",
+                        None,
+                    )
+                ):
+                    now = self._presentation_monotonic()
+                    plan = plan_presentation_schedule(
+                        current,
+                        now=now,
+                        state=self._presentation_scheduler_state,
+                    )
+                    self._set_lid_observation_active(current_lid_active, now=now)
+                    self._set_device_inventory_active(
+                        current_device_inventory_active,
+                        now=now,
+                    )
+                    self._set_hardware_write_active(current_hardware_write_active)
+                    self._set_display_environment_active(
+                        current_display_environment_active,
+                        now=now,
+                    )
+                    self._set_calendar_observation_active(
+                        current_calendar_observation_active,
+                        now=now,
+                    )
+                    self._set_reminders_observation_active(
+                        current_reminders_observation_active,
+                        now=now,
+                    )
+                    self._set_weather_observation_active(
+                        current_weather_observation_active,
+                        now=now,
+                    )
+                    self._set_preview_active(
+                        RuntimeFeature.SETTINGS_SIGNAL_PREVIEW,
+                        current_signal_preview_active,
+                        now=now,
+                        interval=SETTINGS_SIGNAL_PREVIEW_INTERVAL_SECONDS,
+                    )
+                    self._set_preview_active(
+                        RuntimeFeature.SETTINGS_COLOR_PREVIEW,
+                        current_color_preview_active,
+                        now=now,
+                        interval=SETTINGS_COLOR_PREVIEW_INTERVAL_SECONDS,
+                    )
+                    self._set_preview_active(
+                        RuntimeFeature.SETUP_DEMO,
+                        current_setup_demo_active,
+                        now=now,
+                        interval=SETUP_DEMO_INTERVAL_SECONDS,
+                    )
+                    intents = plan.intents
+                    if current_lid_active:
+                        assert self._lid_observation_fire_at is not None
+                        intents = (
+                            *intents,
+                            RuntimeTimerIntent(
+                                feature=RuntimeFeature.LID_OBSERVATION,
+                                fire_at=self._lid_observation_fire_at,
+                                interval=LID_POLL_SECONDS,
+                                tolerance=LID_POLL_SECONDS * 0.1,
+                                common_modes=True,
+                            ),
+                        )
+                    if current_device_inventory_active:
+                        assert self._device_inventory_fire_at is not None
+                        intents = (
+                            *intents,
+                            RuntimeTimerIntent(
+                                feature=RuntimeFeature.DEVICE_INVENTORY,
+                                fire_at=self._device_inventory_fire_at,
+                                interval=STATUS_BAR_DEVICE_POLL_SECONDS,
+                                tolerance=STATUS_BAR_DEVICE_POLL_SECONDS * 0.1,
+                                common_modes=True,
+                            ),
+                        )
+                    if current_display_environment_active:
+                        assert self._display_environment_fire_at is not None
+                        intents = (
+                            *intents,
+                            RuntimeTimerIntent(
+                                feature=RuntimeFeature.DISPLAY_ENVIRONMENT,
+                                fire_at=self._display_environment_fire_at,
+                                interval=BRIGHTNESS_WATCH_SECONDS,
+                                tolerance=0.25,
+                                common_modes=True,
+                            ),
+                        )
+                    if current_calendar_observation_active:
+                        assert self._calendar_observation_fire_at is not None
+                        intents = (
+                            *intents,
+                            RuntimeTimerIntent(
+                                feature=RuntimeFeature.CALENDAR_OBSERVATION,
+                                fire_at=self._calendar_observation_fire_at,
+                                interval=CALENDAR_WATCH_SECONDS,
+                                tolerance=CALENDAR_WATCH_SECONDS * 0.1,
+                                common_modes=True,
+                            ),
+                        )
+                    if current_reminders_observation_active:
+                        assert self._reminders_observation_fire_at is not None
+                        intents = (
+                            *intents,
+                            RuntimeTimerIntent(
+                                feature=RuntimeFeature.REMINDERS_OBSERVATION,
+                                fire_at=self._reminders_observation_fire_at,
+                                interval=REMINDERS_WATCH_SECONDS,
+                                tolerance=REMINDERS_WATCH_SECONDS * 0.1,
+                                common_modes=True,
+                            ),
+                        )
+                    if current_weather_observation_active:
+                        assert self._weather_observation_fire_at is not None
+                        intents = (
+                            *intents,
+                            RuntimeTimerIntent(
+                                feature=RuntimeFeature.WEATHER_OBSERVATION,
+                                fire_at=self._weather_observation_fire_at,
+                                interval=WEATHER_WATCH_SECONDS,
+                                tolerance=WEATHER_WATCH_SECONDS * 0.1,
+                                common_modes=True,
+                            ),
+                        )
+                    for feature, interval in (
+                        (
+                            RuntimeFeature.SETTINGS_SIGNAL_PREVIEW,
+                            SETTINGS_SIGNAL_PREVIEW_INTERVAL_SECONDS,
+                        ),
+                        (
+                            RuntimeFeature.SETTINGS_COLOR_PREVIEW,
+                            SETTINGS_COLOR_PREVIEW_INTERVAL_SECONDS,
+                        ),
+                        (RuntimeFeature.SETUP_DEMO, SETUP_DEMO_INTERVAL_SECONDS),
+                    ):
+                        fire_at = self._runtime_preview_fire_at.get(feature)
+                        if fire_at is None:
+                            continue
+                        intents = (
+                            *intents,
+                            RuntimeTimerIntent(
+                                feature=feature,
+                                fire_at=fire_at,
+                                interval=interval,
+                                tolerance=interval * 0.1,
+                                common_modes=True,
+                            ),
+                        )
+                    if current_timebox_deadline is not None:
+                        intents = (
+                            *intents,
+                            RuntimeTimerIntent(
+                                feature=RuntimeFeature.TIMEBOX_DEADLINE,
+                                fire_at=current_timebox_deadline,
+                                interval=None,
+                                tolerance=0.0,
+                                common_modes=True,
+                            ),
+                        )
+                    if current_escalation_deadline is not None:
+                        intents = (
+                            *intents,
+                            RuntimeTimerIntent(
+                                feature=RuntimeFeature.ESCALATION_DEADLINE,
+                                fire_at=current_escalation_deadline,
+                                interval=None,
+                                tolerance=0.0,
+                                common_modes=True,
+                            ),
+                        )
+                    if current_settings_message_deadline is not None:
+                        intents = (
+                            *intents,
+                            RuntimeTimerIntent(
+                                feature=RuntimeFeature.SETTINGS_MESSAGE_DEADLINE,
+                                fire_at=current_settings_message_deadline,
+                                interval=None,
+                                tolerance=0.0,
+                                common_modes=True,
+                            ),
+                        )
+                    if current_finite_ui_deadline is not None:
+                        intents = (
+                            *intents,
+                            RuntimeTimerIntent(
+                                feature=RuntimeFeature.TEST_SIGNAL_DEADLINE,
+                                fire_at=current_finite_ui_deadline,
+                                interval=None,
+                                tolerance=0.0,
+                                common_modes=True,
+                            ),
+                        )
+                    self._runtime_timer_registry.reconcile(
+                        intents,
+                        target=self,
+                    )
+                    self._presentation_scheduler_state = plan.next_state
+                    self._presentation_scheduler_inputs = current
+                    self._scheduled_timebox_deadline = current_timebox_deadline
+                    self._scheduled_escalation_deadline = (
+                        current_escalation_deadline
+                    )
+                    self._scheduled_reminders_cue_deadline = current_finite_ui_deadline
+                    self._scheduled_settings_message_deadline = (
+                        current_settings_message_deadline
+                    )
+                    if plan.reconcile_immediately:
+                        self._presentation_static_deadline_fired()
+                current = self._presentation_reconcile_pending
+        finally:
+            self._presentation_reconcile_pending = None
+            self._presentation_reconcile_active = False
+
+    def runtimeTimerFired_(self, timer) -> None:
+        self._runtime_timer_registry.dispatch(timer)
+
+    def _presentation_frame_fallback_fired(self) -> None:
+        self.virtual_status_device.redraw_(None)
+
+    def _presentation_static_deadline_fired(self) -> None:
+        self.virtual_status_device.presentationStaticDeadline()
+
+    def _presentation_alcove_observation_fired(self) -> None:
+        self.virtual_status_device.presentationAlcoveObservation()
+
+    def _presentation_pointer_peek_fired(self) -> None:
+        self.peekTick_(None)
+
+    def _settings_signal_preview_fired(self) -> None:
+        inputs = self._presentation_scheduler_inputs
+        if (
+            inputs is not None
+            and self._preview_should_run(
+                RuntimeFeature.SETTINGS_SIGNAL_PREVIEW,
+                inputs,
+            )
+        ):
+            self.redrawSignalPreviews_(None)
+
+    def _settings_color_preview_fired(self) -> None:
+        inputs = self._presentation_scheduler_inputs
+        if (
+            inputs is not None
+            and self._preview_should_run(
+                RuntimeFeature.SETTINGS_COLOR_PREVIEW,
+                inputs,
+            )
+        ):
+            self.animate_colors_preview_once()
+
+    def _setup_demo_fired(self) -> None:
+        inputs = self._presentation_scheduler_inputs
+        if (
+            inputs is not None
+            and self._preview_should_run(RuntimeFeature.SETUP_DEMO, inputs)
+        ):
+            self.redrawSetupDemo_(None)
+
+    def _lid_observation_timer_fired(self) -> None:
+        if not self._lid_observation_active:
+            return
+        now = self._runtime_worker_monotonic()
+        self._os_poll_worker.submit(
+            RuntimeWorkCommand(
+                domain=RuntimeWorkerDomain.OS_POLL,
+                key="lid-observation",
+                generation=self._os_poll_generation,
+                deadline=now + max(2.0, LID_POLL_SECONDS * 3.0),
+                payload=LidObservationRequest(),
+            )
+        )
+
+    def _device_inventory_timer_fired(self) -> None:
+        if not self._device_inventory_active:
+            return
+        now = self._runtime_worker_monotonic()
+        self._os_poll_worker.submit(
+            RuntimeWorkCommand(
+                domain=RuntimeWorkerDomain.OS_POLL,
+                key="device-inventory",
+                generation=self._os_poll_generation,
+                deadline=now + max(4.0, STATUS_BAR_DEVICE_POLL_SECONDS * 3.0),
+                payload=DeviceInventoryRequest(),
+            )
+        )
+
+    def _display_environment_timer_fired(self) -> None:
+        if not self._display_environment_active:
+            return
+        inputs = self._presentation_scheduler_inputs
+        read_accessibility = bool(
+            inputs is not None and inputs.screen_bar_enabled and inputs.visible
+        )
+        now = self._runtime_worker_monotonic()
+        self._os_poll_worker.submit(
+            RuntimeWorkCommand(
+                domain=RuntimeWorkerDomain.OS_POLL,
+                key="display-environment",
+                generation=self._os_poll_generation,
+                deadline=now + max(4.0, BRIGHTNESS_WATCH_SECONDS * 3.0),
+                payload=DisplayEnvironmentRequest(
+                    read_brightness=any(
+                        device.auto_brightness_enabled
+                        for device in self.settings.devices
+                    ),
+                    read_focus=bool(
+                        self.settings.focus_sync_enabled
+                        or self.settings.focus_profile_rules
+                    ),
+                    read_accessibility=read_accessibility,
+                    previous_accessibility_preferences=(
+                        self._accessibility_display_preferences
+                    ),
+                ),
+            )
+        )
+
+    def _calendar_observation_timer_fired(self) -> None:
+        inputs = self._presentation_scheduler_inputs
+        if (
+            not self._calendar_observation_active
+            or not self._runtime_started
+            or not self.settings.calendar_alerts_enabled
+            or inputs is None
+            or inputs.display_asleep
+            or inputs.app_terminating
+        ):
+            return
+        now = self._runtime_worker_monotonic()
+        if now < self.calendar_watch_retry_at:
+            return
+        self._os_poll_worker.submit(
+            RuntimeWorkCommand(
+                domain=RuntimeWorkerDomain.OS_POLL,
+                key="calendar-observation",
+                generation=self._os_poll_generation,
+                deadline=now + max(5.0, CALENDAR_WATCH_SECONDS * 3.0),
+                payload=CalendarObservationRequest(
+                    lead_minutes=self.settings.calendar_lead_minutes,
+                ),
+            )
+        )
+
+    def _reminders_observation_timer_fired(self) -> None:
+        inputs = self._presentation_scheduler_inputs
+        if (
+            not self._reminders_observation_active
+            or not self._runtime_started
+            or not self.settings.reminder_alerts_enabled
+            or inputs is None
+            or inputs.display_asleep
+            or inputs.app_terminating
+        ):
+            return
+        now = self._runtime_worker_monotonic()
+        if now < self.reminders_watch_retry_at:
+            return
+        self._os_poll_worker.submit(
+            RuntimeWorkCommand(
+                domain=RuntimeWorkerDomain.OS_POLL,
+                key="reminders-observation",
+                generation=self._os_poll_generation,
+                deadline=now + max(5.0, REMINDERS_WATCH_SECONDS * 3.0),
+                payload=RemindersObservationRequest(
+                    lookback_seconds=REMINDERS_WATCH_SECONDS * 2.0,
+                ),
+            )
+        )
+
+    def _weather_observation_timer_fired(self) -> None:
+        inputs = self._presentation_scheduler_inputs
+        if (
+            not self._weather_observation_active
+            or not self._runtime_started
+            or not self.settings.weather_alerts_enabled
+            or inputs is None
+            or inputs.display_asleep
+            or inputs.app_terminating
+        ):
+            return
+        now = self._runtime_worker_monotonic()
+        if now < self.weather_watch_retry_at:
+            return
+        self._weather_worker.submit(
+            RuntimeWorkCommand(
+                domain=RuntimeWorkerDomain.WEATHER_FETCH,
+                key=WEATHER_WORKER_KEY,
+                generation=self._weather_observation_generation,
+                deadline=now + WEATHER_FETCH_TIMEOUT_SECONDS,
+                payload=WeatherObservationRequest(
+                    self.settings.weather_latitude,
+                    self.settings.weather_longitude,
+                ),
+            )
+        )
+
+    def _settings_message_deadline_fired(self) -> None:
+        deadline = self._settings_message_deadline_at
+        now = self._presentation_monotonic()
+        self._scheduled_settings_message_deadline = None
+        if deadline > now:
+            self._reconcile_current_presentation_inputs()
+            return
+        self._settings_message_deadline_at = 0.0
+        self.dismissSettingsMessage_(None)
+        self._reconcile_current_presentation_inputs()
+
+    def _finite_ui_deadline_fired(self) -> None:
+        inputs = self._presentation_scheduler_inputs
+        if inputs is None:
+            return
+        now = self._presentation_monotonic()
+        self._scheduled_reminders_cue_deadline = None
+        changed = self._retire_elapsed_ui_deadlines(inputs, now=now)
+        glance = self._current_resolved_glance
+        if type(glance) is ResolvedGlance:
+            finite_cues = self.status_cue_coordinator.advance(now=now)
+            self._status_finite_cues = finite_cues
+            self._status_cue_deadline = finite_cues.next_deadline
+            self._apply_status_accessibility_text(glance, finite_cues)
+        self._reconcile_current_presentation_inputs()
+        if changed:
+            self.refresh_(None)
+
+    def _timebox_deadline_fired(self) -> None:
+        deadline = self.timebox_ends_at
+        now = self._presentation_monotonic()
+        if deadline is None:
+            return
+        if now < deadline:
+            self._scheduled_timebox_deadline = None
+            self.reconcile_lid_observation()
+            return
+        self._complete_timebox(now)
+        self._scheduled_timebox_deadline = None
+        self.reconcile_lid_observation()
+
+    def _complete_timebox(self, now: float) -> None:
+        self.timebox_ends_at = None
+        self.timebox_total_seconds = 0.0
+        self.timebox_overtime_since = now
+        self.fire_timebox_off_shortcut()
+        if self.webhook_event_enabled("timebox"):
+            self.post_webhook({"event": "sidepulse.timebox_finished"})
+        try:
+            from AppKit import NSSound
+
+            sound = NSSound.soundNamed_("Glass")
+            if sound is not None:
+                sound.play()
+        except Exception:
+            pass
+        self.set_settings_message("Timebox finished.")
+        self.refresh_(None)
+
+    def _escalation_deadline_fired(self) -> None:
+        self._scheduled_escalation_deadline = None
+        self.apply_escalation(allow_refresh=True)
+        inputs = self._presentation_scheduler_inputs
+        if inputs is not None:
+            self.reconcile_presentation_timers(inputs)
 
     @objc.IBAction
     def peekTick_(self, _timer):
@@ -6337,15 +11634,16 @@ class StatusBarController(NSObject):
             and frame.origin.y <= location.y <= frame.origin.y + frame.size.height
         )
         now = time.monotonic()
-        peeking = now < getattr(self, "peek_until", 0.0)
+        peek_deadline = getattr(self, "peek_until", 0.0)
+        peeking = now < peek_deadline
+        if peek_deadline > 0.0 and not peeking:
+            self.peek_until = 0.0
+            self.refresh_(None)
         if inside:
             self._peek_hits = getattr(self, "_peek_hits", 0) + 1
             if self._peek_hits == 3 and not peeking:
                 self.peek_until = now + 4.0
                 self.refresh_(None)
-                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                    4.1, self, "refresh:", None, False
-                )
         else:
             self._peek_hits = 0
             if peeking:
@@ -6353,9 +11651,7 @@ class StatusBarController(NSObject):
                 self.refresh_(None)
 
     def peek_program(self, brightness: float, led_count: int = 8) -> str:
-        """The vitals readout: an active timebox shows the timer fill;
-        otherwise the left half is Claude runway, the right half Codex,
-        each brand-colored and scaled by remaining headroom."""
+        """Show an active timebox, otherwise withhold legacy capacity."""
         if self.timebox_active():
             return timer_fill_program(
                 self.timer_fill_fraction(),
@@ -6363,66 +11659,36 @@ class StatusBarController(NSObject):
                 brightness=brightness,
                 color=self.settings.colors.mode_colors.get("working", "#00E5FF"),
             )
-        percents = getattr(self, "quota_last_percents", None) or {}
-
-        def _fraction(prefix):
-            values = [v for k, v in percents.items() if k.startswith(prefix)]
-            return 1.0 - (max(values) / 100.0) if values else None
-
-        halves = (
-            (_fraction("Claude"), "#D97757"),
-            (_fraction("Codex"), "#10A37F"),
-        )
-        half = max(1, led_count // 2)
-        segments = []
-        for side, (fraction, color) in enumerate(halves):
-            for position in range(half):
-                index = side * half + position
-                if index >= led_count:
-                    break
-                if fraction is None:
-                    segments.append(f"{index}:#1A1A1A 60000ms linear")
-                    continue
-                level = max(0.0, min(1.0, fraction * half - position))
-                lit = (
-                    scale_hex_brightness(color, max(0.08, level) * (brightness / 255.0))
-                    if level > 0.0
-                    else "#000000"
-                )
-                segments.append(f"{index}:{lit} 60000ms linear")
-        return "\n".join(["; ".join(segments), "repeat"])
+        return "off"
 
     def screen_bar_click_status(self):
         """The session a Screen Bar click should open: the OLDEST
         unanswered hard ask (the same episode ordering escalation
         follows), or None when nothing needs you."""
-        snapshot = getattr(self, "last_snapshot", None)
-        if snapshot is None:
+        projection = getattr(self, "current_attention_projection", None)
+        if projection is None or not projection.actionable_attention:
             return None
-        asks = ask_statuses(snapshot)
-        if not asks:
-            return None
-        episodes = getattr(self, "ask_blocked_by_agent", {})
-        return min(
-            asks,
-            key=lambda status: episodes.get(status.agent_id, float("inf")),
+        tracked = getattr(self, "ask_blocked_by_agent", {})
+        target_row = min(
+            projection.actionable_attention,
+            key=lambda row: (
+                tracked.get(row.agent_id, float("inf")),
+                row.updated_at,
+                row.agent_id,
+            ),
+        )
+        return next(
+            (
+                row.source_status
+                for row in projection.actionable_attention
+                if row.agent_id == target_row.agent_id
+            ),
+            None,
         )
 
     def quota_runway_state(self) -> tuple[float, str] | None:
-        """(fraction_left, brand color) for the WORST tracked quota
-        window, or None before any data -- factory-None falls back to
-        Agent display by the documented table contract."""
-        percents = getattr(self, "quota_last_percents", None) or {}
-        if not percents:
-            return None
-        worst_key = max(percents, key=lambda key: percents[key])
-        used = max(0.0, min(100.0, float(percents[worst_key])))
-        brand = {"Claude": "#D97757", "Codex": "#10A37F"}
-        color = next(
-            (hex_value for name, hex_value in brand.items() if worst_key.startswith(name)),
-            "#10A37F",
-        )
-        return (1.0 - used / 100.0, color)
+        """Withhold every capacity-derived LED and hardware state this wave."""
+        return None
 
     def studio_display_program(self, brightness: float) -> str | None:
         """The persistent Studio render: the saved program, validated and
@@ -6465,6 +11731,20 @@ class StatusBarController(NSObject):
             return factory
 
         return {
+            LED_DISPLAY_FAILURE: (
+                lambda brightness, led_count: (
+                    failure_signal_program(
+                        self.settings.colors.mode_color("ask"),
+                        active,
+                        brightness=brightness,
+                        led_count=led_count,
+                    )
+                    if (active := self.active_failure_signal()) is not None
+                    else None
+                ),
+                LedDisplayState.FAILED,
+                lambda device, _snapshot: f"{device.name} Failure",
+            ),
             LED_DISPLAY_TEST: (
                 lambda brightness, led_count: self.test_signal_program(
                     brightness, led_count=led_count
@@ -6478,18 +11758,6 @@ class StatusBarController(NSObject):
                 ),
                 LedDisplayState.ASK,
                 lambda device, _snapshot: f"{device.name} Needs you (takeover)",
-            ),
-            LED_DISPLAY_NOTIFICATION: (
-                lambda brightness, led_count: (
-                    styled(
-                        signals_module.SIGNAL_NOTIFICATION,
-                        color=self.notification_blink_color,
-                    )(brightness, led_count)
-                    if self.notification_blink_color
-                    else None
-                ),
-                LedDisplayState.ASK,
-                lambda device, _snapshot: f"{device.name} Notification blink",
             ),
             LED_DISPLAY_COMPLETION: (
                 lambda brightness, led_count: styled(
@@ -6586,6 +11854,8 @@ class StatusBarController(NSObject):
         battery_snapshot: BatterySnapshot | None,
         display_kind: str,
         statuses: tuple[AgentStatus, ...] = (),
+        *,
+        projection: AttentionProjection | None = None,
     ) -> None:
         devices = [
             device for device in self.status_bar_devices()
@@ -6602,9 +11872,12 @@ class StatusBarController(NSObject):
             self.last_led_error = None
             return
 
+        relay_elapsed_seconds = max(0.0, time.monotonic() - self._relay_epoch)
+
         active_errors: dict[str, str] = {}
         agent_write_changed = False
         agent_write_failed = False
+        agent_display_rendered = False
         for device in devices:
             device_display_kind = self.active_led_display_kind_for_device(
                 device,
@@ -6648,6 +11921,7 @@ class StatusBarController(NSObject):
                     f"{format_watts(battery_snapshot.adapter_power)}"
                 )
             else:
+                agent_display_rendered = True
                 colors_for_render = self.agent_render_colors()
                 override = self.settings.device_blend_mode(device.device_id)
                 if override:
@@ -6666,11 +11940,20 @@ class StatusBarController(NSObject):
                     )
                     if not statuses_for_device:
                         fallback_for_device = AgentMode.IDLE_READY
-                result = self.agent_controller_for_device(device).sync_snapshot(
-                    statuses_for_device,
-                    colors_for_render,
-                    fallback_mode=fallback_for_device,
-                )
+                if projection is not None:
+                    result = self.agent_controller_for_device(device).sync_projection(
+                        self.projection_for_device(projection, device),
+                        colors_for_render,
+                        active_signal=self.active_failure_signal(),
+                        relay_elapsed_seconds=relay_elapsed_seconds,
+                    )
+                else:
+                    result = self.agent_controller_for_device(device).sync_snapshot(
+                        statuses_for_device,
+                        colors_for_render,
+                        fallback_mode=fallback_for_device,
+                        relay_elapsed_seconds=relay_elapsed_seconds,
+                    )
                 label = f"{device.name} {result.label}"
                 if result.error:
                     agent_write_failed = True
@@ -6695,7 +11978,14 @@ class StatusBarController(NSObject):
             # The physical write(s) just completed on this worker thread --
             # use this instant as the Screen Bar's phase-zero instead of
             # letting it start independently on the next main-thread tick.
-            self.schedule_screen_bar_sync(mode, battery_snapshot, statuses, time.monotonic())
+            self.schedule_screen_bar_sync(
+                mode,
+                battery_snapshot,
+                statuses,
+                time.monotonic(),
+                projection,
+                relay_elapsed_seconds,
+            )
         elif agent_write_failed:
             # The physical write failed -- there's no real completion to
             # sync to, so fall back to an immediate (unsynced) update rather
@@ -6705,11 +11995,26 @@ class StatusBarController(NSObject):
                 "battery_snapshot": battery_snapshot,
                 "statuses": statuses,
                 "started_at": None,
+                "projection": projection,
+                "relay_elapsed_seconds": relay_elapsed_seconds,
             }
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "applyScreenBarSync:",
                 payload,
                 False,
+            )
+        elif agent_display_rendered:
+            # A smaller physical surface can dedupe even when an agent that
+            # only appears on the 8-LED Screen Bar changed. Let the virtual
+            # renderer perform its own program invalidation without claiming
+            # that a new physical write supplied a phase anchor.
+            self.schedule_screen_bar_sync(
+                mode,
+                battery_snapshot,
+                statuses,
+                None,
+                projection,
+                relay_elapsed_seconds,
             )
 
     def play_lid_animation(
@@ -6756,7 +12061,11 @@ class StatusBarController(NSObject):
         for device in devices:
             try:
                 program = program_for_lid_animation(animation, brightness=device.brightness)
-                target = write_led_program(program, device_path=device.target)
+                target = write_led_program(
+                    program,
+                    device_path=device.target,
+                    preserve_existing_inode=True,
+                )
                 log_status_bar(f"animation={label} device={device.name} target={target}")
             except Exception as exc:
                 log_status_bar(f"animation error {label} {device.name}: {exc}")
@@ -6774,6 +12083,7 @@ class StatusBarController(NSObject):
 
     def connect_device(self) -> None:
         self.leds_enabled = True
+        self.reconcile_lid_observation()
         self.status_bar_devices()
         self.reset_led_controllers_for_display_change()
         self.last_led_error = None
@@ -6782,6 +12092,7 @@ class StatusBarController(NSObject):
 
     def disconnect_device(self) -> None:
         self.leds_enabled = False
+        self.reconcile_lid_observation()
         targets = self.current_led_targets()
         if not targets:
             targets = [
@@ -6864,37 +12175,14 @@ class StatusBarController(NSObject):
         self.led_controller.device_path = target
         self.battery_led_controller.device_path = target
 
-    @objc.IBAction
-    def pollLid_(self, _sender):
-        # read_lid_closed forks ioreg -- this ran ON the main thread
-        # every second for every user (the audit's #1 finding). Same
-        # worker contract as pollWeather_: the thread must ALWAYS post
-        # its payload or the in-flight flag strands.
-        if getattr(self, "lid_poll_in_flight", False):
-            return
-        self.lid_poll_in_flight = True
-
-        def _work():
-            try:
-                payload = {"ok": True, "closed": read_lid_closed()}
-            except Exception as exc:
-                payload = {"ok": False, "error": str(exc)}
-            self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "lidChecked:", payload, False
-            )
-
-        threading.Thread(target=_work, daemon=True).start()
-
-    @objc.IBAction
-    def lidChecked_(self, payload):
-        self.lid_poll_in_flight = False
-        if not payload.get("ok"):
-            error = str(payload.get("error"))
+    def _apply_lid_observation(self, result: LidObservationResult) -> None:
+        if not result.ok:
+            error = str(result.error)
             if error != self.last_lid_error:
                 self.last_lid_error = error
                 log_status_bar(f"lid_state error: {error}")
             return
-        closed = payload.get("closed")
+        closed = result.closed
         if closed is None:
             return
         self.last_lid_error = None
@@ -6911,26 +12199,18 @@ class StatusBarController(NSObject):
         )
         self.play_lid_animation(kind)
 
-    def display_aggregate_mode(self, snapshot) -> AgentMode:
-        """The mode the lights and icon actually show. A SUB-agent ask
-        can't be answered (its parent handles it), so by default only
-        MAIN sessions may pull the aggregate into Ask/Blocked -- the
-        blinking light was firing for workers nobody could reply to.
-        settings.subagent_asks_alert restores the old behavior."""
-        mode = snapshot.aggregate.mode
-        if self.settings.subagent_asks_alert:
-            return mode
-        ask_modes = (AgentMode.WAITING_FOR_INPUT, AgentMode.BLOCKED_ERROR)
-        if mode not in ask_modes:
-            return mode
-        mains = tuple(
-            status for status in snapshot.statuses if not status.is_subagent
-        )
-        if any(status.mode in ask_modes for status in mains):
-            return mode
-        if not mains:
-            return AgentMode.IDLE_READY
-        return aggregate_status(mains, snapshot.stale_statuses).mode
+    def display_aggregate_mode(self, projection) -> AgentMode:
+        """Legacy mode adapter for semantics already fixed by projection."""
+        if not isinstance(projection, AttentionProjection):
+            projection = project_attention(projection, self.settings)
+        return {
+            LifecycleMode.IDLE: AgentMode.IDLE_READY,
+            LifecycleMode.ACTIVE: AgentMode.WORKING,
+            LifecycleMode.WAITING: AgentMode.WAITING_FOR_INPUT,
+            LifecycleMode.COMPLETED_RECENTLY: AgentMode.COMPLETED,
+            LifecycleMode.FAILED_VISIBLE: AgentMode.BLOCKED_ERROR,
+            LifecycleMode.UNKNOWN: AgentMode.UNKNOWN,
+        }[projection.lifecycle_mode]
 
     def agents_active_now(self) -> bool:
         """Any MAIN session actually working at this instant -- the lid
@@ -7063,6 +12343,7 @@ class StatusBarController(NSObject):
                 log_status_bar(
                     f"closed_lid_awake error: {self.last_closed_lid_awake_error}"
                 )
+        self.reconcile_lid_observation()
 
     def status_keepalive_targets(self) -> list[Path]:
         targets = self.current_led_targets()
@@ -7122,6 +12403,149 @@ def target_quiet_active(target) -> bool:
     return bool(quiet()) if callable(quiet) else False
 
 
+def concise_usage_error(error: Exception) -> str:
+    text = " ".join(str(error).split())
+    return (text or "usage unavailable")[:80]
+
+
+def usage_window_payloads(model: ProviderUsageViewModel) -> tuple[dict, ...]:
+    return tuple(
+        {
+            "label": window.label,
+            "used_percent": window.percent_used,
+            "window_minutes": window.window_minutes,
+            "resets_at": window.reset_at,
+        }
+        for window in model.windows
+    )
+
+
+def _capacity_age_text(model: ProviderUsageViewModel, *, monotonic_now: float) -> str | None:
+    if model.last_success_at is None:
+        return None
+    age = max(0.0, float(monotonic_now) - float(model.last_success_at))
+    if age < 60.0:
+        return "updated just now"
+    if age < 3_600.0:
+        return f"updated {max(1, int(age // 60.0))}m ago"
+    if age < 24 * 3_600.0:
+        return f"updated {max(1, int(age // 3_600.0))}h ago"
+    return f"updated {max(1, int(age // (24 * 3_600.0)))}d ago"
+
+
+def capacity_menu_lines(
+    model: ProviderUsageViewModel,
+    *,
+    monotonic_now: float,
+    epoch_now: float,
+) -> tuple[str, str]:
+    """Return concise primary capacity and secondary reset/freshness copy."""
+    if model.missing:
+        return model.menu_line, ""
+
+    primary_window = model.windows[0] if model.windows else None
+    if primary_window is None:
+        primary = model.menu_line
+    else:
+        semantic = primary_window.duration_text
+        remaining = primary_window.percent_remaining
+        amount = f" {remaining:.0f}% left" if remaining is not None else ""
+        primary = f"{model.provider_title} · {semantic}{amount}"
+
+    secondary_parts: list[str] = []
+    if primary_window is not None:
+        reset = primary_window.reset_text(epoch_now)
+        if reset:
+            secondary_parts.append(f"resets {reset}")
+    age = _capacity_age_text(model, monotonic_now=monotonic_now)
+    if age:
+        secondary_parts.append(age)
+    if model.refreshing:
+        secondary_parts.append("refreshing")
+    if model.partial:
+        secondary_parts.append("partial")
+    if model.source_text:
+        secondary_parts.append(model.source_text)
+    if model.stale:
+        secondary_parts.append("stale")
+    if model.error_text:
+        secondary_parts.append(model.error_text)
+    return primary, " · ".join(secondary_parts)
+
+
+def _configure_usage_menu_label(field, *, size: float, secondary: bool) -> None:
+    field.setBezeled_(False)
+    field.setDrawsBackground_(False)
+    field.setEditable_(False)
+    field.setSelectable_(False)
+    field.setFont_(
+        NSFont.systemFontOfSize_(size)
+        if secondary
+        else NSFont.boldSystemFontOfSize_(size)
+    )
+    if secondary:
+        field.setTextColor_(NSColor.secondaryLabelColor())
+
+
+def build_usage_menu_item(target) -> NSMenuItem:
+    """Host stable Capacity labels so publications never rebuild the menu."""
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("", None, "")
+    view = NSView.alloc().initWithFrame_(((0, 0), (292, 110)))
+    header = NSTextField.alloc().initWithFrame_(((14, 87), (264, 17)))
+    _configure_usage_menu_label(header, size=11.0, secondary=False)
+    header.setStringValue_("Capacity")
+    view.addSubview_(header)
+
+    labels = {}
+    secondary_labels = {}
+    models = getattr(target, "_usage_provider_models", {}) or {}
+    states = getattr(target, "_usage_provider_states", {}) or {}
+    now = time.monotonic()
+    reset_now = time.time()
+    for provider_id, primary_y, secondary_y in (
+        ("codex", 64, 47),
+        ("claude", 25, 8),
+    ):
+        field = NSTextField.alloc().initWithFrame_(((14, primary_y), (264, 18)))
+        _configure_usage_menu_label(field, size=11.0, secondary=False)
+        secondary_field = NSTextField.alloc().initWithFrame_(
+            ((14, secondary_y), (264, 16))
+        )
+        _configure_usage_menu_label(secondary_field, size=10.0, secondary=True)
+        model = models.get(provider_id)
+        state = states.get(provider_id)
+        if model is None:
+            model = build_provider_usage_view(
+                provider_id,
+                provider_id.title(),
+                (),
+                now=now,
+                reset_now=reset_now,
+                refreshing=bool(state and state.in_flight),
+                error_text=getattr(state, "error_text", None),
+            )
+        elif state is not None and model.refreshing != state.in_flight:
+            model = dataclass_replace(model, refreshing=state.in_flight)
+        primary, secondary = capacity_menu_lines(
+            model,
+            monotonic_now=now,
+            epoch_now=reset_now,
+        )
+        field.setStringValue_(primary)
+        secondary_field.setStringValue_(secondary)
+        view.addSubview_(field)
+        view.addSubview_(secondary_field)
+        labels[provider_id] = field
+        secondary_labels[provider_id] = secondary_field
+    item.setView_(view)
+    target._usage_menu_item = item
+    target._usage_menu_view = view
+    target._usage_menu_header = header
+    target._usage_menu_labels = labels
+    target._usage_menu_secondary_labels = secondary_labels
+    return item
+
+
 def session_row_suffix(
     status: AgentStatus,
     *,
@@ -7155,19 +12579,118 @@ def session_row_suffix(
     return " \u00b7 " + " \u00b7 ".join(parts)
 
 
+_MAILBOX_SECTION_TITLES = {
+    MailboxSectionKind.NEEDS_YOU: "Needs You",
+    MailboxSectionKind.IN_PROGRESS: "In Progress",
+    MailboxSectionKind.READY_FOR_REVIEW: "Ready for Review",
+    MailboxSectionKind.RECENT: "Recent",
+}
+_MAILBOX_MAX_WORKERS_PER_ROLLUP = 12
+
+
+def mailbox_projection_rows(
+    projection: AttentionProjection,
+    target,
+) -> tuple:
+    """Return only the authoritative projected rows eligible for the mailbox."""
+    cleared_ids = getattr(target, "cleared_session_ids", set())
+    if not cleared_ids:
+        return projection.visible_rows
+    return tuple(
+        row
+        for row in projection.visible_rows
+        if not (
+            row.agent_id in cleared_ids
+            and row.lifecycle_mode == LifecycleMode.COMPLETED_RECENTLY
+        )
+    )
+
+
+def project_mailbox_for_target(
+    projection: AttentionProjection,
+    target,
+) -> AgentMailboxProjection:
+    mailbox_projection = dataclass_replace(
+        projection,
+        visible_rows=mailbox_projection_rows(projection, target),
+    )
+    return project_mailbox(
+        mailbox_projection,
+        previous_order=getattr(target, "mailbox_retained_order", None),
+        seen_completion_ids=getattr(target, "mailbox_seen_completion_ids", set()),
+    )
+
+
+def mailbox_projection_for_menu(snapshot, target) -> AgentMailboxProjection:
+    """Return the controller-owned projection, with a legacy test fallback."""
+    current = getattr(target, "current_mailbox_projection", None)
+    if isinstance(current, AgentMailboxProjection):
+        return current
+    attention = getattr(target, "current_attention_projection", None)
+    if not isinstance(attention, AttentionProjection):
+        attention = project_attention(
+            SimpleNamespace(
+                statuses=mailbox_attention_statuses(snapshot),
+                collected_at=snapshot.collected_at,
+            ),
+            target.settings,
+        )
+    mailbox = project_mailbox_for_target(attention, target)
+    target.current_attention_projection = attention
+    target.current_mailbox_projection = mailbox
+    target.mailbox_retained_order = dict(mailbox.retained_order)
+    if not hasattr(target, "mailbox_seen_completion_ids"):
+        target.mailbox_seen_completion_ids = set()
+    return mailbox
+
+
+def mailbox_content_signature(mailbox: AgentMailboxProjection) -> tuple:
+    return (
+        mailbox.active_count,
+        mailbox.needs_you_count,
+        mailbox.ready_count,
+        tuple(
+            (
+                section.kind.value,
+                tuple(_mailbox_row_content_signature(row) for row in section.rows),
+                section.overflow_count,
+            )
+            for section in mailbox.sections
+        ),
+    )
+
+
+def _mailbox_row_content_signature(row) -> tuple:
+    if type(row) is MailboxRow:
+        return (
+            _work_key_menu_identity(row.work_key),
+            row.safe_label,
+            row.lifecycle.value,
+            row.next_actor.value,
+            row.source_freshness.value,
+            row.actionable,
+            row.worker_count,
+            row.stable_order,
+            row.timing_uncertain,
+        )
+    return (
+        row.agent_id,
+        row.provider,
+        row.display_name,
+        row.lifecycle_mode.value,
+        row.activity_label,
+        row.actionable,
+        row.navigation_agent_id,
+        row.worker_count,
+        row.stable_order,
+    )
+
+
 def menu_content_signature(snapshot, state, target) -> tuple:
     """Everything the dropdown renders, hashed coarsely. Ages bucket to
     the minute (rows show "4m"), and a 30s monotonic bucket is a safety
     valve: anything this signature misses self-heals within 30s."""
-    now = snapshot.collected_at
-    def row(status):
-        return (
-            status.agent_id,
-            status.mode.value,
-            status.display_name,
-            int(status.age_seconds(now) // 60),
-        )
-
+    mailbox = mailbox_projection_for_menu(snapshot, target)
     devices = tuple(
         (
             device.device_id,
@@ -7179,12 +12702,7 @@ def menu_content_signature(snapshot, state, target) -> tuple:
     )
     return (
         state.label,
-        tuple(row(status) for status in ask_statuses(snapshot)),
-        tuple(row(status) for status in recent_statuses(snapshot)),
-        tuple(
-            tuple(row(child) for child in children)
-            for children in active_subagents_by_parent(snapshot).values()
-        ),
+        mailbox_content_signature(mailbox),
         devices,
         round(target.timer_fill_fraction(), 2) if target.timebox_active() else None,
         target.settings.closed_lid_awake_policy,
@@ -7203,169 +12721,558 @@ def menu_content_signature(snapshot, state, target) -> tuple:
     )
 
 
+def _mailbox_source_rows(projection: AttentionProjection) -> dict[str, AgentStatus]:
+    sources: dict[str, AgentStatus] = {}
+    for projected in projection.visible_rows:
+        current = sources.get(projected.agent_id)
+        if current is None or projected.updated_at >= current.updated_at:
+            sources[projected.agent_id] = projected.source_status
+    return sources
+
+
+def _mailbox_workers_by_parent(
+    sources: dict[str, AgentStatus],
+) -> tuple[dict[str, list[AgentStatus]], list[AgentStatus]]:
+    groups: dict[str, list[AgentStatus]] = {}
+    orphans: list[AgentStatus] = []
+    for status in sources.values():
+        if not status.is_subagent:
+            continue
+        parent_id = status.parent_agent_id
+        if parent_id is None or parent_id not in sources:
+            orphans.append(status)
+        else:
+            groups.setdefault(parent_id, []).append(status)
+    return groups, orphans
+
+
+def _mailbox_row_suffix(row: MailboxRow) -> str:
+    facts = []
+    if row.activity_label:
+        facts.append(row.activity_label)
+    if row.worker_count == 1:
+        facts.append("1 worker")
+    elif row.worker_count > 1:
+        facts.append(f"{row.worker_count} workers")
+    return f" · {' · '.join(facts)}" if facts else ""
+
+
+def _mailbox_display_status(
+    row: MailboxRow,
+    display_source: AgentStatus,
+    navigation_source: AgentStatus,
+) -> AgentStatus:
+    mode_by_lifecycle = {
+        LifecycleMode.IDLE: AgentMode.IDLE_READY,
+        LifecycleMode.ACTIVE: AgentMode.WORKING,
+        LifecycleMode.WAITING: AgentMode.WAITING_FOR_INPUT,
+        LifecycleMode.COMPLETED_RECENTLY: AgentMode.COMPLETED,
+        LifecycleMode.FAILED_VISIBLE: AgentMode.BLOCKED_ERROR,
+        LifecycleMode.UNKNOWN: AgentMode.UNKNOWN,
+    }
+    return dataclass_replace(
+        display_source,
+        display_name=row.display_name,
+        mode=mode_by_lifecycle[row.lifecycle_mode],
+        event_name=(
+            navigation_source.event_name if row.actionable else display_source.event_name
+        ),
+        cwd=None,
+    )
+
+
+def _add_mailbox_empty_teaching(menu: NSMenu, target) -> None:
+    menu.addItem_(disabled_menu_item("No agents yet"))
+    hooks_probe = getattr(target, "_menu_hooks_probe", None)
+    now_probe = time.monotonic()
+    if hooks_probe is None or now_probe - hooks_probe[0] > 30.0:
+        try:
+            any_hooks = any(
+                provider_hooks_installed(provider_spec(provider).detector(None))
+                for provider in HOOK_PROVIDERS
+            )
+        except Exception:
+            any_hooks = True
+        target._menu_hooks_probe = (now_probe, any_hooks)
+    else:
+        any_hooks = hooks_probe[1]
+    if any_hooks:
+        menu.addItem_(
+            disabled_menu_item("Start Claude Code or Codex -- sessions appear here")
+        )
+        return
+    connect_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Connect your agents in Setup…", "openSetup:", ""
+    )
+    connect_item.setTarget_(target)
+    menu.addItem_(connect_item)
+
+
+def build_agent_mailbox_menu_item(snapshot, target) -> NSMenuItem:
+    mailbox = mailbox_projection_for_menu(snapshot, target)
+    attention = getattr(target, "current_attention_projection", None)
+    if not isinstance(attention, AttentionProjection):
+        attention = project_attention(snapshot, target.settings)
+    sources = _mailbox_source_rows(attention)
+    workers_by_parent, orphan_workers = _mailbox_workers_by_parent(sources)
+    display_sources = [status for status in sources.values() if not status.is_subagent]
+    identity: dict[str, str] = {}
+    if len(display_sources) > 1:
+        menu_colors = getattr(getattr(target, "settings", None), "colors", None)
+        identity = colors_module.identity_colors_for_agents(
+            [status.agent_id for status in display_sources],
+            groups=colors_module.identity_groups_for_statuses(
+                display_sources, menu_colors
+            ),
+        )
+
+    summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        (
+            f"Agent Mailbox · {mailbox.active_count} active · "
+            f"{mailbox.needs_you_count} need you · {mailbox.ready_count} ready"
+        ),
+        None,
+        "",
+    )
+    mailbox_menu = NSMenu.alloc().init()
+    mailbox_menu.setAutoenablesItems_(False)
+    has_rows = any(section.rows for section in mailbox.sections)
+    for section in mailbox.sections:
+        shelf_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            _MAILBOX_SECTION_TITLES[section.kind], None, ""
+        )
+        shelf_menu = NSMenu.alloc().init()
+        shelf_menu.setAutoenablesItems_(False)
+        if not section.rows:
+            if not has_rows and section.kind == MailboxSectionKind.RECENT:
+                _add_mailbox_empty_teaching(shelf_menu, target)
+        provider_order: list[str] = []
+        for row in section.rows:
+            if row.provider not in provider_order:
+                provider_order.append(row.provider)
+        show_provider_headers = len(provider_order) > 1
+        rows = (
+            tuple(
+                row
+                for provider in provider_order
+                for row in section.rows
+                if row.provider == provider
+            )
+            if show_provider_headers
+            else section.rows
+        )
+        last_provider_header = None
+        for row in rows:
+            if show_provider_headers and row.provider != last_provider_header:
+                last_provider_header = row.provider
+                try:
+                    provider_title = provider_spec(row.provider).label
+                except ValueError:
+                    provider_title = row.provider.title()
+                shelf_menu.addItem_(disabled_menu_item(provider_title))
+            display_source = sources.get(row.agent_id)
+            navigation_source = sources.get(row.navigation_agent_id or "")
+            dot_color = None
+            if display_source is None:
+                display_source = navigation_source
+            if navigation_source is None:
+                navigation_source = display_source
+            if display_source is None or navigation_source is None:
+                synthetic = disabled_menu_item(
+                    f"{row.display_name}{_mailbox_row_suffix(row)}"
+                )
+                shelf_menu.addItem_(synthetic)
+            else:
+                rendered = _mailbox_display_status(
+                    row, display_source, navigation_source
+                )
+                if getattr(target, "settings", None) is not None:
+                    dot_color = target.settings.colors.session_color(row.agent_id)
+                row_item = build_session_menu_item(
+                    rendered,
+                    snapshot.collected_at,
+                    target,
+                    identity_color=dot_color or identity.get(row.agent_id),
+                    title_suffix=_mailbox_row_suffix(row),
+                )
+                row_item.setRepresentedObject_(navigation_source)
+                shelf_menu.addItem_(row_item)
+            children = (
+                orphan_workers
+                if row.agent_id == "sidepulse:mailbox:background-agents"
+                else workers_by_parent.get(row.agent_id, [])
+            )
+            if children:
+                shelf_menu.addItem_(
+                    build_worker_rollup_item(
+                        children,
+                        snapshot.collected_at,
+                        target,
+                        dot_color or identity.get(row.agent_id),
+                        max_visible=_MAILBOX_MAX_WORKERS_PER_ROLLUP,
+                    )
+                )
+        if section.overflow_count:
+            shelf_menu.addItem_(disabled_menu_item(f"{section.overflow_count} more"))
+        shelf_item.setSubmenu_(shelf_menu)
+        mailbox_menu.addItem_(shelf_item)
+    summary.setSubmenu_(mailbox_menu)
+    return summary
+
+
+def _canonical_agent_browser_projection(
+    snapshot,
+    target,
+    *,
+    text: str = "",
+    shelf: MailboxSectionKind | None = None,
+    family_key=None,
+    selected_work_key=None,
+):
+    state = getattr(snapshot, "operator_state", None)
+    if state is None:
+        state = getattr(target, "current_operator_state", None)
+    if state is None:
+        return None
+    target.current_operator_state = state
+    previous_order = {
+        key: order
+        for key, order in getattr(target, "mailbox_retained_order", {}).items()
+        if type(key) is not str and type(order) is int and order >= 0
+    }
+    mailbox = project_canonical_mailbox(
+        state,
+        previous_order=previous_order,
+    )
+    preferences = apply_mailbox_preferences(
+        mailbox,
+        getattr(target, "mailbox_preferences", ()),
+        now=time.time(),
+    )
+    if type(preferences) is not MailboxPreferenceProjection:
+        return None
+    target.current_mailbox_projection = preferences.projection
+    target.mailbox_retained_order = dict(preferences.projection.retained_order)
+    scheduler = getattr(target, "schedule_mailbox_boundary", None)
+    if callable(scheduler):
+        scheduler(preferences.next_wake_epoch)
+    documents = build_agent_browser_documents(
+        state,
+        preferences.projection,
+        preferences,
+        getattr(target, "local_triage_state", LocalTriageState(())),
+    )
+    return project_agent_browser(
+        documents,
+        AgentBrowserQuery(text, shelf=shelf, family_key=family_key),
+        generation=state.generation,
+        selected_work_key=selected_work_key or family_key,
+    )
+
+
+def _request_for_work(state, work_key):
+    requests = {
+        request.key: request
+        for request in getattr(state, "requests", ())
+        if request.key.work_key == work_key
+    }
+    work = next(
+        (item for item in getattr(state, "works", ()) if item.key == work_key),
+        None,
+    )
+    if work is None:
+        return None
+    return next(
+        (requests[key] for key in work.request_keys if key in requests),
+        None,
+    )
+
+
+def _family_work_key(state, work_key):
+    works = {work.key: work for work in getattr(state, "works", ())}
+    current = works.get(work_key)
+    seen = set()
+    while current is not None and current.parent_key is not None:
+        if current.key in seen:
+            return None
+        seen.add(current.key)
+        current = works.get(current.parent_key)
+    return None if current is None else current.key
+
+
+def _preference_for_work_key(preferences, work_key):
+    return next(
+        (
+            item
+            for item in preferences
+            if type(item) is MailboxPreference and item.work_key == work_key
+        ),
+        None,
+    )
+
+
+def _replace_mailbox_preference(preferences, replacement):
+    retained = [
+        item
+        for item in preferences
+        if type(item) is MailboxPreference and item.work_key != replacement.work_key
+    ]
+    return tuple((*retained, replacement))
+
+
+def _move_pinned_preference(preferences, work_key, *, delta):
+    pinned = sorted(
+        (
+            item
+            for item in preferences
+            if type(item) is MailboxPreference
+            and item.mode is MailboxPreferenceMode.PINNED
+            and item.pin_order is not None
+        ),
+        key=lambda item: (item.pin_order, item.work_key),
+    )
+    index = next(
+        (position for position, item in enumerate(pinned) if item.work_key == work_key),
+        None,
+    )
+    if index is None or not 0 <= index + delta < len(pinned):
+        return None
+    other_index = index + delta
+    moved = pinned[index]
+    other = pinned[other_index]
+    replacements = {
+        moved.work_key: dataclass_replace(moved, pin_order=other.pin_order),
+        other.work_key: dataclass_replace(other, pin_order=moved.pin_order),
+    }
+    return tuple(replacements.get(item.work_key, item) for item in preferences)
+
+
+def _canonical_operator_actions(state, target):
+    if state is None:
+        return {}
+    preferences = {
+        item.work_key: item
+        for item in getattr(target, "mailbox_preferences", ())
+        if type(item) is MailboxPreference
+    }
+    pinned = sorted(
+        (
+            item
+            for item in preferences.values()
+            if item.mode is MailboxPreferenceMode.PINNED
+            and item.pin_order is not None
+        ),
+        key=lambda item: (item.pin_order, item.work_key),
+    )
+    pin_positions = {item.work_key: index for index, item in enumerate(pinned)}
+    acknowledged = {
+        item.request_key
+        for item in getattr(
+            target,
+            "local_triage_state",
+            LocalTriageState(()),
+        ).acknowledgements
+    }
+    candidates_by_work = getattr(target, "navigation_candidates_by_work_key", {})
+    result = {}
+    for work in state.works:
+        family_key = _family_work_key(state, work.key)
+        if family_key is None:
+            continue
+        request = _request_for_work(state, work.key)
+        preference = preferences.get(family_key)
+        navigation = resolve_navigation(
+            work.key,
+            "open:primary",
+            candidates_by_work.get(work.key, ()),
+        )
+        result[work.key] = build_operator_actions(
+            work=work,
+            request=request,
+            local=OperatorLocalActionState(
+                watched=(
+                    preference is not None
+                    and preference.mode is MailboxPreferenceMode.WATCHED
+                ),
+                pinned=family_key in pin_positions,
+                snoozed=(
+                    preference is not None
+                    and preference.snoozed_at is not None
+                ),
+                acknowledged=(
+                    request is not None and request.key in acknowledged
+                ),
+                pin_position=pin_positions.get(family_key),
+                pin_count=len(pinned),
+            ),
+            navigation=navigation,
+        )
+    return result
+
+
+def _work_key_menu_identity(work_key) -> str:
+    source = work_key.source_key
+    return ":".join(
+        (
+            source.provider_id,
+            source.adapter_id,
+            source.source_instance_id,
+            source.capability_id,
+            work_key.work_id.value,
+        )
+    )
+
+
+def _menu_copy_size(title: str) -> tuple[int, int]:
+    bounded = title[:256]
+    size = NSString.stringWithString_(bounded).sizeWithAttributes_(
+        {NSFontAttributeName: NSFont.menuFontOfSize_(0.0)}
+    )
+    return math.ceil(size.width), math.ceil(size.height)
+
+
+def _native_item_state(
+    item,
+    *,
+    item_key: str,
+    parent_key: str | None,
+    order: int,
+    submenu_key: str | None,
+    action_kind: OperatorActionKind | None,
+) -> MenuItemState:
+    title = str(item.title())
+    width, height = _menu_copy_size(title)
+
+    def text_value(selector: str, fallback: str = "") -> str:
+        getter = getattr(item, selector, None)
+        value = getter() if callable(getter) else None
+        return value if type(value) is str else fallback
+
+    if ":action:" in item_key:
+        accessibility_label = "Agent action"
+    elif ":urgent:" in item_key:
+        accessibility_label = "Urgent agent row"
+    elif ":overflow:" in item_key:
+        accessibility_label = "More agents"
+    elif ":browser:" in item_key:
+        accessibility_label = "Open Agent Browser"
+    else:
+        accessibility_label = "Agent Mailbox summary"
+
+    return MenuItemState(
+        item_key=item_key,
+        parent_key=parent_key,
+        order=order,
+        submenu_key=submenu_key,
+        action_kind=action_kind,
+        key_equivalent=str(item.keyEquivalent() or ""),
+        title=title,
+        enabled=bool(item.isEnabled()),
+        state=int(item.state()),
+        measured_width=width,
+        measured_height=height,
+        accessibility_label=text_value(
+            "accessibilityLabel",
+            accessibility_label,
+        ),
+        accessibility_value=text_value("accessibilityValue"),
+        accessibility_help=text_value("accessibilityHelp"),
+    )
+
+
+def _canonical_agent_root_snapshot(snapshot, target, *, menu=None):
+    projection = _canonical_agent_browser_projection(snapshot, target)
+    if projection is None:
+        return None
+    actions = _canonical_operator_actions(target.current_operator_state, target)
+    prepared = build_agent_root_items(
+        projection,
+        actions_by_work_key=actions,
+        target=target,
+    )
+    root_items = tuple(
+        menu.itemAtIndex_(index) if menu is not None else prepared[index]
+        for index in range(len(prepared))
+    )
+    states = []
+    items = {}
+    urgent_index = 0
+    for order, item in enumerate(root_items):
+        title = str(item.title())
+        if order == 0:
+            item_key = "agent-mailbox:summary"
+            submenu_key = None
+        elif item.submenu() is not None:
+            row = projection.rows[urgent_index]
+            urgent_index += 1
+            identity = _work_key_menu_identity(row.work_key)
+            item_key = f"agent-mailbox:urgent:{identity}"
+            submenu_key = f"{item_key}:actions:g{projection.generation}"
+        elif title.endswith("more..."):
+            item_key = f"agent-mailbox:overflow:g{projection.generation}"
+            submenu_key = None
+        else:
+            item_key = f"agent-mailbox:browser:g{projection.generation}"
+            submenu_key = None
+        items[item_key] = item
+        states.append(
+            _native_item_state(
+                item,
+                item_key=item_key,
+                parent_key=None,
+                order=order,
+                submenu_key=submenu_key,
+                action_kind=None,
+            )
+        )
+        submenu = item.submenu()
+        if submenu is None:
+            continue
+        for action_order in range(submenu.numberOfItems()):
+            action = submenu.itemAtIndex_(action_order)
+            payload = action.representedObject()
+            if type(payload) is not AgentBrowserActionPayload:
+                continue
+            preset = f":{payload.snooze_preset}" if payload.snooze_preset else ""
+            action_key = f"{item_key}:action:{payload.kind.value}{preset}"
+            items[action_key] = action
+            states.append(
+                _native_item_state(
+                    action,
+                    item_key=action_key,
+                    parent_key=item_key,
+                    order=action_order,
+                    submenu_key=None,
+                    action_kind=payload.kind,
+                )
+            )
+    return tuple(states), items
+
+
 def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> NSMenu:
     """The status-item dropdown. Glanceability rules: sessions first
     (the thing you opened the menu to check), no self-titled header (you
     know what menu you clicked), and one row per secondary concern --
     the keep-awake policy is a submenu, not four inline rows."""
     menu = NSMenu.alloc().init()
-
-    # The Ask Inbox: WHO needs you, pinned first -- the reason the menu
-    # got opened. Rows are the same one-click session jumps as below.
-    asks = ask_statuses(snapshot)
-    summary_mains = recent_statuses(snapshot)
-    summary_workers = sum(
-        len(children) for children in active_subagents_by_parent(snapshot).values()
-    )
-    if summary_mains:
-        session_word = "session" if len(summary_mains) == 1 else "sessions"
-        summary_bits = [f"{len(summary_mains)} {session_word}"]
-        if summary_workers:
-            worker_word = "worker" if summary_workers == 1 else "workers"
-            summary_bits.append(f"{summary_workers} {worker_word}")
-        if asks:
-            summary_bits.append(f"{len(asks)} needs you")
-        menu.addItem_(disabled_menu_item(" \u00b7 ".join(summary_bits)))
-        menu.addItem_(NSMenuItem.separatorItem())
-    if asks:
-        menu.addItem_(disabled_menu_item(f"Needs You ({len(asks)})"))
-        ask_identity: dict[str, str] = {}
-        if len(asks) > 1:
-            menu_colors = getattr(getattr(target, "settings", None), "colors", None)
-            ask_identity = colors_module.identity_colors_for_agents(
-                [status.agent_id for status in asks],
-                groups=colors_module.identity_groups_for_statuses(asks, menu_colors),
-            )
-        for status in asks:
-            dot = None
-            if getattr(target, "settings", None) is not None:
-                dot = target.settings.colors.session_color(status.agent_id)
-            menu.addItem_(
-                build_session_menu_item(
-                    status,
-                    snapshot.collected_at,
-                    target,
-                    identity_color=dot or ask_identity.get(status.agent_id),
-                )
-            )
-        menu.addItem_(NSMenuItem.separatorItem())
-
-    menu.addItem_(disabled_menu_item("Agents"))
-
-    statuses = recent_statuses(snapshot)
-    if not statuses:
-        # The empty state teaches instead of dead-ending: a brand-new
-        # user's first open should say what will happen next. With zero
-        # hooks installed the old teaching text ("start Claude Code --
-        # sessions appear here") could never come true, so that case
-        # gets an enabled row straight into Setup instead. The probe is
-        # cached: detector() hits the filesystem per provider, and this
-        # runs on every menu build.
-        menu.addItem_(disabled_menu_item("No agents yet"))
-        hooks_probe = getattr(target, "_menu_hooks_probe", None)
-        now_probe = time.monotonic()
-        if hooks_probe is None or now_probe - hooks_probe[0] > 30.0:
-            try:
-                any_hooks = any(
-                    provider_hooks_installed(provider_spec(provider).detector(None))
-                    for provider in HOOK_PROVIDERS
-                )
-            except Exception:
-                any_hooks = True
-            target._menu_hooks_probe = (now_probe, any_hooks)
-        else:
-            any_hooks = hooks_probe[1]
-        if any_hooks:
-            menu.addItem_(
-                disabled_menu_item("Start Claude Code or Codex -- sessions appear here")
-            )
-        else:
-            connect_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                "Connect your agents in Setup\u2026", "openSetup:", ""
-            )
-            connect_item.setTarget_(target)
-            menu.addItem_(connect_item)
+    browser_projection = _canonical_agent_browser_projection(snapshot, target)
+    if browser_projection is None:
+        menu.addItem_(build_agent_mailbox_menu_item(snapshot, target))
     else:
-        # "Color = agent": with several sessions, each row leads with
-        # its identity dot -- the same hue the LEDs and Screen Bar use
-        # for that session -- so the mapping is learnable at a glance.
-        identity: dict[str, str] = {}
-        if len(statuses) > 1:
-            menu_colors = getattr(getattr(target, "settings", None), "colors", None)
-            identity = colors_module.identity_colors_for_agents(
-                [status.agent_id for status in statuses],
-                groups=colors_module.identity_groups_for_statuses(statuses, menu_colors),
-            )
-        subagent_groups = active_subagents_by_parent(snapshot)
-        cleared_ids = getattr(target, "cleared_session_ids", set())
-        unseen_ids = {
-            unseen.agent_id for unseen in unseen_completions(snapshot, target)
-        }
-        working_since = getattr(target, "working_since_by_agent", {})
-        # With SEVERAL providers live, small provider headers keep the
-        # 2-Claude-plus-Codex reality scannable; a single provider
-        # renders exactly as before.
-        providers_live = []
-        for status in statuses:
-            if status.provider not in providers_live:
-                providers_live.append(status.provider)
-        show_provider_headers = len(providers_live) > 1
-        if show_provider_headers:
-            # Stable regroup: provider blocks in first-appearance order,
-            # priority order preserved inside each block.
-            statuses = [
-                status
-                for provider in providers_live
-                for status in statuses
-                if status.provider == provider
-            ]
-        last_provider_header = None
-        for status in statuses:
-            if status.mode == AgentMode.COMPLETED and status.agent_id in cleared_ids:
-                continue
-            if show_provider_headers and status.provider != last_provider_header:
-                last_provider_header = status.provider
-                menu.addItem_(disabled_menu_item(status.provider.title()))
-            dot_color = None
-            if getattr(target, "settings", None) is not None:
-                dot_color = target.settings.colors.session_color(status.agent_id)
-            dot_color = dot_color or identity.get(status.agent_id)
-            children = subagent_groups.pop(status.agent_id, [])
-            menu.addItem_(
-                build_session_menu_item(
-                    status,
-                    snapshot.collected_at,
-                    target,
-                    identity_color=dot_color,
-                    title_suffix=session_row_suffix(
-                        status,
-                        worker_count=len(children),
-                        working_since=working_since.get(status.agent_id),
-                        unseen_done=status.agent_id in unseen_ids,
-                    ),
-                )
-            )
-            # Its running sub-agents roll up into ONE submenu row --
-            # three sessions each spawning a dozen workers used to
-            # balloon the top level; now the top level is main
-            # sessions, and the workers are one hover away, every row
-            # still a real click-to-jump item in the family's color.
-            if children:
-                menu.addItem_(
-                    build_worker_rollup_item(
-                        children, snapshot.collected_at, target, dot_color
-                    )
-                )
-        # Sub-agents whose parent session isn't visible (rare: parent
-        # aged out while workers run on) still get a rollup -- labeled,
-        # so it doesn't read as a stray floating row.
-        for children in subagent_groups.values():
-            if children:
-                orphan = build_worker_rollup_item(
-                    children, snapshot.collected_at, target, None
-                )
-                orphan.setTitle_(orphan.title() + " (session ended)")
-                menu.addItem_(orphan)
+        actions_by_work_key = _canonical_operator_actions(
+            getattr(target, "current_operator_state", None),
+            target,
+        )
+        for item in build_agent_root_items(
+            browser_projection,
+            actions_by_work_key=actions_by_work_key,
+            target=target,
+        ):
+            menu.addItem_(item)
+        action_error = getattr(target, "operator_action_error", None)
+        if type(action_error) is str and action_error:
+            menu.addItem_(disabled_menu_item(action_error))
+    statuses = recent_statuses(snapshot)
 
     focus_summary = (
         target.active_focus_summary()
@@ -7377,6 +13284,8 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         # user is already looking.
         menu.addItem_(disabled_menu_item(f"Focus: {focus_summary}"))
 
+    menu.addItem_(NSMenuItem.separatorItem())
+    menu.addItem_(build_usage_menu_item(target))
     menu.addItem_(NSMenuItem.separatorItem())
     menu.addItem_(disabled_menu_item("Devices"))
     # A device whose writes are failing must say so HERE, not only in
@@ -7555,7 +13464,7 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         menu.addItem_(tip_item)
 
     quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Quit",
+        "Quit SidePulse",
         "quit:",
         "q",
     )
@@ -7915,6 +13824,26 @@ def choose_debug_export_path(format_name: str) -> Path | None:
     return Path(str(url.path()))
 
 
+def choose_operator_export_path(kind: str) -> Path | None:
+    if kind not in {"history", "diagnostics"}:
+        return None
+    panel = NSSavePanel.savePanel()
+    if kind == "history":
+        panel.setTitle_("Export SidePulse History")
+        panel.setNameFieldStringValue_("sidepulse-history.json")
+    else:
+        panel.setTitle_("Export SidePulse Diagnostics")
+        panel.setNameFieldStringValue_("sidepulse-diagnostics.json")
+    if hasattr(panel, "setAllowedFileTypes_"):
+        panel.setAllowedFileTypes_(["json"])
+    if panel.runModal() != 1:
+        return None
+    url = panel.URL()
+    if url is None:
+        return None
+    return Path(str(url.path()))
+
+
 def debug_log_status_text() -> str:
     path = default_status_audit_log_path()
     try:
@@ -7954,9 +13883,12 @@ def format_byte_count(size: int) -> str:
 SETTINGS_SIDEBAR_ITEMS: tuple[tuple[str, str], ...] = (
     ("header:you", "YOU"),
     ("profile", "Profile"),
+    ("history", "History"),
+    ("capacity", "Capacity"),
     ("header:setup", "SET UP"),
     ("devices", "Devices"),
     ("agents", "Agents"),
+    ("installed_agents", "Installed Agents"),
     ("header:looks", "LOOKS"),
     ("color_studio", "Color Studio"),
     ("colors_screen_bar", "Screen Bar"),
@@ -7971,8 +13903,11 @@ SETTINGS_SIDEBAR_ITEMS: tuple[tuple[str, str], ...] = (
 DEFAULT_SETTINGS_PANE = "profile"
 SIDEBAR_ICONS: dict[str, str] = {
     "profile": "person.crop.circle",
+    "history": "clock.arrow.circlepath",
+    "capacity": "gauge.with.dots.needle.67percent",
     "devices": "cpu",
     "agents": "sparkles",
+    "installed_agents": "shippingbox",
     "color_studio": "paintpalette",
     "colors_screen_bar": "menubar.rectangle",
     "animations": "film",
@@ -7984,23 +13919,45 @@ SIDEBAR_ICONS: dict[str, str] = {
 
 
 class UsageGraphView(NSView):
-    """Seven day bars (Claude spend in Claude's brand orange, Codex
-    tokens in OpenAI green, normalized per series) over an hourly
-    session sparkline for today. Flat, no dependencies, redrawn only
-    when data changes."""
+    """One calm shared-axis chart for the selected period and metric."""
+
+    PROVIDER_COLORS: ClassVar[dict[str, str]] = {
+        "claude": "#D97757",
+        "codex": "#10A37F",
+        "opencode": "#7C6CF2",
+        "google": "#4285F4",
+    }
 
     def initWithFrame_(self, frame):
         self = objc.super(UsageGraphView, self).initWithFrame_(frame)
         if self is None:
             return None
-        self.day_bars = []
-        self.hourly = []
+        self.model = {}
         return self
 
-    def setData_hourly_(self, day_bars, hourly):
-        self.day_bars = list(day_bars or [])
-        self.hourly = list(hourly or [])
+    def setModel_(self, model):
+        self.model = dict(model) if isinstance(model, dict) else {}
         self.setNeedsDisplay_(True)
+
+    def setData_hourly_(self, day_bars, hourly):
+        """Compatibility adapter for old tests and an in-flight old publish."""
+        del hourly
+        bars = list(day_bars or [])
+        self.setModel_(
+            {
+                "metric": "tokens",
+                "labels": tuple(bar.get("label", "") for bar in bars),
+                "series": (
+                    {
+                        "provider_id": "codex",
+                        "values": tuple(bar.get("codex_tokens", 0) for bar in bars),
+                    },
+                ),
+                "scale_max": usage_stats.nice_usage_scale(
+                    max((bar.get("codex_tokens", 0) for bar in bars), default=0)
+                ),
+            }
+        )
 
     def isFlipped(self):
         return False
@@ -8008,104 +13965,106 @@ class UsageGraphView(NSView):
     def drawRect_(self, _rect):
         bounds = self.bounds().size
         width, height = bounds.width, bounds.height
-        if width <= 0 or not self.day_bars:
+        model = self.model
+        series = tuple(model.get("series") or ())
+        labels = tuple(model.get("labels") or ())
+        if width <= 0 or height <= 0:
             return
-        spark_height = 24.0
-        label_height = 14.0
-        bars_bottom = spark_height + label_height + 6.0
-        bars_height = max(10.0, height - bars_bottom - 16.0)
-        count = len(self.day_bars)
-        slot = width / count
-        max_cost = max((bar["claude_cost"] for bar in self.day_bars), default=0.0) or 1.0
-        max_tokens = max((bar["codex_tokens"] for bar in self.day_bars), default=0) or 1
-        claude_color = nscolor_from_hex("#D97757")
-        codex_color = nscolor_from_hex("#10A37F")
+        left = 50.0
+        right = 10.0
+        bottom = 22.0
+        top = 18.0
+        plot_width = max(1.0, width - left - right)
+        plot_height = max(1.0, height - bottom - top)
+        metric = str(model.get("metric") or "tokens")
+        scale_max = max(1.0, float(model.get("scale_max") or 1.0))
         label_attrs = {
             NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
+            NSFontAttributeName: NSFont.systemFontOfSize_(9.5),
         }
-        # Baseline hairline (the T3/CodexBar look: bars sit ON a line).
-        NSColor.tertiaryLabelColor().colorWithAlphaComponent_(0.35).setFill()
-        NSBezierPath.bezierPathWithRect_(
-            ((0.0, bars_bottom - 1.0), (width, 1.0))
-        ).fill()
-        # Series maxima as tiny axis captions in the top corners.
-        cost_caption = NSString.stringWithString_(f"${max_cost:,.0f}")
-        cost_caption.drawAtPoint_withAttributes_((2.0, height - 13.0), label_attrs)
-        token_caption = NSString.stringWithString_(
-            f"{max_tokens / 1_000_000_000:.1f}B tok"
-            if max_tokens >= 1_000_000_000
-            else f"{max_tokens / 1_000_000:.0f}M tok"
+        for grid_index in range(4):
+            fraction = grid_index / 3.0
+            y = bottom + plot_height * fraction
+            NSColor.separatorColor().colorWithAlphaComponent_(0.22).setFill()
+            NSBezierPath.bezierPathWithRect_(((left, y), (plot_width, 0.5))).fill()
+            value = scale_max * fraction
+            label = NSString.stringWithString_(
+                _format_usage_axis_value(value, metric)
+            )
+            label_size = label.sizeWithAttributes_(label_attrs)
+            label.drawAtPoint_withAttributes_(
+                (left - label_size.width - 7.0, y - label_size.height / 2.0),
+                label_attrs,
+            )
+
+        if not series:
+            empty = NSString.stringWithString_("No activity in this range")
+            empty_size = empty.sizeWithAttributes_(label_attrs)
+            empty.drawAtPoint_withAttributes_(
+                (
+                    left + (plot_width - empty_size.width) / 2.0,
+                    bottom + (plot_height - empty_size.height) / 2.0,
+                ),
+                label_attrs,
+            )
+            return
+
+        count = max(
+            (len(tuple(provider_series.get("values") or ())) for provider_series in series),
+            default=0,
         )
-        token_size = token_caption.sizeWithAttributes_(label_attrs)
-        token_caption.drawAtPoint_withAttributes_(
-            (width - token_size.width - 2.0, height - 13.0), label_attrs
-        )
-        # Bars: side-by-side down to ~4pt slots, overlaid single-pixel
-        # columns below that -- a YEAR must render, not vanish (the old
-        # half-minus-one math went NEGATIVE at 365 bars and drew nothing).
-        paired = slot >= 4.0
-        radius = min(2.0, slot * 0.2)
-        for index, bar in enumerate(self.day_bars):
-            left = slot * index
-            claude_h = bars_height * (bar["claude_cost"] / max_cost)
-            codex_h = bars_height * (bar["codex_tokens"] / max_tokens)
-            if paired:
-                series_width = max(1.0, (slot * 0.72) / 2.0)
-                gap = min(1.0, slot * 0.06)
-                start = left + (slot - (series_width * 2.0 + gap)) / 2.0
-                if bar["claude_cost"] > 0:
-                    claude_color.setFill()
-                    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                        ((start, bars_bottom), (series_width, max(1.5, claude_h))),
-                        radius,
-                        radius,
-                    ).fill()
-                if bar["codex_tokens"] > 0:
-                    codex_color.setFill()
-                    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                        (
-                            (start + series_width + gap, bars_bottom),
-                            (series_width, max(1.5, codex_h)),
-                        ),
-                        radius,
-                        radius,
-                    ).fill()
-            else:
-                column = max(0.8, slot * 0.9)
-                if bar["codex_tokens"] > 0:
-                    codex_color.colorWithAlphaComponent_(0.75).setFill()
-                    NSBezierPath.bezierPathWithRect_(
-                        ((left, bars_bottom), (column, max(1.0, codex_h)))
-                    ).fill()
-                if bar["claude_cost"] > 0:
-                    claude_color.setFill()
-                    NSBezierPath.bezierPathWithRect_(
-                        ((left, bars_bottom), (column, max(1.0, claude_h)))
-                    ).fill()
-            label_text = bar.get("label", "")
-            if label_text:
-                label = NSString.stringWithString_(label_text)
-                size = label.sizeWithAttributes_(label_attrs)
-                label.drawAtPoint_withAttributes_(
-                    (
-                        min(max(0.0, left + slot / 2.0 - size.width / 2.0), width - size.width),
-                        spark_height + 2.0,
-                    ),
-                    label_attrs,
+        if count <= 0:
+            return
+        step = plot_width / max(1, count - 1)
+        for provider_series in series:
+            provider_id = str(provider_series.get("provider_id") or "")
+            values = tuple(provider_series.get("values") or ())
+            if not values:
+                continue
+            color = nscolor_from_hex(
+                self.PROVIDER_COLORS.get(provider_id, "#8B93A7")
+            )
+            line = NSBezierPath.bezierPath()
+            area = NSBezierPath.bezierPath()
+            for index, raw_value in enumerate(values):
+                x = left + step * index
+                y = bottom + plot_height * min(
+                    1.0,
+                    max(0.0, float(raw_value)) / scale_max,
                 )
-        if self.hourly:
-            peak = max(self.hourly) or 1
-            step = width / len(self.hourly)
-            NSColor.tertiaryLabelColor().setFill()
-            for hour, value in enumerate(self.hourly):
-                if value <= 0:
-                    continue
-                bar_h = max(1.5, (spark_height - 4.0) * value / peak)
-                NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                    ((step * hour + 1.0, 0.0), (max(1.5, step - 2.0), bar_h)),
-                    1.0,
-                    1.0,
-                ).fill()
+                if index == 0:
+                    line.moveToPoint_((x, y))
+                    area.moveToPoint_((x, bottom))
+                    area.lineToPoint_((x, y))
+                else:
+                    line.lineToPoint_((x, y))
+                    area.lineToPoint_((x, y))
+            area.lineToPoint_((left + step * (len(values) - 1), bottom))
+            area.closePath()
+            color.colorWithAlphaComponent_(0.09).setFill()
+            area.fill()
+            color.colorWithAlphaComponent_(0.92).setStroke()
+            line.setLineWidth_(2.0)
+            line.stroke()
+
+        for index, label_text in enumerate(labels):
+            if not label_text or index >= count:
+                continue
+            label = NSString.stringWithString_(str(label_text))
+            size = label.sizeWithAttributes_(label_attrs)
+            x = left + step * index - size.width / 2.0
+            label.drawAtPoint_withAttributes_(
+                (min(max(left, x), width - right - size.width), 3.0),
+                label_attrs,
+            )
+
+
+def _format_usage_axis_value(value: float, metric: str) -> str:
+    if metric == "cost":
+        return f"${value:,.0f}" if value >= 1.0 else f"${value:.2f}"
+    if metric == "sessions":
+        return f"{value:,.0f}"
+    return usage_stats.compact_token_count(round(value))
 
 
 def add_color_swatch(parent, hex_color: str, x: int, y: int, target, selector: str, represented: dict):
@@ -8568,7 +14527,7 @@ def open_terminal_setup_command(command: str, *, filename: str = "install-sleep-
     script_path.write_text(script, encoding="utf-8")
     script_path.chmod(0o700)
     subprocess.Popen(
-        ["/usr/bin/open", str(script_path)],
+        [str(trusted_system_tool("open")), str(script_path)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -8720,27 +14679,14 @@ def status_bar_device_sort_key(candidate: DeviceCandidate) -> tuple[int, str]:
     return (len(STATUS_BAR_DEVICE_PRIORITY), candidate.root.name.lower())
 
 
-def deliver_macos_notification(
-    title: str, body: str, user_info: dict | None = None
-) -> None:
-    """One banner through Notification Center. A plain module function
-    so tests can patch the seam -- ObjC class selectors can't be
-    mock-patched (the un-patch delattr fails on the ObjC class).
-    ``user_info`` rides along so clicking the banner can jump to the
-    session that posted it."""
-    from AppKit import NSUserNotification, NSUserNotificationCenter
-
-    notification = NSUserNotification.alloc().init()
-    notification.setTitle_(title)
-    notification.setInformativeText_(body)
-    if user_info:
-        notification.setUserInfo_(user_info)
-    NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(
-        notification
-    )
-
-
-def build_worker_rollup_item(children, collected_at, target, dot_color):
+def build_worker_rollup_item(
+    children,
+    collected_at,
+    target,
+    dot_color,
+    *,
+    max_visible: int | None = None,
+):
     """One indented '\u21b3 N workers' row whose submenu holds EVERY
     worker as a real session item -- busiest first, active count in
     the title."""
@@ -8756,12 +14702,16 @@ def build_worker_rollup_item(children, collected_at, target, dot_color):
         children,
         key=lambda c: (c.mode == AgentMode.COMPLETED, -c.updated_at.timestamp()),
     )
-    for child in ordered:
+    visible = ordered if max_visible is None else ordered[: max(0, max_visible)]
+    for child in visible:
         submenu.addItem_(
             build_session_menu_item(
                 child, collected_at, target, identity_color=dot_color
             )
         )
+    overflow_count = len(ordered) - len(visible)
+    if overflow_count:
+        submenu.addItem_(disabled_menu_item(f"{overflow_count} more"))
     rollup.setSubmenu_(submenu)
     return rollup
 
@@ -9157,9 +15107,11 @@ def unseen_completions(snapshot, target) -> list[AgentStatus]:
         if status.event_name == "SessionEnd":
             # The user closed that terminal themselves -- not news.
             continue
-        if (
-            snapshot.collected_at - status.updated_at
-        ).total_seconds() > COMPLETED_VISIBLE_SECONDS:
+        if not is_recent(
+            snapshot.collected_at,
+            status.updated_at,
+            COMPLETED_VISIBLE_SECONDS,
+        ):
             continue
         if status.agent_id in cleared:
             continue
@@ -9186,14 +15138,21 @@ def recent_statuses(snapshot) -> list[AgentStatus]:
         # Stop = a turn finished (news). SessionEnd = the user closed
         # that terminal (61 of those were badging as "new" at once).
         and status.event_name != "SessionEnd"
-        and (snapshot.collected_at - status.updated_at).total_seconds()
-        <= COMPLETED_VISIBLE_SECONDS
+        and is_recent(
+            snapshot.collected_at,
+            status.updated_at,
+            COMPLETED_VISIBLE_SECONDS,
+        )
     ]
     finished_rows.sort(key=lambda status: -status.updated_at.timestamp())
     statuses.extend(finished_rows[:3])
     if not statuses:
         statuses = [
-            status for status in snapshot.stale_statuses if not status.is_subagent
+            status
+            for status in snapshot.stale_statuses
+            if not status.is_subagent
+            and bounded_age_seconds(snapshot.collected_at, status.updated_at)
+            != float("inf")
         ]
     statuses.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
     return statuses[:12]
@@ -9215,16 +15174,14 @@ def active_subagents_by_parent(snapshot) -> dict[str, list[AgentStatus]]:
     return groups
 
 
-def ask_statuses(snapshot) -> list[AgentStatus]:
-    """The sessions currently waiting on the user -- the Ask Inbox.
-    Main sessions only: a sub-agent's ask is its parent's problem, and
-    counting them made "Needs You" claim asks nobody could answer."""
-    return [
-        status
-        for status in snapshot.statuses
-        if not status.is_subagent
-        and status.mode in (AgentMode.WAITING_FOR_INPUT, AgentMode.BLOCKED_ERROR)
-    ]
+def ask_statuses(projection, settings=None) -> list[AgentStatus]:
+    """Source rows for the projection's proven actionable requests."""
+    if not isinstance(projection, AttentionProjection):
+        projection = project_attention(
+            projection,
+            settings or AgentMonitorSettings(),
+        )
+    return [row.source_status for row in projection.actionable_attention]
 
 
 def menu_title_for_status(status: AgentStatus, now: datetime) -> str:
@@ -9348,24 +15305,38 @@ def open_url(url: str) -> None:
         NSWorkspace.sharedWorkspace().openURL_(ns_url)
 
 
-def open_terminal_command(command: str) -> None:
-    script = "\n".join(
-        [
-            'tell application "Terminal"',
-            "  activate",
-            f"  do script {applescript_quote(command)}",
-            "end tell",
-        ]
+def frontmost_terminal_bundle_identifier() -> str | None:
+    """Return the exact frontmost application identity, if AppKit exposes one."""
+    try:
+        application = NSWorkspace.sharedWorkspace().frontmostApplication()
+        bundle_identifier = application.bundleIdentifier() if application is not None else None
+    except Exception:
+        return None
+    if type(bundle_identifier) is not str:
+        return None
+    value = bundle_identifier.strip()
+    return value or None
+
+
+def open_terminal_command(
+    command: str,
+    *,
+    terminal_bundle_identifier: str | None = None,
+) -> TerminalLaunchPlan:
+    requested_bundle_identifier = (
+        terminal_bundle_identifier
+        if terminal_bundle_identifier is not None
+        else frontmost_terminal_bundle_identifier()
     )
+    plan = resolve_terminal_launch(requested_bundle_identifier)
     subprocess.Popen(
-        ["/usr/bin/osascript", "-e", script],
+        terminal_launch_arguments(plan, command),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-
-
-def applescript_quote(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    if plan.fallback_copy is not None:
+        log_status_bar(plan.fallback_copy)
+    return plan
 
 
 def run_status_bar() -> None:
@@ -9408,6 +15379,7 @@ from .settings_window import (  # noqa: E402, F401 -- re-export: tests and
     FOCUS_DIM_CHOICES,
     LID_ANIMATION_PRESETS,
     MODE_COLOR_DISPLAY_LABELS,
+    OPERATOR_HISTORY_FIELD_MANIFEST,
     SCREEN_BAR_PREVIEW_NOTCH_WIDTH,
     SCREEN_BAR_PREVIEW_WING_WIDTH,
     SIGNAL_PREVIEW_SIZE,
@@ -9423,6 +15395,7 @@ from .settings_window import (  # noqa: E402, F401 -- re-export: tests and
     _build_debug_pane,
     _build_devices_pane,
     _build_focus_pane,
+    _build_history_pane,
     _build_led_behavior_pane,
     _build_lid_animations_pane,
     _build_lid_preset_row,
@@ -9431,7 +15404,6 @@ from .settings_window import (  # noqa: E402, F401 -- re-export: tests and
     _build_settings_pane,
     _mini_led_view,
     _mode_animation_thumb_program,
-    _signal_preview_color,
     _solid_swatch_image,
     build_calibration_popover_content,
     build_settings_window,

@@ -25,6 +25,7 @@ from .led_status import (
     led_count_for_target,
     normalize_brightness,
 )
+from .trusted_tools import trusted_system_tool
 
 BATTERY_LOW_RED = "#FF2600"
 BATTERY_MID_AMBER = "#FFB000"
@@ -159,7 +160,7 @@ def read_battery_snapshot(
     runner: CommandRunner = subprocess.run,
 ) -> BatterySnapshot:
     result = runner(
-        ["ioreg", "-r", "-n", "AppleSmartBattery", "-a"],
+        [str(trusted_system_tool("ioreg")), "-r", "-n", "AppleSmartBattery", "-a"],
         check=True,
         capture_output=True,
     )
@@ -404,6 +405,7 @@ def write_battery_to_leds(
         device_path=target,
         file_name=file_name,
         dry_run=dry_run,
+        preserve_existing_inode=not dry_run,
     )
     return BatteryLedWrite(
         target=written_target,
@@ -498,6 +500,7 @@ class BatteryLedController:
                 device_path=target,
                 file_name=self.file_name,
                 dry_run=self.dry_run,
+                preserve_existing_inode=not self.dry_run,
             )
         except (DeviceWriteError, OSError) as exc:
             self.last_program = program
@@ -606,7 +609,7 @@ def default_full_charge_watts() -> float:
 
     try:
         result = subprocess.run(
-            ["system_profiler", "SPHardwareDataType", "-json"],
+            [str(trusted_system_tool("system_profiler")), "SPHardwareDataType", "-json"],
             check=True,
             capture_output=True,
             text=True,
@@ -635,7 +638,16 @@ def default_full_charge_watts() -> float:
 def read_product_tree_text() -> str:
     try:
         result = subprocess.run(
-            ["ioreg", "-p", "IODeviceTree", "-r", "-d", "1", "-n", "product"],
+            [
+                str(trusted_system_tool("ioreg")),
+                "-p",
+                "IODeviceTree",
+                "-r",
+                "-d",
+                "1",
+                "-n",
+                "product",
+            ],
             check=True,
             capture_output=True,
             text=True,

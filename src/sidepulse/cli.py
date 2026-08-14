@@ -18,6 +18,14 @@ from .battery import (
 )
 from .collector import AgentMonitor, SourceSpec, default_sources
 from .device_writer import DEFAULT_FILE_NAME, DeviceWriteError, write_led_program
+from .doctor import (
+    PUBLIC_COLLECTION_ERROR_MESSAGE,
+    DoctorExportError,
+    collect_diagnostics,
+    encode_diagnostic_result,
+    render_diagnostic_result,
+    write_diagnostic_export,
+)
 from .hook import hook_log_main
 from .install import (
     install_provider_hooks,
@@ -34,7 +42,6 @@ from .models import AgentStatus
 from .providers import (
     HOOK_PROVIDERS,
     default_log_path,
-    detect_provider_configs,
     provider_spec,
 )
 from .settings import (
@@ -43,6 +50,7 @@ from .settings import (
     load_settings,
     save_settings,
 )
+from .trusted_tools import trusted_system_tool
 
 
 def main(argv: list[str] | None = None, *, prog: str = "agent-monitor") -> int:
@@ -71,6 +79,12 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
         description="SidePulse command line tools.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    doctor = subparsers.add_parser(
+        "doctor",
+        help="Show privacy-safe local SidePulse diagnostics.",
+    )
+    add_doctor_arguments(doctor)
+    doctor.set_defaults(func=cmd_doctor)
     subparsers.add_parser(
         "agent-monitor",
         help="Install hooks and show live AI agent statuses.",
@@ -501,7 +515,13 @@ def cmd_sidepulse_sdejectguard_logs(args: argparse.Namespace) -> int:
             return 1
         try:
             return subprocess.run(
-                ["tail", "-n", str(args.lines), "-f", *(str(path) for path in existing_paths)],
+                [
+                    str(trusted_system_tool("tail")),
+                    "-n",
+                    str(args.lines),
+                    "-f",
+                    *(str(path) for path in existing_paths),
+                ],
                 check=False,
             ).returncode
         except KeyboardInterrupt:
@@ -582,8 +602,11 @@ def build_parser(prog: str = "agent-monitor") -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    doctor = subparsers.add_parser("doctor", help="Show detected agent hook config.")
-    doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    doctor = subparsers.add_parser(
+        "doctor",
+        help="Show privacy-safe local SidePulse diagnostics.",
+    )
+    add_doctor_arguments(doctor)
     doctor.set_defaults(func=cmd_doctor)
 
     status = subparsers.add_parser("status", help="Show current aggregate status once.")
@@ -692,19 +715,46 @@ def add_provider_log_arguments(parser: argparse.ArgumentParser) -> None:
         )
 
 
-def cmd_doctor(args: argparse.Namespace) -> int:
-    configs = detect_provider_configs()
-    payload = {"providers": [config.to_dict() for config in configs]}
-    if args.json:
-        print(json.dumps(payload, indent=2))
-        return 0
+def add_doctor_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    parser.add_argument(
+        "--export",
+        type=Path,
+        help="Save one bounded private JSON diagnostic file.",
+    )
 
-    for config in configs:
-        print(f"{config.provider}:")
-        print(f"  config: {config.config_path} ({'found' if config.exists else 'missing'})")
-        print(f"  hooks enabled: {config.hooks_enabled}")
-        print(f"  events: {', '.join(config.hook_events) if config.hook_events else '-'}")
-        print(f"  logs: {', '.join(str(path) for path in config.log_paths) if config.log_paths else '-'}")
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    try:
+        result = collect_diagnostics()
+    except Exception:
+        print(
+            f"sidepulse doctor: {PUBLIC_COLLECTION_ERROR_MESSAGE}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        output = (
+            encode_diagnostic_result(result).decode("ascii")
+            if args.json
+            else render_diagnostic_result(result) + "\n"
+        )
+    except Exception:
+        print(
+            f"sidepulse doctor: {PUBLIC_COLLECTION_ERROR_MESSAGE}",
+            file=sys.stderr,
+        )
+        return 1
+    sys.stdout.write(output)
+
+    if args.export is not None:
+        try:
+            write_diagnostic_export(args.export, result)
+        except DoctorExportError as error:
+            print(f"sidepulse doctor: {error.public_message}", file=sys.stderr)
+            return 1
+        print("diagnostic export: saved")
     return 0
 
 

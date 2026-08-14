@@ -22,8 +22,10 @@ from AppKit import (
     NSBackingStoreBuffered,
     NSBezierPath,
     NSButton,
+    NSButtonTypeRadio,
     NSClickGestureRecognizer,
     NSColor,
+    NSFont,
     NSImage,
     NSLayoutConstraint,
     NSLayoutConstraintOrientationHorizontal,
@@ -33,23 +35,503 @@ from AppKit import (
     NSView,
     NSWindow,
     NSWindowStyleMaskClosable,
-    NSWindowStyleMaskMiniaturizable,
     NSWindowStyleMaskTitled,
 )
 
 from .colors import ANIMATION_MODE_KEYS, CURATED_PALETTE, matching_preset
 from .led_status import ANIMATION_STYLE_CHOICES, program_for_display_state
+from .operator_accessibility import normalize_semantic_text_scale
+from .provider_capacity import CapacityPolicyState, provider_capacity_policies
 from .session_actions import provider_session_opener_providers
 from .settings import (
     LID_ANIMATION_CLOSED,
     LID_ANIMATION_CLOSED_ACTIVE,
     LID_ANIMATION_OPEN,
     LID_ANIMATION_OPEN_ACTIVE,
-    NOTIFICATION_APP_IMESSAGE,
-    NOTIFICATION_APP_TELEGRAM,
-    NOTIFICATION_APP_WHATSAPP,
 )
 from .virtual_device import LED_COUNT
+
+OPERATOR_HISTORY_FIELD_MANIFEST: tuple[str, ...] = (
+    "day_key",
+    "timezone_offset_minutes",
+    "provider_id",
+    "started",
+    "needs_user",
+    "completed",
+    "failed",
+    "acknowledged",
+    "active_duration_bands",
+    "attention_wait_bands",
+    "primary_count",
+    "worker_count",
+    "source_recoveries",
+    "device_recoveries",
+    "coverage",
+    "sample_count",
+)
+
+
+def _make_history_radio_group(
+    target,
+    choices: tuple[tuple[str, int], ...],
+    *,
+    selector: str,
+    selected: int,
+    label: str,
+    scale: float,
+):
+    group = native_ui.make_stack(
+        orientation="vertical" if scale >= 1.75 else "horizontal",
+        spacing=native_ui.SPACE_S,
+    )
+    group.setAccessibilityLabel_(label)
+    group.setAccessibilityRole_("AXRadioGroup")
+    controls: dict[int, object] = {}
+    for title, value in choices:
+        button = NSButton.alloc().init()
+        button.setButtonType_(NSButtonTypeRadio)
+        button.setTitle_(title)
+        button.setTarget_(target)
+        button.setAction_(selector)
+        button.setRepresentedObject_(value)
+        button.setState_(1 if value == selected else 0)
+        button.setAccessibilityLabel_(title)
+        button.setFont_(NSFont.systemFontOfSize_(13.0 * scale))
+        if button.accessibilityRole() == "AXUnknown":
+            button.setAccessibilityRole_("AXRadioButton")
+        controls[value] = button
+        group.addArrangedSubview_(button)
+    return group, controls
+
+
+def _build_history_pane(target: StatusBarController):
+    scale = normalize_semantic_text_scale(
+        getattr(target, "semantic_text_scale_percent", 100)
+    )
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+
+    retention_outer, retention_inner = native_ui.make_card("Private History")
+    disclosure = native_ui.make_wrapping_label(
+        "Before enabling, SidePulse stores derived metadata only for the "
+        "selected retention period. It does not store prompts, messages, "
+        "responses, commands, titles, paths, raw errors, or navigation targets.",
+        secondary=True,
+        size=11.0 * scale,
+        max_width=560.0,
+    )
+    disclosure.setAccessibilityLabel_("History retention disclosure")
+    retention_inner.addArrangedSubview_(disclosure)
+    retention_group, retention_controls = _make_history_radio_group(
+        target,
+        (("Off", 0), ("7 Days", 7), ("30 Days", 30), ("90 Days", 90)),
+        selector="changeOperatorHistoryRetention:",
+        selected=target.settings.operator_history_retention_days,
+        label="History retention",
+        scale=scale,
+    )
+    retention_inner.addArrangedSubview_(retention_group)
+    stack.addArrangedSubview_(retention_outer)
+
+    observation_outer, observation_inner = native_ui.make_card("Observation")
+    range_group, range_controls = _make_history_radio_group(
+        target,
+        (("Day", 1), ("7 Day", 7), ("30 Day", 30)),
+        selector="changeOperatorHistoryRange:",
+        selected=getattr(target, "operator_history_range_days", 1),
+        label="History range",
+        scale=scale,
+    )
+    observation_inner.addArrangedSubview_(range_group)
+    health = native_ui.make_wrapping_label(
+        "No Observation",
+        secondary=False,
+        size=13.0 * scale,
+        max_width=560.0,
+    )
+    health.setAccessibilityLabel_("History health")
+    summary = native_ui.make_wrapping_label(
+        "No operator history was observed in this range.",
+        secondary=True,
+        size=12.0 * scale,
+        max_width=560.0,
+    )
+    summary.setAccessibilityLabel_("History summary")
+    observation_inner.addArrangedSubview_(health)
+    observation_inner.addArrangedSubview_(summary)
+    stack.addArrangedSubview_(observation_outer)
+
+    fields_outer, fields_inner = native_ui.make_card("Stored Fields")
+    manifest = native_ui.make_wrapping_label(
+        ", ".join(OPERATOR_HISTORY_FIELD_MANIFEST),
+        secondary=True,
+        size=11.0 * scale,
+        max_width=560.0,
+    )
+    manifest.setAccessibilityLabel_("Stored history fields")
+    fields_inner.addArrangedSubview_(manifest)
+    stack.addArrangedSubview_(fields_outer)
+
+    reel_outer, reel_inner = native_ui.make_card("Current Run")
+    reel_copy = native_ui.make_wrapping_label(
+        "Current-run semantic events only. Up to 50 product-vocabulary "
+        "rows are kept in memory and are never persisted or exported.",
+        secondary=True,
+        size=11.0 * scale,
+        max_width=560.0,
+    )
+    reel = native_ui.make_wrapping_label(
+        "No current-run events.",
+        secondary=False,
+        size=11.0 * scale,
+        max_width=560.0,
+    )
+    reel.setAccessibilityLabel_("Current-run semantic events")
+    reel_inner.addArrangedSubview_(reel_copy)
+    reel_inner.addArrangedSubview_(reel)
+    stack.addArrangedSubview_(reel_outer)
+
+    export_outer, export_inner = native_ui.make_card("Local Export")
+    export_preview = native_ui.make_wrapping_label(
+        "History: sidepulse-history.json, up to 2 MiB. Diagnostics: "
+        "sidepulse-diagnostics.json, up to 512 KiB. Each export is a "
+        "separate local file. History contains retention_days and the "
+        "stored fields above. Diagnostics contains app_version, build_trust, "
+        "provider_health_counts, delivery_disposition_counts, "
+        "device_health_counts, and history_health. No upload or sharing "
+        "route is used.",
+        secondary=True,
+        size=11.0 * scale,
+        max_width=560.0,
+    )
+    export_inner.addArrangedSubview_(export_preview)
+    export_buttons = native_ui.make_stack(
+        orientation="horizontal",
+        spacing=native_ui.SPACE_S,
+    )
+    history_export = native_ui.make_button(
+        "Export History",
+        target,
+        "exportOperatorHistory:",
+    )
+    diagnostics_export = native_ui.make_button(
+        "Export Diagnostics",
+        target,
+        "exportOperatorDiagnostics:",
+    )
+    for button in (history_export, diagnostics_export):
+        button.setFont_(NSFont.systemFontOfSize_(13.0 * scale))
+        if button.accessibilityRole() == "AXUnknown":
+            button.setAccessibilityRole_("AXButton")
+    export_buttons.addArrangedSubview_(history_export)
+    export_buttons.addArrangedSubview_(diagnostics_export)
+    export_buttons.addArrangedSubview_(native_ui.make_hspacer())
+    export_inner.addArrangedSubview_(export_buttons)
+    stack.addArrangedSubview_(export_outer)
+
+    clear_outer, clear_inner = native_ui.make_card("Clear History")
+    clear_copy = native_ui.make_wrapping_label(
+        "Clear removes only SidePulse operator-history aggregates. It does "
+        "not clear mailbox preferences, capacity observations, or settings.",
+        secondary=True,
+        size=11.0 * scale,
+        max_width=560.0,
+    )
+    clear_button = native_ui.make_button(
+        "Clear History",
+        target,
+        "clearOperatorHistory:",
+    )
+    clear_button.setFont_(NSFont.systemFontOfSize_(13.0 * scale))
+    if clear_button.accessibilityRole() == "AXUnknown":
+        clear_button.setAccessibilityRole_("AXButton")
+    operation_status = native_ui.make_wrapping_label(
+        getattr(target, "_operator_history_operation_status", "") or "No history operation in progress.",
+        secondary=True,
+        size=11.0 * scale,
+        max_width=560.0,
+    )
+    operation_status.setAccessibilityLabel_("History operation status")
+    if operation_status.accessibilityRole() == "AXUnknown":
+        operation_status.setAccessibilityRole_("AXStaticText")
+    clear_inner.addArrangedSubview_(clear_copy)
+    clear_inner.addArrangedSubview_(clear_button)
+    clear_inner.addArrangedSubview_(operation_status)
+    stack.addArrangedSubview_(clear_outer)
+
+    keyboard_order = (
+        *retention_controls.values(),
+        *range_controls.values(),
+        history_export,
+        diagnostics_export,
+        clear_button,
+    )
+    for current, following in zip(
+        keyboard_order,
+        (*keyboard_order[1:], keyboard_order[0]),
+        strict=True,
+    ):
+        current.setNextKeyView_(following)
+    fields = {
+        "history_retention_disclosure": disclosure,
+        "history_retention_group": retention_group,
+        "history_retention_controls": retention_controls,
+        "history_range_group": range_group,
+        "history_range_controls": range_controls,
+        "history_health": health,
+        "history_summary": summary,
+        "history_field_manifest": manifest,
+        "history_semantic_reel": reel,
+        "history_export_preview": export_preview,
+        "history_operation_status": operation_status,
+        "history_keyboard_order": keyboard_order,
+    }
+    buttons = {
+        "export_history": history_export,
+        "export_diagnostics": diagnostics_export,
+        "clear_history": clear_button,
+    }
+    return native_ui.wrap_in_scroll_pane(stack), fields, buttons
+
+
+_PROVIDER_FAMILY_LABELS: dict[str, str] = {
+    "anthropic": "Anthropic",
+    "claude": "Claude",
+    "codex": "Codex",
+    "cursor": "Cursor",
+    "devin": "Devin and Windsurf",
+    "github": "GitHub",
+    "google": "Google",
+    "grok": "Grok",
+    "hermes": "Hermes",
+    "openai": "OpenAI",
+    "openclaw": "OpenClaw",
+    "opencode": "OpenCode",
+}
+
+_CAPACITY_PROFILE_LABELS: dict[str, str] = {
+    "openai-codex-consumer": "ChatGPT and Codex",
+    "openai-api-organization": "OpenAI API",
+    "anthropic-consumer": "Claude consumer plan",
+    "anthropic-team-enterprise": "Claude Team and Enterprise",
+    "anthropic-console-api": "Anthropic Console API",
+    "google-gemini-code-assist": "Gemini Code Assist",
+    "google-antigravity": "Google Antigravity",
+    "google-cloud-api": "Google Cloud API",
+    "github-copilot": "GitHub Copilot",
+    "cursor-team-organization": "Cursor Team and Organization",
+    "devin-windsurf-team": "Devin and Windsurf teams",
+    "opencode-upstream-delegation": "OpenCode",
+}
+
+
+def _installed_surface_state_copy(registration) -> str:
+    if registration.support in {
+        SurfaceSupportLevel.FULL,
+        SurfaceSupportLevel.LIFECYCLE,
+    }:
+        return "Not detected · Monitoring available"
+    if registration.support is SurfaceSupportLevel.CAPACITY:
+        return "Not detected · Capacity available"
+    if registration.support is SurfaceSupportLevel.INVENTORY:
+        return "Not detected · Detection only"
+    return "Not detected · Unsupported"
+
+
+def _build_installed_agents_pane(target: StatusBarController):
+    scale = normalize_semantic_text_scale(
+        getattr(target, "semantic_text_scale_percent", 100)
+    )
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    overview_outer, overview_inner = native_ui.make_card("Installed Coding Agents")
+    intro = native_ui.make_wrapping_label(
+        "SidePulse checks a bounded list of reviewed app, extension, and command "
+        "markers only while this pane is visible. Detection never starts an agent, "
+        "reads its conversations, or adds it to the live status menu.",
+        secondary=True,
+        size=11.0 * scale,
+        max_width=560.0,
+    )
+    intro.setAccessibilityLabel_("Installed coding agents privacy summary")
+    refresh_status = native_ui.make_wrapping_label(
+        "Open this pane to check installed coding agents.",
+        secondary=True,
+        size=11.0 * scale,
+        max_width=560.0,
+    )
+    refresh_status.setAccessibilityLabel_("Installed coding agents refresh status")
+    refresh = native_ui.make_button("Refresh", target, "refreshInstalledAgents:")
+    refresh.setAccessibilityLabel_("Refresh installed coding agents")
+    refresh.setFont_(NSFont.systemFontOfSize_(13.0 * scale))
+    refresh_row = native_ui.make_stack(
+        orientation="horizontal", spacing=native_ui.SPACE_S
+    )
+    refresh_row.addArrangedSubview_(refresh_status)
+    refresh_row.addArrangedSubview_(native_ui.make_hspacer())
+    refresh_row.addArrangedSubview_(refresh)
+    overview_inner.addArrangedSubview_(intro)
+    overview_inner.addArrangedSubview_(refresh_row)
+    stack.addArrangedSubview_(overview_outer)
+
+    status_fields: dict[tuple[str, str], object] = {}
+    grouped: dict[str, list[object]] = {}
+    for registration in installed_surface_registrations():
+        grouped.setdefault(registration.provider_id, []).append(registration)
+    for provider_id, registrations in grouped.items():
+        outer, inner = native_ui.make_card(
+            _PROVIDER_FAMILY_LABELS.get(provider_id, provider_id.title())
+        )
+        for registration in registrations:
+            status = native_ui.make_wrapping_label(
+                _installed_surface_state_copy(registration),
+                secondary=True,
+                size=11.0 * scale,
+                max_width=310.0,
+            )
+            status.setAccessibilityLabel_(f"{registration.label} status")
+            status_fields[(registration.provider_id, registration.surface_id)] = status
+            inner.addArrangedSubview_(
+                native_ui.make_row(
+                    registration.label,
+                    status,
+                    help_text=(
+                        "Product-owned inventory state only. Paths, commands, account "
+                        "labels, prompts, and provider errors are never shown."
+                    ),
+                )
+            )
+        stack.addArrangedSubview_(outer)
+
+    fields = {
+        "installed_agents_intro": intro,
+        "installed_agents_refresh_status": refresh_status,
+        "installed_agent_status_fields": status_fields,
+    }
+    buttons = {"refresh_installed_agents": refresh}
+    return native_ui.wrap_in_scroll_pane(stack), fields, buttons
+
+
+def _capacity_policy_copy(policy, active_sources: frozenset) -> tuple[str, str]:
+    if policy.state is CapacityPolicyState.OBSERVABLE:
+        if policy.source in active_sources:
+            return (
+                "Available locally",
+                "SidePulse can refresh this exact source without an account API key.",
+            )
+        return (
+            "Setup required",
+            "The reviewed source is not active in this build. No provider work runs.",
+        )
+    if policy.state is CapacityPolicyState.DETAIL_ONLY:
+        return (
+            "Permission required",
+            "Available only after an explicit opt-in to an official account API.",
+        )
+    if policy.state is CapacityPolicyState.LINK_ONLY:
+        return (
+            "Check provider",
+            "SidePulse does not read browser sessions or private provider endpoints.",
+        )
+    if policy.state is CapacityPolicyState.UPSTREAM_DELEGATED:
+        return (
+            "Uses model provider",
+            "OpenCode capacity belongs to its configured model provider.",
+        )
+    return ("Not observable", "No trustworthy provider capacity source is available.")
+
+
+def _build_capacity_pane(target: StatusBarController):
+    scale = normalize_semantic_text_scale(
+        getattr(target, "semantic_text_scale_percent", 100)
+    )
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+
+    live_outer, live_inner = native_ui.make_card("Current Capacity")
+    intro = native_ui.make_wrapping_label(
+        "Capacity is provider-specific. SidePulse shows only exact sources it can "
+        "bind safely, keeps API billing separate from subscription limits, and "
+        "never reads browser cookies or private provider endpoints.",
+        secondary=True,
+        size=11.0 * scale,
+        max_width=560.0,
+    )
+    intro.setAccessibilityLabel_("Capacity privacy and authority summary")
+    codex = native_ui.make_wrapping_label(
+        getattr(target, "codex_summary_text", None) or "Not observed yet",
+        secondary=True,
+        size=11.0 * scale,
+        max_width=340.0,
+    )
+    claude = native_ui.make_wrapping_label(
+        getattr(target, "claude_plan_text", None) or "Not observed yet",
+        secondary=True,
+        size=11.0 * scale,
+        max_width=340.0,
+    )
+    codex.setAccessibilityLabel_("Codex capacity status")
+    claude.setAccessibilityLabel_("Claude capacity status")
+    live_inner.addArrangedSubview_(intro)
+    live_inner.addArrangedSubview_(native_ui.make_row("Codex", codex))
+    live_inner.addArrangedSubview_(native_ui.make_row("Claude", claude))
+    refresh = native_ui.make_button("Refresh Capacity", target, "refreshCapacitySources:")
+    refresh.setAccessibilityLabel_("Refresh available capacity sources")
+    refresh.setFont_(NSFont.systemFontOfSize_(13.0 * scale))
+    refresh_row = native_ui.make_stack(
+        orientation="horizontal", spacing=native_ui.SPACE_S
+    )
+    refresh_row.addArrangedSubview_(refresh)
+    refresh_row.addArrangedSubview_(native_ui.make_hspacer())
+    live_inner.addArrangedSubview_(refresh_row)
+    stack.addArrangedSubview_(live_outer)
+
+    active_sources = frozenset(
+        source.source_key
+        for source in negotiated_provider_sources()
+        if source.source_key.capability_id == "remote_quota_windows"
+    )
+    policy_fields: dict[str, object] = {}
+    grouped: dict[str, list[object]] = {}
+    for policy in provider_capacity_policies():
+        grouped.setdefault(policy.provider_id, []).append(policy)
+    for provider_id, policies in grouped.items():
+        outer, inner = native_ui.make_card(
+            _PROVIDER_FAMILY_LABELS.get(provider_id, provider_id.title())
+        )
+        for policy in policies:
+            state, detail = _capacity_policy_copy(policy, active_sources)
+            lane_copy = ", ".join(lane.semantic_name for lane in policy.lanes)
+            rendered_detail = (
+                f"{state}. {detail} Windows: {lane_copy}."
+                if lane_copy
+                else f"{state}. {detail}"
+            )
+            status = native_ui.make_wrapping_label(
+                rendered_detail,
+                secondary=True,
+                size=11.0 * scale,
+                max_width=340.0,
+            )
+            label = _CAPACITY_PROFILE_LABELS[policy.profile_id]
+            status.setAccessibilityLabel_(f"{label} capacity status")
+            policy_fields[policy.profile_id] = status
+            inner.addArrangedSubview_(
+                native_ui.make_row(
+                    label,
+                    status,
+                    help_text=(
+                        "This row describes product support only. It never starts "
+                        "provider or network work by appearing on screen."
+                    ),
+                )
+            )
+        stack.addArrangedSubview_(outer)
+
+    fields = {
+        "capacity_intro": intro,
+        "capacity_live_fields": {"codex": codex, "claude": claude},
+        "capacity_policy_status_fields": policy_fields,
+    }
+    buttons = {"refresh_capacity": refresh}
+    return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
 def _install(status_bar_namespace: dict) -> None:
@@ -60,14 +542,26 @@ def _install(status_bar_namespace: dict) -> None:
             globals()[key] = value
 
 def _build_profile_pane(target: StatusBarController):
-    """You: today's usage (the T3-exact math), and what this app is --
-    stats and about get one calm home instead of crowding the dropdown."""
+    """Local usage over one explicit, user-selected period and metric."""
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
     fields: dict[str, object] = {}
 
-    today_outer, today_inner = native_ui.make_card("Today")
+    today_outer, today_inner = native_ui.make_card("Usage")
+    period_label = native_ui.make_label(
+        usage_stats.usage_period_label(target.settings.usage_graph_days),
+        secondary=True,
+        size=11.0,
+    )
+    today_inner.addArrangedSubview_(period_label)
+    fields["profile_usage_period_label"] = period_label
+    usage_summary = getattr(target, "usage_summary_text", None)
     usage_label = native_ui.make_label(
-        getattr(target, "usage_summary_text", None) or "No Claude activity yet today.",
+        usage_summary
+        or (
+            "No Claude activity in this period."
+            if getattr(target, "_usage_local_scan_complete", False)
+            else "Loading local usage history…"
+        ),
         size=13.0,
     )
     today_inner.addArrangedSubview_(usage_label)
@@ -82,14 +576,12 @@ def _build_profile_pane(target: StatusBarController):
     )
     today_inner.addArrangedSubview_(codex_label)
     fields["profile_codex_label"] = codex_label
-    graph = UsageGraphView.alloc().initWithFrame_(((0, 0), (560.0, 120.0)))
+    graph = UsageGraphView.alloc().initWithFrame_(((0, 0), (560.0, 180.0)))
     graph.setTranslatesAutoresizingMaskIntoConstraints_(False)
     native_ui.constrain_width(graph, 560.0)
-    native_ui.constrain_height(graph, 120.0)
+    native_ui.constrain_height(graph, 180.0)
     today_inner.addArrangedSubview_(graph)
-    graph.setData_hourly_(
-        getattr(target, "usage_day_bars", []), getattr(target, "usage_hourly", [])
-    )
+    graph.setModel_(getattr(target, "usage_graph_model", None) or {})
     fields["profile_usage_graph"] = graph
     range_popup = native_ui.make_popup_button(target, "setUsageGraphRange:")
     for range_label, range_days in (
@@ -107,7 +599,11 @@ def _build_profile_pane(target: StatusBarController):
     range_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     range_row.addArrangedSubview_(range_popup)
     mode_popup = native_ui.make_popup_button(target, "setUsageDisplayMode:")
-    for mode_label, mode_key in (("Tokens first", "tokens"), ("Cost first", "cost")):
+    for mode_label, mode_key in (
+        ("Processed tokens", "tokens"),
+        ("Estimated cost", "cost"),
+        ("Sessions", "sessions"),
+    ):
         mode_popup.addItemWithTitle_(mode_label)
         item = mode_popup.lastItem()
         item.setRepresentedObject_(mode_key)
@@ -116,36 +612,65 @@ def _build_profile_pane(target: StatusBarController):
     range_row.addArrangedSubview_(mode_popup)
     range_row.addArrangedSubview_(native_ui.make_hspacer())
     today_inner.addArrangedSubview_(range_row)
+    selected_providers = target.settings.usage_graph_providers
     legend = native_ui.make_label(
-        "\u25a0 Claude spend \u00b7 \u25a0 Codex tokens \u00b7 bottom strip = "
-        "today's sessions by hour",
+        " · ".join(provider_id.title() for provider_id in selected_providers)
+        + " · one shared metric and zero baseline",
         secondary=True,
         size=10.0,
     )
     today_inner.addArrangedSubview_(legend)
+    fields["profile_usage_legend"] = legend
+    provider_row = native_ui.make_stack(
+        orientation="horizontal",
+        spacing=native_ui.SPACE_M,
+    )
+    provider_switches = {}
+    for provider_id, provider_label in (("claude", "Claude"), ("codex", "Codex")):
+        row, switch = native_ui.make_switch_row(
+            provider_label,
+            target,
+            "toggleUsageGraphProvider:",
+            help_text="Show this supported local usage source in the graph.",
+        )
+        switch.setIdentifier_(provider_id)
+        switch.setState_(1 if provider_id in selected_providers else 0)
+        provider_row.addArrangedSubview_(row)
+        provider_switches[provider_id] = switch
+    provider_row.addArrangedSubview_(native_ui.make_hspacer())
+    today_inner.addArrangedSubview_(provider_row)
+    fields["usage_graph_provider_switches"] = provider_switches
+    today_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "All supported local usage sources are selected by default. "
+            "Additional installed agents appear here only when SidePulse has "
+            "a trustworthy, bounded usage source for them.",
+            secondary=True,
+            size=10.0,
+            max_width=560.0,
+        )
+    )
     plan_label = native_ui.make_label(
         getattr(target, "claude_plan_text", None) or "", secondary=False, size=13.0
     )
     today_inner.addArrangedSubview_(plan_label)
     fields["profile_plan_label"] = plan_label
-    plan_row, plan_switch = native_ui.make_switch_row(
-        "Show Claude plan limits (official)",
-        target,
-        "toggleClaudePlanLimits:",
-        help_text=(
-            "Asks Anthropic's own usage endpoint for your REAL 5-hour "
-            "and weekly utilization, using the Claude Code sign-in this "
-            "Mac already has. First use may show one macOS Keychain "
-            "prompt -- choose Always Allow and it never asks again."
-        ),
+    today_inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Claude consumer plan capacity",
+            native_ui.make_label("Not supported", secondary=True),
+            help_text=(
+                "Claude lifecycle and local transcript activity still work. "
+                "This build has no supported Anthropic consumer-plan capacity "
+                "source and never reads browser sessions or private endpoints."
+            ),
+        )
     )
-    plan_switch.setState_(1 if target.settings.claude_plan_limits_enabled else 0)
-    today_inner.addArrangedSubview_(plan_row)
     codex_pct_row, codex_pct_switch = native_ui.make_switch_row(
-        "Show Codex weekly percent",
+        "Show Codex rate-limit percent",
         target,
         "toggleCodexPercent:",
-        help_text="The weekly-limit percent on the Codex line.",
+        help_text="The current rate-limit window percent on the Codex line.",
     )
     codex_pct_switch.setState_(1 if target.settings.codex_percent_enabled else 0)
     today_inner.addArrangedSubview_(codex_pct_row)
@@ -343,7 +868,6 @@ def _build_devices_pane(target: StatusBarController):
             ("Battery fill", LED_DISPLAY_BATTERY),
             ("Working timer fill", LED_DISPLAY_TIMER),
             ("Studio program", LED_DISPLAY_STUDIO),
-            ("Quota runway", LED_DISPLAY_QUOTA_RUNWAY),
         ):
             display_popup.addItemWithTitle_(label)
             item = display_popup.lastItem()
@@ -789,12 +1313,10 @@ def _build_power_pane(target: StatusBarController):
 # live preview strip rendering exactly what the Screen Bar will show.
 SIGNAL_STYLE_CARDS: tuple[tuple[str, str, bool], ...] = (
     ("low_battery", "Low Battery Style", True),
-    ("notification", "Notification Style", False),
     ("reminders", "Reminder Style", True),
     ("calendar", "Calendar Style", True),
     ("weather", "Weather Alert Style", True),
     ("completion", "Completion Sweep Style", True),
-    ("quota", "Quota Alert Style", True),
 )
 SIGNAL_THUMB_SIZE = (52.0, 20.0)
 # Quick-pick swatches for signal colors: recognizable brand hues first
@@ -818,16 +1340,6 @@ ESCALATION_TIER_LABELS: tuple[tuple[str, str], ...] = (
     ("Ramp + flash + one chime", "chime"),
     ("Full takeover", "takeover"),
 )
-
-
-def _signal_preview_color(target: StatusBarController, key: str) -> str | None:
-    """The color previews render with -- the notification signal has no
-    color of its own (the app's color is the meaning), so previews use
-    its first configured app color."""
-    if key != "notification":
-        return None
-    colors = list(target.settings.notification_app_colors.values())
-    return colors[0] if colors else "#34C759"
 
 
 def _mini_led_view(width: float, height: float):
@@ -944,7 +1456,7 @@ def make_signal_style_card(target: StatusBarController, key: str, title: str, *,
         native_ui.add_separator(inner)
         fields[f"signal_color:{key}"] = current_swatch
 
-    preview_color = _signal_preview_color(target, key)
+    preview_color = None
     thumbs: dict[str, object] = {}
     thumb_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     # Continuous signals don't offer one-shot patterns: three flashes
@@ -1253,20 +1765,9 @@ def _build_led_behavior_pane(target: StatusBarController):
     fields = {"idle_dim_minutes_field": minutes_field, "idle_dim_fraction_field": fraction_field}
 
 
-    # Notification blinks: a moment, not a state -- flash the app's own
-    # color, then agent status resumes on its own.
-    notif_outer, notif_inner = native_ui.make_card("Notification Blinks")
-    notif_row, notif_switch = native_ui.make_switch_row(
-        "Blink when a notification arrives",
-        target,
-        "toggleNotificationBlinks:",
-        help_text=(
-            "Reads the Notification Center store, so it needs the same "
-            "Full Disk Access grant as Focus dimming."
-        ),
-    )
-    notif_inner.addArrangedSubview_(notif_row)
-    native_ui.add_separator(notif_inner)
+    # SidePulse-owned agent lifecycle notifications only. Foreign app
+    # notifications are never observed or mirrored into the lights.
+    notif_outer, notif_inner = native_ui.make_card("Agent Notifications")
     completion_row, completion_switch = native_ui.make_switch_row(
         "Sweep when any agent finishes",
         target,
@@ -1284,26 +1785,37 @@ def _build_led_behavior_pane(target: StatusBarController):
         target,
         "toggleCompletionNotification:",
         help_text=(
-            "A banner with the session's name, for eyes on another "
-            "screen when the lights swept. Main sessions only; Quiet "
-            "Hour and Focus policies hold it."
+            "A content-free banner identifies only the provider and whether "
+            "a session finished or needs you. Quiet Hour and Focus policies "
+            "hold it."
         ),
     )
     notif_inner.addArrangedSubview_(completion_banner_row)
-    for bundle_id, app_label in (
-        (NOTIFICATION_APP_IMESSAGE, "iMessage"),
-        (NOTIFICATION_APP_WHATSAPP, "WhatsApp"),
-        (NOTIFICATION_APP_TELEGRAM, "Telegram"),
-    ):
-        native_ui.add_separator(notif_inner)
-        color_field = native_ui.make_field(
-            target.settings.notification_app_colors.get(bundle_id, ""),
-            target=target,
-            action="applyNotificationColors:",
-        )
-        native_ui.constrain_width(color_field, 92.0)
-        notif_inner.addArrangedSubview_(native_ui.make_row(app_label, color_field))
-        fields[f"notification_color:{bundle_id}"] = color_field
+    native_ui.add_separator(notif_inner)
+    notification_status = native_ui.make_label(
+        target.notification_authorization_status_text(),
+        secondary=True,
+    )
+    notification_permission = native_ui.make_button(
+        "Enable Notifications…",
+        target,
+        "requestNotificationPermission:",
+    )
+    notification_permission.setHidden_(
+        not target._notification_authorization_checked
+        or target.notification_authorization_state.value != "not_determined"
+    )
+    notification_controls = native_ui.make_stack(
+        orientation="horizontal",
+        spacing=native_ui.SPACE_S,
+    )
+    notification_controls.addArrangedSubview_(notification_status)
+    notification_controls.addArrangedSubview_(native_ui.make_hspacer())
+    notification_controls.addArrangedSubview_(notification_permission)
+    notif_inner.addArrangedSubview_(
+        native_ui.make_row("macOS permission", notification_controls)
+    )
+    fields["notification_authorization_status"] = notification_status
     stack.addArrangedSubview_(notif_outer)
 
     # Calendar & Reminders: warning lights, not a calendar app.
@@ -1400,30 +1912,16 @@ def _build_led_behavior_pane(target: StatusBarController):
     fields["weather_longitude_field"] = lon_field
     stack.addArrangedSubview_(weather_outer)
 
-    # Quota: threshold blinks in the provider's color.
+    # Capacity effects remain withheld until a separately reviewed release.
     quota_outer, quota_inner = native_ui.make_card("Quota")
-    quota_row, quota_switch = native_ui.make_switch_row(
-        "Blink when a quota threshold is crossed",
-        target,
-        "toggleQuotaAlerts:",
-        help_text=(
-            "A double-tap in the provider's color the moment Codex's "
-            "weekly limit (or a Claude plan window, when plan limits "
-            "are on) crosses a threshold below. Quiet hour holds it."
-        ),
+    quota_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Capacity alerts, outbound events, queue advice, and hardware "
+            "runway are unavailable until a supported source and explicit "
+            "forecast release authority exist.",
+            secondary=True,
+        )
     )
-    quota_inner.addArrangedSubview_(quota_row)
-    quota_field = native_ui.make_field(
-        ", ".join(f"{value:g}" for value in target.settings.quota_alert_thresholds),
-        target=target,
-        action="applyQuotaThresholds:",
-    )
-    native_ui.constrain_width(quota_field, 110.0)
-    quota_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
-    quota_controls.addArrangedSubview_(quota_field)
-    quota_controls.addArrangedSubview_(native_ui.make_label("% used", secondary=True))
-    quota_inner.addArrangedSubview_(native_ui.make_row("Thresholds", quota_controls))
-    fields["quota_thresholds_field"] = quota_field
     stack.addArrangedSubview_(quota_outer)
 
     # Needs-you escalation: how loud an ignored ask may get.
@@ -1491,8 +1989,6 @@ def _build_led_behavior_pane(target: StatusBarController):
     webhook_event_boxes: dict[str, object] = {}
     for label, event_key in (
         ("Completions", "completion"),
-        ("Quota", "quota_threshold"),
-        ("Quota resets", "quota_sunrise"),
         ("Weather", "weather"),
         ("Timebox", "timebox"),
     ):
@@ -1508,8 +2004,7 @@ def _build_led_behavior_pane(target: StatusBarController):
             bridge_row,
             help_text=(
                 "Each ticked moment POSTs one JSON event to the same "
-                "URL: completions, quota threshold crossings and "
-                "resets, severe-weather onset, timebox finish."
+                "URL: completions, severe-weather onset, or timebox finish."
             ),
         )
     )
@@ -1525,13 +2020,12 @@ def _build_led_behavior_pane(target: StatusBarController):
 
     buttons = {
         "idle_dim_enabled": idle_switch,
-        "notification_blinks_enabled": notif_switch,
         "completion_sweep_enabled": completion_switch,
         "completion_notification": completion_banner_switch,
+        "notification_permission": notification_permission,
         "calendar_alerts_enabled": cal_switch,
         "reminder_alerts_enabled": rem_switch,
         "weather_alerts_enabled": weather_switch,
-        "quota_alerts_enabled": quota_switch,
         "subagent_asks_alert": subask_switch,
     }
     buttons.update(webhook_event_boxes)
@@ -1889,11 +2383,15 @@ def _build_debug_pane(target: StatusBarController):
     # as debug output leaking into a settings window.
     settings_path_label = native_ui.make_label("", secondary=True, size=12.0)
     inner.addArrangedSubview_(settings_path_label)
-    buttons_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
-    buttons_row.addArrangedSubview_(native_ui.make_button("Export CSV", target, "exportDebugCsv:"))
-    buttons_row.addArrangedSubview_(native_ui.make_button("Export HTML", target, "exportDebugHtml:"))
-    buttons_row.addArrangedSubview_(native_ui.make_hspacer())
-    inner.addArrangedSubview_(buttons_row)
+    inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Safe diagnostic export is available in History. Content-bearing "
+            "audit CSV and HTML are not exposed in Settings.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
 
     stack.addArrangedSubview_(outer)
     fields = {"debug_log_status": status_label, "settings_path": settings_path_label}
@@ -1908,11 +2406,11 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     # hierarchy is exactly the combination that produced both the
     # shrink-to-fitting-width bug and a dead band above the sidebar on
     # manual resize.
-    style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
+    style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
     window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
         ((0, 0), (width, height)), style, NSBackingStoreBuffered, False,
     )
-    window.setTitle_("SidePulse Agent Monitor Settings")
+    window.setTitle_("SidePulse Settings: Profile")
     window.setDelegate_(target)
     window.setReleasedWhenClosed_(False)
     window.center()
@@ -2006,6 +2504,10 @@ def _build_settings_pane(target: StatusBarController, key: str):
     if key == "profile":
         pane, fields = _build_profile_pane(target)
         return pane, fields, {}
+    if key == "history":
+        return _build_history_pane(target)
+    if key == "capacity":
+        return _build_capacity_pane(target)
     if key == "devices":
         pane, device_controls = _build_devices_pane(target)
         target.device_settings_controls = device_controls
@@ -2016,6 +2518,8 @@ def _build_settings_pane(target: StatusBarController, key: str):
         return _build_colors_screen_bar_pane(target)
     if key == "agents":
         return _build_agents_pane(target)
+    if key == "installed_agents":
+        return _build_installed_agents_pane(target)
     if key == "led_behavior":
         return _build_led_behavior_pane(target)
     if key == "focus":
@@ -2481,4 +2985,3 @@ def refresh_blend_and_speed_fields(target: StatusBarController) -> None:
         if mode_field is not None:
             set_field_value(mode_field, f"{colors.effective_speed_seconds(mode_key):g}")
             mode_field.setEnabled_(not uses_global)
-

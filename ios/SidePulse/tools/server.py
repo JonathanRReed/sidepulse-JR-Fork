@@ -1,59 +1,40 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import copy
+import hmac
 import html
 import json
 import os
+import re
 from typing import Any
-from urllib.parse import parse_qs
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from apns_client import APNsClient, APNsConfig, APNsConfigError, APNsResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
-
-from apns_client import (
-    APNsClient,
-    APNsConfig,
-    APNsConfigError,
-    APNsResponse,
-    LEDPayloadError,
-    normalize_leds_text,
-    validate_leds_text,
-)
 from patterns import PATTERNS, pattern_names
 
-
 DEFAULT_PORT = 8787
-APNS_HEADER_ALIASES = {
-    "push_type": "apns-push-type",
-    "priority": "apns-priority",
-    "collapse_id": "apns-collapse-id",
-    "expiration": "apns-expiration",
-    "topic": "apns-topic",
-}
-RESERVED_ENVELOPE_KEYS = {
-    "device_token",
-    "pattern",
-    "leds",
-    "LEDS.LED",
-    "LEDS.led",
-    "text",
-    "payload",
-    "apns",
-    "alert",
+MAX_REQUEST_BODY_BYTES = 4096
+MAX_DEVICE_TOKEN_LENGTH = 256
+ALLOWED_ENVELOPE_KEYS = frozenset({"device_token", "pattern"})
+DEVICE_TOKEN_PATTERN = re.compile(rf"[A-Za-z0-9_-]{{1,{MAX_DEVICE_TOKEN_LENGTH}}}\Z", re.ASCII)
+FIXED_APNS_HEADERS = {
+    "apns-push-type": "background",
+    "apns-priority": "5",
 }
 
 
-app = FastAPI(title="SidePulse Push Server", version="1.0")
+app = FastAPI(title="SidePulse Push Server", version="2.0")
 
 
 async def require_bearer_auth(authorization: str | None = Header(default=None)) -> None:
     shared_secret = shared_secret_from_env()
     if not shared_secret:
-        return
+        raise HTTPException(status_code=503, detail="Server mutation is disabled")
 
-    if authorization == f"Bearer {shared_secret}":
+    expected = f"Bearer {shared_secret}"
+    if authorization is not None and hmac.compare_digest(authorization, expected):
         return
 
     raise HTTPException(status_code=401, detail="Unauthorized")
@@ -74,7 +55,7 @@ async def health() -> dict[str, Any]:
 @app.get("/v1/patterns")
 async def patterns() -> dict[str, Any]:
     return {
-        "patterns": [PATTERNS[name].as_public_dict() for name in pattern_names()],
+        "patterns": [PATTERNS[name].as_public_dict() for name in finite_pattern_names()],
     }
 
 
@@ -88,208 +69,95 @@ async def push(
     request: Request,
     _: None = Depends(require_bearer_auth),
 ) -> dict[str, Any]:
-    envelope = await read_json_object(request)
-    device_token = resolve_device_token(envelope.get("device_token"))
-    if not device_token:
-        raise HTTPException(status_code=400, detail="Missing device token")
+    envelope = await read_bounded_json_object(request)
+    validate_envelope_keys(envelope)
+    pattern = require_finite_catalog_pattern(envelope.get("pattern"))
+    device_token = resolve_bounded_device_token(envelope)
 
-    payload = build_friendly_payload(envelope)
-    headers = apns_headers_from_options(envelope.get("apns"), payload)
-    response = await send_apns(device_token, payload, headers)
-
-    pattern = envelope.get("pattern")
-    return response_payload(
-        response,
-        extra={
-            "pattern": pattern if isinstance(pattern, str) else None,
-            "known_pattern": isinstance(pattern, str) and pattern in PATTERNS,
-        },
-    )
-
-
-@app.post("/v1/push/raw")
-async def push_raw(
-    request: Request,
-    device_token: str | None = Query(default=None),
-    _: None = Depends(require_bearer_auth),
-) -> dict[str, Any]:
-    payload = await read_json_object(request)
-    token = resolve_device_token(device_token or request.headers.get("x-side-device-token"))
-    if not token:
-        raise HTTPException(status_code=400, detail="Missing device token")
-
-    headers = apns_headers_from_request(request, payload)
-    response = await send_apns(token, payload, headers)
-    return response_payload(response)
-
-
-@app.post("/push")
-async def legacy_push(
-    request: Request,
-    device_token: str | None = Query(default=None),
-    key: str | None = Query(default=None),
-) -> dict[str, Any]:
-    require_legacy_auth(key, request.headers.get("authorization"))
-    envelope = await read_legacy_body(request)
-    if device_token:
-        envelope["device_token"] = device_token
-    if "key" in envelope:
-        envelope.pop("key", None)
-
-    token = resolve_device_token(envelope.get("device_token"))
-    if not token:
-        raise HTTPException(status_code=400, detail="Missing device token")
-
-    payload = build_friendly_payload(envelope)
-    headers = apns_headers_from_options(envelope.get("apns"), payload)
-    response = await send_apns(token, payload, headers)
-    return response_payload(response, extra={"legacy": True})
-
-
-def require_legacy_auth(key: str | None, authorization: str | None) -> None:
-    shared_secret = shared_secret_from_env()
-    if not shared_secret:
-        return
-
-    if authorization == f"Bearer {shared_secret}" or key == shared_secret:
-        return
-
-    raise HTTPException(status_code=401, detail="Unauthorized")
+    payload = {
+        "aps": {"content-available": 1},
+        "pattern": pattern,
+    }
+    response = await send_apns(device_token, payload, FIXED_APNS_HEADERS)
+    return response_payload(response, extra={"pattern": pattern, "known_pattern": True})
 
 
 def shared_secret_from_env() -> str:
-    return os.environ.get("SIDEPULSE_SHARED_SECRET", "")
+    return os.environ.get("SIDEPULSE_SHARED_SECRET", "").strip()
 
 
-def resolve_device_token(value: Any) -> str | None:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return os.environ.get("SIDEPULSE_DEVICE_TOKEN")
+async def read_bounded_json_object(request: Request) -> dict[str, Any]:
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        raise HTTPException(status_code=415, detail="Content-Type must be application/json")
 
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_size = int(content_length)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length") from exc
+        if declared_size < 0:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length")
+        if declared_size > MAX_REQUEST_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Request body is too large")
 
-async def read_json_object(request: Request) -> dict[str, Any]:
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > MAX_REQUEST_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Request body is too large")
+        body.extend(chunk)
+
     try:
-        loaded = await request.json()
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+        loaded = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
 
     if not isinstance(loaded, dict):
         raise HTTPException(status_code=400, detail="JSON body must be an object")
     return loaded
 
 
-async def read_legacy_body(request: Request) -> dict[str, Any]:
-    content_type = request.headers.get("content-type", "")
-    if "application/json" in content_type:
-        return await read_json_object(request)
-
-    body = await request.body()
-    if not body:
-        return {}
-
-    if "application/x-www-form-urlencoded" in content_type:
-        parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True)
-        return {key: values[-1] for key, values in parsed.items()}
-
-    return {"leds": body.decode("utf-8")}
+def validate_envelope_keys(envelope: dict[str, Any]) -> None:
+    if set(envelope) - ALLOWED_ENVELOPE_KEYS:
+        raise HTTPException(status_code=400, detail="Only pattern and device_token are accepted")
 
 
-def build_friendly_payload(envelope: dict[str, Any]) -> dict[str, Any]:
-    payload = envelope.get("payload")
-    if payload is None:
-        payload = {}
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="payload must be an object")
-
-    apns_payload = copy.deepcopy(payload)
-    for key, value in envelope.items():
-        if key not in RESERVED_ENVELOPE_KEYS:
-            apns_payload.setdefault(key, value)
-
-    aps = apns_payload.get("aps")
-    if aps is None:
-        aps = {}
-    if not isinstance(aps, dict):
-        raise HTTPException(status_code=400, detail="payload.aps must be an object")
-
-    alert = envelope.get("alert")
-    if isinstance(alert, str) and alert:
-        aps["alert"] = {"title": "SidePulse", "body": alert}
-        aps["sound"] = "default"
-    else:
-        aps.setdefault("content-available", 1)
-
-    apns_payload["aps"] = aps
-
-    led_text = first_led_text(envelope)
-    if led_text is not None:
-        led_text = normalize_leds_text(led_text)
-        try:
-            validate_leds_text(led_text)
-        except LEDPayloadError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        apns_payload["leds"] = led_text
-
-    pattern = envelope.get("pattern")
-    if isinstance(pattern, str) and pattern:
-        apns_payload["pattern"] = pattern
-
-    data = envelope.get("data")
-    if isinstance(data, dict):
-        apns_payload.setdefault("data", data)
-
-    return apns_payload
+def finite_pattern_names() -> list[str]:
+    return [name for name in pattern_names() if catalog_pattern_is_finite(name)]
 
 
-def first_led_text(envelope: dict[str, Any]) -> str | None:
-    for key in ("leds", "LEDS.LED", "LEDS.led", "text"):
-        value = envelope.get(key)
-        if isinstance(value, str):
-            return value
-    return None
+def catalog_pattern_is_finite(name: str) -> bool:
+    for line in PATTERNS[name].leds.splitlines():
+        tokens = line.strip().split()
+        if len(tokens) == 1 and tokens[0].casefold() == "repeat":
+            return False
+    return True
 
 
-def apns_headers_from_options(options: Any, payload: dict[str, Any]) -> dict[str, str]:
-    if options is None:
-        options = {}
-    if not isinstance(options, dict):
-        raise HTTPException(status_code=400, detail="apns must be an object")
-
-    headers: dict[str, str] = {}
-    for key, value in options.items():
-        if value is None:
-            continue
-        header_name = APNS_HEADER_ALIASES.get(key, key)
-        if header_name.startswith("apns-"):
-            headers[header_name] = str(value)
-
-    headers.setdefault("apns-push-type", default_push_type(payload))
-    headers.setdefault("apns-priority", "10" if headers["apns-push-type"] == "alert" else "5")
-    return headers
+def require_finite_catalog_pattern(value: Any) -> str:
+    if not isinstance(value, str) or value not in PATTERNS or not catalog_pattern_is_finite(value):
+        raise HTTPException(status_code=400, detail="Unknown or nonfinite pattern")
+    return value
 
 
-def apns_headers_from_request(request: Request, payload: dict[str, Any]) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for header_name in ("apns-push-type", "apns-priority", "apns-collapse-id", "apns-expiration", "apns-topic"):
-        value = request.headers.get(header_name) or request.headers.get("x-" + header_name)
-        if value:
-            headers[header_name] = value
+def resolve_bounded_device_token(envelope: dict[str, Any]) -> str:
+    if "device_token" in envelope:
+        value = envelope["device_token"]
+        if not valid_device_token(value):
+            raise HTTPException(status_code=400, detail="Invalid device token")
+        return value
 
-    for option_name, header_name in APNS_HEADER_ALIASES.items():
-        value = request.query_params.get(option_name) or request.query_params.get(header_name)
-        if value:
-            headers[header_name] = value
-
-    headers.setdefault("apns-push-type", default_push_type(payload))
-    headers.setdefault("apns-priority", "10" if headers["apns-push-type"] == "alert" else "5")
-    return headers
+    configured = os.environ.get("SIDEPULSE_DEVICE_TOKEN", "")
+    if not configured:
+        raise HTTPException(status_code=400, detail="Missing device token")
+    if not valid_device_token(configured):
+        raise HTTPException(status_code=503, detail="Configured device token is invalid")
+    return configured
 
 
-def default_push_type(payload: dict[str, Any]) -> str:
-    aps = payload.get("aps")
-    if isinstance(aps, dict) and "alert" in aps:
-        return "alert"
-    return "background"
+def valid_device_token(value: Any) -> bool:
+    return isinstance(value, str) and DEVICE_TOKEN_PATTERN.fullmatch(value) is not None
 
 
 async def send_apns(device_token: str, payload: dict[str, Any], headers: dict[str, str]) -> APNsResponse:
@@ -327,11 +195,7 @@ def response_payload(response: APNsResponse, *, extra: dict[str, Any] | None = N
 
 
 def index_html() -> str:
-    default_token = html.escape(os.environ.get("SIDEPULSE_DEVICE_TOKEN", ""))
-    default_secret = html.escape(shared_secret_from_env())
-    options = "\n".join(
-        f'<option value="{html.escape(name)}">{html.escape(name)}</option>' for name in pattern_names()
-    )
+    options = "\n".join(f"<li><code>{html.escape(name)}</code></li>" for name in finite_pattern_names())
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -340,45 +204,15 @@ def index_html() -> str:
   <title>SidePulse Push Server</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; max-width: 760px; color: #111827; }}
-    label {{ display: block; font-weight: 650; margin-top: 1rem; }}
-    input, select, textarea {{ box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 6px; font: inherit; padding: 0.55rem; width: 100%; }}
-    textarea {{ min-height: 150px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
-    button {{ background: #111827; border: 0; border-radius: 6px; color: white; font: inherit; font-weight: 700; margin-top: 1rem; padding: 0.65rem 0.9rem; }}
-    pre {{ background: #f1f5f9; border-radius: 6px; overflow: auto; padding: 0.8rem; }}
+    code {{ background: #f1f5f9; border-radius: 4px; padding: 0.15rem 0.3rem; }}
   </style>
 </head>
 <body>
   <h1>SidePulse Push Server</h1>
-  <label>Device token</label>
-  <input id="deviceToken" value="{default_token}" autocomplete="off">
-  <label>Bearer secret</label>
-  <input id="secret" value="{default_secret}" autocomplete="off">
-  <label>Pattern</label>
-  <select id="pattern">{options}</select>
-  <label>Optional raw LEDS.LED</label>
-  <textarea id="leds" placeholder="#00ff00 250ms pulse&#10;off 150ms none"></textarea>
-  <button id="send">Send Push</button>
-  <pre id="result">Ready</pre>
-  <script>
-    document.getElementById("send").addEventListener("click", async () => {{
-      const body = {{
-        device_token: document.getElementById("deviceToken").value,
-        pattern: document.getElementById("pattern").value,
-      }};
-      const leds = document.getElementById("leds").value;
-      if (leds.trim()) body.leds = leds;
-      const secret = document.getElementById("secret").value;
-      const response = await fetch("/v1/push", {{
-        method: "POST",
-        headers: {{
-          "content-type": "application/json",
-          ...(secret ? {{ "authorization": "Bearer " + secret }} : {{}})
-        }},
-        body: JSON.stringify(body)
-      }});
-      document.getElementById("result").textContent = JSON.stringify(await response.json(), null, 2);
-    }});
-  </script>
+  <p>Mutation is limited to authenticated JSON requests for finite catalog patterns.</p>
+  <p>Configure credentials in the server environment. This page never renders them.</p>
+  <h2>Available push patterns</h2>
+  <ul>{options}</ul>
 </body>
 </html>"""
 

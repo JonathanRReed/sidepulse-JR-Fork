@@ -1,106 +1,68 @@
-"""Official Claude plan-limit utilization, the CodexBar way.
+"""Pure normalization boundary for explicitly supplied Claude quota evidence.
 
-``GET https://api.anthropic.com/api/oauth/usage`` with the user's own
-Claude Code OAuth token returns the REAL 5-hour and weekly window
-utilization -- no estimation, no transcript math (CodexBar finding #4;
-their citation: ClaudeOAuthUsageFetcher.swift).
-
-Token sources, in order:
-1. ``~/.claude/.credentials.json`` (``claudeAiOauth.accessToken``) --
-   present on some installs, silent to read.
-2. The ``Claude Code-credentials`` Keychain item via ``security``.
-   Reading it from a background app triggers a ONE-TIME macOS prompt,
-   which is why the whole feature is opt-in (Profile pane toggle) and
-   this module must never be called before the user turned it on.
-
-The token is used solely against Anthropic's own API and never logged.
-Same quiet-failure contract as every watcher: any problem raises
-ClaudeQuotaUnavailableError and the caller backs off.
+Credential discovery and remote quota acquisition are deliberately outside the
+trusted SidePulse core. Until an independently supported provider capability
+delivers evidence to this module, ``fetch_windows`` fails closed with a
+product-owned reason code.
 """
 
 from __future__ import annotations
 
-import json
-import subprocess
-import urllib.request
-from pathlib import Path
+import math
 
-USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-OAUTH_BETA_HEADER = "oauth-2025-04-20"
-CREDENTIALS_PATH = Path("~/.claude/.credentials.json").expanduser()
-KEYCHAIN_SERVICE = "Claude Code-credentials"
+from .capacity_types import CapacitySourceHealth, SourceHealthKind, SourceKey
+
+MAX_CLAUDE_WINDOWS = 32
+CLAUDE_REMOTE_QUOTA_UNSUPPORTED = "claude_remote_quota_unsupported"
+CLAUDE_QUOTA_SOURCE = SourceKey(
+    provider_id="claude",
+    adapter_id="quota",
+    source_instance_id="unsupported",
+    capability_id="remote_quota_windows",
+)
+_PRODUCT_MODEL_LABELS = {
+    "claude-opus": "Opus",
+    "opus": "Opus",
+    "claude-sonnet": "Sonnet",
+    "sonnet": "Sonnet",
+    "fable": "Fable",
+}
 
 
 class ClaudeQuotaUnavailableError(RuntimeError):
     pass
 
 
-def _token_from_file() -> str | None:
-    try:
-        data = json.loads(CREDENTIALS_PATH.read_text())
-    except (OSError, ValueError):
-        return None
-    oauth = data.get("claudeAiOauth")
-    if isinstance(oauth, dict):
-        token = oauth.get("accessToken")
-        if isinstance(token, str) and token:
-            return token
-    return None
-
-
-def _token_from_keychain() -> str | None:
-    try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    raw = result.stdout.strip()
-    if not raw:
-        return None
-    # The keychain item stores the whole credentials JSON blob.
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return raw or None
-    oauth = data.get("claudeAiOauth")
-    if isinstance(oauth, dict):
-        token = oauth.get("accessToken")
-        if isinstance(token, str) and token:
-            return token
-    return None
-
-
-def access_token() -> str:
-    token = _token_from_file() or _token_from_keychain()
-    if not token:
-        raise ClaudeQuotaUnavailableError("no Claude Code OAuth token found")
-    return token
-
-
-def fetch_windows(token: str | None = None, timeout: float = 10.0) -> list[dict]:
-    """[{label, utilization (0-100), resets_at iso|None}, ...] for every
-    window the endpoint reports (5h, weekly, per-model carve-outs)."""
-    bearer = token or access_token()
-    request = urllib.request.Request(
-        USAGE_URL,
-        headers={
-            "Authorization": f"Bearer {bearer}",
-            "anthropic-beta": OAUTH_BETA_HEADER,
-            "User-Agent": "SidePulse (Claude-Code companion)",
-        },
+def unsupported_source_health(*, observed_at: float) -> CapacitySourceHealth:
+    """Return bounded health for the unavailable trusted Claude source."""
+    return CapacitySourceHealth(
+        source=CLAUDE_QUOTA_SOURCE,
+        kind=SourceHealthKind.UNSUPPORTED,
+        observed_at=observed_at,
+        last_attempt_at=observed_at,
+        retry_at=None,
+        reason_code=CLAUDE_REMOTE_QUOTA_UNSUPPORTED,
+        has_last_known_good=False,
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except Exception as exc:
-        raise ClaudeQuotaUnavailableError(str(exc)) from exc
-    return windows_from_payload(payload)
+
+
+def fetch_windows() -> list[dict]:
+    """Fail closed until a supported provider capability supplies evidence."""
+    raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_UNSUPPORTED)
+
+
+def _product_model_label(model: object) -> str | None:
+    if not isinstance(model, dict):
+        return None
+    candidates = (model.get("id"), model.get("display_name"))
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        normalized = "-".join(candidate.strip().lower().split())
+        label = _PRODUCT_MODEL_LABELS.get(normalized)
+        if label is not None:
+            return label
+    return None
 
 
 def windows_from_payload(payload: object) -> list[dict]:
@@ -110,37 +72,128 @@ def windows_from_payload(payload: object) -> list[dict]:
         return []
     windows: list[dict] = []
 
-    def add(label: str, entry: object) -> None:
-        if not isinstance(entry, dict):
-            return
-        utilization = entry.get("utilization")
-        if not isinstance(utilization, (int, float)):
-            return
+    def add(
+        label: str,
+        entry: object,
+        semantic_minutes: int | None = None,
+        *,
+        percent_key: str = "utilization",
+    ) -> bool:
+        if not isinstance(entry, dict) or len(windows) >= MAX_CLAUDE_WINDOWS:
+            return False
+        utilization = entry.get(percent_key)
+        if (
+            isinstance(utilization, bool)
+            or not isinstance(utilization, (int, float))
+            or not math.isfinite(float(utilization))
+        ):
+            return False
+        minutes = entry.get("window_minutes")
+        if isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
+            seconds = entry.get("limit_window_seconds", entry.get("window_seconds"))
+            minutes = (
+                seconds / 60.0
+                if not isinstance(seconds, bool)
+                and isinstance(seconds, (int, float))
+                and math.isfinite(float(seconds))
+                else None
+            )
+        if isinstance(minutes, (int, float)) and not math.isfinite(float(minutes)):
+            minutes = None
+        if not isinstance(minutes, (int, float)):
+            minutes = semantic_minutes
         windows.append(
             {
                 "label": label,
                 "utilization": max(0.0, min(100.0, float(utilization))),
-                "resets_at": entry.get("resets_at")
-                if isinstance(entry.get("resets_at"), str)
-                else None,
+                "window_minutes": (
+                    max(1, int(round(float(minutes))))
+                    if isinstance(minutes, (int, float)) and float(minutes) > 0.0
+                    else None
+                ),
+                "resets_at": (
+                    entry.get("resets_at", entry.get("reset_at"))
+                    if not isinstance(
+                        entry.get("resets_at", entry.get("reset_at")), bool
+                    )
+                    and isinstance(
+                        entry.get("resets_at", entry.get("reset_at")),
+                        (str, int, float),
+                    )
+                    else None
+                ),
             }
         )
+        return True
 
-    add("5-hour", payload.get("five_hour"))
-    add("weekly", payload.get("seven_day"))
-    add("weekly Opus", payload.get("seven_day_opus"))
+    add("5-hour", payload.get("five_hour"), 5 * 60)
+    add("weekly", payload.get("seven_day"), 7 * 24 * 60)
+    add("Sonnet only", payload.get("seven_day_sonnet"), 7 * 24 * 60)
+    add("Opus only", payload.get("seven_day_opus"), 7 * 24 * 60)
     limits = payload.get("limits")
     if isinstance(limits, list):
+        seen_scopes: set[str] = set()
         for entry in limits:
             if not isinstance(entry, dict):
                 continue
+            kind = entry.get("kind")
+            group = entry.get("group")
+            if kind is None and group is None:
+                scope = entry.get("scope")
+                label = None
+                if isinstance(scope, dict):
+                    model = scope.get("model")
+                    label = _product_model_label(model)
+                if label is None:
+                    raw_name = entry.get("name")
+                    label = _PRODUCT_MODEL_LABELS.get(
+                        "-".join(raw_name.strip().lower().split())
+                        if isinstance(raw_name, str)
+                        else ""
+                    )
+                add(label or "limit", entry)
+                continue
+            if kind != "weekly_scoped" or group != "weekly":
+                continue
             scope = entry.get("scope")
-            name = None
-            if isinstance(scope, dict):
-                model = scope.get("model")
-                if isinstance(model, dict):
-                    name = model.get("display_name")
-            add(str(name or entry.get("name") or "limit"), entry)
+            model = scope.get("model") if isinstance(scope, dict) else None
+            if not isinstance(model, dict):
+                continue
+            name = _product_model_label(model)
+            model_id = model.get("id")
+            normalized_id = (
+                "-".join(model_id.strip().lower().split())
+                if isinstance(model_id, str)
+                else ""
+            )
+            normalized = normalized_id or (name or "").lower()
+            if (
+                not name
+                or normalized in {"all-models", "all_models"}
+                or normalized.endswith("-all-models")
+                or name.lower() == "all models"
+                or normalized in seen_scopes
+            ):
+                continue
+            seen_scopes.add(normalized)
+            add(
+                f"{name} only",
+                entry,
+                7 * 24 * 60,
+                percent_key="percent",
+            )
+
+    for key in (
+        "seven_day_routines",
+        "seven_day_claude_routines",
+        "claude_routines",
+        "routines",
+        "routine",
+        "seven_day_cowork",
+        "cowork",
+    ):
+        if add("Daily Routines", payload.get(key), 7 * 24 * 60):
+            break
     return windows
 
 

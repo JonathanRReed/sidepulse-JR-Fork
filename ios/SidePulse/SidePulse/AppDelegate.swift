@@ -31,7 +31,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ application: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error
     ) {
-        EventLog.append("APNs registration failed: \(error.localizedDescription)")
+        EventLog.append("APNs registration failed")
         Task { @MainActor in
             AppModel.shared.recordError(error)
         }
@@ -100,8 +100,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                     EventLog.append("\(source) wrote \(targetURL.lastPathComponent)")
                 } catch {
                     status = .failed
-                    errorMessage = error.localizedDescription
-                    EventLog.append("\(source) failed: \(error.localizedDescription)")
+                    errorMessage = "Write failed"
+                    EventLog.append("\(source) write failed")
                 }
             } else {
                 status = .noFolder

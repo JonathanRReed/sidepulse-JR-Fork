@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import shlex
-from pathlib import Path
+from collections.abc import Callable
+from pathlib import PurePath
 from urllib.parse import quote, urlencode
 
 from .models import AgentStatus
+from .navigation_policy import (
+    NavigationResolution,
+    NavigationResolutionKind,
+    navigation_target_allowed,
+)
 from .providers import HOOK_PROVIDERS
 
 SESSION_OPEN_APP = "app"
@@ -14,13 +20,42 @@ SESSION_OPEN_CHOICES = (SESSION_OPEN_APP, SESSION_OPEN_TERMINAL, SESSION_OPEN_VS
 SESSION_OPEN_APP_SURFACES = ("app", "ui", "transcript")
 SESSION_OPEN_TERMINAL_SURFACES = ("cli", "terminal", "command line")
 SESSION_OPEN_VSCODE_SURFACES = ("vscode", "vs code", "visual studio code")
+SESSION_TERMINAL_OPENERS = {
+    "codex": ("codex", "resume"),
+    "claude": ("claude", "--resume"),
+    "devin": ("devin", "--resume"),
+    "grok": ("grok", "--resume"),
+    "cursor": ("cursor-agent", "--resume"),
+    "hermes": ("hermes", "--resume"),
+}
+MAX_SESSION_ID_LENGTH = 256
+MAX_SESSION_CWD_LENGTH = 1_024
+
+
+def _valid_session_id(value: object) -> bool:
+    return (
+        type(value) is str
+        and 1 <= len(value) <= MAX_SESSION_ID_LENGTH
+        and value.isprintable()
+        and "/" not in value
+        and "\\" not in value
+    )
+
+
+def _valid_session_cwd(value: object) -> bool:
+    return (
+        type(value) is str
+        and 1 <= len(value) <= MAX_SESSION_CWD_LENGTH
+        and value.isprintable()
+        and PurePath(value).is_absolute()
+    )
 
 
 def session_deep_link(status: AgentStatus) -> str | None:
     provider = status.provider.lower()
     session_id = status.session_id
 
-    if provider == "codex" and session_id:
+    if provider == "codex" and _valid_session_id(session_id):
         return f"codex://threads/{quote(session_id, safe='')}"
     if provider == "claude":
         return "claude://"
@@ -28,7 +63,7 @@ def session_deep_link(status: AgentStatus) -> str | None:
 
 
 def session_vscode_link(status: AgentStatus) -> str | None:
-    if status.provider.lower() != "claude" or not status.session_id:
+    if status.provider.lower() != "claude" or not _valid_session_id(status.session_id):
         return None
     return "vscode://anthropic.claude-code/open?" + urlencode(
         {"session": status.session_id},
@@ -37,28 +72,17 @@ def session_vscode_link(status: AgentStatus) -> str | None:
 
 
 def session_resume_command(status: AgentStatus) -> str | None:
-    if not status.session_id:
+    if not _valid_session_id(status.session_id) or not _valid_session_cwd(status.cwd):
         return None
 
     provider = status.provider.lower()
-    cwd = shlex.quote(status.cwd or str(Path.home()))
+    opener = SESSION_TERMINAL_OPENERS.get(provider)
+    if opener is None:
+        return None
+    cwd = shlex.quote(status.cwd)
     session_id = shlex.quote(status.session_id)
-
-    if provider == "codex":
-        return f"cd {cwd} && codex resume {session_id}"
-    if provider == "claude":
-        return f"cd {cwd} && claude --resume {session_id}"
-    if provider == "devin":
-        return f"cd {cwd} && devin --resume {session_id}"
-    if provider == "grok":
-        return f"cd {cwd} && grok --resume {session_id}"
-    if provider == "cursor":
-        return f"cd {cwd} && cursor-agent --resume {session_id}"
-    if provider == "hermes":
-        return f"cd {cwd} && hermes --resume {session_id}"
-    # OpenClaw sessions live in the gateway (chat surfaces), not a
-    # resumable CLI -- callers fall back to a plain terminal at the cwd.
-    return None
+    executable, resume_argument = opener
+    return f"cd {cwd} && {executable} {resume_argument} {session_id}"
 
 
 def provider_session_opener_providers() -> tuple[str, ...]:
@@ -123,3 +147,31 @@ def session_open_action_label(status: AgentStatus, action: str) -> str:
     if action == SESSION_OPEN_TERMINAL:
         return "Resume in Terminal"
     return action
+
+
+def activate_navigation_resolution(
+    resolution: NavigationResolution,
+    *,
+    open_url: Callable[[str], None],
+    open_terminal_command: Callable[[str], None],
+) -> bool:
+    """Activate only a ready resolution whose target still passes its allowlist."""
+    if not (
+        type(resolution) is NavigationResolution
+        and resolution.kind is NavigationResolutionKind.READY
+        and resolution.target_kind is not None
+        and resolution.target_value is not None
+        and navigation_target_allowed(
+            resolution.work_key,
+            resolution.target_kind,
+            resolution.target_value,
+        )
+    ):
+        return False
+    if resolution.target_kind == "url":
+        open_url(resolution.target_value)
+        return True
+    if resolution.target_kind == "terminal":
+        open_terminal_command(resolution.target_value)
+        return True
+    return False
