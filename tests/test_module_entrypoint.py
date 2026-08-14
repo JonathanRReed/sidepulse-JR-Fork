@@ -60,7 +60,10 @@ class ModuleEntrypointTests(unittest.TestCase):
             {"document", "findings", "last_failure_class", "version"},
         )
         self.assertEqual(payload["document"], "sidepulse-doctor")
-        self.assertEqual(payload["version"], 1)
+        # v2 added alcove_follow_state: Alcove following used to have no
+        # observable state at all, so a denied Screen Recording permission
+        # was indistinguishable from a working feature with nothing to do.
+        self.assertEqual(payload["version"], 2)
         self.assertEqual(
             tuple(finding["check"] for finding in payload["findings"]),
             (
@@ -73,6 +76,7 @@ class ModuleEntrypointTests(unittest.TestCase):
                 "worker_registry_bounds",
                 "timer_registry_bounds",
                 "mounted_device_health",
+                "alcove_follow_state",
             ),
         )
         self.assertNotIn(str(Path(temp_dir)), result.stdout)

@@ -302,6 +302,7 @@ def _projection(*documents: AgentBrowserDocument, generation: int = 7) -> AgentB
         rows=documents,
         total_count=len(documents),
         scoped_count=len(documents),
+        active_count=sum(document.actionable for document in documents),
         selected_work_key=None,
     )
 
@@ -376,11 +377,36 @@ def test_injected_root_items_cap_urgent_rows_and_keep_action_depth_shallow() -> 
     assert browser.representedObject().generation == 7
 
 
+def test_root_header_says_active_and_means_active() -> None:
+    """"N active" is the working count, never the retained count.
+
+    Live: 27 retained families, 16 of them completed and 8 idle, and the
+    header announced "24 active" while one main agent worked.
+    """
+    rows = tuple(_document(f"row:{index}") for index in range(24))
+    projection = AgentBrowserProjection(
+        generation=7,
+        rows=rows,
+        total_count=len(rows),
+        scoped_count=len(rows),
+        active_count=1,
+        selected_work_key=None,
+    )
+
+    items = build_agent_root_items(
+        projection,
+        actions_by_work_key={},
+        target=None,
+    )
+
+    assert items[0].title() == "Agent Mailbox · 1 active · 0 need you"
+
+
 def test_injected_root_exposes_enabled_exact_shelf_overflow() -> None:
     rows = tuple(
         _document(f"urgent:{index}", actionable=True) for index in range(5)
     )
-    projection = AgentBrowserProjection(7, rows, 5, 5, rows[0].work_key)
+    projection = AgentBrowserProjection(7, rows, 5, 5, 5, rows[0].work_key)
 
     items = build_agent_root_items(
         projection,

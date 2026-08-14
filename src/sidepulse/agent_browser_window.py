@@ -99,7 +99,11 @@ def build_agent_root_items(
     urgent = tuple(row for row in projection.rows if row.actionable)[:3]
     summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         (
-            f"Agent Mailbox · {projection.total_count} active · "
+            # active_count, not total_count: total is every retained
+            # family including completed and idle ones, and printing it
+            # as "active" is how this header claimed 24 agents were
+            # working while one was.
+            f"Agent Mailbox · {projection.active_count} active · "
             f"{sum(row.actionable for row in projection.rows)} need you"
         ),
         None,
@@ -224,7 +228,7 @@ class AgentBrowserWindowController(NSObject):
         if self is None:
             return None
 
-        self.projection = AgentBrowserProjection(0, (), 0, 0, None)
+        self.projection = AgentBrowserProjection(0, (), 0, 0, 0, None)
         self.actions_by_work_key: dict[WorkKey, tuple[OperatorActionDescriptor, ...]] = {}
         self.action_handler: Callable[[AgentBrowserActionPayload], object] | None = None
         self.query_handler: Callable[..., AgentBrowserProjection] | None = None

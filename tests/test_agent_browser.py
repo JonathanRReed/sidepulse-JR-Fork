@@ -463,6 +463,8 @@ def test_query_and_projection_have_no_recent_or_persistent_search_state() -> Non
         "rows",
         "total_count",
         "scoped_count",
+        # A bounded count of working families, not a query or a history.
+        "active_count",
         "selected_work_key",
     }
     document = _document("work:history")

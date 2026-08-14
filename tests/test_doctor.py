@@ -11,6 +11,7 @@ import pytest
 from sidepulse.cli import sidepulse_main
 from sidepulse.doctor import (
     DIAGNOSTIC_MANIFEST,
+    DOCTOR_VERSION,
     MAX_DOCTOR_EXPORT_BYTES,
     PUBLIC_COLLECTION_ERROR_MESSAGE,
     DiagnosticCheck,
@@ -40,7 +41,7 @@ def _finding(
 
 def _result() -> DiagnosticResult:
     return DiagnosticResult(
-        manifest_version=1,
+        manifest_version=DOCTOR_VERSION,
         findings=(
             _finding(DiagnosticCheck.PACKAGE_IMPORT_ROOT, DiagnosticCode.SOURCE_CHECKOUT, 1, 1),
             _finding(DiagnosticCheck.SIGNATURE_STATE, DiagnosticCode.NOT_APPLICABLE, 0, 1),
@@ -51,6 +52,7 @@ def _result() -> DiagnosticResult:
             _finding(DiagnosticCheck.WORKER_REGISTRY_BOUNDS, DiagnosticCode.BOUNDED, 32, 32),
             _finding(DiagnosticCheck.TIMER_REGISTRY_BOUNDS, DiagnosticCode.BOUNDED, 22, 64),
             _finding(DiagnosticCheck.MOUNTED_DEVICE_HEALTH, DiagnosticCode.DISCONNECTED, 0, 16),
+            _finding(DiagnosticCheck.ALCOVE_FOLLOW_STATE, DiagnosticCode.NOT_PERMITTED, 0, 1),
         ),
         last_failure_class=SanitizedFailureClass.NONE,
     )
@@ -58,7 +60,9 @@ def _result() -> DiagnosticResult:
 
 def test_manifest_and_result_are_frozen_exact_and_bounded() -> None:
     assert isinstance(DIAGNOSTIC_MANIFEST, DiagnosticManifest)
-    assert DIAGNOSTIC_MANIFEST.version == 1
+    # Adding a check changes the exported document's shape, so the version
+    # moves with it -- a v1 reader must not silently miss a whole row.
+    assert DIAGNOSTIC_MANIFEST.version == DOCTOR_VERSION == 2
     assert tuple(field.check for field in DIAGNOSTIC_MANIFEST.fields) == tuple(DiagnosticCheck)
     assert tuple(field.name for field in fields(DiagnosticResult)) == (
         "manifest_version",
@@ -78,12 +82,12 @@ def test_manifest_and_result_are_frozen_exact_and_bounded() -> None:
         _finding(DiagnosticCheck.MOUNTED_DEVICE_HEALTH, DiagnosticCode.VERIFIED, 1, 1)
     with pytest.raises(ValueError, match="order"):
         DiagnosticResult(
-            1,
+            DOCTOR_VERSION,
             tuple(reversed(result.findings)),
             SanitizedFailureClass.NONE,
         )
     with pytest.raises(ValueError, match="manifest fields"):
-        DiagnosticManifest(1, (object(),))  # type: ignore[arg-type]
+        DiagnosticManifest(DOCTOR_VERSION, (object(),))  # type: ignore[arg-type]
 
 
 def test_encoding_is_exact_deterministic_and_contains_only_codes_and_counts() -> None:
@@ -99,7 +103,7 @@ def test_encoding_is_exact_deterministic_and_contains_only_codes_and_counts() ->
         "version",
     }
     assert document["document"] == "sidepulse-doctor"
-    assert document["version"] == 1
+    assert document["version"] == DOCTOR_VERSION
     assert document["last_failure_class"] == "none"
     assert document["findings"][0] == {
         "check": "package_import_root",
@@ -160,6 +164,10 @@ def test_default_collection_uses_only_read_only_local_probes(tmp_path: Path) -> 
         patch("sidepulse.doctor.detect_provider_configs", return_value=[]),
         patch("sidepulse.doctor.negotiated_provider_sources", return_value=()),
         patch("sidepulse.doctor.discover_devices", return_value=[]),
+        # Otherwise this probe reads the real settings file and the live
+        # window list, and the assertion below would depend on whether
+        # Alcove happens to be running on the machine under test.
+        patch("sidepulse.doctor._alcove_following_enabled", return_value=False),
         patch("sidepulse.doctor.subprocess.run") as run,
     ):
         result = collect_diagnostics()
@@ -173,6 +181,7 @@ def test_default_collection_uses_only_read_only_local_probes(tmp_path: Path) -> 
     assert result.finding(DiagnosticCheck.WORKER_REGISTRY_BOUNDS).code is DiagnosticCode.BOUNDED
     assert result.finding(DiagnosticCheck.TIMER_REGISTRY_BOUNDS).code is DiagnosticCode.BOUNDED
     assert result.finding(DiagnosticCheck.MOUNTED_DEVICE_HEALTH).code is DiagnosticCode.DISCONNECTED
+    assert result.finding(DiagnosticCheck.ALCOVE_FOLLOW_STATE).code is DiagnosticCode.NOT_CONFIGURED
     assert result.last_failure_class is SanitizedFailureClass.NONE
     run.assert_not_called()
 

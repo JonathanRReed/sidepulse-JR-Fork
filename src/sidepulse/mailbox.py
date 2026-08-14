@@ -176,7 +176,11 @@ def project_mailbox(
         raise ValueError("max_primary_agents must be non-negative")
 
     prior = _valid_previous_order(previous_order)
-    candidates = _primary_candidates(projection.visible_rows)
+    # The mailbox is the one consumer that needs workers: it counts a
+    # family's fan-out and folds a worker's ask into its parent's row.
+    # It reads them from ``worker_rows`` because ``visible_rows`` is
+    # structurally main-agents-only (see AttentionProjection).
+    candidates = _primary_candidates(projection.all_rows)
     order_by_id = dict(prior)
     next_order = max(order_by_id.values(), default=-1) + 1
     new_candidates = sorted(

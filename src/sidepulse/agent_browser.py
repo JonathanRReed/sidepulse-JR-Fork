@@ -176,6 +176,13 @@ class AgentBrowserProjection:
     rows: tuple[AgentBrowserDocument, ...]
     total_count: int
     scoped_count: int
+    #: Retained families that are actually WORKING or waiting on the user.
+    #: ``total_count`` is every retained family at any lifecycle -- 16
+    #: completed and 8 idle among 27, live -- and the dropdown header
+    #: printed it as "27 active". It is a different number and it now has
+    #: its own name. Deliberately NOT defaulted: a caller that forgets it
+    #: would silently publish "0 active" while agents work.
+    active_count: int
     selected_work_key: WorkKey | None
 
 
@@ -330,6 +337,10 @@ def project_agent_browser(
 
     primary_catalog = _canonical_primary_catalog(documents)
     total_count = len(primary_catalog)
+    active_count = sum(
+        seed._shelf in {MailboxSectionKind.NEEDS_YOU, MailboxSectionKind.IN_PROGRESS}
+        for seed in primary_catalog
+    )
     scoped: tuple[AgentBrowserDocument | _PrimarySeed, ...]
     if query.family_key is not None:
         family = next(
@@ -388,6 +399,7 @@ def project_agent_browser(
         rows=tuple(_materialize_primary_row(row) for row in visible_rows),
         total_count=total_count,
         scoped_count=len(ranked),
+        active_count=active_count,
         selected_work_key=selected,
     )
 

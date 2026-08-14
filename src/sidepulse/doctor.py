@@ -7,12 +7,19 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Final
 
+from .alcove_observation import (
+    ALCOVE_STATUS_MAX_AGE_SECONDS,
+    AlcoveCaptureStatus,
+    alcove_follow_blocker,
+    latest_alcove_status,
+)
 from .app_bundle import running_inside_bundle
 from .device_writer import discover_devices
 from .private_export import (
@@ -32,7 +39,10 @@ from .status_bar_launch import launch_agent_path
 from .trusted_tools import trusted_system_tool
 
 DOCTOR_DOCUMENT: Final = "sidepulse-doctor"
-DOCTOR_VERSION: Final = 1
+# 2: adds alcove_follow_state. The document gained a row, so anything
+# holding a v1 export is reading a different shape -- version it rather
+# than let a consumer silently miss a check that is now reported.
+DOCTOR_VERSION: Final = 2
 MAX_DOCTOR_EXPORT_BYTES: Final = 64 * 1024
 PUBLIC_COLLECTION_ERROR_MESSAGE: Final = "Diagnostics could not be collected."
 
@@ -47,6 +57,7 @@ class DiagnosticCheck(str, Enum):
     WORKER_REGISTRY_BOUNDS = "worker_registry_bounds"
     TIMER_REGISTRY_BOUNDS = "timer_registry_bounds"
     MOUNTED_DEVICE_HEALTH = "mounted_device_health"
+    ALCOVE_FOLLOW_STATE = "alcove_follow_state"
 
 
 class DiagnosticCode(str, Enum):
@@ -71,6 +82,11 @@ class DiagnosticCode(str, Enum):
     CONNECTED = "connected"
     AMBIGUOUS = "ambiguous"
     UNAVAILABLE = "unavailable"
+    # Alcove following. Content-free by construction: a fixed product
+    # vocabulary, never a message, a path, or a window title.
+    NOT_PERMITTED = "not_permitted"
+    NOT_RUNNING = "not_running"
+    UNUSABLE = "unusable"
 
 
 class SanitizedFailureClass(str, Enum):
@@ -208,6 +224,23 @@ DIAGNOSTIC_MANIFEST: Final = DiagnosticManifest(
                 DiagnosticCode.UNAVAILABLE,
             ),
             16,
+        ),
+        # Alcove following had exactly one observable state -- nothing --
+        # for every one of these. Screen Recording denied, Alcove absent,
+        # an image that could not be measured and a clean success all
+        # returned the same None, so no surface could tell the user which
+        # one they were living in.
+        DiagnosticFieldManifest(
+            DiagnosticCheck.ALCOVE_FOLLOW_STATE,
+            (
+                DiagnosticCode.HEALTHY,
+                DiagnosticCode.NOT_PERMITTED,
+                DiagnosticCode.NOT_RUNNING,
+                DiagnosticCode.UNUSABLE,
+                DiagnosticCode.NOT_CONFIGURED,
+                DiagnosticCode.UNAVAILABLE,
+            ),
+            1,
         ),
     ),
 )
@@ -499,6 +532,51 @@ def _mounted_device_health_probe() -> DiagnosticFinding:
     )
 
 
+_ALCOVE_DIAGNOSTIC_CODES: Final[dict[AlcoveCaptureStatus, DiagnosticCode]] = {
+    AlcoveCaptureStatus.CAPTURED: DiagnosticCode.HEALTHY,
+    AlcoveCaptureStatus.SCREEN_RECORDING_DENIED: DiagnosticCode.NOT_PERMITTED,
+    AlcoveCaptureStatus.WINDOW_UNAVAILABLE: DiagnosticCode.NOT_RUNNING,
+    AlcoveCaptureStatus.IMAGE_UNUSABLE: DiagnosticCode.UNUSABLE,
+    AlcoveCaptureStatus.CAPTURE_FAILED: DiagnosticCode.UNAVAILABLE,
+    AlcoveCaptureStatus.NOT_FOLLOWING: DiagnosticCode.NOT_CONFIGURED,
+}
+
+
+def _alcove_following_enabled() -> bool:
+    # Imported here, not at module scope: doctor is an entry point and
+    # settings pulls in the colour and signal models with it.
+    from .settings import load_settings
+
+    return bool(load_settings().screen_bar_follow_alcove)
+
+
+def _alcove_follow_state_probe() -> DiagnosticFinding:
+    """What Alcove following is actually doing, or why it is not.
+
+    Prefers the render path's own live reading and falls back to a
+    promptless preflight plus a window probe. It never upgrades "nothing
+    is obviously in the way" into "it works": only a real capture may
+    report healthy, so a fresh process with no reading says unavailable
+    rather than inventing good news.
+    """
+    if not _alcove_following_enabled():
+        status: AlcoveCaptureStatus | None = AlcoveCaptureStatus.NOT_FOLLOWING
+    else:
+        snapshot = latest_alcove_status()
+        age = None if snapshot is None else time.monotonic() - snapshot.updated_at
+        if snapshot is not None and age is not None and 0.0 <= age <= ALCOVE_STATUS_MAX_AGE_SECONDS:
+            status = snapshot.status
+        else:
+            status = alcove_follow_blocker(following=True)
+    code = _ALCOVE_DIAGNOSTIC_CODES.get(status, DiagnosticCode.UNAVAILABLE)
+    return _finding(
+        DiagnosticCheck.ALCOVE_FOLLOW_STATE,
+        code,
+        int(code is DiagnosticCode.HEALTHY),
+        1,
+    )
+
+
 def _default_probes() -> tuple[DiagnosticProbe, ...]:
     return (
         DiagnosticProbe(DiagnosticCheck.PACKAGE_IMPORT_ROOT, _package_import_root_probe),
@@ -510,6 +588,7 @@ def _default_probes() -> tuple[DiagnosticProbe, ...]:
         DiagnosticProbe(DiagnosticCheck.WORKER_REGISTRY_BOUNDS, _worker_registry_bounds_probe),
         DiagnosticProbe(DiagnosticCheck.TIMER_REGISTRY_BOUNDS, _timer_registry_bounds_probe),
         DiagnosticProbe(DiagnosticCheck.MOUNTED_DEVICE_HEALTH, _mounted_device_health_probe),
+        DiagnosticProbe(DiagnosticCheck.ALCOVE_FOLLOW_STATE, _alcove_follow_state_probe),
     )
 
 
@@ -528,8 +607,15 @@ def _sanitized_failure_class(error: Exception) -> SanitizedFailureClass:
 
 
 def _unavailable_finding(check: DiagnosticCheck) -> DiagnosticFinding:
-    field = _FIELD_BY_CHECK[check]
-    return _finding(check, DiagnosticCode.UNAVAILABLE, 0, field.max_count)
+    """A probe that failed measured NOTHING, and says so in both numbers.
+
+    This used to borrow the manifest's ceiling as the denominator, so a
+    private-path probe that raised before reading a single path rendered
+    ``private path modes: unavailable [0/32]`` -- a ratio out of a total
+    the app had not counted and paths it had not looked at. 0/0 is the
+    honest pair: nothing examined, nothing healthy.
+    """
+    return _finding(check, DiagnosticCode.UNAVAILABLE, 0, 0)
 
 
 def collect_diagnostics(
@@ -623,6 +709,7 @@ def render_diagnostic_result(result: DiagnosticResult) -> str:
 __all__ = [
     "DIAGNOSTIC_MANIFEST",
     "DOCTOR_DOCUMENT",
+    "DOCTOR_VERSION",
     "MAX_DOCTOR_EXPORT_BYTES",
     "PUBLIC_COLLECTION_ERROR_MESSAGE",
     "DiagnosticCheck",

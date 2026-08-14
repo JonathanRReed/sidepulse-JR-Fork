@@ -13,10 +13,11 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import tomllib
 
@@ -297,6 +298,60 @@ def _read_optional_text(path: Path, *, tighten: bool) -> str:
         return ""
 
 
+class CodexHookTrustStatus(str, Enum):
+    """Whether Codex was pre-approved to RUN the hook we just wrote.
+
+    Writing the hook into config.toml is half the install. Codex refuses
+    to execute a hook whose hash it has not trusted, so without this
+    handshake the user gets "Codex hooks installed." and a Codex that
+    never calls SidePulse. Every ending here used to be one empty dict:
+    no Codex binary to ask, a handshake that never answered, and a
+    handshake that answered without our hook in it -- all `{}`, all
+    swallowed by ``if not trusted_hashes: return``.
+    """
+
+    TRUSTED = "trusted"
+    #: No `codex` binary anywhere we look, so nothing could be asked.
+    CLI_NOT_FOUND = "cli_not_found"
+    #: The binary ran and did not come back with our hook's hash.
+    NOT_CONFIRMED = "not_confirmed"
+    #: A non-default config path. Trust belongs to whoever owns that file.
+    NOT_ATTEMPTED = "not_attempted"
+
+
+#: One fixed product sentence per non-trusted ending. Content-free: no
+#: paths, no binary locations, no stderr.
+CODEX_TRUST_WARNINGS: Final[dict[CodexHookTrustStatus, str]] = {
+    CodexHookTrustStatus.CLI_NOT_FOUND: (
+        "The Codex CLI is not installed here, so SidePulse could not "
+        "pre-approve its hook. Codex will ask you to trust it the first "
+        "time it runs."
+    ),
+    CodexHookTrustStatus.NOT_CONFIRMED: (
+        "Codex did not confirm the hook, so SidePulse could not "
+        "pre-approve it. Codex will ask you to trust it the first time "
+        "it runs."
+    ),
+}
+
+
+@dataclass(frozen=True)
+class CodexHookTrust:
+    """The handshake's outcome and the hashes it produced, if any."""
+
+    status: CodexHookTrustStatus
+    hashes: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not CodexHookTrustStatus:
+            raise ValueError("invalid codex hook trust status")
+        # The pairing is enforced rather than documented, for the same
+        # reason AlcoveCaptureOutcome enforces its own: a status that can
+        # disagree with its payload is the defect coming back.
+        if (self.status is CodexHookTrustStatus.TRUSTED) != bool(self.hashes):
+            raise ValueError("only a trusted handshake carries hashes")
+
+
 @dataclass(frozen=True)
 class InstallResult:
     provider: str
@@ -305,6 +360,21 @@ class InstallResult:
     changed: bool
     backup_path: Path | None = None
     dry_run: bool = False
+    #: Codex only. None means "this provider has no trust handshake".
+    codex_trust: CodexHookTrustStatus | None = None
+
+    @property
+    def public_warning(self) -> str:
+        """What is still wrong after a "successful" install, or "".
+
+        The installer reported one bit -- ``changed`` -- and an install
+        that wrote the hook but could not get it trusted set that bit to
+        True. This is the difference between "installed" and "installed,
+        and it will not run yet".
+        """
+        if self.codex_trust is None:
+            return ""
+        return CODEX_TRUST_WARNINGS.get(self.codex_trust, "")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -314,6 +384,8 @@ class InstallResult:
             "changed": self.changed,
             "backup_path": str(self.backup_path) if self.backup_path else None,
             "dry_run": self.dry_run,
+            "codex_trust": None if self.codex_trust is None else self.codex_trust.value,
+            "warning": self.public_warning,
         }
 
 
@@ -1080,6 +1152,10 @@ def install_codex_hooks(
     changed = new_text != original
 
     backup = None
+    # A non-default config path is the one ending that is not a failure:
+    # trust for a file the user pointed us at is theirs to grant. It is
+    # still said out loud rather than left as the absence of a warning.
+    trust_status: CodexHookTrustStatus = CodexHookTrustStatus.NOT_ATTEMPTED
     if not dry_run:
         refresh_trust = should_refresh_codex_hook_trust(config, config_path)
 
@@ -1087,11 +1163,17 @@ def install_codex_hooks(
             transaction: PrivateWriteTransaction,
             expected_writes: dict[Path, bytes],
         ) -> None:
-            nonlocal changed
+            nonlocal changed, trust_status
             if not refresh_trust:
                 return
-            trusted_hashes = resolve_codex_hook_hashes(config)
+            trust = resolve_codex_hook_trust(config)
+            trust_status = trust.status
+            trusted_hashes = trust.hashes
             if not trusted_hashes:
+                # Still not a raise: the hook IS written and half-working
+                # beats no hook. But the caller now learns WHICH of the
+                # three reasons this was, instead of an empty dict that
+                # looked exactly like "nothing needed doing".
                 return
             current = expected_writes.get(config, original.encode("utf-8")).decode("utf-8")
             trusted_text = update_codex_trusted_hashes(current, trusted_hashes)
@@ -1117,7 +1199,9 @@ def install_codex_hooks(
                 after_publish=after_publish,
             )
         elif refresh_trust:
-            trusted_hashes = resolve_codex_hook_hashes(config)
+            trust = resolve_codex_hook_trust(config)
+            trust_status = trust.status
+            trusted_hashes = trust.hashes
             trusted_text = update_codex_trusted_hashes(original, trusted_hashes)
             if trusted_text != original:
                 changed = True
@@ -1146,7 +1230,15 @@ def install_codex_hooks(
                     expected_parent_identity=log_leaf.parent_identity,
                 )
 
-    return InstallResult("codex", config, target_log, changed, backup, dry_run)
+    return InstallResult(
+        "codex",
+        config,
+        target_log,
+        changed,
+        backup,
+        dry_run,
+        codex_trust=trust_status,
+    )
 
 
 def install_claude_hooks(
@@ -2216,6 +2308,27 @@ def should_refresh_codex_hook_trust(config: Path, explicit_config: Path | None) 
         return config.expanduser().resolve() == default_config.expanduser().resolve()
     except OSError:
         return explicit_config is None
+
+
+def resolve_codex_hook_trust(
+    config_path: Path,
+    cwd: Path | None = None,
+    timeout_seconds: float = 8.0,
+) -> CodexHookTrust:
+    """Ask Codex for the hook's current hash, and say what came back.
+
+    ``resolve_codex_hook_hashes`` answers the same question with a dict,
+    and an empty dict is the same value for "no Codex binary exists",
+    "the app-server never answered" and "it answered without our hook".
+    The install path treated all three as "nothing to do", which is how
+    an install could report success and leave a hook Codex will not run.
+    """
+    if codex_cli_path() is None:
+        return CodexHookTrust(CodexHookTrustStatus.CLI_NOT_FOUND)
+    hashes = resolve_codex_hook_hashes(config_path, cwd, timeout_seconds)
+    if not hashes:
+        return CodexHookTrust(CodexHookTrustStatus.NOT_CONFIRMED)
+    return CodexHookTrust(CodexHookTrustStatus.TRUSTED, dict(hashes))
 
 
 def resolve_codex_hook_hashes(

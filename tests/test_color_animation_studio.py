@@ -458,9 +458,18 @@ def test_a_preview_program_reflects_the_candidate_not_the_saved_settings() -> No
 
 
 def test_a_provider_preview_puts_that_provider_alone_on_the_strip() -> None:
-    """With two or more sessions the renderer switches to session identity
-    colours, so previewing a PROVIDER colour against a crowd would show no
-    change at all -- the swatch would look broken."""
+    """A provider swatch previews THAT provider, not a fleet.
+
+    This file used to close by asserting the opposite of the last block:
+    that changing Claude's colour made NO difference to a crowd, because
+    two or more sessions handed every row an IDENTITY_PALETTE slot and
+    dropped the provider colour entirely. That is the defect the owner
+    reported as "it's purple for some reason when Claude's running", and
+    a provider colour that is unreachable in the only configuration the
+    owner actually runs is not a setting. A crowd now varies LIGHTNESS
+    inside each brand, so a provider colour change reaches every session
+    of that provider -- and only that provider.
+    """
     statuses = colors_module.provider_preview_statuses("claude")
     assert [status.provider for status in statuses] == ["claude"]
 
@@ -471,8 +480,12 @@ def test_a_provider_preview_puts_that_provider_alone_on_the_strip() -> None:
     )
 
     crowd = (_status("claude", AgentMode.WORKING), _status("codex", AgentMode.WORKING))
-    assert studio_preview_program(committed, statuses=crowd) == studio_preview_program(
+    assert studio_preview_program(committed, statuses=crowd) != studio_preview_program(
         candidate, statuses=crowd
+    )
+    untouched = committed.with_agent_color("devin", "#10A37F")
+    assert studio_preview_program(committed, statuses=crowd) == studio_preview_program(
+        untouched, statuses=crowd
     )
 
 

@@ -237,9 +237,19 @@ def status_item_accessibility(
         return _status_fallback()
 
     details: list[str] = []
-    live_unacknowledged = sum(request.phase is RequestPhase.LIVE_UNACKNOWLEDGED for request in state.requests)
-    acknowledged = sum(request.phase is RequestPhase.LIVE_ACKNOWLEDGED for request in state.requests)
-    stale_holds = sum(request.phase is RequestPhase.STALE_HOLD for request in state.requests)
+    # Main agents only, in EVERY number on this surface. One main session
+    # fans out to 100+ Task workers; counting works at every depth is how
+    # this line read "Active: 34" with one main agent running. A worker
+    # also never asks for the user, so its requests are not "requests
+    # need you" either.
+    primary_work_keys = frozenset(work.key for work in state.works if work.parent_key is None)
+    primary_works = tuple(work for work in state.works if work.parent_key is None)
+    primary_requests = tuple(
+        request for request in state.requests if request.key.work_key in primary_work_keys
+    )
+    live_unacknowledged = sum(request.phase is RequestPhase.LIVE_UNACKNOWLEDGED for request in primary_requests)
+    acknowledged = sum(request.phase is RequestPhase.LIVE_ACKNOWLEDGED for request in primary_requests)
+    stale_holds = sum(request.phase is RequestPhase.STALE_HOLD for request in primary_requests)
     if live_unacknowledged:
         details.append(
             "1 request needs you" if live_unacknowledged == 1 else f"{live_unacknowledged} requests need you"
@@ -249,8 +259,8 @@ def status_item_accessibility(
     if stale_holds:
         details.append(f"Stale request held: {stale_holds}")
 
-    active = sum(work.lifecycle is WorkLifecycle.ACTIVE for work in state.works)
-    failures = sum(work.lifecycle is WorkLifecycle.FAILED for work in state.works)
+    active = sum(work.lifecycle is WorkLifecycle.ACTIVE for work in primary_works)
+    failures = sum(work.lifecycle is WorkLifecycle.FAILED for work in primary_works)
     if active:
         details.append(f"Active: {active}")
     if failures:
@@ -284,6 +294,52 @@ def status_item_accessibility(
         _bounded_join((headline, *details)),
         "Open SidePulse status",
     )
+
+
+#: Longest menu-bar title this app will publish. The menu bar is shared,
+#: finite space owned by macOS: anything longer is truncated mid-word by
+#: AppKit, and a number that ends in an ellipsis is not a ledger.
+MAX_STATUS_ITEM_TITLE_LENGTH: Final = 24
+
+
+def status_item_title(
+    state: CanonicalOperatorState,
+    glance: ResolvedGlance,
+) -> str:
+    """The short ledger the MENU BAR shows, beside its icon.
+
+    This is not the screen-reader value. Both were the same string, and
+    the screen-reader value is a comma-joined sentence built to be read
+    aloud in full -- headline, every request phase, every count, every
+    source-freshness caveat, quiet-presentation and cue notes. Rendered
+    as a title it produced, verbatim from a live screenshot:
+
+        "Agents active, Active: 34, Source partially availabl…"
+
+    -- a sentence cut off mid-word in the menu bar. VoiceOver still gets
+    the whole sentence; the eye gets one number and what it counts.
+    """
+    if type(state) is not CanonicalOperatorState or type(glance) is not ResolvedGlance:
+        return ""
+    primary_keys = frozenset(work.key for work in state.works if work.parent_key is None)
+    needs_you = sum(
+        request.phase is RequestPhase.LIVE_UNACKNOWLEDGED
+        for request in state.requests
+        if request.key.work_key in primary_keys
+    )
+    if needs_you:
+        return "1 needs you" if needs_you == 1 else f"{needs_you} need you"
+    primary_works = tuple(work for work in state.works if work.parent_key is None)
+    failed = sum(work.lifecycle is WorkLifecycle.FAILED for work in primary_works)
+    if failed:
+        return "1 failed" if failed == 1 else f"{failed} failed"
+    active = sum(work.lifecycle is WorkLifecycle.ACTIVE for work in primary_works)
+    if active:
+        return f"{active} working"
+    headline = _GLANCE_HEADLINES.get(glance.semantic)
+    if headline is None or len(headline) > MAX_STATUS_ITEM_TITLE_LENGTH:
+        return ""
+    return headline
 
 
 def mailbox_row_accessibility(

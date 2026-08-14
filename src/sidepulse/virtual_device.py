@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import math
+import threading
 import time
+from enum import Enum
 
 import objc
 import Quartz
@@ -29,10 +31,14 @@ from Quartz import CGContextFillRect, CGContextSetRGBFillColor
 from .accessibility_display import AccessibilityDisplayPreferences
 from .draw_guard import guard_draw
 from .alcove_observation import (
+    ALCOVE_STATUS_LOG_LINES,
     AlcoveCaptureRequest,
+    AlcoveCaptureStatus,
     AlcoveObservationBuffer,
     AlcoveObservationReducer,
     AlcoveObservationWorker,
+    note_alcove_status,
+    screen_recording_granted,
 )
 from .led_status import LedDisplayState, normalize_brightness, program_for_display_state
 from .led_wasm import LedWasmUnavailableError, SdLedWasmController
@@ -80,10 +86,37 @@ NOTCH_BOTTOM_RADIUS = 8.0
 # docs/superpowers/specs/2026-08-10-agent-color-customizer-design.md
 # section 6 (superseded from an earlier offset-pill attempt that read as
 # disconnected/floating rather than integrated).
+# "never set" -- distinct from every real value, including None.
+_UNSET = object()
 ALCOVE_BUNDLE_ID = "com.henrikruscon.Alcove"
-# CGWindowList reports an owner NAME, not a bundle id, so the window
-# probe matches on this while process detection matches the bundle id.
-ALCOVE_OWNER_NAME = "Alcove"
+
+#: How long the Screen Bar may hold a deduped program before it is
+#: re-commanded regardless.
+#:
+#: The LED controller has always had this (``LED_REASSERT_SECONDS``, 60s)
+#: and the Screen Bar had NOTHING: once ``_program_identity`` matched, the
+#: gate returned forever. The asymmetry was backwards. The strip is
+#: animated by firmware, which cannot stop; the notch is animated by a
+#: Python sampler with six silent ``return`` paths in
+#: ``ScreenBarSampler._execute_command`` (superseded generation, missing
+#: neighbour frame, interval wait, bare except...) and a ``_step`` that
+#: returns None on any LED-count or channel-range mismatch. Any one of
+#: them left the notch with no motion loop, falling back to
+#: ``last_safe_colors`` -- one frozen colour, no error, no log, and
+#: nothing to ever re-command it. Reported live as "the screen bar and
+#: pulse bar aren't doing anything right now; they're just stuck on a
+#: color".
+#:
+#: Shorter than the strip's 60s because re-applying here is an in-process
+#: sampler reconcile, not ~30 syscalls plus an fsync to USB storage, and
+#: because the phase anchor is absolute -- a reassert resumes the same
+#: phase rather than restarting the animation.
+SCREEN_BAR_REASSERT_SECONDS = 10.0
+# CGWindowList reports an owner NAME, not a bundle id, so the window probe
+# matches on that while process detection matches the bundle id. The name
+# is DEFINED in alcove_observation (which also probes the window list for
+# the settings pane and doctor) and re-exported here, not copied -- a
+# second copy of an Alcove constant is how the last Alcove bug got in.
 COMPACT_ACCENT_HEIGHT = 2.5
 # NSStatusWindowLevel without another SDK dependency; and the level the
 # wrap bracket rides at while Alcove is running -- kCGMaximumWindowLevel,
@@ -131,6 +164,7 @@ WING_AUTO_LENGTH = 14.0
 from .alcove_observation import (  # noqa: E402, F401
     ALCOVE_HOLD_SECONDS,
     ALCOVE_NARROW_AFTER_SECONDS,
+    ALCOVE_OWNER_NAME,
 )
 WING_SAFETY_MARGIN = 28.0
 WING_MIN_USABLE = 24.0
@@ -338,6 +372,63 @@ def wing_width_for_screen(screen, notch_width: float) -> float:
     return max(0.0, min(WING_AUTO_LENGTH, room))
 
 
+class ScreenBarWingState(str, Enum):
+    """Why "extend glow along the menu bar" is or is not doing anything.
+
+    ``wing_width_for_screen`` answers with 0.0 for four unrelated facts:
+    this display reports no notch gap at all (every external monitor and
+    every non-notched Mac), the gap exists but the menu bar is too full
+    to lend any of it, the screen would not report its areas, and -- the
+    only one anybody expected -- the user turned the switch off. All four
+    render identically: a bar the same size it was, and a switch still
+    reading ON.
+    """
+
+    EXTENDED = "extended"
+    NO_SAFE_AREA = "no_safe_area"
+    MENU_BAR_FULL = "menu_bar_full"
+    UNREADABLE = "unreadable"
+    #: A manual wing length overrides the measurement entirely.
+    MANUAL = "manual"
+    NOT_EXTENDING = "not_extending"
+
+
+def screen_bar_wing_state(
+    screen,
+    notch_width: float,
+    *,
+    wrap_menu_bar: bool,
+    wing_length: float | None = None,
+) -> ScreenBarWingState:
+    """The reason behind ``wing_width_for_screen``'s number.
+
+    Deliberately re-derived from the same two auxiliary areas rather than
+    inferred from the returned width: a 0.0 is the value being explained,
+    so it cannot also be the evidence.
+    """
+    if not wrap_menu_bar:
+        return ScreenBarWingState.NOT_EXTENDING
+    if wing_length is not None:
+        return ScreenBarWingState.MANUAL
+    try:
+        left = screen.auxiliaryTopLeftArea()
+        right = screen.auxiliaryTopRightArea()
+    except Exception:
+        return ScreenBarWingState.UNREADABLE
+    try:
+        left_width = float(left.size.width)
+        right_width = float(right.size.width)
+    except Exception:
+        return ScreenBarWingState.UNREADABLE
+    if left_width <= 0.0 or right_width <= 0.0:
+        # No notch, so no menu-bar area beside one. Nothing is broken and
+        # nothing will ever happen here either.
+        return ScreenBarWingState.NO_SAFE_AREA
+    if wing_width_for_screen(screen, notch_width) <= 0.0:
+        return ScreenBarWingState.MENU_BAR_FULL
+    return ScreenBarWingState.EXTENDED
+
+
 def notch_depth_for_screen(screen) -> float:
     try:
         notch_depth = float(screen.safeAreaInsets().top)
@@ -424,8 +515,84 @@ def is_alcove_running() -> bool:
         return False
 
 
+class AlcovePresenceProbe:
+    """Answers "is Alcove running" without ever blocking the main thread.
+
+    ``bundleIdentifier()`` on a lazily-faulted NSRunningApplication is a
+    BLOCKING XPC round trip to LaunchServices
+    (_LSCopyApplicationInformation ->
+    xpc_connection_send_message_with_reply_sync), and
+    ``is_alcove_running`` does one per running app. Measured on the live
+    app with `sample`: 636 of 4503 main-thread samples -- 14.1% of the
+    main thread, one full core's worth of a 100.7% CPU process -- inside
+    this one call, from ``reposition()`` on a 2s timer whose 3s TTL did
+    not even cover its own cadence.
+
+    So the main thread only ever READS a cached answer, and refreshes
+    happen on a daemon worker. The very first read is synchronous, once
+    per process, because the first layout has to be right and there is
+    nothing cached to be right with.
+    """
+
+    def __init__(self, *, probe=is_alcove_running, ttl_seconds: float = 3.0) -> None:
+        self._probe = probe
+        self._ttl_seconds = max(0.0, float(ttl_seconds))
+        self._value: bool | None = None
+        self._sampled_at = 0.0
+        self._refreshing = False
+        self._lock = threading.Lock()
+
+    def running(self, *, now: float | None = None) -> bool:
+        moment = time.monotonic() if now is None else float(now)
+        with self._lock:
+            value = self._value
+            fresh = value is not None and moment - self._sampled_at < self._ttl_seconds
+            if fresh:
+                return value
+            if value is None:
+                # Cold start only. Never again on this main thread.
+                self._value = self._sample()
+                self._sampled_at = moment
+                return self._value
+            if self._refreshing:
+                return value
+            self._refreshing = True
+        self._start_refresh()
+        return value
+
+    def _sample(self) -> bool:
+        try:
+            return bool(self._probe())
+        except Exception:
+            return False
+
+    def _start_refresh(self) -> None:
+        thread = threading.Thread(
+            target=self._refresh,
+            name="sidepulse-alcove-probe",
+            daemon=True,
+        )
+        thread.start()
+
+    def _refresh(self) -> None:
+        sampled = self._sample()
+        with self._lock:
+            self._value = sampled
+            self._sampled_at = time.monotonic()
+            self._refreshing = False
+
+
 def _on_screen_windows() -> list:
-    """Every on-screen window, or an empty list. Injectable for tests."""
+    """Every on-screen window, or an empty list. Injectable for tests.
+
+    The empty list is deliberately NOT a reason here, and this is the one
+    place in the Alcove path where that is defensible: the only consumer
+    is alcove_window_level, which already treats both "no windows" and
+    "no Alcove windows" as "keep the floor level". Whether following is
+    working at all is answered by capture_alcove_observation's status,
+    which never collapses its endings -- so nothing user-visible depends
+    on telling those two apart here.
+    """
     try:
         import Quartz
 
@@ -519,7 +686,7 @@ def _alcove_window_values(screen_x: float, screen_width: float):
     candidates = []
     for entry in info or ():
         try:
-            if str(entry.get("kCGWindowOwnerName", "")) != "Alcove":
+            if str(entry.get("kCGWindowOwnerName", "")) != ALCOVE_OWNER_NAME:
                 continue
             window_number = int(entry.get("kCGWindowNumber", 0))
             bounds = entry.get("kCGWindowBounds") or {}
@@ -1832,6 +1999,7 @@ class VirtualStatusDevice(NSObject):
             self._pointer_interaction_relevant = False
             self._presentation_schedule_reconciler = None
             self._program_identity = None
+            self._program_applied_at = float("-inf")
             self._enabled = True
             self._terminating = False
             # Uncommitted Studio preview: the last program the LIVE path
@@ -1943,6 +2111,31 @@ class VirtualStatusDevice(NSObject):
         if observation is not None and request is not None:
             self._alcove_reducer.apply(observation, request, now=now)
         return self._alcove_reducer.current(now=now)
+
+    def _record_alcove_status(self, status, *, now: float | None = None) -> bool:
+        """Publish the outcome, and log it ONCE per transition.
+
+        Per-frame logging at the 1.5s observation cadence is a log nobody
+        reads; zero lines is how "Alcove mode doesn't seem to be working"
+        stayed unanswerable. Transitions are the only interesting events,
+        so the record itself decides when there is anything to say.
+        """
+        if type(status) is not AlcoveCaptureStatus:
+            return False
+        changed = note_alcove_status(status, now=now)
+        if not changed:
+            return False
+        line = ALCOVE_STATUS_LOG_LINES.get(status)
+        if line is None:
+            return True
+        try:
+            from .status_bar import log_status_bar
+
+            log_status_bar(line)
+        except Exception:
+            # Logging must never be able to break the render path.
+            pass
+        return True
 
     @staticmethod
     def _validated_fallback_colors(colors) -> tuple:
@@ -2460,6 +2653,17 @@ class VirtualStatusDevice(NSObject):
         if not self.follow_alcove_width:
             self._alcove_relevant = False
             self._stop_alcove_observer()
+            self._record_alcove_status(AlcoveCaptureStatus.NOT_FOLLOWING)
+        else:
+            # THE point following is enabled: ask the system, once, whether
+            # we are even allowed to look. Preflight never prompts -- the
+            # request call is reserved for a button the user pressed -- and
+            # forcing it here refreshes a cache that may be holding a
+            # "denied" the user has since fixed in System Settings.
+            if screen_recording_granted(force=True) is False:
+                self._record_alcove_status(
+                    AlcoveCaptureStatus.SCREEN_RECORDING_DENIED
+                )
         self._publish_presentation_schedule()
 
     def set_bracket_style(self, style: str) -> None:
@@ -2640,11 +2844,24 @@ class VirtualStatusDevice(NSObject):
                 fallback_colors,
             )
         )
+        motion_class = motion if isinstance(motion, MotionClass) else MotionClass.STATIC
+        # The gate must include whatever ADVANCES the animation, not just
+        # what the program says. A phase-free token is the right dedupe
+        # for a surface whose motion is guaranteed by something else --
+        # true of the strip (firmware loops), false here. So the notch
+        # additionally requires that its sampler is actually running the
+        # motion this token claims, and re-asserts on a timer regardless.
+        now = time.monotonic()
+        sampler_is_running_the_motion = self._sampler is not None and (
+            self._animation_active or motion_class is MotionClass.STATIC
+        )
         if (
             self.window is not None
             and self.window.isVisible()
             and self.view is not None
             and identity == self._program_identity
+            and sampler_is_running_the_motion
+            and now - self._program_applied_at < SCREEN_BAR_REASSERT_SECONDS
         ):
             return
         if self._terminating or not self._enabled:
@@ -2664,6 +2881,7 @@ class VirtualStatusDevice(NSObject):
             self.view.current_program = str(program)
             self.view.started_at = anchor
         self._program_identity = identity
+        self._program_applied_at = now
         self._advance_presentation_generation(enqueue=False)
         self._static_fallback_colors = fallback_colors
         self._sampler_command = SamplerCommand(
@@ -2706,15 +2924,14 @@ class VirtualStatusDevice(NSObject):
         # invisible) window whose bounds say nothing about what it's
         # drawing, so the bar ballooned across the menu bar. The user's
         # Bar Size sliders are the override for anything else.
-        running_cache = getattr(self, "_alcove_running_cache", None)
         now = time.monotonic()
-        if running_cache is not None and now - running_cache[0] < 3.0:
-            alcove_active = running_cache[1]
-        else:
-            # Iterating every running app with bridged bundleIdentifier()
-            # calls is too rich for a 2s cadence -- 3s TTL.
-            alcove_active = is_alcove_running()
-            self._alcove_running_cache = (now, alcove_active)
+        probe = getattr(self, "_alcove_presence_probe", None)
+        if probe is None:
+            # Bound late and per-instance so a test can substitute one,
+            # and so the module-level function stays directly callable.
+            probe = AlcovePresenceProbe()
+            self._alcove_presence_probe = probe
+        alcove_active = probe.running(now=now)
         wings_only = alcove_active and self.wraps_menu_bar
         compact = alcove_active and not self.wraps_menu_bar
 
@@ -2753,11 +2970,21 @@ class VirtualStatusDevice(NSObject):
         # someone who does not want us wrapping their menu bar -- never
         # followed the capsule at all and silently sized itself to the
         # hardware notch instead.
-        if (
-            alcove_active
-            and wing_override is None
-            and getattr(self, "follow_alcove_width", True)
-        ):
+        follow_enabled = wing_override is None and getattr(
+            self, "follow_alcove_width", True
+        )
+        # Preflighted, cached, and never a prompt. Denied is a state the
+        # user can be told about and fix, so it gets its own branch rather
+        # than being discovered one failed capture at a time.
+        screen_recording = screen_recording_granted() if follow_enabled else None
+        if alcove_active and follow_enabled and screen_recording is False:
+            # A capture thread that can only come back denied is pure cost
+            # and, worse, looks identical to "Alcove isn't running".
+            self._stop_alcove_observer()
+            self._record_alcove_status(
+                AlcoveCaptureStatus.SCREEN_RECORDING_DENIED, now=now
+            )
+        elif alcove_active and follow_enabled:
             band = max(24.0, window_height_for_notch_depth(notch_depth_for_screen(screen)))
             screen_values = render_screen_values
             window_values = (
@@ -2821,7 +3048,22 @@ class VirtualStatusDevice(NSObject):
                 # as a bracket that does not quite touch.
                 follow_width = observation.width + 2.0 * ALCOVE_ACCENT_EDGE_INSET
                 follow_center_x = observation.center_x
-            if follow_width != getattr(self, "_last_follow_width", None):
+            # Why there is no geometry, said once per transition. The
+            # main-thread lookup losing the window outranks a stale worker
+            # status: we KNOW there is nothing to capture right now.
+            if screen_values is None or window_values is None:
+                self._record_alcove_status(
+                    AlcoveCaptureStatus.WINDOW_UNAVAILABLE, now=now
+                )
+            else:
+                self._record_alcove_status(
+                    getattr(self._alcove_observer, "last_status", None), now=now
+                )
+            # _UNSET, not None: the previous sentinel was None, which is
+            # also the value follow_width has when nothing was measured --
+            # so the very first (and, when following is broken, the ONLY)
+            # state this line could report was the one it never logged.
+            if follow_width != getattr(self, "_last_follow_width", _UNSET):
                 self._last_follow_width = follow_width
                 try:
                     from .status_bar import log_status_bar
@@ -2835,6 +3077,12 @@ class VirtualStatusDevice(NSObject):
                     pass
         else:
             self._stop_alcove_observer()
+            self._record_alcove_status(
+                AlcoveCaptureStatus.NOT_FOLLOWING
+                if not follow_enabled
+                else AlcoveCaptureStatus.WINDOW_UNAVAILABLE,
+                now=now,
+            )
         window_frame = virtual_window_frame_for_screen(
             screen,
             wrap_menu_bar=self.wraps_menu_bar,

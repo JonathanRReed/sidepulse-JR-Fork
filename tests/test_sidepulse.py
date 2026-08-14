@@ -7105,13 +7105,22 @@ def _status(
 
 
 def _identity_color(statuses, agent_id: str) -> str:
-    """The effective color a multi-agent render gives this session --
-    since "color = agent" (phase 3), a crowd uses the identity palette,
-    not the provider brand colors."""
+    """The effective color a multi-agent render gives this session.
+
+    "Color = agent" (phase 3) and "color = brand" are not in conflict:
+    hue says which PRODUCT is working, lightness says which of my
+    sessions. A crowd used to be assigned raw IDENTITY_PALETTE slots
+    instead, which is why Claude rendered magenta and Codex rendered
+    yellow with the declared brand hues nowhere on the strip.
+    """
     ordered = sorted(statuses, key=colors_module._stable_agent_sort_key)
+    settings = ColorSettings.defaults()
     if len(ordered) <= 1:
-        return ColorSettings.defaults().agent_color(ordered[0].provider)
-    return colors_module.identity_colors_for_agents([s.agent_id for s in ordered])[agent_id]
+        return settings.agent_color(ordered[0].provider)
+    return colors_module.provider_identity_colors_for_agents(
+        [(status.agent_id, status.provider) for status in ordered],
+        colors=settings,
+    )[agent_id]
 
 
 def _program_body(program: str) -> list[str]:
@@ -10432,11 +10441,16 @@ class IdentityColorTests(unittest.TestCase):
             self.assertNotIn(reserved, IDENTITY_PALETTE)
 
     def test_multiple_sessions_get_identity_colors_single_keeps_brand(self) -> None:
-        from sidepulse.colors import (
-            IDENTITY_PALETTE,
-            ColorSettings,
-            _active_agents,
-        )
+        """A crowd is told apart WITHOUT anyone losing their brand.
+
+        This used to assert every crowd member wore an IDENTITY_PALETTE
+        slot -- eight hues chosen for mutual distinctness and nothing
+        else. That is exactly the reported defect: with two sessions up,
+        Claude rendered magenta #E44CFF and its declared terracotta
+        #D97757 appeared nowhere. Distinctness is still required below;
+        it is now bought with lightness inside each brand's own hue.
+        """
+        from sidepulse.colors import ColorSettings, _active_agents
 
         one = (_status("codex", AgentMode.WORKING),)
         two = (
@@ -10448,8 +10462,30 @@ class IdentityColorTests(unittest.TestCase):
         self.assertEqual(solo[0].color, settings.agent_color("codex"))
         crowd = _active_agents(two, settings)
         self.assertEqual(len({agent.color for agent in crowd}), 2)
+        by_provider = {agent.provider: agent.color for agent in crowd}
+        self.assertEqual(by_provider["codex"], settings.agent_color("codex"))
+        self.assertEqual(by_provider["claude"], settings.agent_color("claude"))
+
+    def test_two_sessions_of_one_provider_stay_inside_that_brands_hue(self) -> None:
+        """Which product, then which session -- in that order."""
+        from dataclasses import replace as dataclass_replace
+
+        from sidepulse.colors import ColorSettings, _active_agents, hex_to_oklch
+
+        settings = ColorSettings.defaults()
+        base = _status("claude", AgentMode.WORKING)
+        crowd = _active_agents(
+            (
+                dataclass_replace(base, agent_id="claude:session:a"),
+                dataclass_replace(base, agent_id="claude:session:b"),
+            ),
+            settings,
+        )
+
+        self.assertEqual(len({agent.color for agent in crowd}), 2)
+        brand_hue = hex_to_oklch(settings.agent_color("claude"))[2]
         for agent in crowd:
-            self.assertIn(agent.color, IDENTITY_PALETTE)
+            self.assertAlmostEqual(hex_to_oklch(agent.color)[2], brand_hue, delta=6.0)
 
     def test_session_override_wins_and_round_trips(self) -> None:
         from sidepulse.colors import ColorSettings, _active_agents

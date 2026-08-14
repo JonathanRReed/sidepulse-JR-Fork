@@ -2752,7 +2752,14 @@ def aggregate_status(
 
     return AggregateStatus(
         mode=representative.mode,
-        active_count=sum(1 for status in statuses if status_counts_active(status)),
+        # Main agents only. `sidepulse status` reported 38 here against 3
+        # real ones because every Task worker counted; a count is a count
+        # wherever it is printed.
+        active_count=sum(
+            1
+            for status in statuses
+            if not status.is_subagent and status_counts_active(status)
+        ),
         stale_count=len(stale_statuses),
         representative=representative,
     )

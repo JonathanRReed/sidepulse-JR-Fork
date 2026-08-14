@@ -391,7 +391,7 @@ from .navigation_policy import (
     build_operator_actions,
     resolve_navigation,
 )
-from .operator_accessibility import status_item_accessibility
+from .operator_accessibility import status_item_accessibility, status_item_title
 from .operator_export import (
     MAX_DEBUG_EXPORT_BYTES,
     MAX_HISTORY_EXPORT_BYTES,
@@ -1203,9 +1203,29 @@ def display_state_for_resolved_glance(resolved: ResolvedGlance) -> LedDisplaySta
 def color_for_resolved_glance(
     colors: ColorSettings,
     resolved: ResolvedGlance,
+    *,
+    provider: str | None = None,
 ) -> str:
+    """The one colour a whole-surface glance is painted in.
+
+    ``provider`` is the agent the moment is ABOUT, when one is known.
+    Only ordinary ACTIVE work takes it: "Claude is working" is a
+    statement about Claude and is painted Claude's declared brand hue on
+    every surface. Attention, failure, completion and rest are the app's
+    own signal language -- deliberately one unmistakable colour each,
+    independent of whose work triggered them -- and must never become a
+    guessing game about which product is asking.
+
+    Without this, the Screen Bar had NO provider input at all: it painted
+    ``mode_color`` and nothing else, so the notch and the strip spoke two
+    different colour languages about the same moment. Reported live as
+    "the screen bar color and the color on the side aren't the brand
+    colors".
+    """
     if type(colors) is not ColorSettings or type(resolved) is not ResolvedGlance:
         raise ValueError("invalid resolved presentation color")
+    if resolved.semantic is GlanceSemantic.ACTIVE and type(provider) is str and provider:
+        return colors.agent_color(provider)
     mode_key = {
         GlanceSemantic.ATTENTION: "ask",
         GlanceSemantic.FRESH_FAILURE: "ask",
@@ -2438,9 +2458,12 @@ class StatusBarController(NSObject):
         device: StatusBarDevice,
     ):
         pin = self.settings.device_provider_pin(device.device_id)
+        # light_rows, not visible_rows: main agents, or one stand-in row
+        # for a background crowd with no main agent left above it.
+        rows = projection.light_rows
         if not pin:
-            return projection.visible_rows
-        return tuple(row for row in projection.visible_rows if row.provider == pin)
+            return rows
+        return tuple(row for row in rows if row.provider == pin)
 
     def screen_bar_channel_gains(self, virtual_device) -> tuple[float, float, float]:
         """The gains the Screen Bar should render with.
@@ -2506,7 +2529,7 @@ class StatusBarController(NSObject):
         are deliberately designed as one unmistakable signal, and a
         crowd of colors would bury them.
         """
-        if projection is None or len(projection.visible_rows) < 2:
+        if projection is None or len(projection.light_rows) < 2:
             return False
         if resolved_glance is None:
             return True
@@ -2527,6 +2550,7 @@ class StatusBarController(NSObject):
                 projection,
                 lifecycle_mode=LifecycleMode.IDLE,
                 visible_rows=(),
+                worker_rows=(),
                 dominant_provider=None,
                 click_target_agent_id=None,
             )
@@ -2543,6 +2567,9 @@ class StatusBarController(NSObject):
             projection,
             lifecycle_mode=lifecycle,
             visible_rows=rows,
+            worker_rows=tuple(
+                row for row in projection.worker_rows if row.provider == pin
+            ),
             dominant_provider=rows[0].provider,
             click_target_agent_id=None,
         )
@@ -5807,11 +5834,7 @@ class StatusBarController(NSObject):
         ) or colors_module.PROVIDER_PALETTES.get(name)
         if palette is None:
             return
-        colors = self.settings.colors
-        for mode_key, hex_value in palette["modes"].items():
-            colors = colors.with_mode_color(mode_key, hex_value)
-        for provider, hex_value in palette["agents"].items():
-            colors = colors.with_agent_color(provider, hex_value)
+        colors = colors_module.apply_palette(self.settings.colors, palette)
         self.settings = self.settings.with_colors(colors)
         save_settings(self.settings)
         self.refresh_colors_window()
@@ -7834,7 +7857,16 @@ class StatusBarController(NSObject):
         # the honest one set by set_status().
         shown = self.displayed_status_state()
         value = shown.label if shown is not self.current_state else text.value
-        button.setTitle_(f" {value}")
+        # Title: the short ledger. Value: the full spoken sentence. These
+        # were one string, and the menu bar showed the sentence.
+        operator_state = self.current_operator_state
+        headline = (
+            status_item_title(operator_state, glance)
+            if shown is self.current_state
+            and type(operator_state) is CanonicalOperatorState
+            else ""
+        )
+        button.setTitle_(f" {headline or shown.label}")
         for selector, item in (
             ("setAccessibilityLabel_", text.label),
             ("setAccessibilityValue_", value),
@@ -7915,7 +7947,7 @@ class StatusBarController(NSObject):
             and type(operator_state) is CanonicalOperatorState
             and shown is state
         ):
-            title = f" {status_item_accessibility(operator_state, glance, finite_cues=self._status_finite_cues).value}"
+            title = f" {status_item_title(operator_state, glance) or title.strip()}"
         button.setTitle_(title)
         button.setImage_(
             image_for_symbol(shown.symbol, shown.label)
@@ -9832,6 +9864,15 @@ class StatusBarController(NSObject):
             self.settings_fields.get("cloud_ingest_status"),
             cloud_ingest_status_text(self),
         )
+        # Panes are built once, lazily. Without these two the honest
+        # rows freeze at whatever was true the first time each pane was
+        # opened -- "Screen Recording is off" after the user has already
+        # granted it, "this display has no notch" after undocking, or a
+        # Calendar permission the owner just switched on in System
+        # Settings. refresh_alcove_follow_controls also carries the
+        # Screen Bar's menu-bar-glow row: same pane, same freeze.
+        refresh_alcove_follow_controls(self)
+        refresh_event_access_controls(self)
         self.refresh_agent_animation_popups()
 
     def refresh_agent_animation_popups(self) -> None:
@@ -11693,7 +11734,23 @@ class StatusBarController(NSObject):
             if override:
                 colors_for_render = colors_for_render.with_blend_mode(override)
             presentation = None
-            if resolved_glance is not None:
+            # Same routing as the hardware path, in the same order. This
+            # branch used to test ``resolved_glance is not None`` FIRST,
+            # and resolve_presentation_glance never returns None -- so the
+            # multi-agent renderer below was unreachable on the Screen Bar
+            # and the notch painted one fleet-wide state colour while the
+            # strip beside it painted per-agent identity. Two surfaces,
+            # two colour languages, same moment.
+            if self.should_render_multi_agent(resolved_glance, projection):
+                _, program = program_for_projection(
+                    projection,
+                    active_signal=self.active_failure_signal(),
+                    led_count=8,
+                    colors=colors_for_render,
+                    brightness=brightness,
+                    relay_elapsed_seconds=relay_elapsed_seconds,
+                )
+            elif resolved_glance is not None:
                 preferences = self._accessibility_display_preferences
                 if type(preferences) is not AccessibilityDisplayPreferences:
                     preferences = AccessibilityDisplayPreferences(
@@ -11709,6 +11766,11 @@ class StatusBarController(NSObject):
                     color=color_for_resolved_glance(
                         colors_for_render,
                         resolved_glance,
+                        provider=(
+                            projection.dominant_provider
+                            if projection is not None
+                            else None
+                        ),
                     ),
                     preferences=preferences,
                     capacity_remaining_fraction=capacity_remaining_fraction,
@@ -12752,6 +12814,11 @@ class StatusBarController(NSObject):
                     color=color_for_resolved_glance(
                         colors_for_render,
                         request.resolved_glance,
+                        provider=(
+                            device_projection.dominant_provider
+                            if device_projection is not None
+                            else None
+                        ),
                     ),
                     preferences=preferences,
                     capacity_remaining_fraction=request.capacity_remaining_fraction,
@@ -15122,13 +15189,19 @@ def mailbox_projection_rows(
     projection: AttentionProjection,
     target,
 ) -> tuple:
-    """Return only the authoritative projected rows eligible for the mailbox."""
+    """Return only the authoritative projected rows eligible for the mailbox.
+
+    ``all_rows``, because the mailbox is the one surface entitled to
+    sub-agents: it rolls a family's workers up UNDER their parent and
+    folds a worker's ask into the parent's row. It still publishes one
+    row per family -- 30 workers under two mains is two rows.
+    """
     cleared_ids = getattr(target, "cleared_session_ids", set())
     if not cleared_ids:
-        return projection.visible_rows
+        return projection.all_rows
     return tuple(
         row
-        for row in projection.visible_rows
+        for row in projection.all_rows
         if not (
             row.agent_id in cleared_ids
             and row.lifecycle_mode == LifecycleMode.COMPLETED_RECENTLY
@@ -15142,7 +15215,11 @@ def project_mailbox_for_target(
 ) -> AgentMailboxProjection:
     mailbox_projection = dataclass_replace(
         projection,
+        # worker_rows is cleared, not carried: the replacement rows are
+        # already the whole family, and AttentionProjection re-splits
+        # them. Leaving the old tuple in place would double every worker.
         visible_rows=mailbox_projection_rows(projection, target),
+        worker_rows=(),
     )
     return project_mailbox(
         mailbox_projection,
@@ -15290,8 +15367,10 @@ def remote_ledger_content_signature(target) -> tuple:
 
 
 def _mailbox_source_rows(projection: AttentionProjection) -> dict[str, AgentStatus]:
+    # all_rows: the caller splits these into display rows (mains) and the
+    # per-parent worker rollup, and needs both halves.
     sources: dict[str, AgentStatus] = {}
-    for projected in projection.visible_rows:
+    for projected in projection.all_rows:
         current = sources.get(projected.agent_id)
         if current is None or projected.updated_at >= current.updated_at:
             sources[projected.agent_id] = projected.source_status
@@ -15846,11 +15925,6 @@ def _native_item_state(
     title = str(item.title())
     width, height = _menu_copy_size(title)
 
-    def text_value(selector: str, fallback: str = "") -> str:
-        getter = getattr(item, selector, None)
-        value = getter() if callable(getter) else None
-        return value if type(value) is str else fallback
-
     if ":action:" in item_key:
         accessibility_label = "Agent action"
     elif ":urgent:" in item_key:
@@ -15874,12 +15948,35 @@ def _native_item_state(
         state=int(item.state()),
         measured_width=width,
         measured_height=height,
-        accessibility_label=text_value(
-            "accessibilityLabel",
-            accessibility_label,
-        ),
-        accessibility_value=text_value("accessibilityValue"),
-        accessibility_help=text_value("accessibilityHelp"),
+        # DESIRED state, computed. Never read back off the NSMenuItem.
+        #
+        # AppKit answers -[NSMenuItem accessibilityLabel] through the
+        # legacy accessibility bridge, which services the query by
+        # SIMULATING OPENING THE MENU: _openForInspection: ->
+        # _simulateOpening: -> _sendMenuOpeningNotification: -> this app's
+        # own menuWillOpen_, then _sendMenuClosedNotification: ->
+        # menuDidClose_. Per phantom open that runs an activity-ledger
+        # write, a full mailbox projection, capacity timer scheduling and
+        # the usage-refresh planner -- and menuDidClose_ can
+        # performSelectorOnMainThread_("refresh:"), re-entering
+        # update_status_menu and phantom-opening again.
+        #
+        # Measured on the live app with `sample`: 422 of 4503 main-thread
+        # samples inside accessibilityLabel, and 15 fsync calls in an 8
+        # second window on the main thread, to USB mass storage, all
+        # between the opening and closing notifications. Called once per
+        # root item, from a timer.
+        #
+        # The read-back was never worth anything either: this app is the
+        # only writer of these three fields (StableNativeMenuRegistry
+        # patches them from this same state), so reading them back asks
+        # AppKit to tell us what we last told it -- and it answered
+        # differently depending on whether the item was attached to a
+        # menu yet, which made the prepared and live snapshots compare
+        # unequal and forced a DEFER_REBUILD on every pass.
+        accessibility_label=accessibility_label,
+        accessibility_value="",
+        accessibility_help="",
     )
 
 
@@ -16102,6 +16199,19 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         )
         stale_item.setTarget_(target)
         menu.addItem_(stale_item)
+        menu.addItem_(NSMenuItem.separatorItem())
+    # Same shape, same reason: Alcove following cannot capture anything
+    # without Screen Recording, and that failure has no other symptom --
+    # the bar just keeps its old size forever and nothing says why.
+    alcove_alert = alcove_menu_alert_title(target)
+    if alcove_alert:
+        alcove_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            alcove_alert,
+            "grantScreenRecording:",
+            "",
+        )
+        alcove_item.setTarget_(alcove_actions_for(target))
+        menu.addItem_(alcove_item)
         menu.addItem_(NSMenuItem.separatorItem())
     # Sessions answer "what is happening now"; this answers "what changed
     # while I was gone". Directly under the sessions because it is the second
@@ -18367,6 +18477,8 @@ from .settings_window import (  # noqa: E402, F401 -- re-export: tests and
     _mini_led_view,
     _mode_animation_thumb_program,
     _solid_swatch_image,
+    alcove_actions_for,
+    alcove_menu_alert_title,
     build_calibration_popover_content,
     build_settings_window,
     calibration_summary_text,
@@ -18376,7 +18488,9 @@ from .settings_window import (  # noqa: E402, F401 -- re-export: tests and
     make_focus_dim_popup,
     make_signal_color_row,
     make_signal_style_card,
+    refresh_alcove_follow_controls,
     refresh_blend_and_speed_fields,
+    refresh_event_access_controls,
     remote_peer_status_text,
     select_focus_dim_choice,
 )

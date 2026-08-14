@@ -21,6 +21,9 @@ from __future__ import annotations
 # objc/Foundation are imported here rather than inherited from
 # status_bar's namespace because SidePulseStudioActions is defined at
 # module scope, i.e. before _install() has run.
+import time
+from typing import Final
+
 import objc
 from AppKit import (
     NSBackingStoreBuffered,
@@ -48,6 +51,20 @@ from AppKit import (
 )
 from Foundation import NSObject
 
+# calendar_watch/reminders_watch import EventKit lazily, inside their own
+# helpers -- importing the modules here costs nothing at start-up and is
+# what lets the Extras pane read a permission without owning EventKit.
+from . import calendar_watch, display_brightness, reminders_watch, remote_peers
+from . import colors as colors_module
+from .alcove_observation import (
+    ALCOVE_STATUS_MAX_AGE_SECONDS,
+    ALCOVE_STATUS_MESSAGES,
+    AlcoveCaptureStatus,
+    alcove_follow_blocker,
+    latest_alcove_status,
+    request_screen_recording_access,
+    reset_alcove_status,
+)
 from .colors import ANIMATION_MODE_KEYS, MODE_ROW_LABELS, matching_preset
 from .led_status import ANIMATION_STYLE_CHOICES, program_for_display_state
 from .operator_accessibility import normalize_semantic_text_scale
@@ -59,7 +76,27 @@ from .settings import (
     LID_ANIMATION_OPEN,
     LID_ANIMATION_OPEN_ACTIVE,
 )
-from .virtual_device import LED_COUNT
+
+# _install() only fills names this module does not already define, so an
+# explicit import here wins over status_bar's namespace injection -- and
+# these three are new, which status_bar does not re-export.
+from .virtual_device import (
+    LED_COUNT,
+    WINDOW_WIDTH,
+    ScreenBarWingState,
+    screen_bar_wing_state,
+    slot_width_for_screen,
+)
+
+# What the Bar Size slider shows when the screen cannot be measured. Read
+# from the geometry module so it is the SAME number Automatic would use.
+SCREEN_BAR_AUTOMATIC_GAP_FALLBACK = WINDOW_WIDTH
+
+# Where macOS keeps the Screen Recording list. Same shape as the Full Disk
+# Access link the Focus pane already offers.
+SCREEN_RECORDING_SETTINGS_URL = (
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+)
 
 OPERATOR_HISTORY_FIELD_MANIFEST: tuple[str, ...] = (
     "day_key",
@@ -1002,12 +1039,73 @@ def _build_devices_pane(target: StatusBarController):
     return native_ui.wrap_in_scroll_pane(stack), device_controls
 
 
-def calibration_summary_text(auto_brightness_enabled: bool, red: float, green: float, blue: float) -> str:
+# The screen-brightness reading behind Auto-Brightness is cached for the
+# same reason the permission reads are: this text is rebuilt on every
+# settings refresh, once per device.
+SCREEN_BRIGHTNESS_TTL_SECONDS: Final = 5.0
+_screen_brightness_cache: tuple[float, bool] | None = None
+
+
+def reset_screen_brightness_cache() -> None:
+    """Force the next Auto-Brightness summary to ask CoreDisplay again."""
+    global _screen_brightness_cache
+    _screen_brightness_cache = None
+
+
+def screen_brightness_readable() -> bool:
+    """Can this Mac actually report its screen brightness right now?
+
+    ``CoreDisplay_Display_GetUserBrightness`` is undocumented -- see
+    display_brightness.py, which says in its own first paragraph that
+    Apple may remove it without notice. When it goes, every
+    auto-brightness device silently keeps its MANUAL brightness and no
+    surface anywhere says so, which is the whole defect class: the
+    checkbox reads on, the feature is inert.
+    """
+    global _screen_brightness_cache
+    now = time.monotonic()
+    cached = _screen_brightness_cache
+    if cached is not None and 0.0 <= now - cached[0] < SCREEN_BRIGHTNESS_TTL_SECONDS:
+        return cached[1]
+    try:
+        display_brightness.current_screen_brightness_fraction()
+        readable = True
+    except Exception:
+        # DisplayBrightnessUnavailableError is the documented answer; a
+        # broader failure is the same fact for this row's purposes.
+        readable = False
+    _screen_brightness_cache = (now, readable)
+    return readable
+
+
+def calibration_summary_text(
+    auto_brightness_enabled: bool,
+    red: float,
+    green: float,
+    blue: float,
+    *,
+    brightness_readable: bool | None = None,
+) -> str:
     """The at-a-glance summary next to the Calibrate button. Channel
     percentages only appear once they differ from the default -- an
     uncalibrated device just says what Auto-Brightness is doing, not a
-    wall of R100% G100% B100% that reads as debug output."""
-    parts = ["Auto-Brightness on" if auto_brightness_enabled else "Auto-Brightness off"]
+    wall of R100% G100% B100% that reads as debug output.
+
+    "Auto-Brightness on" used to be a claim about the CHECKBOX, not a
+    reading: with the screen-brightness technique unavailable, the LED
+    sync falls back to the manual value on every tick (see
+    effective_brightness_for_device) and this line still said "on".
+    ``brightness_readable`` is resolved here rather than demanded of the
+    caller so the refresh path in status_bar keeps its positional call.
+    """
+    if not auto_brightness_enabled:
+        parts = ["Auto-Brightness off"]
+    elif brightness_readable is False or (
+        brightness_readable is None and not screen_brightness_readable()
+    ):
+        parts = ["Auto-Brightness on, but this Mac won't report screen brightness"]
+    else:
+        parts = ["Auto-Brightness on"]
     if any(round(gain * 100) != 100 for gain in (red, green, blue)):
         parts.append(f"R{round(red * 100)}% G{round(green * 100)}% B{round(blue * 100)}%")
     return " · ".join(parts)
@@ -1200,6 +1298,17 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         "Extend glow along the menu bar", target, "toggleScreenBarWrapsMenuBar:"
     )
     inner.addArrangedSubview_(wraps_row)
+    # The same defect as the Alcove switch, on a different measurement:
+    # every display without a notch reports no area beside one, so the
+    # wings are zero points wide and this switch has never done anything
+    # on an external monitor. Nothing said so.
+    wing_status_label = native_ui.make_wrapping_label(
+        screen_bar_wing_status_text(target),
+        secondary=True,
+        size=11.0,
+        max_width=360.0,
+    )
+    inner.addArrangedSubview_(native_ui.make_row("Menu bar glow", wing_status_label))
     follow_row, follow_switch = native_ui.make_switch_row(
         "Match Alcove's width automatically",
         target,
@@ -1215,6 +1324,35 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         ),
     )
     inner.addArrangedSubview_(follow_row)
+    # A switch that reads ON while the feature does nothing is the defect,
+    # not the cosmetics. This row says which of the four things is
+    # actually happening, and -- when the answer is a permission -- offers
+    # the one click that fixes it, exactly as the dropdown does for a
+    # stale hook.
+    alcove_actions = alcove_actions_for(target)
+    alcove_status_label = native_ui.make_wrapping_label(
+        alcove_follow_status_text(target),
+        secondary=True,
+        size=11.0,
+        max_width=360.0,
+    )
+    alcove_permission_button = native_ui.make_button(
+        "Open Screen Recording Settings…",
+        alcove_actions,
+        "grantScreenRecording:",
+    )
+    alcove_permission_button.setHidden_(not alcove_follow_needs_permission(target))
+    alcove_controls = native_ui.make_stack(
+        orientation="horizontal",
+        spacing=native_ui.SPACE_S,
+    )
+    alcove_controls.addArrangedSubview_(alcove_status_label)
+    alcove_controls.addArrangedSubview_(native_ui.make_hspacer())
+    alcove_controls.addArrangedSubview_(alcove_permission_button)
+    alcove_status_row = native_ui.make_row("Alcove following", alcove_controls)
+    inner.addArrangedSubview_(alcove_status_row)
+    alcove_actions.status_label = alcove_status_label
+    alcove_actions.permission_button = alcove_permission_button
     native_ui.add_separator(inner)
     # Bracket coloring: Auto keeps the on-screen bracket in lockstep
     # with the physical LEDs' ripple whenever a crowd is lit.
@@ -1251,7 +1389,11 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
     try:
         auto_gap = slot_width_for_screen(NSScreen.mainScreen())
     except Exception:
-        auto_gap = 232.0
+        # WINDOW_WIDTH, not a literal. This was 232.0 -- a number that
+        # appears nowhere in the geometry it claims to stand in for, so
+        # the slider parked 12pt away from the size Automatic actually
+        # uses and the owner was reading a measurement of nothing.
+        auto_gap = SCREEN_BAR_AUTOMATIC_GAP_FALLBACK
     gap_value = target.settings.screen_bar_gap_width or auto_gap
     gap_slider = native_ui.make_slider(
         min_value=140.0,
@@ -1281,14 +1423,224 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         "screen_bar_preview_container": preview_container,
         "screen_bar_gap_slider": gap_slider,
         "bracket_style_popup": bracket_popup,
+        "alcove_follow_status": alcove_status_label,
+        "screen_bar_wing_status": wing_status_label,
     }
     buttons = {
         "screen_bar_wraps_menu_bar": wraps_switch,
         "screen_bar_gauges": gauges_switch,
         "link_screen_bar_to_hardware": link_switch,
         "screen_bar_follow_alcove": follow_switch,
+        "alcove_screen_recording_permission": alcove_permission_button,
     }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
+
+
+SCREEN_BAR_WING_MESSAGES: Final[dict[ScreenBarWingState, str]] = {
+    ScreenBarWingState.EXTENDED: "Reaching along the menu bar on both sides.",
+    ScreenBarWingState.NO_SAFE_AREA: (
+        "This display has no notch, so there is no menu-bar room beside "
+        "one to glow into. The bar keeps its own size here."
+    ),
+    ScreenBarWingState.MENU_BAR_FULL: (
+        "Your menu bar is too full to lend any room, so the glow stays "
+        "inside the notch."
+    ),
+    ScreenBarWingState.UNREADABLE: (
+        "This display would not report its menu-bar areas, so the glow "
+        "stays inside the notch."
+    ),
+    ScreenBarWingState.MANUAL: "Using your saved wing length.",
+    # Deliberately does not mention a notch: this same line is shown on
+    # displays that have none.
+    ScreenBarWingState.NOT_EXTENDING: "Off — the bar keeps its own width.",
+}
+
+
+def screen_bar_wing_status_text(target) -> str:
+    """The sentence under "Extend glow along the menu bar".
+
+    While Alcove following is live the wings are sized from the measured
+    capsule instead of the screen's auxiliary areas, so a screen that
+    reports no room is NOT the reason the bar looks the way it does --
+    saying "no notch here" then would be a second wrong answer stacked on
+    the first. The Alcove row directly below already owns that case.
+    """
+    settings = target.settings
+    wrap = bool(getattr(settings, "virtual_status_device_wraps_menu_bar", False))
+    if wrap and alcove_follow_state(target) is AlcoveCaptureStatus.CAPTURED:
+        return "Matching Alcove's capsule — see below."
+    try:
+        screen = NSScreen.mainScreen()
+    except Exception:
+        screen = None
+    if screen is None:
+        return "No display to measure right now."
+    gap = getattr(settings, "screen_bar_gap_width", None)
+    try:
+        notch_width = float(gap) if gap else slot_width_for_screen(screen)
+        state = screen_bar_wing_state(
+            screen,
+            notch_width,
+            wrap_menu_bar=wrap,
+            wing_length=getattr(settings, "screen_bar_wing_length", None),
+        )
+    except Exception:
+        # A settings row must never be able to take the window down.
+        state = ScreenBarWingState.UNREADABLE
+    return SCREEN_BAR_WING_MESSAGES.get(
+        state, SCREEN_BAR_WING_MESSAGES[ScreenBarWingState.UNREADABLE]
+    )
+
+
+def alcove_follow_state(target) -> AlcoveCaptureStatus | None:
+    """What Alcove following is doing right now, or None when unknown.
+
+    Prefers the render path's own live reading, because only a real
+    capture may claim success. Falls back to a promptless preflight and
+    window probe, which can only ever report a BLOCKER -- "nothing is in
+    the way" is not evidence that anything worked, and this function
+    returns None for it rather than implying otherwise.
+    """
+    if not bool(getattr(target.settings, "screen_bar_follow_alcove", True)):
+        return AlcoveCaptureStatus.NOT_FOLLOWING
+    snapshot = latest_alcove_status()
+    if snapshot is not None:
+        age = time.monotonic() - snapshot.updated_at
+        if 0.0 <= age <= ALCOVE_STATUS_MAX_AGE_SECONDS:
+            return snapshot.status
+    return alcove_follow_blocker(following=True)
+
+
+def alcove_follow_status_text(target) -> str:
+    """The sentence under the "Match Alcove's width" switch.
+
+    Before this row the switch was the only signal, and it read ON in all
+    four failure modes -- including the one where macOS had never granted
+    Screen Recording, which no surface anywhere mentioned.
+    """
+    status = alcove_follow_state(target)
+    if status is None:
+        return "No measurement yet."
+    return ALCOVE_STATUS_MESSAGES.get(status, "No measurement yet.")
+
+
+def alcove_follow_needs_permission(target) -> bool:
+    """Only a DENIED preflight earns the button. Unknown does not.
+
+    Offering "grant Screen Recording" to someone whose permission is
+    already fine sends them to a settings pane to fix nothing, which is
+    its own species of dishonesty.
+    """
+    return alcove_follow_state(target) is AlcoveCaptureStatus.SCREEN_RECORDING_DENIED
+
+
+def alcove_actions_for(target):
+    """The retained action sink for Alcove's permission button.
+
+    Created on demand and kept on the controller, so the dropdown can
+    offer the same one click without depending on whether the Screen Bar
+    settings pane has ever been opened.
+    """
+    actions = getattr(target, "alcove_actions", None)
+    if actions is None:
+        actions = SidePulseAlcoveActions.alloc().initWithController_(target)
+        target.alcove_actions = actions
+    return actions
+
+
+def alcove_menu_alert_title(target) -> str:
+    """The dropdown's one line about Alcove following, or "".
+
+    Only the permission case earns a row in the menu. It is the one
+    failure the user can actually fix, and -- unlike a missing Alcove or
+    an unmeasurable capsule -- the one with no other symptom at all: the
+    bar simply keeps its old size forever and nothing says why.
+    """
+    if not alcove_follow_needs_permission(target):
+        return ""
+    return (
+        "⚠ Alcove following needs Screen Recording — grant it in "
+        "Settings…"
+    )
+
+
+def refresh_alcove_follow_controls(target) -> None:
+    """Keep the row current while the window is open.
+
+    Panes are built once, lazily, so without a refresh this row would
+    freeze at whatever was true the first time the user visited it --
+    including a stale "Screen Recording is off" after they granted it.
+    """
+    fields = getattr(target, "settings_fields", None) or {}
+    buttons = getattr(target, "settings_buttons", None) or {}
+    label = fields.get("alcove_follow_status")
+    if label is not None:
+        label.setStringValue_(alcove_follow_status_text(target))
+    button = buttons.get("alcove_screen_recording_permission")
+    if button is not None:
+        button.setHidden_(not alcove_follow_needs_permission(target))
+    label = fields.get("screen_bar_wing_status")
+    if label is not None:
+        # Same pane, same freeze: a display change is exactly when this
+        # row stops describing anything, and a display change is exactly
+        # what the owner does when they dock the Mac.
+        label.setStringValue_(screen_bar_wing_status_text(target))
+
+
+class SidePulseAlcoveActions(NSObject):
+    """Action target for the Alcove permission button.
+
+    Same reason SidePulseStudioActions exists: every other selector in
+    this window belongs to StatusBarController, which lives in a file
+    this one may not edit, and PyObjC dispatches target/action through
+    respondsToSelector: -- which a plain Python object cannot satisfy.
+    The controller retains this via ``target.alcove_actions``.
+    """
+
+    def initWithController_(self, controller):
+        self = objc.super(SidePulseAlcoveActions, self).init()
+        if self is None:
+            return None
+        self.controller = controller
+        self.status_label = None
+        self.permission_button = None
+        return self
+
+    @objc.IBAction
+    def grantScreenRecording_(self, _sender):
+        """Explicit user action -- the ONLY place a prompt is allowed.
+
+        Requesting first is what puts SidePulse in the Screen Recording
+        list at all; an app that never asked does not appear there, so
+        sending someone straight to the pane would show them a list
+        without the row they were told to switch on. Then open the pane,
+        because a second request after the first denial is a no-op and
+        the switch is the real fix.
+        """
+        granted = request_screen_recording_access()
+        if granted is True:
+            # The last recorded outcome was taken under the OLD permission
+            # and is now a lie with up to two seconds left to live. Drop
+            # it rather than let the row keep saying "Screen Recording is
+            # off" to the person who just switched it on.
+            reset_alcove_status()
+        else:
+            open_url(SCREEN_RECORDING_SETTINGS_URL)
+        refresh_alcove_follow_controls(self.controller)
+        message = getattr(self.controller, "set_settings_message", None)
+        if callable(message):
+            message(
+                # Not "following is live": permission is one of four
+                # things that have to be true, and the row already knows
+                # which of them currently is.
+                alcove_follow_status_text(self.controller)
+                if granted is True
+                else (
+                    "Turn SidePulse on under Screen Recording, then "
+                    "reopen SidePulse."
+                )
+            )
 
 
 def _build_power_pane(target: StatusBarController):
@@ -1382,12 +1734,14 @@ SIGNAL_THUMB_SIZE = (52.0, 20.0)
 # Concurrency's executor checks in this Python-hosted process the
 # moment its "add a color" picker was touched (crash report
 # SidePulse-2026-08-11-202021.ips).
-BRAND_SWATCHES: tuple[tuple[str, str], ...] = (
-    ("Claude", "#D97757"),
-    ("OpenAI", "#10A37F"),
-    ("Codex", "#FF3A00"),
-    ("Gemini", "#4796E3"),
-)
+#
+# Read out of colors.BRAND_SEED_COLORS, never restated. The literal that
+# used to live here still named Codex #FF3A00 -- which is this app's own
+# ask/blocked signal colour (led_status.ASK_AMBER), not Codex's #2B8FFF --
+# so the chip captioned "Codex" painted the alert red. colors.py fixed its
+# own copy and left this one behind, which is exactly the failure mode
+# that comment warned about.
+BRAND_SWATCHES: tuple[tuple[str, str], ...] = colors_module.BRAND_SEED_COLORS
 SWATCH_BUTTON_SIZE = 22.0
 SIGNAL_PREVIEW_SIZE = (220.0, 22.0)
 ESCALATION_TIER_LABELS: tuple[tuple[str, str], ...] = (
@@ -2103,6 +2457,21 @@ def _build_extras_pane(target: StatusBarController):
         ),
     )
     cal_inner.addArrangedSubview_(cal_row)
+    # Same defect as the Alcove switch, one pane over. Turning this on
+    # asks macOS once; if the answer is no -- or was no a year ago, in
+    # which case macOS never asks again -- the switch stays ON forever
+    # and nothing ever glows. The toggle handler says so in the status
+    # line, but that line is gone by the next time anyone looks.
+    calendar_access_label = native_ui.make_wrapping_label(
+        calendar_access_status_text(target),
+        secondary=True,
+        size=11.0,
+        max_width=360.0,
+    )
+    cal_inner.addArrangedSubview_(
+        native_ui.make_row("Calendar access", calendar_access_label)
+    )
+    fields["calendar_access_status"] = calendar_access_label
     native_ui.add_separator(cal_inner)
     lead_field = native_ui.make_field(
         f"{target.settings.calendar_lead_minutes:g}",
@@ -2125,6 +2494,16 @@ def _build_extras_pane(target: StatusBarController):
         ),
     )
     cal_inner.addArrangedSubview_(rem_row)
+    reminders_access_label = native_ui.make_wrapping_label(
+        reminders_access_status_text(target),
+        secondary=True,
+        size=11.0,
+        max_width=360.0,
+    )
+    cal_inner.addArrangedSubview_(
+        native_ui.make_row("Reminders access", reminders_access_label)
+    )
+    fields["reminders_access_status"] = reminders_access_label
     stack.addArrangedSubview_(cal_outer)
     fields["calendar_lead_field"] = lead_field
 
@@ -2228,6 +2607,98 @@ def _build_extras_pane(target: StatusBarController):
         "capacity_history_enabled": history_switch,
     }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
+
+
+# EventKit's authorization status is a TCC cache read, but the Extras
+# pane can be rebuilt and refreshed repeatedly, so it is asked at most
+# this often. Same reason -- and the same shape -- as the Screen
+# Recording preflight cache in alcove_observation.
+EVENT_ACCESS_TTL_SECONDS: Final = 5.0
+_event_access_cache: dict[str, tuple[float, str]] = {}
+
+
+def reset_event_access_cache() -> None:
+    """Force the next read to ask EventKit again."""
+    _event_access_cache.clear()
+
+
+def _event_access_status(key: str, watch) -> str:
+    """``watch.authorization_status()``, or "unavailable", cached briefly.
+
+    The module raises rather than returning a falsy value, which is why
+    "EventKit cannot be used on this Mac" survives as its own answer
+    instead of arriving as the same "denied" a real denial produces.
+    """
+    now = time.monotonic()
+    cached = _event_access_cache.get(key)
+    if cached is not None and 0.0 <= now - cached[0] < EVENT_ACCESS_TTL_SECONDS:
+        return cached[1]
+    try:
+        status = str(watch.authorization_status())
+    except Exception:
+        # Every entry point of calendar_watch/reminders_watch raises its
+        # own Unavailable error for "EventKit missing" and for API drift.
+        # That is a fourth state, not a denial, and it is named as one.
+        status = "unavailable"
+    _event_access_cache[key] = (now, status)
+    return status
+
+
+def _access_status_text(enabled: bool, status: str, *, subject: str, pane: str) -> str:
+    """One sentence for a switch whose feature needs a macOS permission.
+
+    The switch alone said the same thing -- ON -- whether the glow was
+    working, whether macOS had refused a year ago and would never ask
+    again, or whether EventKit was not usable at all. The toggle handler
+    does say which, once, in a status line that is gone by the next time
+    anyone opens this window.
+    """
+    if not enabled:
+        return "Not used while this is off."
+    if status == "authorized":
+        return f"Granted — {subject} can start a glow."
+    if status == "not_determined":
+        return "macOS has not been asked yet. Switch this off and on again to ask."
+    if status == "unavailable":
+        return f"{pane} access is unavailable on this Mac, so nothing here can glow."
+    return (
+        f"Denied — no {subject} will glow until you turn SidePulse on "
+        f"under Privacy & Security → {pane}."
+    )
+
+
+def calendar_access_status_text(target) -> str:
+    # Probed only when the switch is on: `authorization_status` imports
+    # EventKit, and a pane read has no business pulling a framework in
+    # for a feature the owner turned off.
+    enabled = bool(getattr(target.settings, "calendar_alerts_enabled", False))
+    status = _event_access_status("calendar", calendar_watch) if enabled else ""
+    return _access_status_text(enabled, status, subject="events", pane="Calendars")
+
+
+def reminders_access_status_text(target) -> str:
+    enabled = bool(getattr(target.settings, "reminder_alerts_enabled", False))
+    status = _event_access_status("reminders", reminders_watch) if enabled else ""
+    return _access_status_text(enabled, status, subject="reminders", pane="Reminders")
+
+
+def refresh_event_access_controls(target) -> None:
+    """Keep both rows current while the window is open.
+
+    Panes are built once, lazily, so without this the row freezes at
+    whatever was true the first time the pane was visited -- including a
+    stale "Denied" after the owner granted access in System Settings.
+    The cache is NOT dropped here: its five seconds are shorter than any
+    trip to System Settings, and clearing it would turn every unrelated
+    settings action into two more EventKit reads.
+    """
+    fields = getattr(target, "settings_fields", None) or {}
+    label = fields.get("calendar_access_status")
+    if label is not None:
+        label.setStringValue_(calendar_access_status_text(target))
+    label = fields.get("reminders_access_status")
+    if label is not None:
+        label.setStringValue_(reminders_access_status_text(target))
 
 
 FOCUS_DIM_CHOICES: tuple[tuple[str, str], ...] = (
@@ -2473,14 +2944,32 @@ def _build_remote_peers_card(target: StatusBarController):
 
 
 def remote_peer_status_text(target) -> str:
-    """What the peer transport can honestly claim right now."""
+    """What the peer transport can honestly claim right now.
+
+    "No peers found yet." was three different facts wearing one coat:
+    Tailscale is not installed on this Mac at all, the refresh has not
+    run yet, and the refresh ran and genuinely found nobody. The first
+    of those is the only one the owner can act on, and it was the one
+    the sentence actively argued against -- "yet" promises a peer is
+    still coming when there is no CLI to discover one with.
+    """
     remote = target.settings.remote_peers
     if not remote.enabled:
         return "Off."
+    if not remote_peers.tailscale_available():
+        return (
+            "Tailscale is not installed, so there is nothing to discover "
+            "your other Macs with."
+        )
     result = getattr(target, "_remote_refresh", None)
     health = tuple(getattr(result, "health", ()) or ())
     if not health:
-        return "No peers found yet."
+        # `attempted` is the refresh's own count of peers it reached for.
+        # Zero means no round trip has happened, which is not the same
+        # answer as one that came back empty.
+        if not int(getattr(result, "attempted", 0) or 0):
+            return "No peers checked yet."
+        return "No other Macs are running SidePulse right now."
     reachable = [item.machine for item in health if item.reachable]
     failed = [
         f"{item.machine} ({item.failure or 'unreachable'})"
@@ -2536,12 +3025,23 @@ def _build_cloud_agents_card(target: StatusBarController):
 
 
 def cloud_ingest_status_text(target) -> str:
+    """The listening address, or why there is not one.
+
+    "Enabled -- starts with the app." was a PROMISE, and it was printed
+    in the one case where the promise had already been broken:
+    ``start_cloud_ingest_server`` sets ``cloud_ingest`` back to None and
+    logs when the bind raises (a port already in use is the ordinary
+    way), so a switch reading ON with no server is a failure that had
+    happened minutes ago and this row was still saying it was coming.
+    """
     if not target.settings.cloud_ingest_enabled:
         return "Off."
     server = getattr(target, "cloud_ingest", None)
     address = getattr(server, "address", None) if server is not None else None
     if address is None:
-        return "Enabled — starts with the app."
+        # A reading, not a promise: whatever the reason, nothing on this
+        # Mac is accepting cloud events right now.
+        return "Nothing is listening — the loopback port could not be opened."
     return f"http://{address[0]}:{address[1]}/v1/agent-event"
 
 

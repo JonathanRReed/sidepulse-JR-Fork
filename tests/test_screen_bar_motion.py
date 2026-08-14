@@ -901,6 +901,11 @@ def test_reposition_submits_plain_alcove_request_and_applies_validated_center(
         "_alcove_window_values",
         lambda *_args: (99, 444.0, 0.0, 624.0),
     )
+    # Following now preflights Screen Recording, and a denied preflight
+    # correctly refuses to start a capture. Pin it: whether the machine
+    # running the suite happens to have granted the permission is not
+    # what this test is about.
+    monkeypatch.setattr(virtual_device, "screen_recording_granted", lambda **_kwargs: True)
 
     device.reposition()
     request = observer.requests[-1]

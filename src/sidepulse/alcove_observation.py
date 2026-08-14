@@ -5,6 +5,8 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
+from typing import Final
 
 ALCOVE_ALPHA_THRESHOLD = 0.08
 ALCOVE_CONFIDENCE_MINIMUM = 0.75
@@ -14,6 +16,73 @@ ALCOVE_HOLD_SECONDS = 8.0
 ALCOVE_MAX_WIDTH = 520.0
 ALCOVE_MAX_BAND_FACTOR = 1.8
 ALCOVE_MAX_CONTOUR_POINTS = 64
+# CGWindowList reports an owner NAME, not a bundle id. One definition,
+# here, because every other Alcove constant that got a second copy in
+# another module is exactly how the last Alcove bug was introduced.
+ALCOVE_OWNER_NAME: Final = "Alcove"
+
+
+class AlcoveCaptureStatus(str, Enum):
+    """Why the last capsule measurement did or did not produce geometry.
+
+    Every one of these used to be the same value: ``None``. "Screen
+    Recording was never granted", "Alcove is not running", "the window
+    moved mid-capture" and "there was genuinely nothing there" are four
+    completely different facts with four different fixes, and returning
+    one bare ``None`` for all of them is why "Alcove mode doesn't seem to
+    be working" could not be answered by anything -- not the UI, not
+    doctor, not a single line in the log.
+    """
+
+    CAPTURED = "captured"
+    SCREEN_RECORDING_DENIED = "screen_recording_denied"
+    WINDOW_UNAVAILABLE = "window_unavailable"
+    IMAGE_UNUSABLE = "image_unusable"
+    CAPTURE_FAILED = "capture_failed"
+    # Never returned by a capture: the user turned following off, or a
+    # manual wing length is overriding it. Said out loud so a surface
+    # never has to guess whether silence means "off" or "broken".
+    NOT_FOLLOWING = "not_following"
+
+
+# What each outcome means to someone reading a settings pane. Content-free
+# by construction: fixed product sentences, no paths, no window titles, no
+# measurements.
+ALCOVE_STATUS_MESSAGES: Final[dict[AlcoveCaptureStatus, str]] = {
+    AlcoveCaptureStatus.CAPTURED: "Matching Alcove's width.",
+    AlcoveCaptureStatus.SCREEN_RECORDING_DENIED: (
+        "Screen Recording is off, so SidePulse cannot see Alcove's capsule. "
+        "The bar keeps its classic size until you grant it."
+    ),
+    AlcoveCaptureStatus.WINDOW_UNAVAILABLE: (
+        "Alcove is not showing a capsule right now, so the bar is using its "
+        "own size."
+    ),
+    AlcoveCaptureStatus.IMAGE_UNUSABLE: (
+        "Alcove's capsule was captured but could not be measured, so the bar "
+        "is using its own size."
+    ),
+    AlcoveCaptureStatus.CAPTURE_FAILED: (
+        "Measuring Alcove's capsule failed, so the bar is using its own size."
+    ),
+    AlcoveCaptureStatus.NOT_FOLLOWING: (
+        "Not following Alcove -- the bar uses its own size."
+    ),
+}
+
+# One short line per outcome for the app log. Logged on TRANSITION only --
+# see note_alcove_status -- because a per-frame line at 1.5s cadence is a
+# log nobody reads, and zero lines is why this was invisible for a week.
+ALCOVE_STATUS_LOG_LINES: Final[dict[AlcoveCaptureStatus, str]] = {
+    AlcoveCaptureStatus.CAPTURED: "alcove: following the capsule",
+    AlcoveCaptureStatus.SCREEN_RECORDING_DENIED: (
+        "alcove: screen recording not granted -- not following"
+    ),
+    AlcoveCaptureStatus.WINDOW_UNAVAILABLE: "alcove: no capsule window on screen",
+    AlcoveCaptureStatus.IMAGE_UNUSABLE: "alcove: captured, image unusable",
+    AlcoveCaptureStatus.CAPTURE_FAILED: "alcove: capture failed",
+    AlcoveCaptureStatus.NOT_FOLLOWING: "alcove: following is off",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +119,37 @@ class AlcoveObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class AlcoveCaptureOutcome:
+    """One capture attempt: what happened, and the geometry if any.
+
+    The pairing is enforced rather than documented -- an outcome cannot
+    claim CAPTURED with nothing to show, and cannot smuggle geometry out
+    of a failure. That invariant is the whole point of replacing None.
+    """
+
+    status: AlcoveCaptureStatus
+    observation: AlcoveObservation | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not AlcoveCaptureStatus:
+            raise ValueError("invalid alcove capture status")
+        if self.status is AlcoveCaptureStatus.NOT_FOLLOWING:
+            # A capture never decides whether following is enabled.
+            raise ValueError("not_following is not a capture outcome")
+        captured = self.status is AlcoveCaptureStatus.CAPTURED
+        if captured != isinstance(self.observation, AlcoveObservation):
+            raise ValueError("only a successful capture carries an observation")
+
+
+@dataclass(frozen=True, slots=True)
+class AlcoveStatusSnapshot:
+    """The latest recorded outcome and when it was recorded."""
+
+    status: AlcoveCaptureStatus
+    updated_at: float
+
+
+@dataclass(frozen=True, slots=True)
 class RawAlphaImage:
     width: int
     height: int
@@ -57,6 +157,201 @@ class RawAlphaImage:
     bytes_per_pixel: int
     alpha_offset: int
     pixels: bytes
+
+
+# --- Screen Recording permission ----------------------------------------
+# Following Alcove means capturing another application's window, which is
+# Screen Recording. Nothing in this app ever preflighted it, so a denied
+# permission was indistinguishable from "Alcove isn't running".
+#
+# Preflight is CHEAP and never prompts. Requesting is a different call and
+# is reserved for an explicit user action (see request_screen_recording_access):
+# a permission dialog nobody asked for, raised from a 1.5s background
+# cadence, is its own bug.
+SCREEN_RECORDING_PREFLIGHT_TTL_SECONDS: Final = 5.0
+# A recorded outcome older than this is not a reading. Following runs at a
+# ~1.5s cadence, so past half a minute the render path has stopped
+# reporting -- and a surface must not present its last words as current.
+ALCOVE_STATUS_MAX_AGE_SECONDS: Final = 30.0
+
+_screen_recording_lock = threading.Lock()
+_screen_recording_cache: tuple[float, bool | None] | None = None
+
+_status_lock = threading.Lock()
+_status_snapshot: AlcoveStatusSnapshot | None = None
+
+
+def _quartz():
+    import Quartz
+
+    return Quartz
+
+
+def _preflight_screen_capture_access() -> bool | None:
+    """CGPreflightScreenCaptureAccess, or None when it cannot be asked.
+
+    None is NOT "denied": on a build without the symbol, or with Quartz
+    unavailable, we genuinely do not know -- and reporting "not granted"
+    to a user whose permission is fine is the same dishonesty in reverse.
+    """
+    try:
+        preflight = getattr(_quartz(), "CGPreflightScreenCaptureAccess", None)
+    except Exception:
+        return None
+    if preflight is None:
+        return None
+    try:
+        return bool(preflight())
+    except Exception:
+        return None
+
+
+def screen_recording_granted(
+    *,
+    force: bool = False,
+    now: float | None = None,
+    preflight: Callable[[], bool | None] | None = None,
+) -> bool | None:
+    """Cached preflight. True, False, or None when it cannot be determined.
+
+    Cached because the answer is read on every reposition; time-bounded
+    because the answer genuinely changes -- the user can grant or revoke
+    it in System Settings while we are running, and a permanently cached
+    "denied" would strand the feature exactly as a permanently cached
+    None did.
+    """
+    global _screen_recording_cache
+    moment = time.monotonic() if now is None else float(now)
+    if not math.isfinite(moment):
+        moment = time.monotonic()
+    if not force:
+        with _screen_recording_lock:
+            cached = _screen_recording_cache
+        if (
+            cached is not None
+            and 0.0 <= moment - cached[0] < SCREEN_RECORDING_PREFLIGHT_TTL_SECONDS
+        ):
+            return cached[1]
+    probe = preflight or _preflight_screen_capture_access
+    try:
+        granted = probe()
+    except Exception:
+        granted = None
+    if granted is not None:
+        granted = bool(granted)
+    with _screen_recording_lock:
+        _screen_recording_cache = (moment, granted)
+    return granted
+
+
+def reset_screen_recording_cache() -> None:
+    """Force the next preflight to ask the system again."""
+    global _screen_recording_cache
+    with _screen_recording_lock:
+        _screen_recording_cache = None
+
+
+def request_screen_recording_access(
+    *,
+    request: Callable[[], bool] | None = None,
+) -> bool | None:
+    """Prompt for Screen Recording. EXPLICIT USER ACTION ONLY.
+
+    Never call this from the observer, from reposition, or from any timer.
+    A modal permission dialog the user did not ask for is indistinguishable
+    from malware behaviour and trains people to deny it.
+    """
+    caller = request
+    if caller is None:
+        try:
+            caller = getattr(_quartz(), "CGRequestScreenCaptureAccess", None)
+        except Exception:
+            caller = None
+    if caller is None:
+        return None
+    try:
+        granted = bool(caller())
+    except Exception:
+        granted = None
+    reset_screen_recording_cache()
+    return granted
+
+
+def alcove_window_present(*, window_lister: Callable[[], object] | None = None) -> bool | None:
+    """Is an Alcove window on screen? None when the list cannot be read."""
+    if window_lister is not None:
+        try:
+            info = window_lister()
+        except Exception:
+            return None
+    else:
+        try:
+            quartz = _quartz()
+            info = quartz.CGWindowListCopyWindowInfo(
+                quartz.kCGWindowListOptionOnScreenOnly,
+                quartz.kCGNullWindowID,
+            )
+        except Exception:
+            return None
+    if info is None:
+        return None
+    try:
+        return any(
+            str(entry.get("kCGWindowOwnerName", "")) == ALCOVE_OWNER_NAME
+            for entry in info
+        )
+    except Exception:
+        return None
+
+
+def alcove_follow_blocker(*, following: bool = True) -> AlcoveCaptureStatus | None:
+    """The reason following cannot work right now, or None.
+
+    None means "nothing visible is in the way" -- deliberately NOT a claim
+    that a capture succeeded. Only a real capture may claim CAPTURED, which
+    is why a surface with no live reading reports "unavailable" instead of
+    inventing good news.
+    """
+    if not following:
+        return AlcoveCaptureStatus.NOT_FOLLOWING
+    if screen_recording_granted() is False:
+        return AlcoveCaptureStatus.SCREEN_RECORDING_DENIED
+    if alcove_window_present() is False:
+        return AlcoveCaptureStatus.WINDOW_UNAVAILABLE
+    return None
+
+
+def note_alcove_status(
+    status: AlcoveCaptureStatus,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Record the current outcome; True only when it CHANGED.
+
+    The return value is the whole logging policy: callers log on a True,
+    which is once per transition rather than once per frame.
+    """
+    global _status_snapshot
+    if type(status) is not AlcoveCaptureStatus:
+        return False
+    moment = time.monotonic() if now is None else float(now)
+    if not math.isfinite(moment):
+        moment = time.monotonic()
+    with _status_lock:
+        previous = _status_snapshot
+        _status_snapshot = AlcoveStatusSnapshot(status=status, updated_at=moment)
+    return previous is None or previous.status is not status
+
+
+def latest_alcove_status() -> AlcoveStatusSnapshot | None:
+    with _status_lock:
+        return _status_snapshot
+
+
+def reset_alcove_status() -> None:
+    global _status_snapshot
+    with _status_lock:
+        _status_snapshot = None
 
 
 def _finite(*values: object) -> bool:
@@ -365,9 +660,28 @@ def _cg_alpha_offset(quartz: object, bitmap_info: int, bytes_per_pixel: int) -> 
 
 def capture_alcove_observation(
     request: AlcoveCaptureRequest,
-) -> AlcoveObservation | None:
-    """Capture one requested Alcove window as raw CGImage provider bytes."""
+    *,
+    screen_recording: bool | None = None,
+) -> AlcoveCaptureOutcome:
+    """Capture one requested Alcove window, and always say what happened.
+
+    This returned a bare ``None`` for four unrelated failures and for one
+    success-with-nothing-in-it. The catch-all is still here -- a capture
+    must never raise into the render path -- but it is now the LAST
+    branch, not the only one, and it carries its own distinct status
+    instead of impersonating the other four.
+    """
     try:
+        granted = (
+            screen_recording_granted() if screen_recording is None else screen_recording
+        )
+        if granted is False:
+            # Do not even attempt the capture: without permission macOS
+            # hands back the desktop rather than the window, which scans
+            # as "nothing there" and would be reported as a missing
+            # capsule. Preflight is what makes the two distinguishable.
+            return AlcoveCaptureOutcome(AlcoveCaptureStatus.SCREEN_RECORDING_DENIED)
+
         import Quartz
 
         probe_height = request.menu_band_height * (ALCOVE_MAX_BAND_FACTOR + 0.2)
@@ -384,7 +698,9 @@ def capture_alcove_observation(
             Quartz.kCGWindowImageNominalResolution,
         )
         if image is None:
-            return None
+            # The window went away between selection on main and capture
+            # here -- Alcove quit, collapsed, or moved to another Space.
+            return AlcoveCaptureOutcome(AlcoveCaptureStatus.WINDOW_UNAVAILABLE)
         width = int(Quartz.CGImageGetWidth(image))
         height = int(Quartz.CGImageGetHeight(image))
         bits_per_pixel = int(Quartz.CGImageGetBitsPerPixel(image))
@@ -397,9 +713,11 @@ def capture_alcove_observation(
             bytes_per_pixel,
         )
         if alpha_offset is None:
-            return None
+            return AlcoveCaptureOutcome(AlcoveCaptureStatus.IMAGE_UNUSABLE)
         provider = Quartz.CGImageGetDataProvider(image)
-        data = Quartz.CGDataProviderCopyData(provider)
+        data = None if provider is None else Quartz.CGDataProviderCopyData(provider)
+        if data is None:
+            return AlcoveCaptureOutcome(AlcoveCaptureStatus.IMAGE_UNUSABLE)
         raw = RawAlphaImage(
             width=width,
             height=height,
@@ -408,9 +726,32 @@ def capture_alcove_observation(
             alpha_offset=alpha_offset,
             pixels=bytes(data),
         )
-        return scan_alpha_image(request, raw, captured_at=time.monotonic())
+        observation = scan_alpha_image(request, raw, captured_at=time.monotonic())
+        if observation is None:
+            # A real image with no measurable capsule in it: fully
+            # transparent (the usual shape of a silently denied capture),
+            # or geometry the validator refuses.
+            return AlcoveCaptureOutcome(AlcoveCaptureStatus.IMAGE_UNUSABLE)
+        return AlcoveCaptureOutcome(AlcoveCaptureStatus.CAPTURED, observation)
     except Exception:
-        return None
+        # Bounded and non-raising, as before -- but no longer the same
+        # value as every other ending.
+        return AlcoveCaptureOutcome(AlcoveCaptureStatus.CAPTURE_FAILED)
+
+
+def normalized_capture_outcome(result: object) -> AlcoveCaptureOutcome:
+    """Accept an outcome, a bare observation, or anything else.
+
+    Injected captures (tests, and any future provider) may still return a
+    plain observation. Anything that is neither is a capture that declined
+    to say why, which is precisely CAPTURE_FAILED -- never a quiet success
+    and never an invented reason.
+    """
+    if type(result) is AlcoveCaptureOutcome:
+        return result
+    if isinstance(result, AlcoveObservation):
+        return AlcoveCaptureOutcome(AlcoveCaptureStatus.CAPTURED, result)
+    return AlcoveCaptureOutcome(AlcoveCaptureStatus.CAPTURE_FAILED)
 
 
 class AlcoveObservationWorker:
@@ -420,7 +761,7 @@ class AlcoveObservationWorker:
         self,
         buffer: AlcoveObservationBuffer,
         *,
-        capture: Callable[[AlcoveCaptureRequest], AlcoveObservation | None] | None = None,
+        capture: Callable[[AlcoveCaptureRequest], object] | None = None,
     ) -> None:
         self._buffer = buffer
         self._capture = capture or capture_alcove_observation
@@ -428,6 +769,7 @@ class AlcoveObservationWorker:
         self._pending: AlcoveCaptureRequest | None = None
         self._accepting = True
         self._in_flight = False
+        self._last_status: AlcoveCaptureStatus | None = None
         self.dropped_requests = 0
         self._thread = threading.Thread(
             target=self._run,
@@ -445,6 +787,17 @@ class AlcoveObservationWorker:
     def in_flight(self) -> bool:
         with self._condition:
             return self._in_flight
+
+    @property
+    def last_status(self) -> AlcoveCaptureStatus | None:
+        """The most recent capture's reason, or None before the first one.
+
+        The buffer only carries successes, so without this the main
+        thread can see that nothing arrived and still not know why --
+        which is the original defect, moved one layer out.
+        """
+        with self._condition:
+            return self._last_status
 
     def reconcile(self, request: AlcoveCaptureRequest) -> bool:
         if not isinstance(request, AlcoveCaptureRequest):
@@ -469,11 +822,19 @@ class AlcoveObservationWorker:
                 self._pending = None
                 self._in_flight = True
             try:
-                observation = self._capture(request)
+                outcome = normalized_capture_outcome(self._capture(request))
+            except Exception:
+                outcome = AlcoveCaptureOutcome(AlcoveCaptureStatus.CAPTURE_FAILED)
+            try:
                 with self._condition:
                     publish = self._accepting
-                if publish and isinstance(observation, AlcoveObservation):
-                    self._buffer.publish(observation)
+                    if publish:
+                        # A result that arrives after close belongs to a
+                        # torn-down generation: it must not publish and
+                        # must not overwrite the status either.
+                        self._last_status = outcome.status
+                if publish and outcome.observation is not None:
+                    self._buffer.publish(outcome.observation)
             except Exception:
                 pass
             finally:

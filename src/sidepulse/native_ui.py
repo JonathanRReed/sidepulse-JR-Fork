@@ -33,6 +33,19 @@ bridge dispatches via respondsToSelector:, which a plain Python object
 can't satisfy) -- that wiring belongs in status_bar.py, on
 StatusBarController itself, the same way every other AppKit delegate
 method in this app already lives there.
+
+On the bare ``except Exception: pass`` blocks below, and why NONE of them
+owes its caller a reason. Every one of them wraps an OPTIONAL AppKit
+appearance setter -- a material, a corner radius, a table style, a track
+fill colour, a monospaced font -- that does not exist on every macOS this
+app runs on (see the Big Sur..Tahoe range above). The failure they absorb
+has exactly one consequence: the control keeps the system default look.
+There is no permission behind them, no measurement, no state the caller
+could report and nothing a user could act on, so they are the one case
+where swallowing genuinely is the whole answer. Anything here that DOES
+carry a fact -- a permission, a reading, a device -- is required to say
+so; that rule is why this paragraph exists rather than being re-derived
+per handler.
 """
 
 from __future__ import annotations
@@ -721,6 +734,14 @@ class _HoverRowView(NSView):
         )
 
     def _row_is_selected(self) -> bool:
+        """False on any failure, and that is the whole answer.
+
+        The only consumer is the hover paint below. "We could not ask
+        whether this row is selected" and "it is not selected" lead to
+        the identical, correct-either-way behaviour: draw the hover. No
+        caller could do anything with a reason, and there is no surface
+        that would show one.
+        """
         view = self.superview()
         while view is not None:
             if hasattr(view, "isSelected"):

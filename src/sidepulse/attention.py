@@ -55,16 +55,6 @@ class TransientSignal:
     source_agent_id: str | None
 
 
-@dataclass(frozen=True)
-class AttentionProjection:
-    lifecycle_mode: LifecycleMode
-    actionable_attention: tuple[ProjectedAgentRow, ...]
-    visible_rows: tuple[ProjectedAgentRow, ...]
-    transient_signals: tuple[TransientSignal, ...]
-    dominant_provider: str | None
-    click_target_agent_id: str | None
-
-
 _LIFECYCLE_PRIORITY = {
     LifecycleMode.WAITING: 0,
     LifecycleMode.ACTIVE: 1,
@@ -73,6 +63,87 @@ _LIFECYCLE_PRIORITY = {
     LifecycleMode.IDLE: 4,
     LifecycleMode.UNKNOWN: 5,
 }
+
+
+@dataclass(frozen=True)
+class AttentionProjection:
+    """The one place "which agents exist" is decided for every surface.
+
+    ``visible_rows`` is MAIN AGENTS ONLY, structurally. A sub-agent is
+    never a row, never a light, never an interrupt and never part of a
+    count -- one main session fans out to 100+ Task workers (200
+    observed), and a live snapshot ran 87 workers against 27 mains, so
+    every consumer that read this field inherited a ~4x inflation. The
+    menu bar said "Active: 34" and the dropdown said "24 active" with
+    ONE main agent running, because each one filtered (or failed to
+    filter) at its own call site and they disagreed.
+
+    So the filter lives HERE, not at the call sites, and it is enforced
+    in ``__post_init__`` rather than merely applied by the projectors:
+    any construction that puts a worker in ``visible_rows`` -- including
+    ``dataclasses.replace`` on a device-pinned copy, and including a
+    test -- has it moved to ``worker_rows`` instead of silently lighting
+    an LED.
+
+    ``worker_rows`` exists because sub-agents matter in exactly one way:
+    they hold their parent's completion open. The mailbox reads them to
+    count a family's workers and to fold a worker's ask into its parent.
+    Nothing else should touch them.
+    """
+
+    lifecycle_mode: LifecycleMode
+    actionable_attention: tuple[ProjectedAgentRow, ...]
+    visible_rows: tuple[ProjectedAgentRow, ...]
+    transient_signals: tuple[TransientSignal, ...]
+    dominant_provider: str | None
+    click_target_agent_id: str | None
+    worker_rows: tuple[ProjectedAgentRow, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not any(row.is_subagent for row in self.visible_rows):
+            return
+        primary = tuple(row for row in self.visible_rows if not row.is_subagent)
+        demoted = tuple(row for row in self.visible_rows if row.is_subagent)
+        object.__setattr__(self, "visible_rows", primary)
+        object.__setattr__(self, "worker_rows", (*self.worker_rows, *demoted))
+
+    @property
+    def light_rows(self) -> tuple[ProjectedAgentRow, ...]:
+        """The rows the LEDs and the Screen Bar are allowed to paint.
+
+        Main agents. When there are none at all, the single most urgent
+        orphaned worker stands in for the whole background crowd -- one
+        presence, never N, exactly as the mailbox collapses them into one
+        "Background agents" row. Painting the crowd itself is how 87
+        workers became 87 identity colours and left Claude's brand hue
+        off the strip entirely.
+        """
+        if self.visible_rows:
+            return self.visible_rows
+        if not self.worker_rows:
+            return ()
+        return (
+            min(
+                self.worker_rows,
+                key=lambda row: (
+                    _LIFECYCLE_PRIORITY[row.lifecycle_mode],
+                    -row.updated_at.timestamp(),
+                    row.agent_id,
+                ),
+            ),
+        )
+
+    @property
+    def all_rows(self) -> tuple[ProjectedAgentRow, ...]:
+        """Every row at every depth, for the few callers entitled to one.
+
+        The mailbox and the dropdown's per-family worker rollup, and
+        nothing else. Asking for this is deliberately conspicuous: the
+        default field is the safe one, and a consumer has to say out loud
+        that it wants sub-agents.
+        """
+        return (*self.visible_rows, *self.worker_rows)
+
 
 _FAILURE_EVENTS = {
     "PostToolUseFailure",
@@ -137,8 +208,10 @@ def project_attention(
             )
         )
         emitted.add(event_key)
+    primary_rows = tuple(row for row in rows if not row.is_subagent)
+    worker_rows = tuple(row for row in rows if row.is_subagent)
     representative = min(
-        rows,
+        _light_driver_candidates(primary_rows, worker_rows),
         key=lambda row: (
             _LIFECYCLE_PRIORITY[row.lifecycle_mode],
             -row.updated_at.timestamp(),
@@ -151,7 +224,8 @@ def project_attention(
             representative.lifecycle_mode if representative is not None else LifecycleMode.IDLE
         ),
         actionable_attention=actionable,
-        visible_rows=rows,
+        visible_rows=primary_rows,
+        worker_rows=worker_rows,
         transient_signals=tuple(signals),
         dominant_provider=(
             actionable[0].provider
@@ -260,8 +334,10 @@ def project_attention_from_operator_state(
         for event in events
         if event.kind is TransitionKind.FAILED
     )
+    primary_rows = tuple(row for row in ordered_rows if not row.is_subagent)
+    worker_rows = tuple(row for row in ordered_rows if row.is_subagent)
     representative = min(
-        ordered_rows,
+        _light_driver_candidates(primary_rows, worker_rows),
         key=lambda row: (
             _LIFECYCLE_PRIORITY[row.lifecycle_mode],
             -row.updated_at.timestamp(),
@@ -276,7 +352,8 @@ def project_attention_from_operator_state(
             else representative.lifecycle_mode
         ),
         actionable_attention=actionable_rows,
-        visible_rows=ordered_rows,
+        visible_rows=primary_rows,
+        worker_rows=worker_rows,
         transient_signals=failure_signals,
         dominant_provider=(
             actionable_rows[0].provider
@@ -285,6 +362,28 @@ def project_attention_from_operator_state(
         ),
         click_target_agent_id=None,
     )
+
+
+def _light_driver_candidates(
+    primary_rows: tuple[ProjectedAgentRow, ...],
+    worker_rows: tuple[ProjectedAgentRow, ...],
+) -> tuple[ProjectedAgentRow, ...]:
+    """Which rows may decide what the light says.
+
+    Main agents, and a main agent always outranks a worker however urgent
+    the worker is. Choosing the most urgent row over EVERY depth is what
+    handed the entire light language to a Task worker -- a live snapshot's
+    representative was ``claude:agent:a70f42924b7bb211d``, so 35 busy
+    workers under an idle main made the strip announce "working" about
+    something the user cannot see, click, or answer.
+
+    Workers are considered only when there is no main agent at all. That
+    is the orphaned-worker case the mailbox already surfaces as one
+    "Background agents" row: a worker blocked with nobody above it is
+    still the only thing happening, and going dark would be a worse lie
+    than naming it.
+    """
+    return primary_rows or worker_rows
 
 
 def _project_row(

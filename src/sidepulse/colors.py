@@ -511,43 +511,89 @@ def _hue_gap(left: str, right: str) -> float:
     return min(delta, 360.0 - delta)
 
 
+# The CURATED_PALETTE slot each SHIPPED brandless provider wears, pinned
+# as data rather than derived from its position in PROVIDER_SPECS.
+#
+# It used to be derived. `_palette_defaults_by_provider` keyed the
+# positional slot on the ABSOLUTE registry index -- including branded
+# providers, which consume no slot -- so registering one new provider
+# ANYWHERE except the end silently repainted every brandless provider
+# after it. Simulated by inserting a single spec at index 4:
+#
+#     cursor    #FFCC00 -> #FF9500
+#     hermes    #FF9500 -> #FF2D55
+#     openclaw  #FF2D55 -> #AF52DE
+#     opencode  #AF52DE -> #FF3B30
+#
+# Four providers change colour, on an install where the user has learned
+# which light is which, because an unrelated tenth provider was added.
+# Identity that moves is not identity.
+#
+# These hexes are exactly what the derivation produced for the shipped
+# nine, so no existing install changes colour. New providers still get an
+# automatic slot from the algorithm below -- but they get it from the
+# PINNED set plus the brands, never from a position, so adding one can
+# never move one of these.
+PROVIDER_PALETTE_SLOTS: dict[str, str] = {
+    "cursor": "#FFCC00",
+    "hermes": "#FF9500",
+    "openclaw": "#FF2D55",
+    "opencode": "#AF52DE",
+}
+
+
 def _palette_defaults_by_provider() -> dict[str, str]:
     """The CURATED_PALETTE slot each brandless registered provider gets.
 
-    Positional indexing alone is NOT enough, and shipped a real collision:
-    ``opencode`` sits at index 7 in PROVIDER_SPECS, CURATED_PALETTE[7] is
-    systemGray #8E8E93, and #8E8E93 is also ``grok``'s brand colour -- so
-    out of the box those two agents were the same colour on the strip and
-    genuinely indistinguishable.
+    Pinned first (see PROVIDER_PALETTE_SLOTS), then derived for anything
+    the table does not yet name.
 
-    A provider whose positional slot is free still gets it, so nothing that
-    was already distinct moves. A provider whose slot is taken is given the
-    free slot whose hue sits FARTHEST from everything already spoken for --
-    brands, earlier providers, and the four state colours. Taking merely the
-    next free index instead would have handed opencode systemRed #FF3B30,
-    ten degrees of hue from the ask/blocked signal #FF3A00: distinct as a
-    string, the same light on the strip.
+    Derivation is what shipped a real collision: ``opencode`` sat at index
+    7 in PROVIDER_SPECS, CURATED_PALETTE[7] is systemGray #8E8E93, and
+    #8E8E93 is also ``grok``'s brand colour -- so out of the box those two
+    agents were the same colour on the strip and genuinely
+    indistinguishable. An unpinned provider is therefore given the free
+    slot whose hue sits FARTHEST from everything already spoken for --
+    brands, pinned providers, and the four state colours. Taking merely
+    the next free index instead would have handed opencode systemRed
+    #FF3B30, ten degrees of hue from the ask/blocked signal #FF3A00:
+    distinct as a string, the same light on the strip.
+
+    Unpinned providers are resolved in SORTED id order, never registry
+    order, so their result does not depend on where in the registry they
+    were declared either.
     """
-    assigned: dict[str, str] = {}
+    registered = {spec.provider for spec in PROVIDER_SPECS}
+    assigned: dict[str, str] = {
+        provider: hex_value
+        for provider, hex_value in PROVIDER_PALETTE_SLOTS.items()
+        if provider in registered and provider not in PROVIDER_BRAND_COLORS
+    }
     taken = {hex_value.upper() for hex_value in PROVIDER_BRAND_COLORS.values()}
-    reserved = list(PROVIDER_BRAND_COLORS.values()) + [
-        hex_value for _name, hex_value in STATE_SEED_COLORS
-    ]
-    for index, spec in enumerate(PROVIDER_SPECS):
-        if spec.provider in PROVIDER_BRAND_COLORS:
-            continue
-        positional = CURATED_PALETTE[index % len(CURATED_PALETTE)]
+    taken |= {hex_value.upper() for hex_value in assigned.values()}
+    reserved = (
+        list(PROVIDER_BRAND_COLORS.values())
+        + list(assigned.values())
+        + [hex_value for _name, hex_value in STATE_SEED_COLORS]
+    )
+    unpinned = sorted(
+        provider
+        for provider in registered
+        if provider not in PROVIDER_BRAND_COLORS and provider not in assigned
+    )
+    for provider in unpinned:
         free = [hex_value for hex_value in CURATED_PALETTE if hex_value.upper() not in taken]
-        if positional.upper() not in taken:
-            choice = positional
-        elif free:
+        if free:
             choice = max(free, key=lambda candidate: min(_hue_gap(candidate, other) for other in reserved))
         else:
             # More providers than palette slots: everything distinct is
-            # already spent, so fall back to the positional slot rather
+            # already spent, so fall back to a deterministic slot rather
             # than refusing to colour the row at all.
-            choice = positional
-        assigned[spec.provider] = choice
+            choice = CURATED_PALETTE[
+                int(hashlib.md5(provider.encode("utf-8")).hexdigest(), 16)
+                % len(CURATED_PALETTE)
+            ]
+        assigned[provider] = choice
         taken.add(choice.upper())
         reserved.append(choice)
     return assigned
@@ -1040,6 +1086,7 @@ class ColorSettings:
             for provider, value in raw_agents.items():
                 if isinstance(provider, str):
                     agent_colors[provider] = normalize_hex(value, default_agent_color(provider))
+        agent_colors = _brand_colors_repainted_by_a_palette(agent_colors)
 
         session_colors: dict[str, str] = {}
         raw_sessions = data.get("session_colors")
@@ -1153,6 +1200,69 @@ PRESET_DESCRIPTIONS: dict[str, str] = {
     PRESET_INFORMATIVE: "Clear motion at a normal brightness. The default.",
     PRESET_EVERYTHING: "Fast, bright, and it celebrates. Full show.",
 }
+
+
+def _palette_written_agent_colors() -> dict[str, frozenset[str]]:
+    """Every hex a palette click could ever have written per provider."""
+    written: dict[str, set[str]] = {}
+    for palette in (*CURATED_PALETTES.values(), *PROVIDER_PALETTES.values()):
+        for provider, hex_value in palette["agents"].items():
+            written.setdefault(provider, set()).add(normalize_hex(hex_value, "#000000"))
+    # The four brand SEEDS too: they are the chips every provider row
+    # leads with, and clicking the wrong one is the same accident.
+    for _name, seed in BRAND_SEED_COLORS:
+        for provider in PROVIDER_BRAND_COLORS:
+            written.setdefault(provider, set()).add(normalize_hex(seed, "#000000"))
+    return {provider: frozenset(values) for provider, values in written.items()}
+
+
+def _brand_colors_repainted_by_a_palette(agent_colors: dict[str, str]) -> dict[str, str]:
+    """Undo a palette that overwrote a provider's declared brand colour.
+
+    The live install held ``claude: #10A37F`` -- OpenAI's own green -- and
+    ``codex: #007AFF`` -- systemBlue, not Codex's #2B8FFF. Both were
+    written by ``applyPalette_``, which used to repaint every provider
+    with the palette's own fan-out. From then on Claude could not be
+    rendered as Claude ANYWHERE, because every surface resolves through
+    ``agent_color`` and ``agent_color`` reads settings before brands.
+
+    Only a BRANDED provider is repaired, and only when its stored hex is
+    exactly a value some shipped palette would have written for it. A
+    colour the user picked by hand is not in that set and is left alone.
+    """
+    written = _palette_written_agent_colors()
+    repaired = dict(agent_colors)
+    for provider, brand in PROVIDER_BRAND_COLORS.items():
+        stored = repaired.get(provider)
+        if stored is None:
+            continue
+        normalized = normalize_hex(stored, brand)
+        if normalized.upper() == normalize_hex(brand, brand).upper():
+            continue
+        if normalized in written.get(provider, frozenset()):
+            repaired[provider] = brand
+    return repaired
+
+
+def apply_palette(colors: ColorSettings, palette: dict) -> ColorSettings:
+    """Dress every STATE in one look, without touching brand identity.
+
+    A palette owns the four mode colours and any provider that has no
+    declared brand hue. It does NOT own the brands: applying the "OpenAI"
+    look used to write ``claude = #10A37F`` -- OpenAI's own green -- into
+    the live settings, and from then on nothing anywhere could render
+    Claude as Claude, because every surface resolves through
+    ``agent_color`` and ``agent_color`` reads settings first. Per-provider
+    brand colour is changed one row at a time, deliberately, or not at
+    all.
+    """
+    for mode_key, hex_value in palette["modes"].items():
+        colors = colors.with_mode_color(mode_key, hex_value)
+    for provider, hex_value in palette["agents"].items():
+        if provider in PROVIDER_BRAND_COLORS:
+            continue
+        colors = colors.with_agent_color(provider, hex_value)
+    return colors
 
 
 def apply_preset(colors: ColorSettings, preset: str) -> ColorSettings:
@@ -1369,9 +1479,16 @@ def _active_agents(statuses: tuple[AgentStatus, ...], colors: ColorSettings) -> 
     # to tell apart; a lone session keeps its provider's brand color.
     identity: dict[str, str] = {}
     if len(ordered) > 1:
-        identity = identity_colors_for_agents(
-            [status.agent_id for status in ordered],
-            groups=identity_groups_for_statuses(ordered, colors),
+        groups = identity_groups_for_statuses(ordered, colors)
+        identity = (
+            identity_colors_for_agents(
+                [status.agent_id for status in ordered], groups=groups
+            )
+            if groups
+            else provider_identity_colors_for_agents(
+                [(status.agent_id, status.provider) for status in ordered],
+                colors=colors,
+            )
         )
     agents: list[_ActiveAgent] = []
     for status in ordered:
@@ -2050,7 +2167,12 @@ def program_for_projection(
             led_count=led_count,
         )
 
-    rows = tuple(projection.visible_rows)
+    # light_rows: main agents only, or one stand-in for an orphaned
+    # background crowd. Colouring visible_rows here fed 114 rows -- 87 of
+    # them Task workers -- into identity assignment, which is why the
+    # multi-agent renderer never switched off and Claude's brand hue
+    # never reached the strip.
+    rows = tuple(projection.light_rows)
     if not rows:
         return state, program_for_display_state(
             state,
@@ -2067,11 +2189,19 @@ def program_for_projection(
     ordered = sorted(rows, key=lambda row: _stable_agent_sort_key(row.source_status))
     identity: dict[str, str] = {}
     if len(ordered) > 1:
-        identity = identity_colors_for_agents(
-            [row.agent_id for row in ordered],
-            groups=identity_groups_for_statuses(
-                [row.source_status for row in ordered], settings
-            ),
+        groups = identity_groups_for_statuses(
+            [row.source_status for row in ordered], settings
+        )
+        identity = (
+            # Color by Project is an explicit override: the bar answers
+            # "which project needs me", so project hue replaces brand.
+            identity_colors_for_agents([row.agent_id for row in ordered], groups=groups)
+            if groups
+            # Otherwise a crowd is still told apart INSIDE each brand.
+            else provider_identity_colors_for_agents(
+                [(row.agent_id, row.provider) for row in ordered],
+                colors=settings,
+            )
         )
     state_by_lifecycle = {
         LifecycleMode.IDLE: LedDisplayState.IDLE,
@@ -2685,6 +2815,91 @@ def _hex_to_oklch_hue(hex_value: str) -> float:
     red, green, blue = (int(hex_value[i : i + 2], 16) / 255.0 for i in (1, 3, 5))
     hue, _light, _sat = colorsys.rgb_to_hls(red, green, blue)
     return (hue * 360.0) % 360.0
+
+
+def hex_to_oklch(hex_value: str) -> tuple[float, float, float]:
+    """The exact inverse of ``oklch_hex``'s forward transform.
+
+    Needed to shade a colour without leaving it: two sessions of the same
+    provider are told apart by LIGHTNESS, which means reading the brand's
+    real lightness first rather than guessing one.
+    """
+    import math
+
+    def _decode(channel: float) -> float:
+        if channel <= 0.04045:
+            return channel / 12.92
+        return ((channel + 0.055) / 1.055) ** 2.4
+
+    normalized = normalize_hex(hex_value, "#000000")
+    red, green, blue = (
+        _decode(int(normalized[index : index + 2], 16) / 255.0) for index in (1, 3, 5)
+    )
+    long_ = 0.4122214708 * red + 0.5363325363 * green + 0.0514459929 * blue
+    medium = 0.2119034982 * red + 0.6806995451 * green + 0.1073969566 * blue
+    short = 0.0883024619 * red + 0.2817188376 * green + 0.6299787005 * blue
+    l_ = long_ ** (1 / 3) if long_ >= 0 else -((-long_) ** (1 / 3))
+    m_ = medium ** (1 / 3) if medium >= 0 else -((-medium) ** (1 / 3))
+    s_ = short ** (1 / 3) if short >= 0 else -((-short) ** (1 / 3))
+    lightness = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_
+    a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_
+    b = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_
+    return (
+        lightness,
+        math.hypot(a, b),
+        math.degrees(math.atan2(b, a)) % 360.0,
+    )
+
+
+#: Perceptual lightness offsets that tell two sessions of the SAME
+#: provider apart WITHOUT leaving that provider's hue. Offset 0 is the
+#: brand colour itself, so a lone session of a provider always wears the
+#: exact declared brand hex.
+IDENTITY_SHADE_OFFSETS: tuple[float, ...] = (0.0, 0.17, -0.16, 0.32, -0.28, 0.46)
+
+
+def shade_of(hex_value: str, lightness_offset: float) -> str:
+    """The same hue and chroma at a different perceptual lightness."""
+    lightness, chroma, hue = hex_to_oklch(hex_value)
+    shifted = min(0.97, max(0.16, lightness + lightness_offset))
+    return oklch_hex(shifted, chroma, hue)
+
+
+def provider_identity_colors_for_agents(
+    agents,
+    *,
+    colors: ColorSettings,
+) -> dict[str, str]:
+    """Per-session identity that still says WHICH PRODUCT is working.
+
+    ``agents`` is an iterable of ``(agent_id, provider)``.
+
+    The old identity assignment hashed each agent_id into
+    IDENTITY_PALETTE -- eight hues chosen for mutual distinctness and
+    nothing else. That is why the owner reported "it's purple for some
+    reason when Claude's running": a live snapshot put Claude main
+    sessions on #E44CFF, #4C8DFF, #FFD60A, #FF6FA9, #00B3A4, #E6E6E6 and
+    #FF9F0A, and Claude's declared brand terracotta #D97757 appeared
+    nowhere on the strip at all. The provider colour was reachable ONLY
+    when exactly one row was visible, and 87 leaked sub-agents meant that
+    never happened.
+
+    Identity and brand are not in conflict: hue answers "which product",
+    lightness answers "which of my Claude sessions". Sorted-order
+    assignment inside each provider keeps the result a pure function of
+    the id SET, exactly as ``identity_colors_for_agents`` documents for
+    its own palette.
+    """
+    by_provider: dict[str, list[str]] = {}
+    for agent_id, provider in agents:
+        by_provider.setdefault(provider, []).append(agent_id)
+    assignment: dict[str, str] = {}
+    for provider, agent_ids in by_provider.items():
+        base = colors.agent_color(provider)
+        for index, agent_id in enumerate(sorted(set(agent_ids))):
+            offset = IDENTITY_SHADE_OFFSETS[index % len(IDENTITY_SHADE_OFFSETS)]
+            assignment[agent_id] = base if offset == 0.0 else shade_of(base, offset)
+    return assignment
 
 
 def derive_palette(accent_hex: str) -> dict[str, dict[str, str]]:
