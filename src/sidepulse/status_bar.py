@@ -114,6 +114,7 @@ from .audit import (
     export_status_audit_html,
     remove_orphaned_state_files,
     trim_oversized_logs,
+    trim_oversized_process_logs,
 )
 from .battery import (
     BatteryLedController,
@@ -3400,6 +3401,10 @@ class StatusBarController(NSObject):
             trimmed = trim_oversized_logs(state_dir)
         except Exception:
             trimmed = 0
+        try:
+            trimmed += trim_oversized_process_logs(state_dir)
+        except Exception:
+            pass
         try:
             removed = remove_orphaned_state_files(state_dir)
         except Exception:

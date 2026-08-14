@@ -158,3 +158,58 @@ def test_the_janitor_survives_a_missing_state_dir(tmp_path: Path) -> None:
     from sidepulse.audit import remove_orphaned_state_files
 
     assert remove_orphaned_state_files(tmp_path / "nope") == 0
+
+
+def test_process_logs_are_bounded_without_losing_the_inode(tmp_path: Path) -> None:
+    """launchd holds an O_APPEND fd on stdout/stderr for the process's life.
+
+    Replacing the file atomically would leave the app writing into an
+    unlinked inode: the log on disk freezes and every later line vanishes,
+    silently. So this one truncates in place.
+    """
+    import os
+
+    from sidepulse.audit import TRIM_TARGET_BYTES, trim_process_log
+
+    log = tmp_path / "status-bar.err.log"
+    with log.open("w", encoding="utf-8") as handle:
+        for index in range(200_000):
+            handle.write(f"line {index} " + "x" * 40 + "\n")
+    before_inode = log.stat().st_ino
+    assert log.stat().st_size > TRIM_TARGET_BYTES
+
+    # A live appender, exactly like launchd's.
+    appender = os.open(log, os.O_WRONLY | os.O_APPEND)
+    try:
+        assert trim_process_log(log) is True
+        assert log.stat().st_ino == before_inode, "the inode changed"
+        assert log.stat().st_size <= TRIM_TARGET_BYTES
+
+        os.write(appender, b"after the trim\n")
+        # The appender's writes must still land in the file on disk.
+        assert "after the trim" in log.read_text()
+    finally:
+        os.close(appender)
+
+
+def test_process_log_trim_keeps_the_newest_lines(tmp_path: Path) -> None:
+    from sidepulse.audit import trim_process_log
+
+    log = tmp_path / "status-bar.out.log"
+    with log.open("w", encoding="utf-8") as handle:
+        for index in range(200_000):
+            handle.write(f"line {index} " + "y" * 40 + "\n")
+
+    trim_process_log(log)
+    lines = log.read_text().splitlines()
+    assert lines[-1] == "line 199999 " + "y" * 40
+    assert lines[0].startswith("line "), "trim left a partial first line"
+
+
+def test_small_process_logs_are_left_alone(tmp_path: Path) -> None:
+    from sidepulse.audit import trim_oversized_process_logs
+
+    log = tmp_path / "status-bar.out.log"
+    log.write_text("just getting started\n")
+    assert trim_oversized_process_logs(tmp_path) == 0
+    assert log.read_text() == "just getting started\n"

@@ -195,3 +195,54 @@ def test_dedupe_digest_is_truncated(tmp_path: Path) -> None:
     for value in payload["dedupes"]:
         assert value.startswith("message:")
         assert len(value) == len("message:") + usage_stats.DEDUPE_DIGEST_HEX_CHARS
+
+
+def test_files_outside_the_window_are_remembered_not_rescanned(tmp_path: Path) -> None:
+    """The regression that pinned a real machine's CPU at 104%.
+
+    Retention drops records older than the window. If the whole ENTRY is
+    dropped when nothing survives, the file is absent from the cache -- so
+    the next scan re-reads it from disk, finds nothing in window, and drops
+    it again. Forever, every cycle.
+
+    On the owner's corpus that was ~2,000 of 2,633 transcripts re-read every
+    five minutes. Keeping a record-less entry costs ~300 bytes and is the
+    entire point of having a cache.
+    """
+    now = time.time()
+    root = tmp_path / "projects"
+    _write_transcript(root, "old.jsonl", [_claude_line("s-old", "ancient", now - 60 * DAY)])
+    _write_transcript(root, "new.jsonl", [_claude_line("s-new", "fresh", now - 1 * DAY)])
+    cache = tmp_path / "usage-scan-cache.json"
+
+    _scan(root, cache, since_epoch=now - 7 * DAY)
+
+    payload = json.loads(cache.read_text(encoding="utf-8"))
+    assert len(payload["files"]) == 2, (
+        "the out-of-window file was forgotten and will be rescanned every cycle"
+    )
+    empty = [
+        entry for entry in payload["files"].values() if not entry["records"]
+    ]
+    assert len(empty) == 1, "expected one record-less entry for the old file"
+
+
+def test_a_remembered_empty_entry_is_served_from_cache(tmp_path: Path) -> None:
+    """Prove the read is actually skipped, not merely that the entry exists."""
+    now = time.time()
+    root = tmp_path / "projects"
+    _write_transcript(
+        root, "old.jsonl", [_claude_line("s-old", "ancient", now - 60 * DAY)]
+    )
+    _write_transcript(
+        root, "new.jsonl", [_claude_line("s-new", "fresh", now - 1 * DAY)]
+    )
+    cache = tmp_path / "usage-scan-cache.json"
+
+    first = _scan(root, cache, since_epoch=now - 7 * DAY)
+    assert first.source_coverage["claude"].cache_hits == 0, "cold scan should read"
+
+    second = _scan(root, cache, since_epoch=now - 7 * DAY)
+    assert second.source_coverage["claude"].cache_hits == 2, (
+        "the out-of-window file was re-read instead of served from cache"
+    )

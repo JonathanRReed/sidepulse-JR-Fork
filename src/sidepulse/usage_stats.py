@@ -1357,10 +1357,15 @@ def _scan_inventory_usage(
     ) in selected_cache_candidates:
         if retention_epoch > 0.0:
             records = [record for record in records if record[3] >= retention_epoch]
-            if not records and not rate_windows:
-                # Nothing here is reachable from any window the UI can ask
-                # for. Re-reading this file later is cheaper than carrying it.
-                continue
+            # An entry with NO surviving records is still worth keeping: it
+            # records that this file has nothing at or after the floor, which
+            # costs ~300 bytes and saves re-reading the file.
+            #
+            # Dropping it instead looks like a saving and is the opposite. On
+            # this corpus ~2,000 of 2,633 files are older than the window, so
+            # dropping them meant re-reading 2,000 transcripts on every scan
+            # cycle -- measured live as a CPU pin at 104%, permanently. The
+            # cache exists to avoid exactly that read.
         cost = _CACHE_BYTES_PER_ENTRY + _CACHE_BYTES_PER_RECORD * len(records)
         if cost > cache_budget and new_files:
             # Candidates are newest first, so everything past here is older.
