@@ -21,7 +21,29 @@ from .providers import default_state_dir
 
 MAX_HINT_BYTES = 512
 MAX_EVENT_BYTES = MAX_HINT_BYTES
-HOOK_EVENT_SEND_TIMEOUT_SECONDS = 0.2
+# A wedged listener used to cost every hook the full timeout, invisibly,
+# for as long as it stayed wedged. 30ms is ample for a loopback unix
+# socket and bounds the damage; the circuit breaker below bounds it
+# further. Measured baseline: median hook ~48ms total.
+HOOK_EVENT_SEND_TIMEOUT_SECONDS = 0.03
+# Events that mean "this work ENDED". These are the whole product -- a
+# missed completion is the one failure we cannot ship -- so they are
+# never suppressed by the breaker, only ever rate-limited by it.
+TERMINAL_HOOK_EVENTS = frozenset(
+    {
+        "Stop",
+        "StopFailure",
+        "SubagentStop",
+        "SessionEnd",
+        "SessionStart",
+        "Notification",
+        "PermissionRequest",
+    }
+)
+# Consecutive failures before we stop trying non-terminal sends, and how
+# long that suppression lasts before we probe again.
+HOOK_BREAKER_TRIP_AFTER = 3
+HOOK_BREAKER_COOLDOWN_SECONDS = 30.0
 STALE_SOCKET_PROBE_TIMEOUT_SECONDS = 0.2
 PEER_READ_TIMEOUT_SECONDS = 0.5
 MAX_CONCURRENT_PEERS = 8
@@ -397,7 +419,95 @@ def default_latest_state_path() -> Path:
     return default_state_dir() / "latest.json"
 
 
+class _HookSendBreaker:
+    """Stop paying the timeout on every hook when nobody is listening.
+
+    State lives in a FILE, not memory: every hook invocation is its own
+    short-lived process, so an in-memory counter would reset on each one
+    and never trip. The sentinel is one small write on failure and one
+    stat on the happy path.
+
+    Terminal events are exempt and always attempted -- under load a
+    healthy-but-busy server times out too, and suppressing completions
+    there would drop the very thing this product exists to deliver.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self._path = path
+        self.suppressed_sends = 0
+
+    def sentinel_path(self) -> Path:
+        if self._path is not None:
+            return self._path
+        return default_state_dir() / "hook-send-breaker.json"
+
+    def _read(self) -> tuple[int, float]:
+        try:
+            data = json.loads(self.sentinel_path().read_text())
+            return int(data.get("failures", 0)), float(data.get("since", 0.0))
+        except (OSError, ValueError, TypeError):
+            return 0, 0.0
+
+    def should_attempt(self, event_name: str | None, now: float) -> bool:
+        if event_name in TERMINAL_HOOK_EVENTS:
+            return True
+        failures, since = self._read()
+        if failures >= HOOK_BREAKER_TRIP_AFTER and (
+            time.time() - since < HOOK_BREAKER_COOLDOWN_SECONDS
+        ):
+            self.suppressed_sends += 1
+            return False
+        return True
+
+    def record(self, *, delivered: bool, now: float) -> None:
+        path = self.sentinel_path()
+        if delivered:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return
+        failures, since = self._read()
+        wall = time.time()
+        if failures == 0 or wall - since >= HOOK_BREAKER_COOLDOWN_SECONDS:
+            failures, since = 0, wall
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"failures": failures + 1, "since": since}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+
+HOOK_SEND_BREAKER = _HookSendBreaker()
+
+
 def send_refresh_hint(
+    hint: ProviderRefreshHint,
+    *,
+    socket_path: Path | None = None,
+    timeout: float = HOOK_EVENT_SEND_TIMEOUT_SECONDS,
+    event_name: str | None = None,
+) -> bool:
+    """Send one hint, unless the breaker says nobody is listening.
+
+    Terminal events ignore the breaker entirely -- a missed completion
+    is the one failure this product cannot have, so it is always worth
+    the attempt even when the app is wedged.
+    """
+    now = time.monotonic()
+    if not HOOK_SEND_BREAKER.should_attempt(event_name, now):
+        return False
+    delivered = _send_refresh_hint_once(
+        hint, socket_path=socket_path, timeout=timeout
+    )
+    HOOK_SEND_BREAKER.record(delivered=delivered, now=now)
+    return delivered
+
+
+def _send_refresh_hint_once(
     hint: ProviderRefreshHint,
     *,
     socket_path: Path | None = None,

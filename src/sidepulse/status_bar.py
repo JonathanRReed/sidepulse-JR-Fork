@@ -14659,12 +14659,46 @@ def open_terminal_setup_command(command: str, *, filename: str = "install-sleep-
     )
     script_path.write_text(script, encoding="utf-8")
     script_path.chmod(0o700)
+    # Name the terminal explicitly. A bare `open` hands the .command file
+    # to whatever app owns that file type -- on any Mac where Ghostty,
+    # iTerm2 or a text editor claims it, the script is opened rather than
+    # RUN, while the Setup window cheerfully reports success. Silent
+    # no-op in the one flow that makes overnight agent runs work.
+    launcher = [str(trusted_system_tool("open"))]
+    terminal = _installed_terminal_application()
+    if terminal is not None:
+        launcher += ["-a", str(terminal)]
     subprocess.Popen(
-        [str(trusted_system_tool("open")), str(script_path)],
+        [*launcher, str(script_path)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     return script_path
+
+
+# Terminals that can actually RUN a .command script, most standard first.
+# Terminal.app is last-resort-proof: it ships with macOS.
+_TERMINAL_APPLICATION_PATHS: tuple[str, ...] = (
+    "/System/Applications/Utilities/Terminal.app",
+    "/Applications/Utilities/Terminal.app",
+    "/Applications/iTerm.app",
+    "/Applications/Ghostty.app",
+    "/Applications/Warp.app",
+    "/Applications/kitty.app",
+    "/Applications/Alacritty.app",
+)
+
+
+def _installed_terminal_application() -> Path | None:
+    """The first real terminal present, or None to fall back to `open`."""
+    for candidate in _TERMINAL_APPLICATION_PATHS:
+        path = Path(candidate)
+        try:
+            if path.is_dir():
+                return path
+        except OSError:
+            continue
+    return None
 
 
 def validate_lid_animation(animation: LedAnimationSetting) -> None:

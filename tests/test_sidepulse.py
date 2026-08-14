@@ -11005,7 +11005,10 @@ class PrivateStateSecurityTests(unittest.TestCase):
             )
             observations = []
 
-            def observe_hint(hint):
+            def observe_hint(hint, **_kwargs):
+                # Accept the real signature's keywords (event_name), or a
+                # stub that silently mismatches turns a swallowed
+                # TypeError into a passing-looking assertion failure.
                 observations.append(("hint", log.read_text(), hint))
                 return True
 

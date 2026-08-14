@@ -184,7 +184,10 @@ def hook_log_main(provider: str, log_path: Path) -> int:
         write_normalized_hook_record(actual_log_path, record)
         hint = _refresh_hint_for_record(actual_provider, record)
         if hint is not None:
-            send_refresh_hint(hint)
+            send_refresh_hint(
+                hint,
+                event_name=str(line.get("hook_event_name") or "") or None,
+            )
         write_hook_status_audit(record)
     except Exception:
         return 0
