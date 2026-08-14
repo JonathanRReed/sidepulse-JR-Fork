@@ -47,6 +47,7 @@ from .render_policy import (
     RenderDriverKind,
     alcove_bracket_corner_radius,
     choose_render_schedule,
+    display_link_fps,
     presentation_hold_seconds,
     rounded_silhouette,
     runtime_render_environment,
@@ -1779,6 +1780,11 @@ class VirtualStatusDevice(NSObject):
             self.view = None
             self.timer = None
             self.display_link = None
+            # The rate the installed link was registered for; None when there
+            # is no link. Compared against schedule.driver_fps so a panel that
+            # changed under us reinstalls rather than quietly disagreeing.
+            self._display_link_fps = None
+            self._panel_refresh_cache = None
             self.wraps_menu_bar = False
             self._animation_active = True
             self._display_asleep = False
@@ -2086,10 +2092,14 @@ class VirtualStatusDevice(NSObject):
     def _panel_refresh_hz(self) -> float | None:
         """The display's real refresh rate, cached briefly.
 
-        Cadences are snapped to an integer divisor of this so every
-        frame lands on a vsync boundary -- a rate that is not a whole
-        fraction of the panel reads as judder, which is the opposite of
-        what a slower cadence is for.
+        The one reader of the panel. Everything that needs the rate -- the
+        cadence policy AND the display link's own negotiation -- goes through
+        the schedule built from this call, because two independent readings of
+        a number that changes are two numbers.
+
+        Cached for five seconds because NSScreen is touched on every cadence
+        refresh; ``screenDidChange_`` drops the cache, since a new screen
+        generation is precisely when the old reading stops describing anything.
         """
         cached = getattr(self, "_panel_refresh_cache", None)
         now = time.monotonic()
@@ -2145,10 +2155,18 @@ class VirtualStatusDevice(NSObject):
         if self.view is not None:
             self.view.setRenderFps_(cadence.sample_fps)
         if schedule.driver is RenderDriverKind.DISPLAY_LINK:
+            # A link registered for a different rate is the wrong driver, not
+            # the right driver early: the gate holds against schedule.driver_fps
+            # and the callbacks arrive at whatever was negotiated. This costs
+            # nothing in churn -- display_link_fps depends only on the panel, so
+            # the number moves when the display does and at no other time. In
+            # particular a CONTINUOUS/FINITE motion flip changes the cadence
+            # without changing this, and keeps the link it has.
             installed = (
                 self.display_link is not None
                 and self.timer is None
                 and not self._frame_fallback_relevant
+                and self._display_link_fps == schedule.driver_fps
             ) or (
                 self._display_link_setup_failed
                 and self.display_link is None
@@ -2179,8 +2197,23 @@ class VirtualStatusDevice(NSObject):
             getattr(self.view, "displayLinkWithTarget_selector_", None)
         )
 
-    def _install_display_link(self) -> bool:
-        """Register one native display callback, falling back on AppKit failure."""
+    def _install_display_link(self, driver_fps: float | None = None) -> bool:
+        """Register one native display callback, falling back on AppKit failure.
+
+        The rate requested here is the rate the schedule already assumed --
+        ``schedule.driver_fps``, which is ``display_link_fps`` of the same panel
+        reading. Passing it in rather than re-deriving it is what stops the two
+        from disagreeing: this function used to read ``maximumFramesPerSecond``
+        fresh off NSScreen while the policy quantised against a five-second
+        cached copy, so a screen change could leave the link negotiated for one
+        panel and the cadence computed for another.
+
+        A degenerate range -- minimum, maximum and preferred all the same rate
+        -- is deliberate. ``CAFrameRateRangeMake(60, 120, 120)`` on a 144 Hz
+        panel has exactly one achievable member, 72, and on an adaptive panel it
+        has several, so the rate a range yields is either a surprise or a guess.
+        Asking for one achievable number makes the answer knowable.
+        """
         if self._display_link_setup_failed or not self._display_link_available():
             return False
         display_link = None
@@ -2196,16 +2229,12 @@ class VirtualStatusDevice(NSObject):
                 None,
             )
             make_frame_range = getattr(Quartz, "CAFrameRateRangeMake", None)
-            screen = NSScreen.mainScreen()
-            maximum_fps = getattr(screen, "maximumFramesPerSecond", None)
-            if (
-                not callable(set_frame_range)
-                or not callable(make_frame_range)
-                or not callable(maximum_fps)
-            ):
+            if not callable(set_frame_range) or not callable(make_frame_range):
                 raise RuntimeError("display link frame range is unavailable")
-            maximum = min(max(60, int(maximum_fps())), 120)
-            frame_range = make_frame_range(60, maximum, maximum)
+            rate = float(driver_fps or 0.0)
+            if rate <= 0.0:
+                rate = display_link_fps(self._panel_refresh_hz())
+            frame_range = make_frame_range(rate, rate, rate)
             set_frame_range(frame_range)
             display_link.addToRunLoop_forMode_(
                 NSRunLoop.currentRunLoop(), NSRunLoopCommonModes
@@ -2219,6 +2248,10 @@ class VirtualStatusDevice(NSObject):
                     pass
             return False
         self.display_link = display_link
+        # The rate this particular link is registered for. Kept so a later
+        # cadence refresh can tell "the driver is installed" from "a driver is
+        # installed, for a display we are no longer on".
+        self._display_link_fps = rate
         return True
 
     def _invalidate_frame_driver(self) -> None:
@@ -2227,6 +2260,7 @@ class VirtualStatusDevice(NSObject):
         timer = self.timer
         self.display_link = None
         self.timer = None
+        self._display_link_fps = None
         self._frame_fallback_relevant = False
         self._frame_interval_current = None
         for driver in (display_link, timer):
@@ -2245,7 +2279,9 @@ class VirtualStatusDevice(NSObject):
         if schedule.driver is RenderDriverKind.PAUSED:
             self._publish_presentation_schedule()
             return
-        if schedule.driver is RenderDriverKind.DISPLAY_LINK and self._install_display_link():
+        if schedule.driver is RenderDriverKind.DISPLAY_LINK and self._install_display_link(
+            schedule.driver_fps
+        ):
             self._publish_presentation_schedule()
             return
         # KNOWN HOLE, left open deliberately. _animation_active is False for
@@ -2317,6 +2353,12 @@ class VirtualStatusDevice(NSObject):
         visible = self._is_surface_visible()
         self._invalidate_frame_driver()
         self._stop_alcove_observer()
+        # A different screen generation is exactly when the cached panel rate
+        # stops being about this panel. Five seconds of a stale reading is five
+        # seconds of negotiating and quantising for the display we just left --
+        # 60 Hz assumed on a 120 Hz panel doubles the delivered rate, and the
+        # gate has no way to notice.
+        self._panel_refresh_cache = None
         self._display_link_setup_failed = False
         self._advance_presentation_generation(enqueue=True)
         if visible:

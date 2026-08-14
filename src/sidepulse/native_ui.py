@@ -255,7 +255,9 @@ class _FillWidthStackView(NSStackView):
         constraint.setActive_(True)
 
 
-def make_fill_stack(*, spacing: float = SPACE_M, fill_priority: int = 999) -> NSStackView:
+def make_fill_stack(
+    *, spacing: float = SPACE_M, fill_priority: int = 999, view_class=None
+) -> NSStackView:
     """A vertical _FillWidthStackView with the shared stack defaults.
 
     Two tiers of fill_priority, and the difference matters:
@@ -270,7 +272,7 @@ def make_fill_stack(*, spacing: float = SPACE_M, fill_priority: int = 999) -> NS
       wins, stretchy rows still fill (500 > default 250 hugging), and
       fixed previews keep their size, centered.
     """
-    stack = _FillWidthStackView.alloc().init()
+    stack = (view_class or _FillWidthStackView).alloc().init()
     stack.fill_priority = fill_priority
     stack.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
     stack.setSpacing_(spacing)
@@ -412,7 +414,31 @@ def make_hspacer() -> NSView:
     return spacer
 
 
-def make_card(title: str | None = None) -> tuple[NSView, NSStackView]:
+class _RevealingStackView(_FillWidthStackView):
+    """A card that makes itself visible before the window scrolls to it.
+
+    The daily-tip "Show Me" button scrolls a registered anchor card into
+    view and flashes it. In a pane whose sections are stacked and switched
+    by ``setHidden_``, an anchor sitting in a section that is not the
+    current one is scrolled to and flashed while invisible -- the tip
+    silently lands on nothing, which is the exact "took me somewhere but I
+    couldn't find it" failure the anchor mechanism exists to prevent.
+
+    Assign a Python callable to ``on_reveal``; it runs first, then the
+    normal scroll happens against a card that is actually on screen.
+    """
+
+    def scrollRectToVisible_(self, rect):
+        handler = getattr(self, "on_reveal", None)
+        if callable(handler):
+            try:
+                handler()
+            except Exception:
+                pass
+        return objc.super(_RevealingStackView, self).scrollRectToVisible_(rect)
+
+
+def make_card(title: str | None = None, *, revealing: bool = False) -> tuple[NSView, NSStackView]:
     """A translucent, rounded, padded card -- the grouped-box unit both
     windows are built from. Returns (outer_view_to_add_to_parent_stack,
     inner_content_stack) -- callers append rows to the inner stack.
@@ -421,6 +447,10 @@ def make_card(title: str | None = None) -> tuple[NSView, NSStackView]:
     (System Settings' own placement for group titles), never as a
     display-size headline inside it. Panes whose sidebar selection
     already says the same thing should pass no title at all.
+
+    ``revealing=True`` (titled cards only) returns an outer view that can
+    un-hide itself when something asks to scroll it into view -- see
+    _RevealingStackView. Used for cards registered as daily-tip anchors.
     """
     panel, inner_container = make_glass_panel(corner_radius=14.0)
     content = make_fill_stack(spacing=SPACE_M, fill_priority=500)
@@ -432,7 +462,7 @@ def make_card(title: str | None = None) -> tuple[NSView, NSStackView]:
     )
     if not title:
         return panel, content
-    outer = make_fill_stack(spacing=SPACE_S)
+    outer = make_fill_stack(spacing=SPACE_S, view_class=_RevealingStackView if revealing else None)
     outer.addArrangedSubview_(make_section_title(title))
     outer.addArrangedSubview_(panel)
     return outer, content
@@ -790,6 +820,60 @@ def make_swatch_button(
     except Exception:
         pass
     return button
+
+
+class HoverView(NSView):
+    """A transparent wrapper that reports the pointer for a view that has no
+    hover of its own.
+
+    SwatchButton can do this itself because it is a button. An animated LED
+    thumbnail is a plain NSView with no tracking area, which is why the
+    Studio could promise "hover any color or animation to try it here first"
+    while exactly zero animation controls had any hover wiring. Wrapping is
+    used rather than teaching VirtualLedView about tracking areas, because
+    that same class draws the always-on Screen Bar overlay, which must never
+    start accepting mouse tracking.
+
+    Assign Python callables to ``hover_enter``/``hover_exit``; both receive
+    this view, and both are optional. ``hover_payload`` is a plain dict the
+    handler reads -- no ObjC bridging, so it can hold anything.
+    """
+
+    def updateTrackingAreas(self):
+        for area in list(self.trackingAreas()):
+            self.removeTrackingArea_(area)
+        self.addTrackingArea_(
+            NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                self.bounds(),
+                NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow,
+                self,
+                None,
+            )
+        )
+
+    @objc.python_method
+    def _fire(self, name):
+        handler = getattr(self, name, None)
+        if callable(handler):
+            handler(self)
+
+    def mouseEntered_(self, _event):
+        self._fire("hover_enter")
+
+    def mouseExited_(self, _event):
+        self._fire("hover_exit")
+
+
+def make_hover_area(child, payload: dict | None = None) -> HoverView:
+    """Wrap ``child`` in a HoverView pinned to its edges, so the child keeps
+    its own size and gains a pointer-enter/exit report."""
+    area = HoverView.alloc().init()
+    area.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    area.hover_payload = dict(payload or {})
+    child.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    area.addSubview_(child)
+    _pin_edges(child, area)
+    return area
 
 
 def make_caption(text: str) -> NSTextField:

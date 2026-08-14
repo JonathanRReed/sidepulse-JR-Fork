@@ -22,11 +22,24 @@ GENTLE_MOTION_FPS = 30.0
 # 30, deterministically, at zero jitter -- and the policy went on reporting 40.
 # The timer's rate is the shared runtime scheduler's frame-fallback interval,
 # imported rather than restated so the two cannot drift apart. The display
-# link's is what _install_display_link negotiates: the panel, floored at 60 and
-# capped at 120.
+# link's is display_link_fps below, which _install_display_link then requests
+# verbatim, so the negotiated rate and the assumed rate cannot disagree.
 TIMER_DRIVER_FPS = 1.0 / FRAME_FALLBACK_INTERVAL_SECONDS
+# The rate assumed when the panel cannot be read at all. Not a floor on the
+# request any more: a 24 Hz panel has no rate at or above 60, and asking it for
+# one used to make every number downstream 150% too high.
 DISPLAY_LINK_MIN_FPS = 60.0
+# A deliberate power cap. Nothing here wants more than ACTIVE_RENDER_FPS, so
+# there is no reason to be woken 144 or 240 times a second to throw most of it
+# away.
 DISPLAY_LINK_MAX_FPS = 120.0
+# The only ceilings the display link is ever asked to meet. choose_render_schedule
+# picks that driver exclusively at thermal nominal, on mains power, with motion
+# active -- the one branch of choose_render_cadence where no thermal or
+# low-power clamp applies -- so the cadence there is ACTIVE_RENDER_FPS for a
+# transition or GENTLE_MOTION_FPS for the resting breathe, and nothing else.
+# test_display_link_panel_rate.py enumerates every environment to keep this true.
+DISPLAY_LINK_CEILINGS = (ACTIVE_RENDER_FPS, GENTLE_MOTION_FPS)
 
 
 def refresh_divisor_fps(refresh_hz: float | None, target_fps: float) -> float:
@@ -127,8 +140,7 @@ def driver_callback_fps(
     if driver is RenderDriverKind.TIMER:
         return TIMER_DRIVER_FPS
     if driver is RenderDriverKind.DISPLAY_LINK:
-        panel = float(refresh_hz) if refresh_hz else DISPLAY_LINK_MIN_FPS
-        return min(max(DISPLAY_LINK_MIN_FPS, panel), DISPLAY_LINK_MAX_FPS)
+        return display_link_fps(refresh_hz)
     return 0.0
 
 
@@ -147,6 +159,68 @@ def deliverable_fps(driver_fps: float, target_fps: float) -> float:
         return driver_fps
     divisor = math.ceil(driver_fps / target_fps - 1e-9)
     return driver_fps / max(1, divisor)
+
+
+def achievable_display_rates(refresh_hz: float | None) -> tuple[float, ...]:
+    """Every rate a panel at ``refresh_hz`` can hand a link, cap downwards.
+
+    A display link does not generate frames, it hands back scans the panel has
+    already produced. A panel running at R Hz produces a scan every 1/R second,
+    so the ONLY rates a link on it can fire at are R/n. There is no R/2.5.
+
+    Starts at the fastest such rate that fits under DISPLAY_LINK_MAX_FPS and
+    stops one past GENTLE_MOTION_FPS: at or below a ceiling a rate is delivered
+    whole, so once a candidate clears the lowest ceiling every slower one is
+    worse against every ceiling and cannot win the selection below.
+    """
+    panel = float(refresh_hz) if refresh_hz else 0.0
+    if panel <= 0.0:
+        return ()
+    first = max(1, math.ceil(panel / DISPLAY_LINK_MAX_FPS - 1e-9))
+    rates: list[float] = []
+    divisor = first
+    while divisor <= first + 240:
+        rate = panel / divisor
+        rates.append(rate)
+        if rate <= min(DISPLAY_LINK_CEILINGS) + 1e-9:
+            break
+        divisor += 1
+    return tuple(rates)
+
+
+def display_link_fps(refresh_hz: float | None) -> float:
+    """The rate to ask the display link for, and to assume it fires at.
+
+    These have to be one number. They were two: ``_install_display_link`` asked
+    for ``CAFrameRateRangeMake(60, min(max(60, panel), 120), ...)`` and this
+    function reported that same clamp as fact. On any panel that is not a whole
+    fraction of itself inside that window the clamp is not achievable, so the
+    link settled somewhere else and the gate downstream subsampled against a
+    rate that did not exist:
+
+        144 Hz panel -> asked 120, got 144/2 = 72, assumed 120
+        165 Hz panel -> asked 120, got 165/2 = 82.5, assumed 120
+         24 Hz panel -> asked 60,  got 24,          assumed 60
+
+    Of the rates the panel can actually produce, this picks the one that serves
+    the policy's own ceilings best: the highest DELIVERED rate at the transition
+    ceiling, then at the gentle-motion ceiling, then the highest rate for
+    headroom. On a 144 Hz panel that is 144/3 = 48, delivered whole under a 60
+    ceiling, rather than 144/2 = 72 which the gate would have to halve to 36.
+
+    An unreadable panel is assumed to be DISPLAY_LINK_MIN_FPS, which is what
+    every driver here already did with no screen to ask.
+    """
+    rates = achievable_display_rates(refresh_hz)
+    if not rates:
+        return DISPLAY_LINK_MIN_FPS
+    return max(
+        rates,
+        key=lambda rate: (
+            *(deliverable_fps(rate, ceiling) for ceiling in DISPLAY_LINK_CEILINGS),
+            rate,
+        ),
+    )
 
 
 def presentation_hold_seconds(schedule: RenderSchedule) -> float | None:
@@ -274,9 +348,10 @@ def choose_render_schedule(
     # It could not have bought vsync alignment on either path anyway. The
     # fallback timer free-runs at TIMER_DRIVER_FPS and is not locked to the
     # panel at all, so subsampling it by an integer changes how OFTEN it beats
-    # against a 144 Hz panel, never WHETHER it beats. And the display link IS
-    # the panel -- driver_callback_fps returns exactly what _install_display_link
-    # negotiates -- so quantising to that driver already quantises to the panel.
+    # against a 144 Hz panel, never WHETHER it beats. And the display link's
+    # rate is now a rate the panel actually produces -- display_link_fps picks
+    # it out of {panel/n} and _install_display_link requests that number and no
+    # other -- so quantising to that driver already quantises to the panel.
     snapped = deliverable_fps(driver_fps, cadence.fps)
     if snapped != cadence.fps:
         cadence = RenderCadence(fps=snapped, sample_fps=snapped)

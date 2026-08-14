@@ -48,7 +48,7 @@ from AppKit import (
 )
 from Foundation import NSObject
 
-from .colors import ANIMATION_MODE_KEYS, CURATED_PALETTE, matching_preset
+from .colors import ANIMATION_MODE_KEYS, MODE_ROW_LABELS, matching_preset
 from .led_status import ANIMATION_STYLE_CHOICES, program_for_display_state
 from .operator_accessibility import normalize_semantic_text_scale
 from .provider_capacity import CapacityPolicyState, provider_capacity_policies
@@ -2591,81 +2591,73 @@ def _build_settings_pane(target: StatusBarController, key: str):
     raise KeyError(key)
 
 
-MODE_COLOR_DISPLAY_LABELS: dict[str, str] = {
-    "idle": "Idle",
-    "working": "Working",
-    "done": "Done",
-    "ask": "Ask (waiting / blocked)",
-}
+# One source for the state row's words: the model names the row, the view
+# renders it. status_bar imports this name, so it stays a dict.
+MODE_COLOR_DISPLAY_LABELS: dict[str, str] = dict(MODE_ROW_LABELS)
 
 COLOR_SWATCH_SIZE = 22
 COLOR_SWATCH_GAP = 8
 COLOR_ROW_HEIGHT = 40
 
 
-def _build_agent_or_mode_color_row(
-    row_key: tuple[str, str],
-    row_label: str,
-    current: str,
-    palette: tuple[str, ...],
-    target,
-    swatch_selector: str,
-    swatch_represented: dict,
-    custom_selector: str,
-    custom_represented: dict,
-    swatches: dict,
-    hex_labels: dict,
-):
-    """One "label ... [named swatch][named swatch] ... + hex" row, used by the
-    Mode Colours card.
+def _build_agent_or_mode_color_row(row, target, actions, swatches, hex_labels):
+    """One state's colour row, rendered straight from
+    ``colors.mode_color_row()`` -- identity, then a labelled Default group,
+    then Palette, then the picker.
 
-    Every chip carries its name underneath. The previous version drew bare
-    coloured squares and leaned on a tooltip, which is exactly the failure
-    the Studio exists to end -- a colour with no word attached is a guess.
+    Three things this replaces, all reproduced live before the rewrite:
+
+    1. It drew ``CURATED_PALETTE[:6]`` and nothing else. Not one of the four
+       shipped state colours is in that strip, so on a fresh install every
+       state row rendered with ZERO chips ringed -- the row could not show
+       you what it was currently set to.
+    2. Its picker chip was hardcoded ``name="Pick…"`` with ``selected``
+       never set, so a hand-picked colour could not become the named,
+       ringed "Custom" chip that provider rows get.
+    3. The picker button was a throwaway local: built, added to the row, and
+       dropped. Nothing could repaint it, so after a palette button or Reset
+       the chip kept whatever colour it was born with.
     """
-    container = native_ui.make_stack(
-        orientation="horizontal", spacing=native_ui.SPACE_XS
-    )
-    actions = getattr(target, "studio_actions", None)
-    for palette_hex in palette:
-        swatch = colors_module.Swatch(
-            name=colors_module.swatch_name(palette_hex),
-            hex=palette_hex,
-            group=(
-                colors_module.SWATCH_GROUP_BRAND
-                if colors_module.is_brand_color(palette_hex)
-                else colors_module.SWATCH_GROUP_PALETTE
-            ),
-            selected=palette_hex.upper() == current.upper(),
-        )
-        column, button = _studio_swatch_column(
-            swatch,
-            target,
-            swatch_selector,
-            {**swatch_represented, "hex": palette_hex},
-        )
-        if actions is not None and row_key[0] == "mode":
-            button.hover_enter = actions.hover_mode_color
-            button.hover_exit = actions.hover_end
-        swatches[(row_key, palette_hex)] = button
-        container.addArrangedSubview_(column)
-    custom_column, _custom_button = _studio_swatch_column(
-        colors_module.Swatch(
-            name="Pick…",
-            hex=current,
-            group=colors_module.SWATCH_GROUP_CUSTOM,
-            opens_picker=True,
-        ),
+    stack = native_ui.make_stack(orientation="vertical", spacing=native_ui.SPACE_XS)
+    row_key = ("mode", row.key)
+    header, name_label, hex_label = _identity_view(row)
+    stack.addArrangedSubview_(header)
+
+    sync = _row_sync(
         target,
-        custom_selector,
-        dict(custom_represented),
+        actions,
+        row_key,
+        lambda colors, key=row.key: colors_module.mode_color_row(key, colors),
+        picker_payload={"key": row.key},
+        hex_labels=hex_labels,
     )
-    container.addArrangedSubview_(custom_column)
-    hex_label = native_ui.make_label(current, secondary=True, size=11.0)
-    container.addArrangedSubview_(hex_label)
-    container.addArrangedSubview_(native_ui.make_hspacer())
-    hex_labels[row_key] = hex_label
-    return native_ui.make_row(row_label, container)
+    sync.add_identity(name_label, hex_label)
+
+    def register(swatch, button):
+        if not swatch.opens_picker:
+            swatches[(row_key, swatch.hex)] = button
+
+    for group in row.groups:
+        if group.key == colors_module.SWATCH_GROUP_CUSTOM:
+            group_row, picker = _build_picker_group_row(
+                group, target, "openCustomModeColor:", {"key": row.key}
+            )
+            sync.add_picker(picker)
+            stack.addArrangedSubview_(group_row)
+            continue
+        group_row, _buttons = _build_swatch_group_row(
+            group,
+            target,
+            actions,
+            "selectModeColorSwatch:",
+            {"key": row.key},
+            hover=(actions.hover_mode_color if actions is not None else None),
+            register=register,
+            action_target=target,
+        )
+        stack.addArrangedSubview_(group_row)
+
+    return stack
 
 
 # --- Colour / Animation Studio ---------------------------------------------
@@ -2697,6 +2689,19 @@ STUDIO_COMPARE_LED_COUNT = 8
 STUDIO_IDLE_COMPARE_CAPTION = "Hover any color or animation to try it here first."
 
 
+def hardware_preview_enabled(target) -> bool:
+    """Does a COMMITTED colour change reach connected hardware right now?
+
+    One reader, one default. This flag was read with ``default=False`` where
+    the answer decided whether to push to a device and ``default=True`` where
+    it decided how to draw the switch, so a controller that had not set the
+    attribute would have shown a switch that was ON while behaving as OFF.
+    False is the right default for both: never touch hardware on the strength
+    of an attribute nobody set.
+    """
+    return bool(getattr(target, "color_preview_enabled", False))
+
+
 class SidePulseStudioActions(NSObject):
     """Action target for the Studio's own controls.
 
@@ -2720,6 +2725,8 @@ class SidePulseStudioActions(NSObject):
         self.section_subtitle = None
         self.animation_popups = {}
         self.animation_thumbs = {}
+        self.animation_hover_areas = {}
+        self.mode_animation_hover_areas = {}
         self.preview_session = colors_module.StudioPreviewSession(
             controller.settings.colors
         )
@@ -2779,7 +2786,7 @@ class SidePulseStudioActions(NSObject):
         self.preview_session.commit(colors)
         self.release_screen_bar()
         controller.refresh_colors_window()
-        if getattr(controller, "color_preview_enabled", False):
+        if hardware_preview_enabled(controller):
             controller.push_colors_preview_to_device()
         controller.refresh_(None)
         controller.set_settings_message(
@@ -2808,7 +2815,7 @@ class SidePulseStudioActions(NSObject):
         # the committed colour rather than replaying the pre-hover frame.
         self.release_screen_bar()
         controller.refresh_colors_window()
-        if getattr(controller, "color_preview_enabled", False):
+        if hardware_preview_enabled(controller):
             controller.push_colors_preview_to_device()
         controller.refresh_(None)
         row = colors_module.provider_color_row(provider, colors)
@@ -2902,49 +2909,144 @@ class SidePulseStudioActions(NSObject):
             f"{colors_module.swatch_name(hex_value)}",
         )
 
+    @objc.python_method
+    def hover_provider_animation(self, view) -> None:
+        """Hovering a provider's rhythm thumb plays that rhythm, in that
+        provider's colour, alone on the Screen Bar -- the same bargain
+        hovering a colour makes. Without this the pane's own body copy
+        ("hover any color or animation") was simply untrue."""
+        provider = (getattr(view, "hover_payload", None) or {}).get("provider")
+        if not provider:
+            return
+        colors = self.controller.settings.colors
+        row = colors_module.provider_color_row(provider, colors)
+        self.preview_colors(
+            colors,
+            f"Trying {row.label}: {row.animation_label}",
+            statuses=colors_module.provider_preview_statuses(provider),
+        )
+
+    @objc.python_method
+    def hover_mode_animation(self, view) -> None:
+        payload = getattr(view, "hover_payload", None) or {}
+        key = payload.get("key")
+        style = payload.get("style")
+        if not key or not style:
+            return
+        try:
+            colors = self.controller.settings.colors.with_mode_animation(key, style)
+        except ValueError:
+            return
+        self.preview_colors(
+            colors,
+            f"Trying {MODE_COLOR_DISPLAY_LABELS.get(key, key)}: "
+            f"{ANIMATION_STYLE_DISPLAY_LABELS.get(style, style.title())}",
+        )
+
 
 class _StudioRowSync:
-    """Stands in for one provider row's hex label in ``color_hex_labels``.
+    """Stands in for one row's hex label in ``color_hex_labels``.
 
     StatusBarController.refresh_color_row re-rings the row's swatches and
     then calls ``setStringValue_(hex)`` on whatever it finds there. Putting
     this object in that slot is how the Studio's extra per-row chrome -- the
-    colour's NAME, the picker chip, the animation popup -- stays in sync with
-    settings changed from anywhere else (a palette button, Reset to Defaults)
-    without adding a hook inside a file this module may not edit.
+    colour's NAME, the picker chip, the animation popup, the sentence
+    explaining the animation -- stays in sync with settings changed from
+    anywhere else (a palette button, Reset to Defaults) without adding a
+    hook inside a file this module may not edit.
+
+    THE RULE THIS CLASS EXISTS TO ENFORCE: if a view can go stale, this
+    object holds a live reference to it. The shipped bug was the opposite
+    -- views built as throwaway locals, added to a stack, and dropped:
+
+      * the per-provider animation DESCRIPTION (settings_window.py:3155)
+        was a local, so choosing Chase left the popup reading "Chase" above
+        a sentence still reading "Follows the state...";
+      * the animation thumb's TOOLTIP was set once at build time and never
+        re-set, stale the same way;
+      * the Animations section's own identity line (provider name + hex)
+        was discarded as ``_name_label, _hex_label``, so recolouring a
+        provider in the Colors section left the Animations section showing
+        the old hex;
+      * the state rows' picker chip was dropped entirely.
+
+    Nothing rebuilds this pane -- it is cached for the window's lifetime --
+    so a dropped reference is a permanently wrong string, not a flicker.
+    Every registration below is therefore a list: one row can be drawn in
+    more than one section, and all of its copies have to agree.
     """
 
-    def __init__(self, target, actions, provider, hex_label, name_label, picker):
+    def __init__(self, target, actions, row_key, row_for_colors, *, picker_payload):
         self.target = target
         self.actions = actions
-        self.provider = provider
-        self.hex_label = hex_label
-        self.name_label = name_label
-        self.picker = picker
+        self.row_key = row_key
+        self._row_for_colors = row_for_colors
+        self.picker_payload = dict(picker_payload)
+        self.identity_labels: list[tuple[object, object]] = []
+        self.description_labels: list[object] = []
+        self.pickers: list[object] = []
 
-    def setStringValue_(self, value) -> None:
-        hex_value = str(value)
-        self.hex_label.setStringValue_(hex_value)
-        row = colors_module.provider_color_row(
-            self.provider, self.target.settings.colors
-        )
-        self.name_label.setStringValue_(row.current_name)
-        popup = self.actions.animation_popups.get(self.provider)
+    # --- registration (every one of these is a reference kept alive) ---
+
+    def add_identity(self, name_label, hex_label) -> None:
+        self.identity_labels.append((name_label, hex_label))
+
+    def add_description(self, label) -> None:
+        self.description_labels.append(label)
+
+    def add_picker(self, button) -> None:
+        if button is not None:
+            self.pickers.append(button)
+
+    # --- the model this row renders ---
+
+    def row(self):
+        return self._row_for_colors(self.target.settings.colors)
+
+    @property
+    def provider(self) -> str:
+        return getattr(self.row(), "provider", "")
+
+    @property
+    def name_label(self):
+        return self.identity_labels[0][0] if self.identity_labels else None
+
+    @property
+    def hex_label(self):
+        return self.identity_labels[0][1] if self.identity_labels else None
+
+    def setStringValue_(self, _value) -> None:
+        # The MODEL is the source, not the string passed in: a label that
+        # renders its argument can disagree with settings; one that renders
+        # the row cannot.
+        row = self.row()
+        for name_label, hex_label in self.identity_labels:
+            hex_label.setStringValue_(row.current_hex)
+            name_label.setStringValue_(row.current_name)
+        description = getattr(row, "animation_description", "")
+        for label in self.description_labels:
+            label.setStringValue_(description)
+        picker_swatch = row.picker_swatch
+        for picker in self.pickers:
+            _paint_swatch(picker, picker_swatch)
+            picker.setRepresentedObject_(dict(self.picker_payload))
+            caption = getattr(picker, "studio_caption", None)
+            if caption is not None:
+                caption.setStringValue_(picker_swatch.name)
+        provider = getattr(row, "provider", "")
+        if not provider:
+            return
+        popup = self.actions.animation_popups.get(provider)
         if popup is not None:
             select_popup_item(popup, "motion", row.animation)
-        thumb = self.actions.animation_thumbs.get(self.provider)
+        thumb = self.actions.animation_thumbs.get(provider)
         if thumb is not None:
             thumb.setProgram_(_provider_animation_thumb_program(self.target, row))
-        picker_swatch = row.group(colors_module.SWATCH_GROUP_CUSTOM).swatches[0]
-        if self.picker is not None:
-            _paint_swatch(self.picker, picker_swatch)
-            self.picker.setRepresentedObject_({"provider": self.provider})
-        caption = getattr(self.picker, "studio_caption", None) if self.picker else None
-        if caption is not None:
-            caption.setStringValue_(picker_swatch.name)
+            thumb.setToolTip_(description)
 
     def stringValue(self) -> str:
-        return self.hex_label.stringValue()
+        label = self.hex_label
+        return label.stringValue() if label is not None else ""
 
 
 def _paint_swatch(button, swatch) -> None:
@@ -2995,11 +3097,18 @@ def _studio_swatch_column(swatch, target, selector: str, represented: dict, acti
     return column, button
 
 
-def _build_swatch_group_row(group, target, actions, selector, represented, *, hover, register):
+def _build_swatch_group_row(
+    group, target, actions, selector, represented, *, hover, register, action_target=None
+):
     """A LABELLED run of named chips: "Brand  [Claude][OpenAI]...".
 
     The label is the whole point -- it is the only thing on screen that says
     these four colours are brands rather than an arbitrary strip.
+
+    ``action_target`` is which object the chips send their selector to, and
+    it is NOT always ``actions``: the state rows' ``selectModeColorSwatch:``
+    lives on StatusBarController, only the Studio's own selectors live on
+    SidePulseStudioActions. Defaults to ``actions`` when given, else target.
     """
     label = native_ui.make_label(group.label, secondary=True, size=11.0)
     native_ui.constrain_width(label, STUDIO_GROUP_LABEL_WIDTH)
@@ -3014,9 +3123,9 @@ def _build_swatch_group_row(group, target, actions, selector, represented, *, ho
             target,
             selector,
             {**represented, "hex": swatch.hex},
-            actions=actions,
+            actions=action_target if action_target is not None else actions,
         )
-        if hover is not None:
+        if hover is not None and actions is not None:
             button.hover_enter = hover
             button.hover_exit = actions.hover_end
         register(swatch, button)
@@ -3026,16 +3135,24 @@ def _build_swatch_group_row(group, target, actions, selector, represented, *, ho
     return row, buttons
 
 
-def _provider_identity_view(row):
-    """Identity first: the provider's own icon when the machine has one,
-    its name always, and the colour it is currently wearing spelled out in
-    words as well as hex."""
+def _identity_view(row):
+    """Identity first: the row's own icon when the machine has one, its name
+    always, and the colour it is currently wearing spelled out in words as
+    well as hex.
+
+    Returns (header, name_label, hex_label). BOTH labels must be handed to
+    the row's _StudioRowSync by every caller -- a section that draws this
+    header and drops the labels is a section that will keep showing a colour
+    the row no longer has.
+    """
     header = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
     icon_image = None
-    try:
-        icon_image = provider_icon_for_provider(row.provider)
-    except Exception:
-        icon_image = None
+    provider = getattr(row, "provider", "")
+    if provider:
+        try:
+            icon_image = provider_icon_for_provider(provider)
+        except Exception:
+            icon_image = None
     if icon_image is not None:
         icon = NSImageView.imageViewWithImage_(icon_image)
         icon.setTranslatesAutoresizingMaskIntoConstraints_(False)
@@ -3051,42 +3168,80 @@ def _provider_identity_view(row):
     return header, name_label, hex_label
 
 
+# Kept under its old name too: status_bar.py imports this symbol.
+_provider_identity_view = _identity_view
+
+
+def _build_picker_group_row(group, target, selector: str, represented: dict):
+    """The labelled "Custom [chip]" run. The picker keeps the controller's
+    own colour-panel selector: NSColorPanel plumbing already lives there and
+    is not worth duplicating for one chip. Returns (row, button) -- the
+    button is a REFERENCE the caller must register, never a local to drop.
+    """
+    column, picker = _studio_swatch_column(
+        group.swatches[0], target, selector, dict(represented)
+    )
+    custom_row = native_ui.make_stack(
+        orientation="horizontal", spacing=native_ui.SPACE_XS
+    )
+    custom_row.setAlignment_(NSLayoutAttributeTop)
+    label = native_ui.make_label(group.label, secondary=True, size=11.0)
+    native_ui.constrain_width(label, STUDIO_GROUP_LABEL_WIDTH)
+    label.setToolTip_(group.hint)
+    custom_row.addArrangedSubview_(label)
+    custom_row.addArrangedSubview_(column)
+    custom_row.addArrangedSubview_(native_ui.make_hspacer())
+    return custom_row, picker
+
+
+def _row_sync(target, actions, row_key, row_for_colors, *, picker_payload, hex_labels):
+    """One sync object per row, shared by every section that draws the row.
+
+    Created on first use rather than at the end of the Colors section: the
+    Animations section draws the same providers and has to register ITS
+    identity labels and description with the SAME object, or half the pane
+    goes stale the first time anything changes.
+    """
+    existing = hex_labels.get(row_key)
+    if existing is None:
+        existing = _StudioRowSync(
+            target, actions, row_key, row_for_colors, picker_payload=picker_payload
+        )
+        hex_labels[row_key] = existing
+    return existing
+
+
 def _build_provider_color_row(row, target, actions, swatches, hex_labels):
     """Identity, then a labelled Brand group, then Palette, then the row's
     own colour. Rendered straight from colors.provider_color_row()."""
     stack = native_ui.make_stack(orientation="vertical", spacing=native_ui.SPACE_XS)
-    header, name_label, hex_label = _provider_identity_view(row)
+    header, name_label, hex_label = _identity_view(row)
     stack.addArrangedSubview_(header)
 
     row_key = ("agent", row.provider)
+    sync = _row_sync(
+        target,
+        actions,
+        row_key,
+        lambda colors, provider=row.provider: colors_module.provider_color_row(
+            provider, colors
+        ),
+        picker_payload={"provider": row.provider},
+        hex_labels=hex_labels,
+    )
+    sync.add_identity(name_label, hex_label)
 
     def register(swatch, button):
         if not swatch.opens_picker:
             swatches[(row_key, swatch.hex)] = button
 
-    picker_button = None
     for group in row.groups:
         if group.key == colors_module.SWATCH_GROUP_CUSTOM:
-            # The picker keeps the controller's own colour-panel selector:
-            # NSColorPanel plumbing already lives there and is not worth
-            # duplicating for one chip.
-            column, picker_button = _studio_swatch_column(
-                group.swatches[0],
-                target,
-                "openCustomAgentColor:",
-                {"provider": row.provider},
+            group_row, picker = _build_picker_group_row(
+                group, target, "openCustomAgentColor:", {"provider": row.provider}
             )
-            custom_row = native_ui.make_stack(
-                orientation="horizontal", spacing=native_ui.SPACE_XS
-            )
-            custom_row.setAlignment_(NSLayoutAttributeTop)
-            label = native_ui.make_label(group.label, secondary=True, size=11.0)
-            native_ui.constrain_width(label, STUDIO_GROUP_LABEL_WIDTH)
-            label.setToolTip_(group.hint)
-            custom_row.addArrangedSubview_(label)
-            custom_row.addArrangedSubview_(column)
-            custom_row.addArrangedSubview_(native_ui.make_hspacer())
-            stack.addArrangedSubview_(custom_row)
+            sync.add_picker(picker)
+            stack.addArrangedSubview_(group_row)
             continue
         group_row, _buttons = _build_swatch_group_row(
             group,
@@ -3099,9 +3254,6 @@ def _build_provider_color_row(row, target, actions, swatches, hex_labels):
         )
         stack.addArrangedSubview_(group_row)
 
-    hex_labels[row_key] = _StudioRowSync(
-        target, actions, row.provider, hex_label, name_label, picker_button
-    )
     return stack
 
 
@@ -3128,12 +3280,32 @@ def _provider_animation_thumb_program(target: StatusBarController, row) -> str:
         return row.current_hex
 
 
-def _build_provider_animation_row(row, target, actions):
+def _build_provider_animation_row(row, target, actions, hex_labels):
     """One provider, one rhythm. The whole point of the Animations section:
-    "pick a provider and choose what animation it gets"."""
+    "pick a provider and choose what animation it gets".
+
+    Every string this row draws is registered with the row's sync object.
+    The version this replaces registered only the popup and the thumb, so
+    picking Chase left a popup reading "Chase" directly beside a sentence
+    still reading "Follows the state: breathe when idle, chase while
+    working" -- and left the identity line showing whatever hex the provider
+    had when the window opened.
+    """
     stack = native_ui.make_stack(orientation="vertical", spacing=native_ui.SPACE_XS)
-    header, _name_label, _hex_label = _provider_identity_view(row)
+    header, name_label, hex_label = _identity_view(row)
     stack.addArrangedSubview_(header)
+
+    sync = _row_sync(
+        target,
+        actions,
+        ("agent", row.provider),
+        lambda colors, provider=row.provider: colors_module.provider_color_row(
+            provider, colors
+        ),
+        picker_payload={"provider": row.provider},
+        hex_labels=hex_labels,
+    )
+    sync.add_identity(name_label, hex_label)
 
     controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     popup = native_ui.make_popup_button(actions, "selectProviderAnimation:")
@@ -3148,15 +3320,23 @@ def _build_provider_animation_row(row, target, actions):
 
     thumb = _mini_led_view(*SIGNAL_THUMB_SIZE)
     thumb.setProgram_(_provider_animation_thumb_program(target, row))
-    thumb.setToolTip_(colors_module.PROVIDER_ANIMATION_DESCRIPTIONS[row.animation])
+    thumb.setToolTip_(row.animation_description)
     actions.animation_thumbs[row.provider] = thumb
-    controls.addArrangedSubview_(thumb)
+    # Hovering the rhythm plays it on the Screen Bar, exactly as hovering a
+    # colour does. Two body strings in this pane promised "hover any color
+    # or animation" while no animation control had any hover wiring at all.
+    hover_thumb = native_ui.make_hover_area(thumb, {"provider": row.provider})
+    hover_thumb.hover_enter = actions.hover_provider_animation
+    hover_thumb.hover_exit = actions.hover_end
+    actions.animation_hover_areas[row.provider] = hover_thumb
+    controls.addArrangedSubview_(hover_thumb)
 
     description = native_ui.make_label(
-        colors_module.PROVIDER_ANIMATION_DESCRIPTIONS[row.animation],
+        row.animation_description,
         secondary=True,
         size=11.0,
     )
+    sync.add_description(description)
     controls.addArrangedSubview_(description)
     controls.addArrangedSubview_(native_ui.make_hspacer())
     stack.addArrangedSubview_(controls)
@@ -3231,13 +3411,14 @@ def _build_studio_compare_strip(target: StatusBarController):
 def _build_studio_colors_section(target, actions, swatches, hex_labels):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
 
-    agent_outer, agent_inner = native_ui.make_card("Agent Colors")
+    agent_outer, agent_inner = native_ui.make_card("Agent Colors", revealing=True)
     agent_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "One row per agent, each led by its own name. The Brand group is "
-            "the official color of Claude, OpenAI, Codex and Gemini; Palette "
-            "is the system set. Hover any color to see it on the Screen Bar "
-            "before you keep it.",
+            "the official color of Claude, OpenAI, Codex and Gemini -- an "
+            "agent whose own color is none of those leads its Brand group "
+            "with it, named Default. Palette is the system set. Hover any "
+            "color to see it on the Screen Bar before you keep it.",
             secondary=True,
             size=11.0,
             max_width=560.0,
@@ -3245,6 +3426,12 @@ def _build_studio_colors_section(target, actions, swatches, hex_labels):
     )
     if not hasattr(target, "tip_anchor_views"):
         target.tip_anchor_views = {}
+    # A tip anchored here is reached from the menu bar while the Studio may
+    # be sitting on any of its three sections; the card un-hides its own
+    # section before the window scrolls to it. See _RevealingStackView.
+    agent_outer.on_reveal = lambda: actions.select_section(
+        colors_module.STUDIO_SECTION_COLORS
+    )
     target.tip_anchor_views["brand_colors"] = agent_outer
     rows = colors_module.provider_color_rows(target.settings.colors)
     for index, row in enumerate(rows):
@@ -3258,29 +3445,22 @@ def _build_studio_colors_section(target, actions, swatches, hex_labels):
     mode_outer, mode_inner = native_ui.make_card("State Colors")
     mode_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
-            "What each state looks like, whoever is in it.",
+            "What each state looks like, whoever is in it. Default is the "
+            "color SidePulse ships for that state.",
             secondary=True,
             size=11.0,
             max_width=560.0,
         )
     )
-    for key in MODE_COLOR_KEYS:
-        current = target.settings.colors.mode_color(key)
+    mode_rows = colors_module.mode_color_rows(target.settings.colors)
+    for index, mode_row in enumerate(mode_rows):
         mode_inner.addArrangedSubview_(
             _build_agent_or_mode_color_row(
-                ("mode", key),
-                MODE_COLOR_DISPLAY_LABELS[key],
-                current,
-                CURATED_PALETTE[:6],
-                target,
-                "selectModeColorSwatch:",
-                {"key": key},
-                "openCustomModeColor:",
-                {"key": key},
-                swatches,
-                hex_labels,
+                mode_row, target, actions, swatches, hex_labels
             )
         )
+        if index < len(mode_rows) - 1:
+            native_ui.add_separator(mode_inner)
     stack.addArrangedSubview_(mode_outer)
 
     palette_outer, palette_inner = native_ui.make_card("Palettes")
@@ -3323,7 +3503,7 @@ def _build_studio_colors_section(target, actions, swatches, hex_labels):
     return stack
 
 
-def _build_studio_animations_section(target, actions):
+def _build_studio_animations_section(target, actions, hex_labels):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
 
     agent_outer, agent_inner = native_ui.make_card("Agent Animation")
@@ -3341,20 +3521,31 @@ def _build_studio_animations_section(target, actions):
     rows = colors_module.provider_color_rows(target.settings.colors)
     for index, row in enumerate(rows):
         agent_inner.addArrangedSubview_(
-            _build_provider_animation_row(row, target, actions)
+            _build_provider_animation_row(row, target, actions, hex_labels)
         )
         if index < len(rows) - 1:
             native_ui.add_separator(agent_inner)
     stack.addArrangedSubview_(agent_outer)
 
     anim_outer, anim_inner = native_ui.make_card("State Animation")
+    anim_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "How each state moves, whoever is in it. Every choice is named "
+            "under its thumbnail; hover one to try it on the Screen Bar.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
     animation_thumbs: dict[str, dict[str, object]] = {}
     for index, key in enumerate(ANIMATION_MODE_KEYS):
         thumb_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+        thumb_row.setAlignment_(NSLayoutAttributeTop)
         thumbs: dict[str, object] = {}
         for style in ANIMATION_STYLE_CHOICES:
+            style_name = ANIMATION_STYLE_DISPLAY_LABELS.get(style, style.title())
             thumb = _mini_led_view(*SIGNAL_THUMB_SIZE)
-            thumb.setToolTip_(ANIMATION_STYLE_DISPLAY_LABELS.get(style, style.title()))
+            thumb.setToolTip_(style_name)
             thumb.setProgram_(_mode_animation_thumb_program(target, key, style))
             thumb.mode_anim_key = key
             thumb.mode_anim_style = style
@@ -3363,7 +3554,24 @@ def _build_studio_animations_section(target, actions):
             )
             thumb.addGestureRecognizer_(recognizer)
             thumbs[style] = thumb
-            thumb_row.addArrangedSubview_(thumb)
+            # A NAME under every one, and a hover on every one. These four
+            # thumbnails were identified by setToolTip_ alone and told apart
+            # only by position -- the exact failure ("a colour square with no
+            # word attached is a guess") that the Studio's own header comment
+            # claims to have ended, three cards above this one.
+            hover_area = native_ui.make_hover_area(
+                thumb, {"key": key, "style": style}
+            )
+            hover_area.hover_enter = actions.hover_mode_animation
+            hover_area.hover_exit = actions.hover_end
+            actions.mode_animation_hover_areas[(key, style)] = hover_area
+            column = native_ui.make_stack(orientation="vertical", spacing=1.0)
+            column.setAlignment_(NSLayoutAttributeCenterX)
+            column.addArrangedSubview_(hover_area)
+            caption = native_ui.make_caption(style_name)
+            column.addArrangedSubview_(caption)
+            thumb.studio_caption = caption
+            thumb_row.addArrangedSubview_(column)
         _apply_thumb_selection(thumbs, target.settings.colors.animation_style(key))
         animation_thumbs[key] = thumbs
         anim_inner.addArrangedSubview_(
@@ -3538,8 +3746,9 @@ def _build_studio_preview_section(target, actions):
         native_ui.make_wrapping_label(
             "Hovering a color or an animation plays it on the Screen Bar "
             "only, and the Screen Bar goes straight back to the truth the "
-            "moment you move away. Your hardware is never touched unless you "
-            "ask for it here.",
+            "moment you move away. Hovering never reaches connected "
+            "hardware; a change you actually keep reaches it only while the "
+            "switch below is on.",
             secondary=True,
             size=11.0,
             max_width=560.0,
@@ -3555,7 +3764,7 @@ def _build_studio_preview_section(target, actions):
         ),
     )
     # NSSwitch builds OFF; the controller's flag is the truth.
-    set_checkbox_state(live_toggle, bool(getattr(target, "color_preview_enabled", True)))
+    set_checkbox_state(live_toggle, hardware_preview_enabled(target))
     surfaces_inner.addArrangedSubview_(live_row)
     stack.addArrangedSubview_(surfaces_outer)
 
@@ -3577,11 +3786,13 @@ def _build_color_studio_pane(target: StatusBarController) -> NSView:
     hex_labels: dict[tuple[str, str], object] = {}
 
     # --- pinned header: what this is, which section, and before/after ---
-    header_outer, header_inner = native_ui.make_card(None)
+    #
+    # The title goes through make_card, which places it ABOVE the panel at
+    # 13pt semibold like every other group header in this window. It used to
+    # be a 15pt bold label INSIDE the glass panel -- the only display-size
+    # headline in the app, against the rule make_card's own docstring states.
+    header_outer, header_inner = native_ui.make_card("Color & Animation Studio")
     root.addSubview_(header_outer)
-    header_inner.addArrangedSubview_(
-        native_ui.make_label("Color & Animation Studio", size=15.0, bold=True)
-    )
     segmented = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
         [colors_module.STUDIO_SECTION_LABELS[key] for key in colors_module.STUDIO_SECTION_CHOICES],
         NSSegmentSwitchTrackingSelectOne,
@@ -3602,7 +3813,7 @@ def _build_color_studio_pane(target: StatusBarController) -> NSView:
     # --- the three peer sections, stacked and cross-faded by visibility ---
     scroll_stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
     colors_section = _build_studio_colors_section(target, actions, swatches, hex_labels)
-    animations_section, behavior_fields = _build_studio_animations_section(target, actions)
+    animations_section, behavior_fields = _build_studio_animations_section(target, actions, hex_labels)
     preview_section, preview_fields = _build_studio_preview_section(target, actions)
     actions.section_views = {
         colors_module.STUDIO_SECTION_COLORS: colors_section,
@@ -3683,7 +3894,7 @@ def refresh_blend_and_speed_fields(target: StatusBarController) -> None:
     refresh_studio_compare(target)
     live_toggle = fields.get("live_toggle")
     if live_toggle is not None:
-        set_checkbox_state(live_toggle, bool(getattr(target, "color_preview_enabled", True)))
+        set_checkbox_state(live_toggle, hardware_preview_enabled(target))
     preset_popup = fields.get("preset_popup")
     if preset_popup is not None:
         select_color_preset(preset_popup, matching_preset(colors))

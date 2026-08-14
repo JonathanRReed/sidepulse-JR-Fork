@@ -488,10 +488,71 @@ PROVIDER_BRAND_COLORS: dict[str, str] = {
 }
 
 
+def _hue_gap(left: str, right: str) -> float:
+    """Degrees between two hues, 0-180. Only ever used to rank candidate
+    colours against colours already spoken for."""
+    delta = abs(_hex_to_oklch_hue(left) - _hex_to_oklch_hue(right)) % 360.0
+    return min(delta, 360.0 - delta)
+
+
+def _palette_defaults_by_provider() -> dict[str, str]:
+    """The CURATED_PALETTE slot each brandless registered provider gets.
+
+    Positional indexing alone is NOT enough, and shipped a real collision:
+    ``opencode`` sits at index 7 in PROVIDER_SPECS, CURATED_PALETTE[7] is
+    systemGray #8E8E93, and #8E8E93 is also ``grok``'s brand colour -- so
+    out of the box those two agents were the same colour on the strip and
+    genuinely indistinguishable.
+
+    A provider whose positional slot is free still gets it, so nothing that
+    was already distinct moves. A provider whose slot is taken is given the
+    free slot whose hue sits FARTHEST from everything already spoken for --
+    brands, earlier providers, and the four state colours. Taking merely the
+    next free index instead would have handed opencode systemRed #FF3B30,
+    ten degrees of hue from the ask/blocked signal #FF3A00: distinct as a
+    string, the same light on the strip.
+    """
+    assigned: dict[str, str] = {}
+    taken = {hex_value.upper() for hex_value in PROVIDER_BRAND_COLORS.values()}
+    reserved = list(PROVIDER_BRAND_COLORS.values()) + [
+        hex_value for _name, hex_value in STATE_SEED_COLORS
+    ]
+    for index, spec in enumerate(PROVIDER_SPECS):
+        if spec.provider in PROVIDER_BRAND_COLORS:
+            continue
+        positional = CURATED_PALETTE[index % len(CURATED_PALETTE)]
+        free = [hex_value for hex_value in CURATED_PALETTE if hex_value.upper() not in taken]
+        if positional.upper() not in taken:
+            choice = positional
+        elif free:
+            choice = max(free, key=lambda candidate: min(_hue_gap(candidate, other) for other in reserved))
+        else:
+            # More providers than palette slots: everything distinct is
+            # already spent, so fall back to the positional slot rather
+            # than refusing to colour the row at all.
+            choice = positional
+        assigned[spec.provider] = choice
+        taken.add(choice.upper())
+        reserved.append(choice)
+    return assigned
+
+
+_PALETTE_DEFAULTS_BY_PROVIDER: dict[str, str] | None = None
+
+
+def palette_defaults_by_provider() -> dict[str, str]:
+    """Memoized because it is pure over module constants, and lazy because
+    it needs _hex_to_oklch_hue, which is defined further down this file."""
+    global _PALETTE_DEFAULTS_BY_PROVIDER
+    if _PALETTE_DEFAULTS_BY_PROVIDER is None:
+        _PALETTE_DEFAULTS_BY_PROVIDER = _palette_defaults_by_provider()
+    return _PALETTE_DEFAULTS_BY_PROVIDER
+
+
 def default_agent_color(provider: str) -> str:
     """Default color for a provider: its brand color if known, otherwise a
-    deterministic slot from CURATED_PALETTE indexed by its position in
-    PROVIDER_SPECS. A future provider added to that registry (without an
+    deterministic slot from CURATED_PALETTE that no other provider is
+    already wearing. A future provider added to that registry (without an
     entry in PROVIDER_BRAND_COLORS) gets the next unused palette slot
     automatically; an entirely unknown provider id (e.g. one seen in a
     snapshot before this module knows about it) falls back to a hash-based
@@ -500,12 +561,18 @@ def default_agent_color(provider: str) -> str:
     """
     if provider in PROVIDER_BRAND_COLORS:
         return PROVIDER_BRAND_COLORS[provider]
-    provider_ids = [spec.provider for spec in PROVIDER_SPECS]
-    if provider in provider_ids:
-        index = provider_ids.index(provider)
-    else:
-        index = len(provider_ids) + (hash(provider) % len(CURATED_PALETTE))
-    return CURATED_PALETTE[index % len(CURATED_PALETTE)]
+    assigned = palette_defaults_by_provider()
+    if provider in assigned:
+        return assigned[provider]
+    # Unknown id: prefer a slot no registered provider has claimed, so a
+    # provider seen in a snapshot before this module knows about it does
+    # not arrive already impersonating one that shipped.
+    claimed = {hex_value.upper() for hex_value in PROVIDER_BRAND_COLORS.values()}
+    claimed |= {hex_value.upper() for hex_value in assigned.values()}
+    spare = [
+        hex_value for hex_value in CURATED_PALETTE if hex_value.upper() not in claimed
+    ] or list(CURATED_PALETTE)
+    return spare[hash(provider) % len(spare)]
 
 
 def _default_mode_colors() -> dict[str, str]:
@@ -2643,11 +2710,32 @@ CURATED_PALETTES: dict[str, dict[str, dict[str, str]]] = {
 # restated as an anonymous literal in settings_window.BRAND_SWATCHES, which
 # is how the Agent Colors card came to claim "the first four swatches are
 # the brand colours" while actually rendering systemRed/Blue/Green/Purple.
+#
+# Where a brand is ALSO a provider this app ships a row for, the hex is read
+# out of PROVIDER_BRAND_COLORS rather than restated -- one table cannot then
+# disagree with the other. It did: this tuple named Codex #FF3A00 while
+# PROVIDER_BRAND_COLORS gave codex #2B8FFF, so the Codex row drew two chips
+# both claiming Codex, and #FF3A00 -- which is this app's own ask/blocked
+# signal colour (led_status.ASK_AMBER) -- was globally named "Codex" and
+# reported by is_brand_color() as a brand. Clicking the chip captioned
+# "Codex" painted Codex the alert red.
 BRAND_SEED_COLORS: tuple[tuple[str, str], ...] = (
-    ("Claude", "#D97757"),
+    ("Claude", PROVIDER_BRAND_COLORS["claude"]),
     ("OpenAI", "#10A37F"),
-    ("Codex", "#FF3A00"),
+    ("Codex", PROVIDER_BRAND_COLORS["codex"]),
     ("Gemini", "#4796E3"),
+)
+
+# The app's own signal colours, named. These are not brands and not palette
+# hues -- they are what SidePulse ships for each state -- but they are the
+# colours a State Colors row is actually wearing out of the box, so they need
+# words too. Without them every State Colors row rendered with no selected
+# chip at all on a fresh install and the row's only truth was its hex text.
+STATE_SEED_COLORS: tuple[tuple[str, str], ...] = (
+    ("Working", WORKING_CYAN),
+    ("Done", DONE_GREEN),
+    ("Ask", ASK_AMBER),
+    ("Idle", IDLE_DIM),
 )
 
 # Brand-seeded looks: one per provider, mix-and-match with anything --
@@ -2673,17 +2761,25 @@ PROVIDER_PALETTES: dict[str, dict[str, dict[str, str]]] = {
 SWATCH_GROUP_BRAND = "brand"
 SWATCH_GROUP_PALETTE = "palette"
 SWATCH_GROUP_CUSTOM = "custom"
+# What SidePulse itself ships for this row -- a state's signal colour. Not a
+# brand (nobody outside this app owns it) and not a palette hue, but it is
+# the colour the row wears out of the box, so it needs its own named group
+# or the row starts life with nothing selected.
+SWATCH_GROUP_DEFAULT = "default"
 SWATCH_GROUP_CHOICES: tuple[str, ...] = (
+    SWATCH_GROUP_DEFAULT,
     SWATCH_GROUP_BRAND,
     SWATCH_GROUP_PALETTE,
     SWATCH_GROUP_CUSTOM,
 )
 SWATCH_GROUP_LABELS: dict[str, str] = {
+    SWATCH_GROUP_DEFAULT: "Default",
     SWATCH_GROUP_BRAND: "Brand",
     SWATCH_GROUP_PALETTE: "Palette",
     SWATCH_GROUP_CUSTOM: "Custom",
 }
 SWATCH_GROUP_HINTS: dict[str, str] = {
+    SWATCH_GROUP_DEFAULT: "What SidePulse ships for this one.",
     SWATCH_GROUP_BRAND: "Official colors, straight from the makers.",
     SWATCH_GROUP_PALETTE: "System hues, chosen to stay far apart from each other.",
     SWATCH_GROUP_CUSTOM: "Anything else you pick.",
@@ -2704,20 +2800,28 @@ _IDENTITY_NAME_BY_HEX: dict[str, str] = {
     hex_value.upper(): name
     for hex_value, name in zip(IDENTITY_PALETTE, IDENTITY_PALETTE_NAMES)
 }
+_STATE_NAME_BY_HEX: dict[str, str] = {
+    hex_value.upper(): name for name, hex_value in STATE_SEED_COLORS
+}
 
 
 def swatch_name(hex_value: str) -> str:
     """The human name for a colour: its brand name if it is one, then its
-    palette name, then its identity name, then "Custom".
+    palette name, then its identity name, then this app's own signal name,
+    then "Custom".
 
     Brand wins ties on purpose -- if a system hue ever collided with a brand
-    hex, the brand meaning is the one a person is actually choosing.
+    hex, the brand meaning is the one a person is actually choosing. The
+    signal names come last for the same reason they exist at all: they are a
+    fallback so that this app's own shipped colours are never anonymous, not
+    a claim on a hex anyone else has a better name for.
     """
     key = normalize_hex(hex_value, "#000000").upper()
     return (
         _BRAND_NAME_BY_HEX.get(key)
         or _CURATED_NAME_BY_HEX.get(key)
         or _IDENTITY_NAME_BY_HEX.get(key)
+        or _STATE_NAME_BY_HEX.get(key)
         or CUSTOM_SWATCH_NAME
     )
 
@@ -2776,15 +2880,20 @@ class SwatchGroup:
 
 
 @dataclass(frozen=True)
-class ProviderColorRow:
-    """One provider's whole row: identity first, palette second."""
+class SwatchRow:
+    """The shared shape of every row the Studio draws: what it is called,
+    what colour it is wearing, what that colour is NAMED, and the labelled
+    groups of chips on offer.
 
-    provider: str
+    Provider rows and state rows are the same object with different group
+    lists on purpose -- the view is one renderer, and every string it can
+    show is decided here where a test can read it without an NSView.
+    """
+
+    key: str
     label: str
     current_hex: str
     current_name: str
-    animation: str
-    animation_label: str
     groups: tuple[SwatchGroup, ...]
 
     @property
@@ -2796,6 +2905,22 @@ class ProviderColorRow:
             if group.key == key:
                 return group
         return None
+
+    @property
+    def picker_swatch(self) -> Swatch:
+        """The one chip that opens the colour panel. Always present."""
+        group = self.group(SWATCH_GROUP_CUSTOM)
+        return group.swatches[0]
+
+
+@dataclass(frozen=True)
+class ProviderColorRow(SwatchRow):
+    """One provider's whole row: identity first, palette second."""
+
+    provider: str = ""
+    animation: str = PROVIDER_ANIMATION_AUTO
+    animation_label: str = ""
+    animation_description: str = ""
 
 
 def _provider_label(provider: str) -> str:
@@ -2878,6 +3003,33 @@ def custom_swatches(
     )
 
 
+def _make_group(key: str, swatches: tuple[Swatch, ...]) -> SwatchGroup:
+    return SwatchGroup(
+        key=key,
+        label=SWATCH_GROUP_LABELS[key],
+        hint=SWATCH_GROUP_HINTS[key],
+        swatches=swatches,
+    )
+
+
+def _selected_name(groups: tuple[SwatchGroup, ...], current: str) -> str:
+    """The name of the chip that is actually ringed.
+
+    A row sitting on its own shipped colour reads "Default", not the global
+    fallback name for an unrecognized hex -- the caption has to agree with
+    the ring, or the row is telling you two different things at once.
+    """
+    return next(
+        (
+            swatch.name
+            for group in groups
+            for swatch in group.swatches
+            if swatch.selected and not swatch.opens_picker
+        ),
+        None,
+    ) or swatch_name(current)
+
+
 def provider_color_row(provider: str, colors: ColorSettings) -> ProviderColorRow:
     current = colors.agent_color(provider)
     animation = colors.agent_animation(provider)
@@ -2887,46 +3039,79 @@ def provider_color_row(provider: str, colors: ColorSettings) -> ProviderColorRow
         current, tuple(swatch.hex for swatch in brand + palette)
     )
     groups = (
-        SwatchGroup(
-            key=SWATCH_GROUP_BRAND,
-            label=SWATCH_GROUP_LABELS[SWATCH_GROUP_BRAND],
-            hint=SWATCH_GROUP_HINTS[SWATCH_GROUP_BRAND],
-            swatches=brand,
-        ),
-        SwatchGroup(
-            key=SWATCH_GROUP_PALETTE,
-            label=SWATCH_GROUP_LABELS[SWATCH_GROUP_PALETTE],
-            hint=SWATCH_GROUP_HINTS[SWATCH_GROUP_PALETTE],
-            swatches=palette,
-        ),
-        SwatchGroup(
-            key=SWATCH_GROUP_CUSTOM,
-            label=SWATCH_GROUP_LABELS[SWATCH_GROUP_CUSTOM],
-            hint=SWATCH_GROUP_HINTS[SWATCH_GROUP_CUSTOM],
-            swatches=custom,
-        ),
-    )
-    # The row's caption names the swatch that is actually ringed, so a
-    # provider sitting on its own shipped colour reads "Default", not the
-    # global fallback name for an unrecognized hex.
-    selected = next(
-        (
-            swatch.name
-            for group in groups
-            for swatch in group.swatches
-            if swatch.selected and not swatch.opens_picker
-        ),
-        None,
+        _make_group(SWATCH_GROUP_BRAND, brand),
+        _make_group(SWATCH_GROUP_PALETTE, palette),
+        _make_group(SWATCH_GROUP_CUSTOM, custom),
     )
     return ProviderColorRow(
+        key=provider,
         provider=provider,
         label=_provider_label(provider),
         current_hex=current,
-        current_name=selected or swatch_name(current),
+        current_name=_selected_name(groups, current),
         animation=animation,
         animation_label=PROVIDER_ANIMATION_LABELS.get(animation, animation.title()),
+        animation_description=PROVIDER_ANIMATION_DESCRIPTIONS.get(animation, ""),
         groups=groups,
     )
+
+
+# The words the State Colors rows lead with. Kept here beside the model
+# rather than in the view, so a test can assert the row is named without
+# building an NSView.
+MODE_ROW_LABELS: dict[str, str] = {
+    MODE_IDLE: "Idle",
+    MODE_WORKING: "Working",
+    MODE_DONE: "Done",
+    MODE_ASK: "Ask (waiting / blocked)",
+}
+
+
+def default_mode_color(key: str) -> str:
+    return _default_mode_colors().get(key, WORKING_CYAN)
+
+
+def mode_color_row(key: str, colors: ColorSettings) -> SwatchRow:
+    """One state's colour row, built exactly like a provider's.
+
+    The shipped signal colour leads the row as a named "Default" chip. Before
+    that existed the State Colors rows drew CURATED_PALETTE[:6] and nothing
+    else -- and not one of the four shipped state colours is in that strip,
+    so on a fresh install every state row rendered with ZERO chips ringed and
+    the row's only truth was the hex printed at its end. The picker chip was
+    hardcoded "Pick…" with ``selected`` never set, so unlike a provider row a
+    hand-picked colour could not become a named, ringed "Custom" either.
+    """
+    current = normalize_hex(colors.mode_color(key), CURATED_PALETTE[0])
+    shipped = normalize_hex(default_mode_color(key), CURATED_PALETTE[0])
+    default = (
+        Swatch(
+            name=swatch_name(shipped),
+            hex=shipped,
+            group=SWATCH_GROUP_DEFAULT,
+            selected=shipped.upper() == current.upper(),
+        ),
+    )
+    palette = palette_swatches(current)
+    custom = custom_swatches(
+        current, tuple(swatch.hex for swatch in default + palette)
+    )
+    groups = (
+        _make_group(SWATCH_GROUP_DEFAULT, default),
+        _make_group(SWATCH_GROUP_PALETTE, palette),
+        _make_group(SWATCH_GROUP_CUSTOM, custom),
+    )
+    return SwatchRow(
+        key=key,
+        label=MODE_ROW_LABELS.get(key, key.title()),
+        current_hex=current,
+        current_name=_selected_name(groups, current),
+        groups=groups,
+    )
+
+
+def mode_color_rows(colors: ColorSettings) -> tuple[SwatchRow, ...]:
+    return tuple(mode_color_row(key, colors) for key in MODE_COLOR_KEYS)
 
 
 def provider_preview_statuses(

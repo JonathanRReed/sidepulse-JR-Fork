@@ -8668,6 +8668,18 @@ def isolate_controller(case, *, build_controller=True):
     )
     latest.start()
     case.addCleanup(latest.stop)
+    # The recent-activity ledger persists on every completion, ask and
+    # error, i.e. from `track_completions`, i.e. from `refresh_`. Isolated
+    # here for the same reason every other state path is: dozens of existing
+    # tests drive those calls, and none of them may reach the owner's real
+    # ~/.local/state ledger.
+    case._activity_ledger_path = Path(tmp.name) / "activity-ledger.json"
+    activity = patch(
+        "sidepulse.status_bar.default_activity_ledger_path",
+        return_value=case._activity_ledger_path,
+    )
+    activity.start()
+    case.addCleanup(activity.stop)
     # The live Alcove on the dev machine still must not steer test
     # geometry, but the synchronous capsule probe this used to stub is
     # gone: observation now runs only through the async worker, which
@@ -8675,6 +8687,17 @@ def isolate_controller(case, *, build_controller=True):
     discovery = patch("sidepulse.status_bar.discover_devices", return_value=[])
     discovery.start()
     case.addCleanup(discovery.stop)
+    # The interrupt budget reads the live Focus assertions (a courtesy
+    # signal is held while one is on), so an un-isolated controller test
+    # would pass or fail depending on whether the machine running the
+    # gate happens to have Do Not Disturb switched on. Tests that WANT a
+    # Focus prime controller._focus_ids_cache or patch this themselves.
+    focus = patch(
+        "sidepulse.focus_sync.active_focus_mode_identifiers",
+        return_value=[],
+    )
+    focus.start()
+    case.addCleanup(focus.stop)
     try:
         from sidepulse import status_bar
     except SystemExit as exc:

@@ -27,6 +27,13 @@ _ACTIVE_MODES = frozenset(
     }
 )
 
+# The two modes that are news in their own right rather than progress: the
+# agent stopped and wants the owner, or it stopped and cannot continue.
+ATTENTION_TRANSITION_MODES = (
+    AgentMode.WAITING_FOR_INPUT,
+    AgentMode.BLOCKED_ERROR,
+)
+
 
 @dataclass(frozen=True)
 class CompletionBatch:
@@ -120,6 +127,47 @@ def parents_with_running_subagents(
         if parent:
             running.add(parent)
     return running
+
+
+def detect_attention_transitions(
+    previous_modes: Mapping[str, AgentMode],
+    statuses: Sequence[AgentStatus],
+    now: datetime,
+) -> tuple[AgentStatus, ...]:
+    """Main sessions that JUST entered an attention mode, in agent order.
+
+    The same edge discipline the rest of this file uses, for the same
+    reasons. A session whose previous mode is unknown never fires: on launch
+    every live session would otherwise arrive as fresh news, so a restart
+    would manufacture a "while you were away" list out of state that was
+    simply already true. And a mode that has not changed never re-fires, so
+    a session sitting on an unanswered question is recorded once, not on
+    every poll for as long as it waits.
+
+    Two consecutive questions from one session therefore record once. That
+    is deliberate: the first is still unanswered, it is still on the mailbox
+    rung showing its current text, and a ledger that re-listed it every time
+    the agent re-prompted would bury everything else.
+
+    Sub-agents cannot appear here -- ``canonical_current_statuses`` drops
+    them before this ever sees a row.
+    """
+    current_by_agent = canonical_current_statuses(statuses)
+    selected: dict[str, AgentStatus] = {}
+    for agent_id, status in current_by_agent.items():
+        if status.mode not in ATTENTION_TRANSITION_MODES:
+            continue
+        previous = previous_modes.get(agent_id)
+        if previous is None or previous == status.mode:
+            continue
+        if not is_recent(
+            now,
+            status.updated_at,
+            COMPLETION_NOTIFY_FRESHNESS_SECONDS,
+        ):
+            continue
+        selected[agent_id] = status
+    return tuple(selected[agent_id] for agent_id in sorted(selected))
 
 
 def detect_completion_batch(

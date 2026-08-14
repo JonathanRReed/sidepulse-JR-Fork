@@ -666,13 +666,20 @@ class StudioPaneTests(unittest.TestCase):
 
     def test_a_colour_changed_elsewhere_still_renames_the_row(self) -> None:
         """A palette button writes settings directly and then asks the window
-        to catch up; the row's NAME has to be part of what catches up."""
+        to catch up; the row's NAME has to be part of what catches up.
+
+        #FF3A00 is deliberate: this test used to assert the row now read
+        "Codex", because BRAND_SEED_COLORS claimed #FF3A00 as Codex's brand
+        colour while PROVIDER_BRAND_COLORS gave codex #2B8FFF. #FF3A00 is
+        led_status.ASK_AMBER -- this app's own blocked/waiting signal -- and
+        the assertion was pinning that confusion in place.
+        """
         self.controller.settings = self.controller.settings.with_colors(
             self.controller.settings.colors.with_agent_color("claude", "#FF3A00")
         )
         self.controller.refresh_colors_window()
         sync = self.controller.color_hex_labels[("agent", "claude")]
-        self.assertEqual(sync.name_label.stringValue(), "Codex")
+        self.assertEqual(sync.name_label.stringValue(), "Ask")
         self.assertEqual(
             self.actions.animation_popups["claude"].titleOfSelectedItem(),
             PROVIDER_ANIMATION_LABELS[PROVIDER_ANIMATION_AUTO],

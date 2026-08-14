@@ -95,6 +95,23 @@ from .accessibility_display import (
     AccessibilityDisplayPreferences,
     refresh_accessibility_display_preferences,
 )
+from .activity_ledger import (
+    MAX_ACTIVITY_LABEL_LENGTH,
+    ActivityEntry,
+    ActivityKind,
+    ActivityLedger,
+    ActivityValidationError,
+    activity_row_text,
+    mark_activity_seen,
+    record_activities,
+    relative_age_label,
+    safe_activity_text,
+)
+from .activity_ledger_store import (
+    default_activity_ledger_path,
+    load_activity_ledger,
+    save_activity_ledger,
+)
 from .agent_browser import (
     AgentBrowserQuery,
     build_agent_browser_documents,
@@ -175,7 +192,11 @@ from .colors import (
 from .completions import (
     COMPLETION_NOTIFY_FRESHNESS_SECONDS as COMPLETION_NOTIFY_FRESHNESS_SECONDS,
 )
-from .completions import canonical_current_statuses, detect_completion_batch
+from .completions import (
+    canonical_current_statuses,
+    detect_attention_transitions,
+    detect_completion_batch,
+)
 from .credentials import (
     CLAUDE_CODE_KEYCHAIN,
     KeychainConsentLedger,
@@ -193,10 +214,29 @@ from .device_writer import (
     validate_led_text,
     write_led_program,
 )
+from .decision_trace import (
+    MENU_ITEM_TITLE as WHY_PANEL_MENU_TITLE,
+    PANEL_TITLE as WHY_PANEL_TITLE,
+    build_decision_trace,
+    decision_trace_text,
+)
 from .freshness import bounded_age_seconds, is_recent
 from .install import (
     install_provider_hooks,
     uninstall_provider_hooks,
+)
+from .intake_health import (
+    NOT_HEARING_LABEL,
+    NOT_SET_UP_LABEL,
+    IntakeReport,
+    accepted_epochs_by_provider,
+    build_intake_report,
+    idle_disclosure,
+    intake_alert_title,
+    intake_content_signature,
+    last_heard_rows,
+    last_heard_summary,
+    probe_providers,
 )
 from .installed_agent_inventory import (
     InstalledAgentInventoryResult,
@@ -284,7 +324,7 @@ from .menu_tracking import (
     MenuItemState,
     StableNativeMenuRegistry,
 )
-from .models import MODE_LABELS, AgentMode, AgentStatus
+from .models import MODE_LABELS, AgentMode, AgentStatus, provider_label
 from .navigation_policy import (
     OperatorActionKind,
     OperatorLocalActionState,
@@ -1097,6 +1137,14 @@ def color_for_resolved_glance(
 
 
 STATE_IDLE = StatusBarState("Idle", "circle", 4)
+# The other two things "Idle" used to mean. These are DISPLAY states only:
+# self.current_state stays STATE_IDLE so idle-dim, state equality and every
+# existing comparison keep working -- what changes is what the user is told.
+# A fresh install said "Idle" whether it was idle, never connected, or
+# hearing nothing because its hooks spoke a wire format that died in a
+# TypeError. Those are three different things to do next.
+STATE_NOT_SET_UP = StatusBarState(NOT_SET_UP_LABEL, "circle.dotted", 4)
+STATE_NOT_HEARING = StatusBarState(NOT_HEARING_LABEL, "exclamationmark.circle", 4)
 STATE_WORKING = StatusBarState("Working", "arrow.triangle.2.circlepath", 2)
 STATE_DONE = StatusBarState("Done", "checkmark.circle", 3)
 STATE_ASK = StatusBarState("Ask", "questionmark.circle", 1)
@@ -1207,6 +1255,23 @@ def state_for_mode(mode: AgentMode) -> StatusBarState:
     if mode == AgentMode.COMPLETED:
         return STATE_DONE
     return STATE_IDLE
+
+
+def displayed_state(state: StatusBarState, report) -> StatusBarState:
+    """The state the USER is shown -- Idle told apart from its impostors.
+
+    Only Idle is ambiguous: Working, Ask, Done and Failed each carry their
+    own evidence. Idle carries none, which is why it was the one word this
+    app could say for an hour while every event died in a TypeError.
+    """
+    if state != STATE_IDLE:
+        return state
+    disclosure = idle_disclosure(report)
+    if disclosure == NOT_SET_UP_LABEL:
+        return STATE_NOT_SET_UP
+    if disclosure == NOT_HEARING_LABEL:
+        return STATE_NOT_HEARING
+    return state
 
 
 def state_for_projection(projection: AttentionProjection) -> StatusBarState:
@@ -1394,6 +1459,14 @@ class StatusBarController(NSObject):
         self.device_settings_controls = {}
         self.settings_sidebar_table = None
         self.settings_panes = {}
+        # The "what did I miss" ledger. Loaded lazily on first use: __init__
+        # runs on the AppKit launch path and must not block on disk, and a
+        # ledger that cannot be read is only ever an empty section.
+        self.activity_ledger = ActivityLedger()
+        self.activity_ledger_path = default_activity_ledger_path()
+        self._activity_ledger_loaded = False
+        self._activity_ledger_revision = 0
+        self._activity_quota_percents: dict[str, float] = {}
         self.operator_history_range_days = 1
         self.operator_history_reel: tuple[str, ...] = ()
         self.operator_history_store = OperatorHistoryStore(
@@ -1454,6 +1527,19 @@ class StatusBarController(NSObject):
         self._status_cue_deadline = None
         self._current_resolved_glance = None
         self._status_emphasis_accessibility_generation = None
+        # "Why is it doing that": when the light's DECISION last changed,
+        # not when the strip was last written. A repaint is not a change.
+        self._glance_decision_key: tuple[str, str] | None = None
+        self._glance_changed_at_epoch: float | None = None
+        self._glance_changed_at_monotonic: float | None = None
+        # First-run honesty: can SidePulse hear anything at all? Probed on
+        # a timer rather than per refresh -- it costs one detector read and
+        # one log tail per provider.
+        self.current_intake_report: IntakeReport | None = None
+        self._intake_probes = None
+        self._intake_probed_at = 0.0
+        self.why_panel_window = None
+        self.why_panel_text_view = None
         self.last_battery_snapshot = None
         self.last_battery_error = None
         self.last_power_connected = None
@@ -2288,6 +2374,9 @@ class StatusBarController(NSObject):
                 if status.mode != AgentMode.COMPLETED
             }
             self.cleared_session_ids = cleared - active_again
+        # Before set_status, so the menu bar never says "Idle" on a tick
+        # where SidePulse already knows it cannot hear anything.
+        self.refresh_intake_report()
         presentation_time = self._presentation_monotonic()
         capacity = self.presentation_capacity_glance()
         resolved_glance = self.resolve_presentation_glance(
@@ -2317,8 +2406,22 @@ class StatusBarController(NSObject):
             presentation_time=presentation_time,
             resolved_glance=resolved_glance,
         )
+        # A panel explaining the current light must follow the current
+        # light. Left alone it would answer for whichever light was on
+        # when it opened, which is the exact failure it exists to end.
+        self.refresh_why_panel()
         if self.status_item is not None:
             self.update_status_menu(snapshot, state)
+
+    def refresh_why_panel(self) -> bool:
+        window = getattr(self, "why_panel_window", None)
+        if window is None or not window.isVisible():
+            return False
+        set_text_control_value(
+            self.why_panel_text_view,
+            decision_trace_text(self.current_decision_trace()),
+        )
+        return True
 
     def update_status_menu(self, snapshot, state) -> None:
         """Rebuild the dropdown only when its CONTENT changed, and never
@@ -3576,6 +3679,17 @@ class StatusBarController(NSObject):
                 # that knows: the refresh itself succeeded, so every
                 # clock-derived staleness test says the card is current.
                 stale_evidence = authorised is not None and authorised.stale
+                # A ceiling crossed while the owner was away leaves no trace
+                # on any other surface: the LED burst is long finished and
+                # the card only ever shows the CURRENT number. Recorded from
+                # the authorised projection, so a drifted payload cannot mint
+                # a crossing (see the method).
+                self.record_activity_entries(
+                    self.record_capacity_threshold_crossings(
+                        authorised,
+                        occurred_at=reset_now,
+                    )
+                )
                 # An owner who switched capacity off is not looking at a
                 # fault, and an opt-out authorises exactly as many lanes as a
                 # dead source does: none. Only the producer can tell them
@@ -3827,7 +3941,13 @@ class StatusBarController(NSObject):
             self.current_operator_state = snapshot.operator_state
         # Opening the menu is a "visit": it clears the unseen-done badge
         # (mirrors T3's lastVisitedAt read/unread model).
-        self.menu_last_opened_at = datetime.now(timezone.utc)
+        opened_at = datetime.now(timezone.utc)
+        self.menu_last_opened_at = opened_at
+        # The same visit, for the same reason, on the "what did I miss"
+        # ledger. The menu the user is looking at was already built --
+        # `update_status_menu` refuses to rebuild while it is open -- so this
+        # clears the section for the NEXT open, never underneath his cursor.
+        self.mark_activity_seen_now(opened_at.timestamp())
         projection = getattr(self, "current_attention_projection", None)
         if projection is not None:
             completed = sorted(
@@ -5126,6 +5246,23 @@ class StatusBarController(NSObject):
         self.show_setup_window()
 
     @objc.IBAction
+    def openWhyPanel_(self, _sender):
+        self.show_why_panel()
+
+    def why_panel_body(self) -> str:
+        """The panel's whole text. Pure enough to assert on in a test."""
+        self.refresh_intake_report()
+        return decision_trace_text(self.current_decision_trace())
+
+    def show_why_panel(self) -> None:
+        body = self.why_panel_body()
+        if self.why_panel_window is None:
+            self.why_panel_window = build_why_panel_window(self)
+        set_text_control_value(self.why_panel_text_view, body)
+        self.why_panel_window.makeKeyAndOrderFront_(None)
+        NSApp.activateIgnoringOtherApps_(True)
+
+    @objc.IBAction
     def runFirstLaunchSetup_(self, _sender):
         self.run_first_launch_setup()
 
@@ -5570,6 +5707,182 @@ class StatusBarController(NSObject):
             else None
         )
 
+    # --- "What did I miss" ledger -------------------------------------
+    #
+    # "Left" is defined as: the last time the dropdown was opened.
+    #
+    # Screen lock and sleep were the alternatives, and both lie about THIS
+    # surface. The ledger lives in the dropdown; the dropdown is the thing
+    # that shows the facts. An owner whose screen never locked but who never
+    # looked at the menu still missed everything -- lock-based "seen" would
+    # quietly mark it read on his behalf. Opening the menu is also the visit
+    # the app ALREADY models (`menu_last_opened_at`, `unseen_completions`),
+    # and a second, contradicting definition of "seen" in the same dropdown
+    # is precisely the duplication this project keeps paying for.
+    #
+    # It is observable, not implied: the section's first row names the
+    # boundary and its age ("Menu last opened 12m ago"), so the owner can
+    # see which window he is being shown rather than infer it.
+
+    def ensure_activity_ledger(self) -> ActivityLedger:
+        """Restore the persisted ledger once. Never raises into AppKit."""
+        if self._activity_ledger_loaded:
+            return self.activity_ledger
+        self._activity_ledger_loaded = True
+        path = getattr(self, "activity_ledger_path", None)
+        if path is None:
+            return self.activity_ledger
+        try:
+            restore = load_activity_ledger(path)
+        except Exception as exc:
+            log_status_bar(f"activity ledger restore failed: {exc}")
+            return self.activity_ledger
+        self.activity_ledger = restore.ledger
+        self._activity_ledger_revision += 1
+        return self.activity_ledger
+
+    def _store_activity_ledger(self, ledger: ActivityLedger) -> None:
+        """Adopt a new ledger and persist it. Never raises into AppKit."""
+        if ledger is self.activity_ledger:
+            return
+        self.activity_ledger = ledger
+        self._activity_ledger_revision += 1
+        path = getattr(self, "activity_ledger_path", None)
+        if path is None:
+            return
+        try:
+            save_activity_ledger(path, ledger)
+        except Exception as exc:
+            log_status_bar(f"activity ledger save failed: {exc}")
+
+    def record_activity_entries(self, entries: tuple[ActivityEntry, ...]) -> None:
+        """Fold a batch of facts into the ledger and persist the result."""
+        if not entries:
+            return
+        ledger = self.ensure_activity_ledger()
+        try:
+            updated = record_activities(ledger, tuple(entries))
+        except ActivityValidationError as exc:
+            log_status_bar(f"activity ledger refused an entry: {exc}")
+            return
+        self._store_activity_ledger(updated)
+
+    def mark_activity_seen_now(self, epoch: float | None = None) -> None:
+        """Opening the dropdown is the visit that clears "since you left"."""
+        ledger = self.ensure_activity_ledger()
+        stamp = time.time() if epoch is None else float(epoch)
+        try:
+            self._store_activity_ledger(mark_activity_seen(ledger, stamp))
+        except ActivityValidationError as exc:
+            log_status_bar(f"activity ledger seen mark refused: {exc}")
+
+    def activity_entries_for_statuses(
+        self,
+        statuses,
+        kind: ActivityKind,
+    ) -> tuple[ActivityEntry, ...]:
+        """Build one ledger row per main session, named the way rows are.
+
+        `strip_session_short_id` is the pure half of the menu's own title
+        rule (display-name first, the short id dropped). `session_title_parts`
+        is not used here on purpose: it stats the filesystem looking for a
+        `.git` directory, which is not something a per-refresh recorder may
+        do.
+        """
+        entries: list[ActivityEntry] = []
+        for status in statuses:
+            if getattr(status, "is_subagent", False):
+                continue
+            label = safe_activity_text(
+                strip_session_short_id(status.display_name, status.session_id),
+                MAX_ACTIVITY_LABEL_LENGTH,
+            ) or safe_activity_text(status.agent_id, MAX_ACTIVITY_LABEL_LENGTH)
+            provider = safe_activity_text(status.provider, 32) or "unknown"
+            if not label:
+                continue
+            try:
+                entries.append(
+                    ActivityEntry(
+                        kind,
+                        status.updated_at.timestamp(),
+                        label,
+                        provider,
+                        safe_activity_text(status.agent_id, 256) or None,
+                    )
+                )
+            except (ActivityValidationError, OSError, OverflowError, ValueError):
+                continue
+        return tuple(entries)
+
+    def record_capacity_threshold_crossings(
+        self,
+        authorised,
+        *,
+        occurred_at: float,
+    ) -> tuple[ActivityEntry, ...]:
+        """Record ceilings the owner crossed while he was away.
+
+        Fed from `AuthorisedCapacity`, never from raw provider percentages:
+        `track_quota_thresholds` refuses those precisely because a drifted
+        payload rendered a 97%-used `Spark` allowance as the 5-hour ceiling.
+        Lanes the authority layer only FORGAVE (stale, last-known-good) are
+        skipped too -- an edge computed against a number the source can no
+        longer stand behind is not an edge.
+
+        This is a fact, not an alert. It lights nothing, sounds nothing, and
+        posts nothing; `quota_alerts_enabled` still gates every outbound
+        effect and stays untouched.
+        """
+        if authorised is None:
+            return ()
+        forgiven = {
+            name
+            for name, state in getattr(authorised, "freshness", ())
+            if state in FALLBACK_OBSERVATION_STATES
+        }
+        current: dict[str, float] = {}
+        labels: dict[str, tuple[str, str]] = {}
+        for lane in getattr(authorised, "lanes", ()):
+            remaining = lane.value.remaining
+            if remaining is None or lane.semantic_name in forgiven:
+                continue
+            provider = lane.key.source.provider_id
+            key = f"{provider}:{lane.semantic_name}"
+            current[key] = max(0.0, min(100.0, 100.0 - float(remaining)))
+            labels[key] = (provider, lane.semantic_name)
+        if not current:
+            return ()
+        previous = getattr(self, "_activity_quota_percents", {})
+        thresholds = signals_module.normalize_quota_thresholds(
+            getattr(self.settings, "quota_alert_thresholds", None)
+        )
+        crossings = signals_module.quota_crossings(previous, current, thresholds)
+        previous.update(current)
+        self._activity_quota_percents = previous
+        entries: list[ActivityEntry] = []
+        for key, threshold in crossings:
+            provider, semantic_name = labels[key]
+            label = safe_activity_text(
+                f"{provider_label(provider)} {semantic_name}",
+                MAX_ACTIVITY_LABEL_LENGTH,
+            )
+            if not label:
+                continue
+            try:
+                entries.append(
+                    ActivityEntry(
+                        ActivityKind.THRESHOLD_CROSSED,
+                        max(0.0, float(occurred_at)),
+                        label,
+                        safe_activity_text(provider, 32) or "unknown",
+                        None,
+                        f"{threshold:g}%",
+                    )
+                )
+            except (ActivityValidationError, ValueError):
+                continue
+        return tuple(entries)
+
     def track_completions(self, statuses, *, operator_events=()) -> None:
         """Detect completion transitions once and route each channel."""
         statuses = tuple(statuses or ())
@@ -5600,10 +5913,36 @@ class StatusBarController(NSObject):
             agent_id: status.mode for agent_id, status in statuses_by_id.items()
         }
         self.last_agent_modes = current_modes
+        observed_at = datetime.now(timezone.utc)
         batch = detect_completion_batch(
             previous_modes,
             tuple(statuses_by_id.values()),
-            datetime.now(timezone.utc),
+            observed_at,
+        )
+        # The ledger records BEFORE the early return below: an ask and an
+        # error are news whether or not anything completed on the same tick,
+        # and this is the one place that still holds the previous modes.
+        self.record_activity_entries(
+            (
+                *self.activity_entries_for_statuses(
+                    batch.statuses,
+                    ActivityKind.COMPLETED,
+                ),
+                *(
+                    entry
+                    for status in detect_attention_transitions(
+                        previous_modes,
+                        tuple(statuses_by_id.values()),
+                        observed_at,
+                    )
+                    for entry in self.activity_entries_for_statuses(
+                        (status,),
+                        ActivityKind.ASKED
+                        if status.mode == AgentMode.WAITING_FOR_INPUT
+                        else ActivityKind.BLOCKED,
+                    )
+                ),
+            )
         )
         if not batch:
             return
@@ -5662,11 +6001,17 @@ class StatusBarController(NSObject):
         if not self.settings.completion_sweep_enabled:
             return
 
+        # The burst budget owns both halves of this: whether the sweep
+        # may fire at all (courtesy -- held by a Focus or a Quiet Hour)
+        # and how long it claims the bar (exactly `alert_burst` sweeps
+        # at a cadence the 2Hz law permits). Refused means the moment
+        # passes unmarked, not deferred: the transition has already been
+        # consumed above, so a Focus ending later must not replay it.
+        hold = self.interrupt_hold_seconds(signals_module.SIGNAL_COMPLETION)
+        if hold is None:
+            return
         visual_status = batch.statuses[0]
         self.completion_sweep_color = completion_color(visual_status)
-        hold = signals_module.signal_hold_seconds(
-            self.settings.signal_style(signals_module.SIGNAL_COMPLETION)
-        )
         self.completion_sweep_until = time.monotonic() + hold
         # The Exhale: when the LAST working session just finished and
         # nothing needs you, the bar takes one slow warm breath after
@@ -5753,25 +6098,90 @@ class StatusBarController(NSObject):
     def active_focus_policy(self) -> str:
         """Story #12: the strictest per-Focus signal policy among the
         Focus modes active right now -- "silent" beats "asks_only" beats
-        "all". Absent keys mean "all"; no Focus active means "all"."""
+        "all". Absent keys mean "all"; no Focus active means "all".
+
+        This only ever makes things STRICTER. Any active Focus already
+        holds the courtesy signals (that is the interrupt budget's law,
+        not this dial); what "silent" adds on top is hushing the
+        escalation CHIME, the one critical effect a Focus may reach --
+        and even then the light and the takeover still tell the story.
+        """
         policy_map = self.settings.focus_signal_policy
         if not policy_map:
-            return "all"
-        ranking = {"all": 0, "asks_only": 1, "silent": 2}
-        best = "all"
+            return signals_module.FOCUS_POLICY_ALL
+        ranking = {
+            policy: rank
+            for rank, policy in enumerate(signals_module.FOCUS_SIGNAL_POLICIES)
+        }
+        best = signals_module.FOCUS_POLICY_ALL
         for identifier in self.active_focus_ids_cached():
-            candidate = policy_map.get(identifier, "all")
+            candidate = policy_map.get(identifier, signals_module.FOCUS_POLICY_ALL)
             if ranking.get(candidate, 0) > ranking[best]:
                 best = candidate
         return best
 
+    def focus_is_active(self) -> bool:
+        """Is a macOS Focus on right now? Unreadable (no Full Disk
+        Access) reads as "no Focus", the same fail-safe every other
+        Focus caller in this file takes."""
+        return bool(self.active_focus_ids_cached())
+
+    def interrupt_budget(self) -> signals_module.InterruptBudget:
+        """What this machine currently permits, as one value. The three
+        inputs the law needs: how loud a courtesy burst may be, whether
+        a Focus is on, and whether the owner snoozed by hand."""
+        return signals_module.InterruptBudget(
+            burst=self.settings.alert_burst,
+            focus_active=self.focus_is_active(),
+            focus_policy=self.active_focus_policy(),
+            quiet_hour=self.quiet_active(),
+        )
+
+    def interrupt_grant(self, kind: str) -> signals_module.InterruptGrant:
+        """THE gate. Every interrupt this app raises -- an LED claim, a
+        burst, the escalation chime, a completion banner -- comes
+        through here, so the law lives with the budget instead of being
+        re-derived at each effect site.
+
+        The style is passed in when the kind has one, so the grant can
+        report the cadence it actually permits (never above 2Hz).
+        """
+        return signals_module.grant_interrupt(
+            kind,
+            budget=self.interrupt_budget(),
+            style=(
+                self.settings.signal_style(kind)
+                if kind in signals_module.DEFAULT_SIGNAL_STYLES
+                else None
+            ),
+        )
+
+    def may_interrupt(self, kind: str) -> bool:
+        """Boolean form of the gate, for the display-claim predicates."""
+        return self.interrupt_grant(kind).allowed
+
+    def interrupt_hold_seconds(self, kind: str) -> float | None:
+        """How long a granted burst of `kind` may claim a surface, or
+        None when the budget refuses it outright. Callers that set a
+        `*_until` deadline ask this instead of computing a hold, so the
+        "burst of exactly three" arithmetic exists in one place."""
+        grant = self.interrupt_grant(kind)
+        return grant.hold_seconds if grant.allowed else None
+
+    def budgeted_signal_style(self, kind: str):
+        """The style this signal may actually PLAY at: the user's
+        configured style with the interrupt budget's 2Hz floor applied.
+        Every render site that puts a signal on a surface goes through
+        here rather than reading settings.signal_style directly."""
+        return signals_module.budgeted_style(self.settings.signal_style(kind))
+
     def courtesy_signals_held(self) -> bool:
-        """Quiet Hour OR an active Focus with a non-"all" policy: the
-        courtesy glows (celebration, notification, quota, calendar,
-        reminders) stay quiet. Hard asks and weather still break
-        through -- only a "silent" policy hushes the escalation chime,
-        and even that never hides the ask itself."""
-        return self.quiet_active() or self.active_focus_policy() != "all"
+        """Are the courtesy glows (celebration, notification, quota,
+        calendar, reminders) held right now? Derived from the one
+        budget rather than deciding anything itself -- completion is
+        the representative courtesy kind, and weather is deliberately
+        NOT (it is the one kind Quiet Hour still lets through)."""
+        return not self.may_interrupt(signals_module.SIGNAL_COMPLETION)
 
     @objc.IBAction
     def toggleQuietHour_(self, _sender):
@@ -5952,8 +6362,12 @@ class StatusBarController(NSObject):
             self.escalation_chimed = True
             # Story #12: a "silent" Focus policy hushes the sound but
             # latches the chime stage normally -- the light, menu-bar
-            # takeover and webhook still tell the story.
-            if self.active_focus_policy() != "silent":
+            # takeover and webhook still tell the story. The budget
+            # decides this, not the effect site: escalation is CRITICAL,
+            # so an ordinary Focus never reaches it, and even "silent"
+            # only takes the sound.
+            audible = self.interrupt_grant(signals_module.INTERRUPT_ESCALATION).audible
+            if audible:
                 try:
                     from AppKit import NSSound
 
@@ -5962,7 +6376,7 @@ class StatusBarController(NSObject):
                         sound.play()
                 except Exception:
                     pass
-            if self.active_focus_policy() != "silent":
+            if audible:
                 state = getattr(self, "current_operator_state", None)
                 if type(state) is CanonicalOperatorState:
                     request = next(
@@ -6184,11 +6598,16 @@ class StatusBarController(NSObject):
         return True
 
     def post_completion_notification(self, status) -> None:
-        """Deliver one content-free banner for an exact canonical edge."""
+        """Deliver one content-free banner for an exact canonical edge.
+
+        A banner is an interrupt like any other, so it asks the same
+        gate the LED claims do -- a completion is courtesy, and courtesy
+        does not reach the owner during a Focus.
+        """
         if (
             status is None
             or not self.settings.completion_notification_enabled
-            or self.courtesy_signals_held()
+            or not self.may_interrupt(signals_module.SIGNAL_COMPLETION)
         ):
             return
         work_key = getattr(status, "work_key", None)
@@ -6335,7 +6754,107 @@ class StatusBarController(NSObject):
         self._status_emphasis_accessibility_generation = (
             self._accessibility_generation
         )
+        self.note_glance_decision(glance)
         return True
+
+    def note_glance_decision(self, glance: ResolvedGlance) -> bool:
+        """Stamp WHEN the light's decision changed, not when it repainted.
+
+        Refresh runs every 15 seconds and rewrites the same program; a
+        panel that reported those as changes would answer "just now"
+        forever and never help anyone.
+        """
+        if type(glance) is not ResolvedGlance:
+            return False
+        key = (glance.semantic.value, glance.override_reason.value)
+        if key == self._glance_decision_key:
+            return False
+        self._glance_decision_key = key
+        self._glance_changed_at_epoch = time.time()
+        self._glance_changed_at_monotonic = time.monotonic()
+        return True
+
+    def displayed_status_state(self) -> StatusBarState:
+        """current_state, with Idle told apart from its two impostors."""
+        return displayed_state(
+            self.current_state,
+            getattr(self, "current_intake_report", None),
+        )
+
+    def refresh_intake_report(self, *, force: bool = False) -> IntakeReport | None:
+        """Re-judge what SidePulse can hear, at most every 30 seconds.
+
+        The installation half is a filesystem probe and is cached; the
+        delivery half comes free from canonical state and is recomputed
+        every call, so a hook that starts landing again clears the alarm
+        on the next refresh rather than half a minute later.
+        """
+        now = time.monotonic()
+        probes = self._intake_probes
+        if force or probes is None or now - self._intake_probed_at > 30.0:
+            try:
+                probes = probe_providers()
+            except Exception:
+                probes = probes or ()
+            self._intake_probes = probes
+            self._intake_probed_at = now
+        if not probes:
+            self.current_intake_report = None
+            return None
+        try:
+            report = build_intake_report(
+                probes,
+                accepted_by_provider=accepted_epochs_by_provider(
+                    getattr(self, "current_operator_state", None)
+                ),
+                now_epoch=time.time(),
+            )
+        except Exception:
+            return self.current_intake_report
+        self.current_intake_report = report
+        return report
+
+    def current_decision_trace(self):
+        """The whole answer to "why is it doing that", as typed facts."""
+        glance = self._current_resolved_glance
+        colors = getattr(getattr(self, "settings", None), "colors", None)
+        color = None
+        light_state = "unknown"
+        if type(glance) is ResolvedGlance:
+            light_state = display_state_for_resolved_glance(glance).value
+            if type(colors) is ColorSettings:
+                color = color_for_resolved_glance(colors, glance)
+        age = None
+        if self._glance_changed_at_monotonic is not None:
+            age = max(0.0, time.monotonic() - self._glance_changed_at_monotonic)
+        return build_decision_trace(
+            glance,
+            light_state=light_state,
+            color=color,
+            driver=self.light_driver_description(),
+            changed_at_epoch=self._glance_changed_at_epoch,
+            changed_age_seconds=age,
+            intake=getattr(self, "current_intake_report", None),
+        )
+
+    def light_driver_description(self) -> str | None:
+        """Which agent the light is about, by the name already on screen."""
+        projection = getattr(self, "current_attention_projection", None)
+        if type(projection) is not AttentionProjection:
+            return None
+        if projection.actionable_attention:
+            row = projection.actionable_attention[0]
+            return f"{row.display_name} — waiting on you"
+        rows = tuple(
+            row
+            for row in projection.visible_rows
+            if not row.is_subagent and row.lifecycle_mode is LifecycleMode.ACTIVE
+        )
+        if not rows:
+            return None
+        if len(rows) == 1:
+            return f"{rows[0].display_name} — working"
+        return f"{rows[0].display_name} — working, and {len(rows) - 1} more"
 
     def _discard_status_emphasis_plan(self) -> None:
         glance = self._current_resolved_glance
@@ -6369,16 +6888,28 @@ class StatusBarController(NSObject):
             glance,
             finite_cues=finite_cues,
         )
-        button.setTitle_(f" {text.value}")
-        for selector, value in (
+        # "No agents need attention" is true of a Mac with no hooks
+        # installed and of a Mac whose hooks all fail -- and it is the
+        # last thing either of them should be told. When the display
+        # state disagrees with Idle, the disagreement wins here too;
+        # otherwise this call would repaint the reassuring version over
+        # the honest one set by set_status().
+        shown = self.displayed_status_state()
+        value = shown.label if shown is not self.current_state else text.value
+        button.setTitle_(f" {value}")
+        for selector, item in (
             ("setAccessibilityLabel_", text.label),
-            ("setAccessibilityValue_", text.value),
+            ("setAccessibilityValue_", value),
             ("setAccessibilityHelp_", text.help),
         ):
             setter = getattr(button, selector, None)
             if callable(setter):
-                setter(value)
-        button.setToolTip_(text.help)
+                setter(item)
+        button.setToolTip_(
+            text.help
+            if shown is self.current_state
+            else f"SidePulse Agent Monitor: {shown.label}"
+        )
 
     def set_status(
         self, state: StatusBarState, *, ask_count: int = 0, done_badge: bool = False
@@ -6417,12 +6948,21 @@ class StatusBarController(NSObject):
         button = self.status_item.button()
         if button is None:
             return
+        # Idle is the only state with no evidence of its own, so it is the
+        # only one that can be a lie. shown replaces it -- and only it --
+        # when SidePulse knows it is unconnected or hearing nothing.
+        shown = self.displayed_status_state()
         # The badge: with several sessions waiting at once, the count is
         # the difference between "check sometime" and "two are stuck".
         if getattr(self.settings, "menu_bar_label_enabled", False):
             title = (
-                f" {state.label} ({ask_count})" if ask_count >= 2 else f" {state.label}"
+                f" {shown.label} ({ask_count})" if ask_count >= 2 else f" {shown.label}"
             )
+        elif shown is not state:
+            # Icon-only is a preference about a working monitor. "I cannot
+            # hear your agents" is not status, it is a broken product, and
+            # it gets words whether or not the label is switched on.
+            title = f" {shown.label}"
         else:
             # Icon-only, like native menu extras -- the symbol carries the
             # state; text appears only when it MEANS something (a count).
@@ -6435,11 +6975,15 @@ class StatusBarController(NSObject):
         if (
             type(glance) is ResolvedGlance
             and type(operator_state) is CanonicalOperatorState
+            and shown is state
         ):
             title = f" {status_item_accessibility(operator_state, glance, finite_cues=self._status_finite_cues).value}"
         button.setTitle_(title)
-        button.setImage_(image_for_symbol(state.symbol, state.label))
-        button.setToolTip_(f"SidePulse Agent Monitor: {state.label}")
+        button.setImage_(
+            image_for_symbol(shown.symbol, shown.label)
+            or image_for_symbol(state.symbol, state.label)
+        )
+        button.setToolTip_(f"SidePulse Agent Monitor: {shown.label}")
         if type(glance) is ResolvedGlance:
             self._apply_status_accessibility_text(
                 glance,
@@ -8788,6 +9332,10 @@ class StatusBarController(NSObject):
         if not payload.get("changed"):
             action = "already installed" if install else "already removed"
         self.set_settings_message(f"{provider.title()} hooks {action}.")
+        # The user just changed the exact fact the intake probe caches.
+        # Waiting out its TTL would leave "Not set up" on screen for half
+        # a minute after they connected an agent.
+        self.refresh_intake_report(force=True)
         self.reload_monitor()
         self.refresh_settings_window()
         self.refresh_setup_window()
@@ -9620,31 +10168,51 @@ class StatusBarController(NSObject):
                 ),
             ),
             # Opt-in stage-3 takeover outranks everything: the user
-            # explicitly chose "don't let me miss this".
-            (LED_DISPLAY_ESCALATION, self.escalation_takeover_active),
+            # explicitly chose "don't let me miss this". Critical, so
+            # the budget lets it through a Focus.
+            (
+                LED_DISPLAY_ESCALATION,
+                lambda: (
+                    self.may_interrupt(signals_module.INTERRUPT_ESCALATION)
+                    and self.escalation_takeover_active()
+                ),
+            ),
             # A Severe/Extreme weather warning outranks every routine
             # signal -- it is the definition of "emergency". But NWS
             # warnings run for hours, and an agent blocked on YOU is
             # the one signal this app exists for: while a hard ask is
             # live, the ask renders and the weather heartbeat waits.
+            # Courtesy against a Focus, though: the owner named weather
+            # in the "do not blink at me in a meeting" list. Quiet Hour
+            # still lets it through (QUIET_HOUR_EXEMPT_KINDS).
             (
                 LED_DISPLAY_WEATHER,
                 lambda: (
                     self.settings.weather_alerts_enabled
+                    and self.may_interrupt(signals_module.SIGNAL_WEATHER)
                     and self.weather_alert_active
                     and not self.hard_ask_renders_on_device(device)
                 ),
             ),
-            (LED_DISPLAY_LOW_BATTERY, lambda: self.low_power_active(battery_snapshot)),
+            (
+                LED_DISPLAY_LOW_BATTERY,
+                lambda: (
+                    self.may_interrupt(signals_module.SIGNAL_LOW_BATTERY)
+                    and self.low_power_active(battery_snapshot)
+                ),
+            ),
             (
                 LED_DISPLAY_FAILURE,
-                lambda: self.active_failure_signal(now=now) is not None,
+                lambda: (
+                    self.may_interrupt(signals_module.INTERRUPT_FAILURE)
+                    and self.active_failure_signal(now=now) is not None
+                ),
             ),
             (
                 LED_DISPLAY_QUOTA,
                 lambda: (
                     self.settings.quota_alerts_enabled
-                    and not self.courtesy_signals_held()
+                    and self.may_interrupt(signals_module.SIGNAL_QUOTA)
                     and now < self.quota_blink_until
                 ),
             ),
@@ -9652,7 +10220,7 @@ class StatusBarController(NSObject):
                 LED_DISPLAY_REMINDERS,
                 lambda: (
                     self.settings.reminder_alerts_enabled
-                    and not self.courtesy_signals_held()
+                    and self.may_interrupt(signals_module.SIGNAL_REMINDERS)
                     and now < self.reminders_glow_until
                 ),
             ),
@@ -9660,7 +10228,7 @@ class StatusBarController(NSObject):
                 LED_DISPLAY_COMPLETION,
                 lambda: (
                     self.settings.completion_sweep_enabled
-                    and not self.courtesy_signals_held()
+                    and self.may_interrupt(signals_module.SIGNAL_COMPLETION)
                     and now < getattr(self, "completion_sweep_until", 0.0)
                 ),
             ),
@@ -9672,7 +10240,7 @@ class StatusBarController(NSObject):
                 LED_DISPLAY_ALL_CLEAR,
                 lambda: (
                     self.settings.completion_sweep_enabled
-                    and not self.courtesy_signals_held()
+                    and self.may_interrupt(signals_module.SIGNAL_COMPLETION)
                     and now >= getattr(self, "completion_sweep_until", 0.0)
                     and now < getattr(self, "all_clear_until", 0.0)
                 ),
@@ -9681,7 +10249,7 @@ class StatusBarController(NSObject):
                 LED_DISPLAY_CALENDAR,
                 lambda: (
                     self.settings.calendar_alerts_enabled
-                    and not self.courtesy_signals_held()
+                    and self.may_interrupt(signals_module.SIGNAL_CALENDAR)
                     and now < self.calendar_glow_until
                 ),
             ),
@@ -9994,7 +10562,7 @@ class StatusBarController(NSObject):
         elif display == LED_DISPLAY_COMPLETION:
             _set_virtual(
                 style_to_program(
-                    self.settings.signal_style(signals_module.SIGNAL_COMPLETION),
+                    self.budgeted_signal_style(signals_module.SIGNAL_COMPLETION),
                     brightness,
                     color=getattr(self, "completion_sweep_color", None),
                 )
@@ -10002,7 +10570,7 @@ class StatusBarController(NSObject):
         elif display == LED_DISPLAY_WEATHER:
             _set_virtual(
                 style_to_program(
-                    self.settings.signal_style(signals_module.SIGNAL_WEATHER), brightness
+                    self.budgeted_signal_style(signals_module.SIGNAL_WEATHER), brightness
                 )
             )
         elif display == LED_DISPLAY_PEEK:
@@ -10014,7 +10582,7 @@ class StatusBarController(NSObject):
         elif display == LED_DISPLAY_QUOTA:
             _set_virtual(
                 style_to_program(
-                    self.settings.signal_style(signals_module.SIGNAL_QUOTA),
+                    self.budgeted_signal_style(signals_module.SIGNAL_QUOTA),
                     brightness,
                     color=self.quota_blink_color,
                 )
@@ -10022,19 +10590,19 @@ class StatusBarController(NSObject):
         elif display == LED_DISPLAY_REMINDERS:
             _set_virtual(
                 style_to_program(
-                    self.settings.signal_style(signals_module.SIGNAL_REMINDERS), brightness
+                    self.budgeted_signal_style(signals_module.SIGNAL_REMINDERS), brightness
                 )
             )
         elif display == LED_DISPLAY_CALENDAR:
             _set_virtual(
                 style_to_program(
-                    self.settings.signal_style(signals_module.SIGNAL_CALENDAR), brightness
+                    self.budgeted_signal_style(signals_module.SIGNAL_CALENDAR), brightness
                 )
             )
         elif display == LED_DISPLAY_LOW_BATTERY:
             _set_virtual(
                 style_to_program(
-                    self.settings.signal_style(signals_module.SIGNAL_LOW_BATTERY), brightness
+                    self.budgeted_signal_style(signals_module.SIGNAL_LOW_BATTERY), brightness
                 )
             )
         elif display == LED_DISPLAY_BATTERY and battery_snapshot is not None:
@@ -10738,9 +11306,13 @@ class StatusBarController(NSObject):
                 -MAX_REMINDER_OBSERVATION_IDENTIFIERS:
             ]
         )
-        hold = signals_module.signal_hold_seconds(
-            self.settings.signal_style(signals_module.SIGNAL_REMINDERS)
-        )
+        # Refused (a Focus is on, or the owner snoozed) means this
+        # reminder passes unmarked. The watermark above is already
+        # advanced on purpose: the glow is a moment, and a moment the
+        # owner was in a meeting for does not get replayed afterwards.
+        hold = self.interrupt_hold_seconds(signals_module.SIGNAL_REMINDERS)
+        if hold is None:
+            return
         self.reminders_glow_until = now + hold
         self._reconcile_current_presentation_inputs()
         self.refresh_(None)
@@ -12302,8 +12874,11 @@ class StatusBarController(NSObject):
 
         def styled(signal_key, *, color=None):
             def factory(brightness, led_count):
+                # budgeted_signal_style, not settings.signal_style: this
+                # is a program about to PLAY at someone, so the interrupt
+                # budget's 2Hz floor applies.
                 return style_to_program(
-                    self.settings.signal_style(signal_key),
+                    self.budgeted_signal_style(signal_key),
                     brightness,
                     color=color() if callable(color) else color,
                     led_count=led_count,
@@ -13460,8 +14035,16 @@ def menu_content_signature(snapshot, state, target) -> tuple:
         ),
         tuple(sorted(getattr(target, "cleared_session_ids", set()))),
         tuple(sorted(u.agent_id for u in unseen_completions(snapshot, target))),
+        # Both halves, not just the revision: closing the menu changes only
+        # the seen watermark, and without it the "Since you left" heading
+        # would still read the old count the next time the menu was opened.
+        getattr(target, "_activity_ledger_revision", 0),
+        round(getattr(target, "activity_ledger", ActivityLedger()).last_seen_epoch, 3),
         getattr(target.settings, "tips_enabled", True),
         len(getattr(target.settings, "dismissed_tips", ()) or ()),
+        # First-run honesty rows: "you are not set up" must disappear the
+        # moment the user IS set up, not when the 30s valve below fires.
+        intake_content_signature(getattr(target, "current_intake_report", None)),
         int(time.monotonic() // 30),
     )
 
@@ -13663,6 +14246,128 @@ def build_agent_mailbox_menu_item(snapshot, target) -> NSMenuItem:
         mailbox_menu.addItem_(shelf_item)
     summary.setSubmenu_(mailbox_menu)
     return summary
+
+
+MAX_ACTIVITY_MENU_ROWS = 8
+
+
+def _activity_statuses_by_agent(snapshot) -> dict[str, AgentStatus]:
+    """Main sessions the dropdown could still open, newest row per agent.
+
+    Both lists, for the same reason `unseen_completions` reads both: with any
+    session active the collector demotes every completed one to
+    `stale_statuses` instantly, and a finished session is exactly the row a
+    ledger entry wants to click through to.
+    """
+    rows: dict[str, AgentStatus] = {}
+    for status in (
+        *getattr(snapshot, "statuses", ()),
+        *getattr(snapshot, "stale_statuses", ()),
+    ):
+        if status.is_subagent or not status.agent_id:
+            continue
+        current = rows.get(status.agent_id)
+        if current is None or status.updated_at >= current.updated_at:
+            rows[status.agent_id] = status
+    return rows
+
+
+def _activity_boundary_text(ledger: ActivityLedger, now_epoch: float) -> str:
+    """Say which window is being shown, rather than letting the owner guess."""
+    if ledger.last_seen_epoch <= 0.0:
+        return "Menu not opened yet · showing everything kept"
+    age = relative_age_label(max(0.0, float(now_epoch) - ledger.last_seen_epoch))
+    if age == "just now":
+        return "Menu last opened just now"
+    return f"Menu last opened {age}"
+
+
+def build_activity_ledger_menu_item(snapshot, target) -> NSMenuItem | None:
+    """The "what did I miss" section. None when there is nothing to say.
+
+    Collapsed by construction: one row in the dropdown, everything else in a
+    submenu, and no row at all when the ledger is empty. A permanently
+    present "Since you left · 0" is the same cry-wolf failure as a capacity
+    card that says "unavailable" when the owner switched it off.
+    """
+    # `callable(getattr(...))`, the way this menu already treats
+    # `active_focus_summary`: several tests build the dropdown against a
+    # stand-in target, and a section that answers "what did I miss" must
+    # never be the reason the whole menu fails to build.
+    restore = getattr(target, "ensure_activity_ledger", None)
+    if not callable(restore):
+        return None
+    ledger = restore()
+    if type(ledger) is not ActivityLedger or not ledger.entries:
+        return None
+    now_epoch = time.time()
+    unseen = ledger.unseen
+    seen = tuple(entry for entry in ledger.entries if entry not in unseen)
+    title = (
+        f"Since you left · {len(unseen)}"
+        if unseen
+        else "Recent activity"
+    )
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
+    submenu = NSMenu.alloc().init()
+    submenu.setAutoenablesItems_(False)
+    submenu.addItem_(disabled_menu_item(_activity_boundary_text(ledger, now_epoch)))
+    submenu.addItem_(NSMenuItem.separatorItem())
+
+    statuses_by_agent = _activity_statuses_by_agent(snapshot)
+    visible_unseen = unseen[:MAX_ACTIVITY_MENU_ROWS]
+    for entry in visible_unseen:
+        submenu.addItem_(
+            _activity_row_item(entry, now_epoch, statuses_by_agent, target)
+        )
+    remaining = MAX_ACTIVITY_MENU_ROWS - len(visible_unseen)
+    visible_seen = seen[:remaining] if remaining > 0 else ()
+    if visible_seen:
+        if visible_unseen:
+            submenu.addItem_(NSMenuItem.separatorItem())
+            submenu.addItem_(disabled_menu_item("Earlier"))
+        for entry in visible_seen:
+            submenu.addItem_(
+                _activity_row_item(entry, now_epoch, statuses_by_agent, target)
+            )
+    hidden = len(ledger.entries) - len(visible_unseen) - len(visible_seen)
+    if hidden > 0:
+        submenu.addItem_(disabled_menu_item(f"{hidden} more"))
+    item.setSubmenu_(submenu)
+    return item
+
+
+def _activity_row_item(
+    entry: ActivityEntry,
+    now_epoch: float,
+    statuses_by_agent: dict[str, AgentStatus],
+    target,
+) -> NSMenuItem:
+    """One ledger row, clickable when the session it names still exists.
+
+    Reuses `openSessionPrimary:` -- the exact action every other session row
+    in this dropdown already carries -- rather than inventing a second way to
+    reveal a session. A row whose session is gone stays visible and disabled:
+    it is still the answer to "what did I miss", it just has nothing left to
+    open.
+    """
+    text = activity_row_text(entry, now_epoch)
+    status = (
+        statuses_by_agent.get(entry.subject_id)
+        if entry.subject_id is not None
+        else None
+    )
+    if status is None:
+        return disabled_menu_item(text)
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        text,
+        "openSessionPrimary:",
+        "",
+    )
+    item.setTarget_(target)
+    item.setRepresentedObject_(status)
+    item.setEnabled_(True)
+    return item
 
 
 def _canonical_agent_browser_projection(
@@ -14007,6 +14712,43 @@ def _canonical_agent_root_snapshot(snapshot, target, *, menu=None):
     return tuple(states), items
 
 
+def add_intake_menu_items(menu: NSMenu, target) -> None:
+    """The dropdown half of first-run honesty: the fault, then the ledger.
+
+    Renders only what the controller already decided. A menu that probed
+    the filesystem itself would make every menu open pay for eight
+    detector reads, and would make this function's output depend on the
+    machine it runs on rather than on the report it is handed.
+    """
+    report = getattr(target, "current_intake_report", None)
+    if type(report) is not IntakeReport:
+        return
+    alert = intake_alert_title(report)
+    if alert:
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            alert,
+            "openSetup:",
+            "",
+        )
+        item.setTarget_(target)
+        menu.addItem_(item)
+    summary = last_heard_summary(report)
+    rows = last_heard_rows(report)
+    if summary and rows:
+        # A dead hook looks exactly like an idle agent until you can see
+        # WHEN each provider last spoke. One row per provider, freshest
+        # first, so the silent one sorts to the bottom where it shows.
+        parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(summary, None, "")
+        submenu = NSMenu.alloc().init()
+        submenu.setAutoenablesItems_(False)
+        for row in rows:
+            submenu.addItem_(disabled_menu_item(row))
+        parent.setSubmenu_(submenu)
+        menu.addItem_(parent)
+    if alert or (summary and rows):
+        menu.addItem_(NSMenuItem.separatorItem())
+
+
 def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> NSMenu:
     """The status-item dropdown. Glanceability rules: sessions first
     (the thing you opened the menu to check), no self-titled header (you
@@ -14030,6 +14772,10 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         action_error = getattr(target, "operator_action_error", None)
         if type(action_error) is str and action_error:
             menu.addItem_(disabled_menu_item(action_error))
+    # First-run honesty: an empty mailbox means one of three completely
+    # different things, and only one of them is "nothing to do". The other
+    # two get the same one click that fixes them.
+    add_intake_menu_items(menu, target)
     # An out-of-date hook cannot deliver live events. Say so where the
     # user already looks, with the one click that fixes it -- this
     # failure was invisible for an hour the first time it happened.
@@ -14044,6 +14790,13 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         stale_item.setTarget_(target)
         menu.addItem_(stale_item)
         menu.addItem_(NSMenuItem.separatorItem())
+    # Sessions answer "what is happening now"; this answers "what changed
+    # while I was gone". Directly under the sessions because it is the second
+    # question, never above them because it is not the first.
+    activity_item = build_activity_ledger_menu_item(snapshot, target)
+    if activity_item is not None:
+        menu.addItem_(NSMenuItem.separatorItem())
+        menu.addItem_(activity_item)
     statuses = recent_statuses(snapshot)
 
     focus_summary = (
@@ -14162,6 +14915,16 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         menu.addItem_(disabled_menu_item(f"Sleep warning: {target.closed_lid_awake.last_error}"))
 
     menu.addItem_(NSMenuItem.separatorItem())
+    # Every debugging session in this project began by reading a log the
+    # user cannot see. This is that log's conclusion, in words, one click
+    # from the light it explains.
+    why = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        WHY_PANEL_MENU_TITLE,
+        "openWhyPanel:",
+        "",
+    )
+    why.setTarget_(target)
+    menu.addItem_(why)
     setup = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         "Setup...",
         "openSetup:",
@@ -14406,6 +15169,42 @@ def _setup_toggle_row(title: str, help_text: str | None = None):
     cluster.addArrangedSubview_(switch)
     row = native_ui.make_row(title, cluster, help_text=help_text)
     return row, switch, status
+
+
+def build_why_panel_window(target: StatusBarController) -> NSWindow:
+    """A plain, selectable, monospaced readout of the current decision.
+
+    Deliberately not a designed pane: this is the thing you read when the
+    designed panes have already failed to explain themselves, and it must
+    be copyable into a bug report in one gesture.
+    """
+    width, height = 620, 660
+    style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+    window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        ((0, 0), (width, height)),
+        style,
+        NSBackingStoreBuffered,
+        False,
+    )
+    window.setTitle_(WHY_PANEL_TITLE)
+    window.setReleasedWhenClosed_(False)
+    window.center()
+
+    root = NSView.alloc().initWithFrame_(((0, 0), (width, height)))
+    window.setContentView_(root)
+    margin = 16
+    text_view = add_text_view(
+        root,
+        "",
+        margin,
+        margin,
+        width - 2 * margin,
+        height - 2 * margin,
+    )
+    text_view.setEditable_(False)
+    text_view.setSelectable_(True)
+    target.why_panel_text_view = text_view
+    return window
 
 
 def build_setup_window(target: StatusBarController) -> NSWindow:

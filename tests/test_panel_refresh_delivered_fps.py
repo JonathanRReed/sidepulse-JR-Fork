@@ -24,9 +24,13 @@ timer by an integer n cannot align it to a 144 Hz panel -- it only makes the
 same beat happen less often. So on the TIMER path the panel snap bought no
 vsync alignment and cost framerate, which is the definition of a bad trade.
 
-The DISPLAY_LINK path never had the problem: driver_callback_fps already IS the
-panel (floored at 60, capped at 120, matching what _install_display_link asks
-for), so quantising to the driver there is quantising to the panel.
+The DISPLAY_LINK path had a second, separate version of the same defect, which
+this file originally asserted as correct. `driver_callback_fps` did NOT return
+the panel: it returned `min(max(60, panel), 120)`, a clamp that is not a member
+of {panel/n} on any panel above 120 that is not a multiple of it. A 144 Hz panel
+was asked for 120, could only produce 144/2 = 72, and was assumed to be running
+at 120. See `test_display_link_panel_rate.py`; the rows below now carry the
+rate the link is really negotiated at.
 
 The tables below assert DELIVERED fps -- measured by driving the real
 presentation gate with real callbacks -- not the number the policy prints.
@@ -209,16 +213,19 @@ def test_the_fallback_timer_delivers_the_same_rate_on_every_panel(
 
 
 # The link is only chosen at thermal nominal on mains power, so one row per
-# panel. driver_fps is min(max(60, panel), 120) -- what _install_display_link
-# passes to CAFrameRateRangeMake.
+# panel. driver_fps is display_link_fps(panel) -- a rate out of {panel/n}, and
+# the exact number _install_display_link passes to CAFrameRateRangeMake.
 DISPLAY_LINK_TABLE = (
     # panel, negotiated driver, transition fps, resting breathe fps
     (60.0, 60.0, 60.0, 30.0),
     (90.0, 90.0, 45.0, 30.0),
     (100.0, 100.0, 50.0, 25.0),
     (120.0, 120.0, 60.0, 30.0),
-    (144.0, 120.0, 60.0, 30.0),
-    (165.0, 120.0, 60.0, 30.0),
+    # 144/3 and 165/3. These two rows used to read `120, 60.0, 30.0` -- a
+    # driver rate neither panel can produce, so the transition was really
+    # painted at 72 and 41.25 and the breathe at 24 and 27.5.
+    (144.0, 48.0, 48.0, 24.0),
+    (165.0, 55.0, 55.0, 27.5),
     (240.0, 120.0, 60.0, 30.0),
 )
 
@@ -235,9 +242,11 @@ def test_the_display_link_delivers_a_whole_fraction_of_what_it_negotiated(
     transition_fps: float,
     breathe_fps: float,
 ) -> None:
-    """Unchanged by the timer fix, and it must stay that way. The link's loss on
-    a 90/100 Hz panel is real physics -- that driver genuinely fires at 90/100
-    Hz -- not the composition defect the timer had."""
+    """The link's loss on a 90/100 Hz panel is real physics -- that driver
+    genuinely fires at 90/100 Hz -- not the composition defect the timer had.
+    On 144/165 Hz it was not physics: the driver was assumed to fire at a rate
+    the panel cannot emit, and the callbacks are now driven at the negotiated
+    rate because that is a rate which exists."""
     for gentle, expected in ((False, transition_fps), (True, breathe_fps)):
         schedule = choose_render_schedule(
             RenderEnvironment(),

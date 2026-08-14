@@ -543,9 +543,16 @@ def test_screen_bar_failed_observer_rollback_remains_owned_for_teardown_retry(mo
     assert not device._power_observers_installed
 
 
-@pytest.mark.parametrize(("maximum_fps", "expected"), [(60, 60), (120, 120), (144, 120)])
+@pytest.mark.parametrize(
+    ("maximum_fps", "negotiated", "cadence"),
+    # The rate asked for is one the panel can produce, so it is also the rate
+    # assumed afterwards. 144 used to ask for 120: there is no 144/n equal to
+    # 120, so the link settled at 72 and every number downstream was a fiction.
+    # 144/3 = 48 is a real scan rate and clears the 60 fps ceiling whole.
+    [(60, 60.0, 60.0), (120, 120.0, 60.0), (144, 48.0, 48.0)],
+)
 def test_screen_bar_driver_negotiates_target_clock_in_common_modes(
-    monkeypatch, maximum_fps: int, expected: int
+    monkeypatch, maximum_fps: int, negotiated: float, cadence: float
 ) -> None:
     """Catches active nominal output falling back to a timer despite display-link support."""
     device, view, run_loop, timers, virtual_device = _active_device(
@@ -556,10 +563,11 @@ def test_screen_bar_driver_negotiates_target_clock_in_common_modes(
 
     assert device.display_link is view.links[0]
     assert view.links[0].run_loop_modes == [(run_loop, virtual_device.NSRunLoopCommonModes)]
-    assert view.links[0].frame_ranges == [(60, expected, expected)]
+    assert view.links[0].frame_ranges == [(negotiated, negotiated, negotiated)]
+    assert device._render_schedule.driver_fps == negotiated
     assert device.timer is None
     assert timers.created == []
-    assert view.sample_fps == [virtual_device.ACTIVE_RENDER_FPS]
+    assert view.sample_fps == [cadence]
 
 
 def test_screen_bar_display_link_callback_samples_and_invalidates_once(monkeypatch) -> None:
@@ -1028,7 +1036,14 @@ def test_screen_bar_late_callback_clamps_last_sample_without_waking_sampler(
 def test_screen_bar_screen_change_rebinds_one_driver_at_new_refresh_rate(
     monkeypatch,
 ) -> None:
-    """Catches a 60-to-120 Hz screen transition retaining the old display clock."""
+    """Catches a 60-to-120 Hz screen transition retaining the old display clock.
+
+    Both halves of the clock: the rate the link is registered at AND the rate
+    the schedule quantises against. The second half used to lag by up to five
+    seconds -- `_install_display_link` re-read NSScreen while the policy used
+    `_panel_refresh_hz`'s cache -- so the driver ran at 120 while the gate held
+    against a 60 Hz period and let every callback through.
+    """
     device, view, _run_loop, timers, virtual_device = _active_device(
         monkeypatch,
         maximum_fps=60,
@@ -1041,7 +1056,8 @@ def test_screen_bar_screen_change_rebinds_one_driver_at_new_refresh_rate(
 
     assert first.invalidated == 1
     assert device.display_link is view.links[1]
-    assert view.links[1].frame_ranges == [(60, 120, 120)]
+    assert view.links[1].frame_ranges == [(120.0, 120.0, 120.0)]
+    assert device._render_schedule.driver_fps == 120.0
     assert device.timer is None
     assert timers.created == []
 

@@ -15,7 +15,12 @@ from .capacity_calibration import (
 )
 from .colors import ColorSettings
 from .led_status import DEFAULT_CHANNEL_GAIN, normalize_channel_gain
-from .signals import DEFAULT_QUOTA_THRESHOLDS
+from .signals import (
+    DEFAULT_ALERT_BURST,
+    DEFAULT_QUOTA_THRESHOLDS,
+    FOCUS_SIGNAL_POLICIES,
+    normalize_alert_burst,
+)
 from .private_io import (
     atomic_private_write,
     ensure_private_directory,
@@ -389,6 +394,10 @@ class AgentMonitorSettings:
     subagent_asks_alert: bool = False
     # The owner's defaults: a nudge at 90, a real warning at 95.
     quota_alert_thresholds: tuple[float, ...] = DEFAULT_QUOTA_THRESHOLDS
+    # The interrupt budget's one dial: how many repetitions a COURTESY
+    # signal gets before it goes back to normal. Three, per the locked
+    # law. Critical signals ignore it -- they blink until dealt with.
+    alert_burst: int = DEFAULT_ALERT_BURST
     dismissed_tips: tuple[str, ...] = ()
     # Per-Focus dim rules, keyed by the Focus mode identifier (e.g.
     # "com.apple.donotdisturb.mode.default"): 1.0 = don't dim, 0.0 = LEDs
@@ -817,7 +826,7 @@ class AgentMonitorSettings:
         return replace(self, timebox_shortcuts=mapping)
 
     def with_focus_signal_policy(self, identifier: str, policy: str) -> AgentMonitorSettings:
-        if policy not in ("all", "asks_only", "silent"):
+        if policy not in FOCUS_SIGNAL_POLICIES:
             raise ValueError(f"unknown focus signal policy: {policy}")
         rules = dict(self.focus_signal_policy)
         if policy == "all":
@@ -891,6 +900,13 @@ class AgentMonitorSettings:
     def with_quota_alert_thresholds(self, thresholds) -> AgentMonitorSettings:
         del thresholds
         return replace(self, quota_alert_thresholds=DEFAULT_QUOTA_THRESHOLDS)
+
+    def with_alert_burst(self, burst: object) -> AgentMonitorSettings:
+        """Honours its argument: unlike the threshold effects above, the
+        burst budget is not a raw-provider-percentage route to the
+        hardware -- it only says how many times an already-authorised
+        courtesy signal may repeat."""
+        return replace(self, alert_burst=normalize_alert_burst(burst))
 
     def with_claude_plan_limits_enabled(self, enabled: bool) -> AgentMonitorSettings:
         # Honours its argument now that the consumer policy declares real
@@ -1296,6 +1312,7 @@ class AgentMonitorSettings:
                 key: list(pair) for key, pair in self.timebox_shortcuts.items()
             },
             "subagent_asks_alert": self.subagent_asks_alert,
+            "alert_burst": normalize_alert_burst(self.alert_burst),
             "dismissed_tips": list(self.dismissed_tips),
             "focus_dim_rules": dict(sorted(self.focus_dim_rules.items())),
         }
@@ -1655,6 +1672,11 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             else 7
         ),
         quota_alert_thresholds=DEFAULT_QUOTA_THRESHOLDS,
+        alert_burst=(
+            normalize_alert_burst(data.get("alert_burst"))
+            if "alert_burst" in data
+            else DEFAULT_ALERT_BURST
+        ),
         dismissed_tips=tuple(
             str(item)
             for item in (data.get("dismissed_tips") or [])

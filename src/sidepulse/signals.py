@@ -199,8 +199,9 @@ def escalation_stage(
 
 # The owner's numbers: a nudge at 90, a real warning at 95. Edge detection
 # itself already lives in quota_crossings/quota_resets below -- these are the
-# thresholds it is fed, and the burst budget the signal layer spends when one
-# fires ("a couple of times means a burst of three").
+# thresholds it is fed, and the burst budget spent when one fires ("a couple
+# of times means a burst of three"). The budget that SPENDS it is the
+# interrupt budget further down; DEFAULT_ALERT_BURST is its default.
 DEFAULT_QUOTA_THRESHOLDS: tuple[float, ...] = (90.0, 95.0)
 DEFAULT_ALERT_BURST = 3
 MAX_QUOTA_THRESHOLDS = 4
@@ -271,13 +272,241 @@ def quota_resets(
     return reset
 
 
-def signal_hold_seconds(style: SignalStyle) -> float:
-    """How long a MOMENT signal (notification/reminders) claims the bar
-    for one firing: the pattern's full play time plus a settle beat."""
-    style = style.normalized()
-    if style.pattern == PATTERN_BLINK:
-        return 3.0 * style.speed_seconds + 0.4
-    if style.pattern == PATTERN_DOUBLE_BLINK:
-        return 2.0 * style.speed_seconds + 0.4
-    # Continuous patterns hold for a few breaths.
-    return max(2.0, 2.0 * style.speed_seconds) + 0.4
+# --- The interrupt budget ---------------------------------------------
+#
+# ONE gate. Every request to interrupt the owner -- an LED claim, a
+# burst, the escalation chime -- passes through grant_interrupt() and
+# gets back an InterruptGrant saying whether it may fire, for how many
+# repetitions, at what cadence, and whether it may make a sound.
+#
+# The owner's law, stated once here instead of re-derived at each
+# effect site:
+#
+#   CRITICAL -- an agent blocked on you, a failed session, the
+#     ignored-ask takeover, a dying battery. Blinks until it is dealt
+#     with, and escalates THROUGH an active Focus. "I'm in a meeting"
+#     never means "let the thing that is blocked on me go dark".
+#
+#   COURTESY -- usage, weather, messages, completions, calendar,
+#     reminders. A burst of exactly `burst` repetitions, then back to
+#     normal -- and nothing at all while a Focus is on. That is the
+#     owner's sentence: "I'm in a meeting -- do not blink at me."
+#
+#   Neither class ever repeats faster than MAX_INTERRUPT_HZ.
+#
+# Focus is an INPUT here, not a dimming afterthought applied later:
+# focus_sync_scale_factor decides how bright a signal that already won
+# is, which is a different question from whether it may fire at all.
+INTERRUPT_CRITICAL = "critical"
+INTERRUPT_COURTESY = "courtesy"
+
+# Interrupt kinds. Most are the styled signals above; three are claims
+# that carry urgency but own no SignalStyle -- they render from the
+# agent colour language rather than from this catalogue.
+INTERRUPT_ASK = "ask"
+INTERRUPT_FAILURE = "failure"
+INTERRUPT_ESCALATION = "escalation"
+
+# The one table that says which rung a signal sits on. A kind with no
+# entry here is REFUSED: a signal added later that forgets to declare
+# itself does not get to blink at someone during a meeting by default.
+INTERRUPT_CLASS_BY_KIND: dict[str, str] = {
+    INTERRUPT_ASK: INTERRUPT_CRITICAL,
+    INTERRUPT_FAILURE: INTERRUPT_CRITICAL,
+    INTERRUPT_ESCALATION: INTERRUPT_CRITICAL,
+    SIGNAL_LOW_BATTERY: INTERRUPT_CRITICAL,
+    SIGNAL_QUOTA: INTERRUPT_COURTESY,
+    SIGNAL_WEATHER: INTERRUPT_COURTESY,
+    SIGNAL_NOTIFICATION: INTERRUPT_COURTESY,
+    SIGNAL_COMPLETION: INTERRUPT_COURTESY,
+    SIGNAL_CALENDAR: INTERRUPT_COURTESY,
+    SIGNAL_REMINDERS: INTERRUPT_COURTESY,
+}
+
+# Quiet Hour is the owner's own manual snooze and predates this budget.
+# It has always let a severe-weather warning through. Focus does NOT --
+# the owner named weather in the "must not escalate through Focus"
+# list. Both facts live in this table so the difference is a
+# declaration rather than an accident at one call site.
+QUIET_HOUR_EXEMPT_KINDS: frozenset[str] = frozenset({SIGNAL_WEATHER})
+
+# Per-Focus signal policies, strictest last. "silent" is the only one
+# that reaches a CRITICAL interrupt, and even then only its sound.
+FOCUS_POLICY_ALL = "all"
+FOCUS_POLICY_ASKS_ONLY = "asks_only"
+FOCUS_POLICY_SILENT = "silent"
+FOCUS_SIGNAL_POLICIES = (
+    FOCUS_POLICY_ALL,
+    FOCUS_POLICY_ASKS_ONLY,
+    FOCUS_POLICY_SILENT,
+)
+
+# "Nothing above 2Hz, ever." The style catalogue lets a speed be dialled
+# down to MIN_SPEED_SECONDS (0.1s = 10Hz) because a settings-pane preview
+# thumbnail is not an interrupt. Anything that INTERRUPTS the owner is
+# floored here instead.
+MAX_INTERRUPT_HZ = 2.0
+MIN_INTERRUPT_CYCLE_SECONDS = 1.0 / MAX_INTERRUPT_HZ
+# One settle beat after the last repetition, so a burst ends on dark
+# rather than being cut off mid-flash.
+INTERRUPT_SETTLE_SECONDS = 0.4
+
+# Why a request was granted or refused. Carried on the grant so a
+# refusal can be explained rather than merely observed.
+INTERRUPT_GRANTED = "granted"
+INTERRUPT_REFUSED_FOCUS = "focus"
+INTERRUPT_REFUSED_QUIET_HOUR = "quiet-hour"
+INTERRUPT_REFUSED_UNDECLARED = "undeclared-kind"
+
+
+@dataclass(frozen=True)
+class InterruptBudget:
+    """What the owner's environment permits right now.
+
+    Exactly the three things the law needs: how loud a courtesy burst
+    may be, whether a Focus is on, and whether the owner has snoozed by
+    hand. focus_policy is the per-Focus refinement (see
+    FOCUS_SIGNAL_POLICIES) and only ever makes things stricter.
+    """
+
+    burst: int = DEFAULT_ALERT_BURST
+    focus_active: bool = False
+    focus_policy: str = FOCUS_POLICY_ALL
+    quiet_hour: bool = False
+
+    def normalized(self) -> InterruptBudget:
+        return replace(
+            self,
+            burst=normalize_alert_burst(self.burst),
+            focus_active=bool(self.focus_active),
+            focus_policy=(
+                self.focus_policy
+                if self.focus_policy in FOCUS_SIGNAL_POLICIES
+                else FOCUS_POLICY_ALL
+            ),
+            quiet_hour=bool(self.quiet_hour),
+        )
+
+
+@dataclass(frozen=True)
+class InterruptGrant:
+    """The budget's answer to one request. `repetitions is None` means
+    "until it is dealt with" -- the critical class's whole point."""
+
+    kind: str
+    interrupt_class: str
+    allowed: bool
+    repetitions: int | None
+    cycle_seconds: float
+    hold_seconds: float | None
+    audible: bool
+    reason: str
+
+    @property
+    def blinks_until_dealt_with(self) -> bool:
+        return self.allowed and self.repetitions is None
+
+    @property
+    def hertz(self) -> float:
+        """How fast this grant actually repeats. Never above
+        MAX_INTERRUPT_HZ -- that is the law, and a test asserts it over
+        every kind at every speed the user can dial."""
+        return 1.0 / self.cycle_seconds
+
+
+def budgeted_style(style: SignalStyle) -> SignalStyle:
+    """The style a signal may actually PLAY at: the configured style
+    with the 2Hz floor applied. Same colour, same pattern, same
+    intensity -- only a cadence that would strobe is slowed."""
+    normalized = style.normalized()
+    return replace(
+        normalized,
+        speed_seconds=max(MIN_INTERRUPT_CYCLE_SECONDS, normalized.speed_seconds),
+    )
+
+
+def interrupt_class(kind: str) -> str | None:
+    """Which rung a kind sits on, or None if it never declared one."""
+    return INTERRUPT_CLASS_BY_KIND.get(kind)
+
+
+def grant_interrupt(
+    kind: str,
+    *,
+    budget: InterruptBudget | None = None,
+    style: SignalStyle | None = None,
+) -> InterruptGrant:
+    """THE enforcement point. Nothing interrupts the owner without an
+    allowed grant from here."""
+    permitted = (budget if isinstance(budget, InterruptBudget) else InterruptBudget()).normalized()
+    signal_class = INTERRUPT_CLASS_BY_KIND.get(kind)
+    cycle = (
+        budgeted_style(style).speed_seconds
+        if isinstance(style, SignalStyle)
+        else MIN_INTERRUPT_CYCLE_SECONDS
+    )
+
+    def refuse(reason: str) -> InterruptGrant:
+        # A refusal reports the COURTESY rung whatever it was asked
+        # about, including an undeclared kind: the least-privileged
+        # rung is what "we are not letting this through" means here.
+        return InterruptGrant(
+            kind=kind,
+            interrupt_class=INTERRUPT_COURTESY,
+            allowed=False,
+            repetitions=0,
+            cycle_seconds=cycle,
+            hold_seconds=0.0,
+            audible=False,
+            reason=reason,
+        )
+
+    if signal_class is None:
+        return refuse(INTERRUPT_REFUSED_UNDECLARED)
+
+    if signal_class == INTERRUPT_CRITICAL:
+        # Blocked and critical blink until dealt with, and go through a
+        # Focus. Only an explicit per-Focus "Silent" reaches them, and
+        # only to hush the SOUND -- never to hide the light.
+        return InterruptGrant(
+            kind=kind,
+            interrupt_class=INTERRUPT_CRITICAL,
+            allowed=True,
+            repetitions=None,
+            cycle_seconds=cycle,
+            hold_seconds=None,
+            audible=permitted.focus_policy != FOCUS_POLICY_SILENT,
+            reason=INTERRUPT_GRANTED,
+        )
+
+    if permitted.focus_active:
+        return refuse(INTERRUPT_REFUSED_FOCUS)
+    if permitted.quiet_hour and kind not in QUIET_HOUR_EXEMPT_KINDS:
+        return refuse(INTERRUPT_REFUSED_QUIET_HOUR)
+    return InterruptGrant(
+        kind=kind,
+        interrupt_class=INTERRUPT_COURTESY,
+        allowed=True,
+        repetitions=permitted.burst,
+        cycle_seconds=cycle,
+        hold_seconds=permitted.burst * cycle + INTERRUPT_SETTLE_SECONDS,
+        audible=False,
+        reason=INTERRUPT_GRANTED,
+    )
+
+
+def signal_hold_seconds(
+    style: SignalStyle,
+    *,
+    burst: int = DEFAULT_ALERT_BURST,
+) -> float:
+    """How long ONE burst of a moment signal claims the bar.
+
+    The burst budget decides this now -- exactly `burst` repetitions at
+    a cadence the 2Hz law permits, plus a settle beat -- instead of each
+    pattern carrying its own private count (a blink played 3, a
+    double-blink 2, and everything else held for "about two seconds",
+    which is a duration, not a burst). Same arithmetic as
+    grant_interrupt, for callers holding a style rather than a grant.
+    """
+    return normalize_alert_burst(burst) * budgeted_style(style).speed_seconds + INTERRUPT_SETTLE_SECONDS
