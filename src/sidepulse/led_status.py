@@ -831,6 +831,36 @@ class AgentLedController:
         self.last_target = result.target
         return result
 
+    def _phase_free_identity(self, render, relay_elapsed_seconds: float):
+        """Identity = what the strip WOULD look like at a fixed phase.
+
+        Dedupe must compare the visual RESULT, not the inputs and not the
+        raw text. Relay bakes a wall-clock phase into the program, so a
+        raw text compare differed on essentially every call and the 60s
+        reassert window never engaged -- the device was rewritten every
+        refresh at ~25-40 syscalls plus an fsync and a readback each. But
+        comparing inputs is wrong in the other direction: a 2-LED Dot
+        genuinely cannot show a third agent changing, and that write
+        should still be skipped. Re-rendering at phase zero gets both:
+        motion alone never writes, and anything that would actually look
+        different does.
+        """
+        # Always render at phase zero, including when the live phase is
+        # already zero: an identity that sometimes falls back to the raw
+        # program compares unequal against a token-shaped one, which
+        # costs an extra device write every time the phase leaves zero.
+        try:
+            identity = render(0.0)
+        except Exception:
+            return None
+        # Same post-processing as the live program: calibration gains and
+        # resting glow change what reaches the device, so they must be
+        # able to invalidate the identity too.
+        identity = apply_resting_glow_to_program(
+            identity, getattr(self, "resting_glow", 0.0)
+        )
+        return apply_channel_gain_to_program(identity, self.channel_gains)
+
     def sync_snapshot(
         self,
         statuses: tuple[AgentStatus, ...],
@@ -868,7 +898,27 @@ class AgentLedController:
         # rewrite, with no separate "did gains change" tracking needed.
         program = apply_resting_glow_to_program(program, getattr(self, "resting_glow", 0.0))
         program = apply_channel_gain_to_program(program, self.channel_gains)
-        return self._write_deduped_program(state, program)
+        # Dedupe on the INPUTS, never the rendered text. Relay bakes a
+        # wall-clock phase into the program, so a text compare differs on
+        # essentially every call -- the 60s reassert window never engaged
+        # and the device was rewritten every refresh, each write costing
+        # ~25-40 syscalls plus an fsync and a full readback.
+        identity = self._phase_free_identity(
+            lambda phase: program_for_snapshot(
+                statuses,
+                colors=colors,
+                fallback_mode=fallback_mode,
+                led_count=led_count,
+                brightness=brightness,
+                relay_elapsed_seconds=phase,
+            )[1],
+            relay_elapsed_seconds,
+        )
+        return self._write_deduped_program(
+            state,
+            program,
+            dedupe_token=("snapshot", identity) if identity is not None else None,
+        )
 
     def sync_projection(
         self,
@@ -892,7 +942,22 @@ class AgentLedController:
         )
         program = apply_resting_glow_to_program(program, getattr(self, "resting_glow", 0.0))
         program = apply_channel_gain_to_program(program, self.channel_gains)
-        return self._write_deduped_program(state, program)
+        identity = self._phase_free_identity(
+            lambda phase: program_for_projection(
+                projection,
+                active_signal=active_signal,
+                led_count=led_count_for_target(target),
+                colors=colors,
+                brightness=normalize_brightness(self.brightness),
+                relay_elapsed_seconds=phase,
+            )[1],
+            relay_elapsed_seconds,
+        )
+        return self._write_deduped_program(
+            state,
+            program,
+            dedupe_token=("projection", identity) if identity is not None else None,
+        )
 
     def sync_program(
         self,

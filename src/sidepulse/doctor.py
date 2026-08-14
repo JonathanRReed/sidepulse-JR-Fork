@@ -293,7 +293,14 @@ def _finding(
 def _package_import_root_probe() -> DiagnosticFinding:
     if running_inside_bundle():
         code = DiagnosticCode.PACKAGED_BUNDLE
-    elif any(part in {"site-packages", "dist-packages"} for part in Path(__file__).parts):
+    # Resolve first: a site-packages entry can be a SYMLINK to a working
+    # checkout, and reporting "installed package" then hides the far more
+    # important fact that the running code lives in a directory the user
+    # could move or delete out from under every hook.
+    elif any(
+        part in {"site-packages", "dist-packages"}
+        for part in Path(__file__).resolve().parts
+    ):
         code = DiagnosticCode.INSTALLED_PACKAGE
     else:
         code = DiagnosticCode.SOURCE_CHECKOUT

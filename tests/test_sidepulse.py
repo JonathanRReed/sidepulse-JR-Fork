@@ -22539,9 +22539,20 @@ class RelayControllerContinuityTests(unittest.TestCase):
             rebuilt_program = target.read_text(encoding="utf-8")
 
         self.assertEqual(self._first_pulse_index(first_program), 0)
-        self.assertEqual(self._first_pulse_index(rebuilt_program), 1)
+        # Motion alone must not rewrite the device. A relay program ends
+        # in `repeat` and encodes its rotation as per-LED pulse delays,
+        # so the HARDWARE animates itself -- rewriting only to advance
+        # the phase burned ~25-40 syscalls plus an fsync and a readback
+        # every refresh, and restarted the loop at a new offset, which
+        # is a visible jump rather than smoother motion. These two
+        # snapshots render identically once phase is factored out, so
+        # the correct behavior is to leave the device running.
+        self.assertEqual(rebuilt_program, first_program)
         self.assertAlmostEqual(scheduled[-1]["relay_elapsed_seconds"], 0.9)
-        self.assertEqual(scheduled[-1]["started_at"], 100.95)
+        # No device write means no new anchor instant, so the Screen Bar
+        # keeps the phase it is already running rather than restarting
+        # it -- the same contract the Dot-dedupe test asserts.
+        self.assertIsNone(scheduled[-1]["started_at"])
 
         _, screen_bar_program = program_for_snapshot(
             changed,
