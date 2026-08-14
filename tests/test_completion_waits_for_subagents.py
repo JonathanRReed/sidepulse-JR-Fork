@@ -9,9 +9,9 @@ notification light earns itself turned off.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sidepulse.completions import detect_completion_batch
+from sidepulse.completions import SUBAGENT_HOLD_SECONDS, detect_completion_batch
 from sidepulse.models import AgentMode, AgentStatus
 
 
@@ -75,3 +75,69 @@ def test_one_straggler_is_enough_to_hold_the_celebration() -> None:
     )
     batch = detect_completion_batch(_previous(), statuses, datetime.now(timezone.utc))
     assert batch.statuses == ()
+
+
+def _stale_worker(index: int, mode: AgentMode) -> AgentStatus:
+    """A worker the collector has already demoted to stale_statuses."""
+    return AgentStatus(
+        provider="claude",
+        agent_id=f"claude:agent:dead{index}",
+        display_name=f"worker {index}",
+        mode=mode,
+        updated_at=datetime.now(timezone.utc) - timedelta(hours=3),
+        event_name="PreToolUse",
+        session_id="main",
+        stale=True,
+    )
+
+
+def _silent_worker(index: int, mode: AgentMode, *, age_seconds: float) -> AgentStatus:
+    """Not flagged stale yet, but has not reported in a long time."""
+    return AgentStatus(
+        provider="claude",
+        agent_id=f"claude:agent:quiet{index}",
+        display_name=f"worker {index}",
+        mode=mode,
+        updated_at=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+        event_name="PreToolUse",
+        session_id="main",
+    )
+
+
+def test_a_reaped_worker_does_not_mute_its_parent_forever() -> None:
+    """The bug this gate could otherwise cause, permanently.
+
+    track_completions is fed the FULL timeline -- live and stale -- on
+    purpose, to fix a missed-celebration bug. So a worker that is killed
+    or crashes never emits a terminal event and stays non-COMPLETED for
+    the life of the process. Counting it would retire this parent from
+    ever completing again: no celebration, no notification, silently.
+    """
+    statuses = [
+        _main(AgentMode.COMPLETED),
+        *(_worker(i, AgentMode.COMPLETED) for i in range(20)),
+        _stale_worker(1, AgentMode.WORKING),
+    ]
+    batch = detect_completion_batch(_previous(), statuses, datetime.now(timezone.utc))
+    assert [status.agent_id for status in batch.statuses] == ["claude:session:main"], (
+        "one dead worker suppressed the parent's completion"
+    )
+
+
+def test_a_worker_gone_quiet_past_the_hold_window_releases_its_parent() -> None:
+    statuses = [
+        _main(AgentMode.COMPLETED),
+        _silent_worker(1, AgentMode.WORKING, age_seconds=SUBAGENT_HOLD_SECONDS + 60),
+    ]
+    batch = detect_completion_batch(_previous(), statuses, datetime.now(timezone.utc))
+    assert [status.agent_id for status in batch.statuses] == ["claude:session:main"]
+
+
+def test_a_worker_still_reporting_holds_its_parent() -> None:
+    """The hold window must not become a way to celebrate early."""
+    statuses = [
+        _main(AgentMode.COMPLETED),
+        _silent_worker(1, AgentMode.WORKING, age_seconds=SUBAGENT_HOLD_SECONDS / 2),
+    ]
+    batch = detect_completion_batch(_previous(), statuses, datetime.now(timezone.utc))
+    assert batch.statuses == (), "released a parent whose worker is still alive"

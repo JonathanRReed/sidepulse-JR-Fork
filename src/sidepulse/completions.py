@@ -10,6 +10,13 @@ from .operator_state import CanonicalOperatorEvent, TransitionKind
 
 COMPLETION_NOTIFY_FRESHNESS_SECONDS = 120.0
 
+# How long a silent sub-agent keeps holding its parent's completion open.
+# Generous enough to cover a genuinely long-running worker between events,
+# short enough that one reaped worker cannot mute a parent for the rest of
+# the session. The staleness flag alone is not enough here: it defaults to
+# an hour, and an hour of suppressed completions reads as "it's broken".
+SUBAGENT_HOLD_SECONDS = 300.0
+
 _ACTIVE_MODES = frozenset(
     {
         AgentMode.WORKING,
@@ -73,17 +80,41 @@ def canonical_current_statuses(
     }
 
 
-def parents_with_running_subagents(statuses: Sequence[AgentStatus]) -> set[str]:
-    """Main sessions that still have at least one sub-agent running.
+def parents_with_running_subagents(
+    statuses: Sequence[AgentStatus],
+    now: datetime | None = None,
+) -> set[str]:
+    """Main sessions that still have at least one sub-agent *plausibly alive*.
 
     Sub-agents are never shown and never signal on their own -- but a
     parent is not FINISHED while its own workers are still going. One
     main agent can fan out to 100+ workers, so celebrating the parent's
     turn-end mid-fan-out is both wrong and, at that scale, relentless.
+
+    "Plausibly alive" is load-bearing, not defensive coding. This gate is
+    fed the FULL timeline -- live *and* stale statuses -- because
+    completions would otherwise be missed entirely (see the caller). A
+    sub-agent that is killed, crashes, or has its process reaped never
+    emits a terminal event, so it stays non-COMPLETED forever. Counting
+    it would silently retire that parent from ever completing again: no
+    celebration, no notification, for the rest of the session. At 100+
+    workers per parent, at least one dying without a terminal event is
+    the expected case, not the edge case.
+
+    So a worker holds its parent open only while it is still reporting.
+    Once it goes quiet past the hold window, the parent is released.
     """
     running: set[str] = set()
     for status in statuses:
         if not status.is_subagent or status.mode == AgentMode.COMPLETED:
+            continue
+        if getattr(status, "stale", False):
+            continue
+        if now is not None and not is_recent(
+            now,
+            status.updated_at,
+            SUBAGENT_HOLD_SECONDS,
+        ):
             continue
         parent = getattr(status, "parent_agent_id", None)
         if parent:
@@ -104,7 +135,7 @@ def detect_completion_batch(
     while a hundred workers keep running.
     """
     current_by_agent = canonical_current_statuses(statuses)
-    busy_parents = parents_with_running_subagents(statuses)
+    busy_parents = parents_with_running_subagents(statuses, now)
 
     eligible_by_agent: dict[str, AgentStatus] = {}
     for status in current_by_agent.values():
