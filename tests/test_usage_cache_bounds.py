@@ -9,6 +9,7 @@ largest single contributor to the app's resident memory.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -225,6 +226,73 @@ def test_files_outside_the_window_are_remembered_not_rescanned(tmp_path: Path) -
         entry for entry in payload["files"].values() if not entry["records"]
     ]
     assert len(empty) == 1, "expected one record-less entry for the old file"
+
+
+def test_a_spent_budget_still_remembers_the_files_that_cost_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same 104% CPU pin, reached by the other road.
+
+    Candidates are admitted newest first, so the record-heavy entries come
+    first and the record-less ones -- the whole reason the previous test
+    exists -- come last. Stopping at the first entry that did not fit meant
+    the budget was spent on recent history and every out-of-window file was
+    re-read on every cycle anyway. On a 365-day window over 5,600 transcripts
+    that was ~5,000 files per scan.
+    """
+    now = time.time()
+    root = tmp_path / "projects"
+    # Admission order is by file mtime, newest first, so the busy files are
+    # stamped newer than the ancient ones -- which is what a real corpus looks
+    # like and what puts the cheap entries last.
+    for index in range(6):
+        target = _write_transcript(
+            root,
+            f"ancient-{index}.jsonl",
+            [_claude_line(f"old{index}", f"old{index}", now - 60 * DAY)],
+        )
+        os.utime(target, (now - 60 * DAY, now - 60 * DAY))
+    for index in range(4):
+        target = _write_transcript(
+            root,
+            f"busy-{index}.jsonl",
+            [
+                _claude_line(f"s{index}", f"m{index}-{n}", now - 60 * (n + 1))
+                for n in range(40)
+            ],
+        )
+        os.utime(target, (now - 60, now - 60))
+    cache = tmp_path / "usage-scan-cache.json"
+
+    # Room for one busy file, then exactly the six cheap ones. Derived from the
+    # module's own costs so this stays honest if they are retuned.
+    busy_cost = usage_stats._CACHE_BYTES_PER_ENTRY + 40 * usage_stats._CACHE_BYTES_PER_RECORD
+    monkeypatch.setattr(
+        usage_stats,
+        "USAGE_CACHE_MAX_BYTES",
+        busy_cost + 6 * usage_stats._CACHE_BYTES_PER_ENTRY,
+    )
+    _scan(root, cache, since_epoch=now - 7 * DAY)
+
+    payload = json.loads(cache.read_text(encoding="utf-8"))
+    remembered = set(payload["files"])
+    empty = [entry for entry in payload["files"].values() if not entry["records"]]
+
+    assert len(empty) == 6, (
+        "the out-of-window files were skipped once the budget ran out on the "
+        "newer, record-heavy ones, so every one of them is re-read on every "
+        "scan cycle"
+    )
+    assert len(remembered) == 7, "the byte budget never bound at all"
+
+
+def test_the_file_cap_does_not_bind_before_the_byte_budget(tmp_path: Path) -> None:
+    """A real corpus is 5,605 transcripts; the cap used to be 4,096."""
+    assert usage_stats.USAGE_CACHE_MAX_FILES >= 8192
+    assert (
+        usage_stats.USAGE_CACHE_MAX_FILES * usage_stats._CACHE_BYTES_PER_ENTRY
+        < usage_stats.USAGE_CACHE_MAX_BYTES
+    ), "remembering an out-of-window file must stay affordable at the cap"
 
 
 def test_a_remembered_empty_entry_is_served_from_cache(tmp_path: Path) -> None:

@@ -13156,13 +13156,21 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         self.assertFalse(self.controller.settings.codex_percent_enabled)
         self.assertEqual(model.windows, ())
         self.assertIn(
-            "Codex, last 7 days: 1 session · 2M processed tokens",
+            "Codex · Last 7 days: 1 session · 2M processed tokens",
             model.menu_line,
         )
+        self.assertEqual(model.menu_line.count("Codex"), 1)
         self.assertNotIn("81%", model.menu_line)
         self.assertNotIn("82%", model.settings_text)
-        self.assertEqual(menu_label.stringValue(), model.menu_line)
+        # The Capacity row carries capacity or says it has none. With the
+        # toggle off there is no ceiling to report, so it says so -- it does
+        # NOT reach down a rung and print the local transcript aggregate,
+        # which is what put "Claude · Claude, last 365 days: 2508 sessions"
+        # in the slot reserved for a plan limit.
+        self.assertEqual(menu_label.stringValue(), "Codex · no reading")
+        self.assertNotIn("session", menu_label.stringValue())
         settings_label.setStringValue_.assert_called_with(model.settings_text)
+        self.assertIn("1 session", model.settings_text)
         self.assertIs(self.controller._usage_menu_item, menu_item)
 
     def test_disabling_claude_plan_limits_clears_old_windows_after_successful_refresh(self) -> None:
@@ -13221,11 +13229,16 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         self.assertFalse(self.controller.settings.claude_plan_limits_enabled)
         fetch.assert_not_called()
         self.assertEqual(model.windows, ())
-        self.assertIn("Claude, last 7 days: 1 session · 130 tokens", model.menu_line)
+        self.assertIn("Claude · Last 7 days: 1 session · 130 tokens", model.menu_line)
+        self.assertEqual(model.menu_line.count("Claude"), 1)
         self.assertNotIn("71%", model.menu_line)
         self.assertNotIn("71%", model.settings_text)
-        self.assertEqual(menu_label.stringValue(), model.menu_line)
+        # Same rule as codex: no ceiling, so the Capacity row says it has no
+        # reading rather than borrowing the transcript summary.
+        self.assertEqual(menu_label.stringValue(), "Claude · no reading")
+        self.assertNotIn("session", menu_label.stringValue())
         settings_label.setStringValue_.assert_called_with(model.settings_text)
+        self.assertIn("1 session", model.settings_text)
         self.assertIs(self.controller._usage_menu_item, menu_item)
 
     def test_claude_plan_setting_uses_exact_source_invalidation(self) -> None:
@@ -14020,9 +14033,12 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             "Local transcripts · 9 files · partial",
         )
         self.assertIn(
-            "Codex, last 7 days: 1 session · 2M processed tokens",
+            "Last 7 days: 1 session · 2M processed tokens",
             model.settings_text,
         )
+        # One title, one owner. The summary names the period; the view names
+        # the provider.
+        self.assertEqual(model.menu_line.count("Codex"), 1)
         self.assertIn("Capacity source unavailable", model.settings_text)
         self.assertNotIn("secret-token", model.settings_text)
         self.assertNotIn("/Users", model.settings_text)
@@ -14126,10 +14142,21 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         self.assertIs(item.view(), hosted_view)
         self.assertEqual(header.stringValue(), "Capacity")
         self.assertEqual(codex_primary.stringValue(), "Codex · 5h 38% left")
+        # Reset and freshness, and nothing from another rung. `partial` and the
+        # transcript file count describe the local SCAN's coverage, not this
+        # ceiling's; a disclaimer belonging to a different fact cannot qualify
+        # this one, and it used to be printed here and on the model's own line.
         self.assertEqual(
             codex_secondary.stringValue(),
-            "resets in 1h · updated just now · partial · 18 files · 1 unreadable",
+            "resets in 1h · updated just now",
         )
+        self.assertNotIn("partial", codex_secondary.stringValue())
+        self.assertNotIn("18 files", codex_secondary.stringValue())
+        # The local coverage is still carried, still scrubbed, on its own rung.
+        model = self.controller._usage_provider_models["codex"]
+        self.assertTrue(model.partial)
+        self.assertIn("18 files", model.source_text)
+        self.assertNotIn("/Users", model.source_text)
         self.assertNotIn("/Users", codex_secondary.stringValue())
         self.controller.status_item.setMenu_.assert_not_called()
 
@@ -14162,10 +14189,14 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
 
         primary = self.controller._usage_menu_labels["codex"].stringValue()
         secondary = self.controller._usage_menu_secondary_labels["codex"].stringValue()
-        self.assertEqual(primary, "Codex · 5h")
+        # A window with no usable percentage says so. The bare "Codex · 5h" it
+        # used to print left the reader to guess whether the number was missing
+        # or the row simply had none.
+        self.assertEqual(primary, "Codex · 5h no reading")
         self.assertIn("resets in 2m", secondary)
         self.assertNotIn("0%", primary)
         self.assertNotIn("0%", secondary)
+        self.assertNotIn("%", primary)
 
     def test_apply_uses_monotonic_freshness_and_epoch_reset_clocks(self) -> None:
         requests = self._prime_refreshes("codex", completed_at=500.0)

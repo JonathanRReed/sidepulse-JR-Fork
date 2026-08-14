@@ -58,7 +58,13 @@ from .providers import NegotiatedProviderSource, negotiated_provider_sources
 from .reset_policy import parse_reset_epoch
 
 CACHE_VERSION = 6
-USAGE_CACHE_MAX_FILES = 4096
+# The byte budget below is the real bound; this one only stops the candidate
+# list itself from growing without limit. At 4096 it bound FIRST on the owner's
+# corpus -- 5,605 transcripts across ~/.claude and ~/.codex -- so ~1,500 files
+# were re-read on every scan cycle no matter how much budget was left. A file
+# with nothing inside the window costs ~320 bytes to remember, so 8192 of them
+# is 2.6MB of an 8MB budget.
+USAGE_CACHE_MAX_FILES = 8192
 USAGE_INVENTORY_MAX_FILES = 4096
 USAGE_FILE_MAX_BYTES = 64 * 1024 * 1024
 
@@ -1585,10 +1591,17 @@ def _scan_inventory_usage(
             # cache exists to avoid exactly that read.
         cost = _CACHE_BYTES_PER_ENTRY + _CACHE_BYTES_PER_RECORD * len(records)
         if cost > cache_budget and new_files:
-            # Candidates are newest first, so everything past here is older.
-            # The first entry is always admitted: an empty cache would mean a
-            # cold scan on every single refresh.
-            break
+            # Skip this one, but keep going. Stopping here defeated the whole
+            # point of the paragraph above: candidates are newest first, so the
+            # expensive record-heavy entries come first and the cheap
+            # record-less ones -- the ones the comment says are worth ~300
+            # bytes to save a whole file read -- come last. On a 365-day window
+            # over 5,600 transcripts the budget was spent on ~560 entries and
+            # the remaining ~5,000 files were re-read on every scan cycle,
+            # which is exactly the CPU pin that paragraph was written about.
+            # The first entry is still always admitted: an empty cache would
+            # mean a cold scan on every single refresh.
+            continue
         cache_budget -= cost
         new_files[key] = {
             "since": retention_epoch,

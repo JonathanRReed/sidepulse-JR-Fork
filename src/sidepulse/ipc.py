@@ -547,17 +547,22 @@ def send_refresh_hint(
 ) -> bool:
     """Send one hint, unless the breaker says nobody is listening.
 
-    Terminal events ignore the breaker entirely -- a missed completion
-    is the one failure this product cannot have, so it is always worth
-    the attempt even when the app is wedged.
+    Turn-boundary events ignore the breaker entirely -- a missed completion is
+    the one failure this product cannot have, and a missed prompt submission
+    is what leaves the ledger insisting everything has stopped -- so both are
+    always worth the attempt even when the app is wedged.
     """
     now = time.monotonic()
-    if not HOOK_SEND_BREAKER.should_attempt(event_name, now):
+    if not HOOK_SEND_BREAKER.should_attempt(event_name, now, socket_path):
         return False
     delivered = _send_refresh_hint_once(
         hint, socket_path=socket_path, timeout=timeout
     )
-    HOOK_SEND_BREAKER.record(delivered=delivered, now=now)
+    HOOK_SEND_BREAKER.record(
+        delivered=delivered,
+        now=now,
+        socket_path=socket_path,
+    )
     return delivered
 
 

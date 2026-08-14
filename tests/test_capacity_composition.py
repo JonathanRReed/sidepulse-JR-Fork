@@ -229,9 +229,16 @@ def test_one_exact_batch_keeps_transcript_and_capacity_truth_independent(
     codex = target._usage_provider_models["codex"]
     claude = target._usage_provider_models["claude"]
     assert codex.windows[0].percent_used == 22.0
-    assert "Codex, last 7 days: 1 session" in codex.summary_text
+    assert "Last 7 days: 1 session" in codex.summary_text
     assert claude.windows == ()
-    assert "Claude, last 7 days: 1 session" in claude.summary_text
+    assert "Last 7 days: 1 session" in claude.summary_text
+    # The summary names the period, never the provider. The view owns the
+    # title, and when the summary named the provider too the card read
+    # "Claude · Claude, last 365 days: ...".
+    assert "Codex" not in codex.summary_text
+    assert "Claude" not in claude.summary_text
+    assert codex.menu_line.count("Codex") == 1
+    assert claude.menu_line.count("Claude") == 1
 
     transcript_states = target._usage_transcript_states
     assert transcript_states[CODEX_TRANSCRIPTS].last_success_at is not None
