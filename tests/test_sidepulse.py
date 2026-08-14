@@ -8648,17 +8648,10 @@ def isolate_controller(case, *, build_controller=True):
     )
     latest.start()
     case.addCleanup(latest.stop)
-    # The live Alcove on the dev machine must never steer test geometry:
-    # the capsule tracker reads "no capsule" unless a test injects one.
-    try:
-        alcove = patch(
-            "sidepulse.virtual_device.measured_alcove_capsule_width",
-            return_value=None,
-        )
-        alcove.start()
-        case.addCleanup(alcove.stop)
-    except (ImportError, SystemExit):
-        pass
+    # The live Alcove on the dev machine still must not steer test
+    # geometry, but the synchronous capsule probe this used to stub is
+    # gone: observation now runs only through the async worker, which
+    # tests drive explicitly by injecting an AlcoveObservation.
     discovery = patch("sidepulse.status_bar.discover_devices", return_value=[])
     discovery.start()
     case.addCleanup(discovery.stop)
@@ -16857,60 +16850,8 @@ class AlcoveFollowTests(unittest.TestCase):
         )
         self.assertLessEqual(huge[1][0], 1512.0)
 
-    def test_tracker_widen_instant_narrow_patient(self) -> None:
-        from sidepulse import virtual_device
 
-        readings = []
-        clock = [0.0]
-        tracker = virtual_device.AlcoveCapsuleTracker(
-            measure=lambda _band: readings.pop(0), clock=lambda: clock[0]
-        )
-        margin = 2.0 * virtual_device.ALCOVE_CAPSULE_MARGIN
-        # First reading adopts immediately.
-        readings.append(272.0)
-        self.assertEqual(tracker.desired_total_width(37.0), 272.0 + margin)
-        # A wider capsule adopts immediately too.
-        clock[0] = 2.0
-        readings.append(330.0)
-        self.assertEqual(tracker.desired_total_width(37.0), 330.0 + margin)
-        # A narrower capsule must HOLD before it is adopted.
-        clock[0] = 4.0
-        readings.append(200.0)
-        self.assertEqual(tracker.desired_total_width(37.0), 330.0 + margin)
-        clock[0] = 5.0
-        readings.append(200.0)
-        self.assertEqual(tracker.desired_total_width(37.0), 330.0 + margin)
-        clock[0] = 4.0 + virtual_device.ALCOVE_NARROW_AFTER_SECONDS + 0.1
-        readings.append(200.0)
-        self.assertEqual(tracker.desired_total_width(37.0), 200.0 + margin)
 
-    def test_tracker_holds_through_gaps_then_falls_back(self) -> None:
-        from sidepulse import virtual_device
-
-        values = {"reading": 272.0}
-        clock = [0.0]
-        tracker = virtual_device.AlcoveCapsuleTracker(
-            measure=lambda _band: values["reading"], clock=lambda: clock[0]
-        )
-        margin = 2.0 * virtual_device.ALCOVE_CAPSULE_MARGIN
-        self.assertEqual(tracker.desired_total_width(37.0), 272.0 + margin)
-        # Reading gap (hover panel open / capsule mid-transition).
-        values["reading"] = None
-        clock[0] = 2.0
-        self.assertEqual(tracker.desired_total_width(37.0), 272.0 + margin)
-        # Past the hold window: hardware geometry.
-        clock[0] = 2.0 + virtual_device.ALCOVE_HOLD_SECONDS + 1.0
-        self.assertIsNone(tracker.desired_total_width(37.0))
-
-    def test_tracker_caps_the_balloon(self) -> None:
-        from sidepulse import virtual_device
-
-        tracker = virtual_device.AlcoveCapsuleTracker(
-            measure=lambda _band: 5000.0, clock=lambda: 0.0
-        )
-        self.assertEqual(
-            tracker.desired_total_width(37.0), virtual_device.ALCOVE_FOLLOW_MAX_WIDTH
-        )
 
     def test_follow_setting_round_trips_default_on(self) -> None:
         self.assertTrue(AgentMonitorSettings().screen_bar_follow_alcove)

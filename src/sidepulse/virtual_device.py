@@ -118,28 +118,14 @@ WING_MAX_WIDTH = 110.0
 WING_AUTO_LENGTH = 14.0
 
 # --- Alcove capsule following -------------------------------------------
-# The visible capsule is measured from Alcove's OWN window image (alpha
-# channel), so the bracket can widen to embrace an expanded live
-# activity. See measured_alcove_capsule_width for why this succeeds
-# where two window-bounds attempts failed.
-ALCOVE_CAPSULE_ALPHA_THRESHOLD = 0.08
-# A lit region taller than this many menu-band heights is Alcove's
-# hover panel, not the capsule -- never size to it (the ballooning
-# failure both reverted attempts hit).
-ALCOVE_CAPSULE_MAX_BAND_FACTOR = 1.8
-# Breathing room past the capsule's edge on each side.
-ALCOVE_CAPSULE_MARGIN = 2.0
-# Hard ceiling on the followed width, whatever the measurement says.
-ALCOVE_FOLLOW_MAX_WIDTH = 520.0
-# Re-measure at most this often, whatever cadence reposition() runs at
-# (the sync path can drive it at 4Hz during agent-event bursts).
-ALCOVE_MEASURE_TTL_SECONDS = 1.5
-# Widen instantly; adopt a NARROWER capsule only after it has held for
-# this long (media pills flicker during track changes).
-ALCOVE_NARROW_AFTER_SECONDS = 3.0
-# Keep the last good width through brief no-reading gaps (capsule
-# mid-transition, hover panel open) before falling back to hardware.
-ALCOVE_HOLD_SECONDS = 8.0
+# alcove_observation.py owns the capsule measurement pipeline and its
+# timings. These two are RE-EXPORTED from it rather than redefined here:
+# a second copy shadowed the live constants, which is precisely how the
+# next Alcove bug would have been introduced.
+from .alcove_observation import (  # noqa: E402
+    ALCOVE_HOLD_SECONDS,
+    ALCOVE_NARROW_AFTER_SECONDS,
+)
 WING_SAFETY_MARGIN = 28.0
 WING_MIN_USABLE = 24.0
 # A wing that's just a flat horizontal strip fading sideways reads as a
@@ -534,91 +520,6 @@ def _alcove_window_values(screen_x: float, screen_width: float):
         candidates
     )
     return window_number, window_x, window_y, window_width
-
-
-def measured_alcove_capsule_width(menu_band_height: float) -> float | None:
-    """Compatibility seam. Alcove capture now exists only in the serial worker."""
-    del menu_band_height
-    return None
-
-
-class AlcoveCapsuleTracker:
-    """Hysteresis around the raw measurement: widen instantly (a live
-    activity just appeared -- embrace it now), narrow only after the
-    smaller reading holds for ALCOVE_NARROW_AFTER_SECONDS, and ride out
-    reading gaps for ALCOVE_HOLD_SECONDS before surrendering to
-    hardware geometry. Injectable measure/clock for tests."""
-
-    def __init__(self, measure=None, clock=time.monotonic):
-        # measure=None resolves to the module function AT CALL TIME so
-        # tests can patch sidepulse.virtual_device.
-        # measured_alcove_capsule_width and every tracker sees it.
-        self._measure = measure
-        self._clock = clock
-        self._measured_at: float | None = None
-        self._measured_value: float | None = None
-        self._adopted: float | None = None
-        self._narrow_candidate: float | None = None
-        self._narrow_since: float | None = None
-        self._last_good: float | None = None
-
-    def desired_total_width(self, menu_band_height: float) -> float | None:
-        """The bar's minimum total width in points, or None for
-        hardware geometry."""
-        now = self._clock()
-        # Measurement TTL: the window capture is the expensive part and
-        # reposition() can be driven at 4Hz by the sync path -- the
-        # capsule doesn't move that fast, and adoption hysteresis below
-        # already works on seconds.
-        if (
-            self._measured_at is not None
-            and now - self._measured_at < ALCOVE_MEASURE_TTL_SECONDS
-        ):
-            reading = self._measured_value
-        else:
-            measure = (
-                self._measure
-                if self._measure is not None
-                else measured_alcove_capsule_width
-            )
-            reading = measure(menu_band_height)
-            self._measured_at = now
-            self._measured_value = reading
-        if reading is not None:
-            reading = min(reading + 2.0 * ALCOVE_CAPSULE_MARGIN, ALCOVE_FOLLOW_MAX_WIDTH)
-            self._last_good = now
-            if self._adopted is None or reading > self._adopted + 0.5:
-                self._adopted = reading
-                self._narrow_since = None
-                self._narrow_candidate = None
-            elif reading < self._adopted - 4.0:
-                if (
-                    self._narrow_since is None
-                    or self._narrow_candidate is None
-                    or reading > self._narrow_candidate + 4.0
-                ):
-                    self._narrow_since = now
-                    self._narrow_candidate = reading
-                elif now - self._narrow_since >= ALCOVE_NARROW_AFTER_SECONDS:
-                    self._adopted = self._narrow_candidate
-                    self._narrow_since = None
-                    self._narrow_candidate = None
-            else:
-                self._narrow_since = None
-                self._narrow_candidate = None
-            return self._adopted
-        if (
-            self._adopted is not None
-            and self._last_good is not None
-            and now - self._last_good <= ALCOVE_HOLD_SECONDS
-        ):
-            return self._adopted
-        self._adopted = None
-        self._narrow_since = None
-        self._narrow_candidate = None
-        return None
-
-
 
 
 def led_band_rect(width: float):
@@ -2397,10 +2298,11 @@ class VirtualStatusDevice(NSObject):
         return True
 
     def set_wraps_menu_bar(self, enabled: bool) -> None:
+        # Turning wrap OFF must not stop watching Alcove: compact mode
+        # still draws an accent that should track the capsule. Only
+        # set_follow_alcove turning off, or Alcove going away, ends the
+        # observation -- reposition() re-derives relevance each pass.
         self.wraps_menu_bar = bool(enabled)
-        if not self.wraps_menu_bar:
-            self._alcove_relevant = False
-            self._stop_alcove_observer()
         self._publish_presentation_schedule()
 
     def set_click_handler(self, handler) -> None:
@@ -2643,7 +2545,7 @@ class VirtualStatusDevice(NSObject):
         gap_override = getattr(self, "gap_width_override", None)
         wing_override = getattr(self, "wing_length_override", None)
         self._alcove_relevant = bool(
-            wings_only
+            alcove_active
             and wing_override is None
             and getattr(self, "follow_alcove_width", True)
         )
@@ -2670,8 +2572,13 @@ class VirtualStatusDevice(NSObject):
         follow_width = None
         follow_center_x = None
         follow_observation = None
+        # Measure whenever Alcove is up, not only in wrap mode. Gating
+        # this on wings_only meant compact -- the POLITE mode, chosen by
+        # someone who does not want us wrapping their menu bar -- never
+        # followed the capsule at all and silently sized itself to the
+        # hardware notch instead.
         if (
-            wings_only
+            alcove_active
             and wing_override is None
             and getattr(self, "follow_alcove_width", True)
         ):
@@ -2730,7 +2637,13 @@ class VirtualStatusDevice(NSObject):
                 self._resume_alcove_observer()
             if observation is not None:
                 follow_observation = observation
-                follow_width = observation.width
+                # Widen by the stroke inset on BOTH sides. The bracket is
+                # drawn ALCOVE_ACCENT_EDGE_INSET in from each window edge
+                # (alcove_accent_horizontal_bounds), so sizing the window
+                # to the raw capsule width put the stroke 6pt inside
+                # Alcove's real corners on each side -- visible every day
+                # as a bracket that does not quite touch.
+                follow_width = observation.width + 2.0 * ALCOVE_ACCENT_EDGE_INSET
                 follow_center_x = observation.center_x
             if follow_width != getattr(self, "_last_follow_width", None):
                 self._last_follow_width = follow_width

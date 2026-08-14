@@ -928,8 +928,12 @@ def test_reposition_submits_plain_alcove_request_and_applies_validated_center(
     )
     device.reposition()
 
-    assert device.window.current.origin.x == pytest.approx(464.0)
-    assert device.window.current.size.width == pytest.approx(272.0)
+    # The follow window is one stroke inset wider on EACH side, so the
+    # drawn bracket lands on Alcove's real corners instead of 6pt inside
+    # them: origin moves out by the inset, width grows by twice it.
+    inset = virtual_device.ALCOVE_ACCENT_EDGE_INSET
+    assert device.window.current.origin.x == pytest.approx(464.0 - inset)
+    assert device.window.current.size.width == pytest.approx(272.0 + 2 * inset)
     assert device.view.silhouettes[-1] == (600.0, 272.0, 32.0, contour)
 
     previous_request_count = len(observer.requests)
@@ -941,7 +945,7 @@ def test_reposition_submits_plain_alcove_request_and_applies_validated_center(
     assert device._alcove_request is None
     assert observer.closes == 1
     assert len(observer.requests) == previous_request_count
-    assert device.window.current.origin.x == pytest.approx(464.0)
+    assert device.window.current.origin.x == pytest.approx(464.0 - inset)
     assert device.view.silhouettes[-1] == (600.0, 272.0, 32.0, contour)
 
     monkeypatch.setattr(
@@ -959,7 +963,7 @@ def test_reposition_submits_plain_alcove_request_and_applies_validated_center(
 
 @pytest.mark.parametrize(
     "lifecycle",
-    ["hide", "disable", "sleep", "terminate", "follow_disabled", "unwrap"],
+    ["hide", "disable", "sleep", "terminate", "follow_disabled"],
 )
 def test_screen_bar_inactive_lifecycle_stops_alcove_observation(
     monkeypatch, lifecycle: str
