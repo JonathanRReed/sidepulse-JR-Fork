@@ -78,6 +78,9 @@ NOTCH_BOTTOM_RADIUS = 8.0
 # section 6 (superseded from an earlier offset-pill attempt that read as
 # disconnected/floating rather than integrated).
 ALCOVE_BUNDLE_ID = "com.henrikruscon.Alcove"
+# CGWindowList reports an owner NAME, not a bundle id, so the window
+# probe matches on this while process detection matches the bundle id.
+ALCOVE_OWNER_NAME = "Alcove"
 COMPACT_ACCENT_HEIGHT = 2.5
 # NSStatusWindowLevel without another SDK dependency; and the level the
 # wrap bracket rides at while Alcove is running -- kCGMaximumWindowLevel,
@@ -86,6 +89,11 @@ COMPACT_ACCENT_HEIGHT = 2.5
 # Alcove's opaque backdrop. The window ignores mouse events, so being
 # top-most is purely visual.
 STATUS_WINDOW_LEVEL = 25
+# Fallback only. Alcove's real layer is MEASURED at runtime (see
+# alcove_window_level) -- measured live on 2026-08-14 at 2147483629 and
+# 2147483628, so this constant happens to be one above today. Trusting
+# it blindly means that the day Alcove raises its own level we sit
+# silently underneath it forever, and the bracket simply disappears.
 ABOVE_ALCOVE_WINDOW_LEVEL = 2147483630
 
 # "Wrap the menu bar" extends the LED glow beyond the notch's own width,
@@ -397,6 +405,50 @@ def is_alcove_running() -> bool:
         # Fail safe to "not running" -- the caller falls back to the normal
         # full-width layout, never to a crash.
         return False
+
+
+def _on_screen_windows() -> list:
+    """Every on-screen window, or an empty list. Injectable for tests."""
+    try:
+        import Quartz
+
+        return list(
+            Quartz.CGWindowListCopyWindowInfo(
+                Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID
+            )
+            or []
+        )
+    except Exception:
+        return []
+
+
+def alcove_window_level(
+    default: int = ABOVE_ALCOVE_WINDOW_LEVEL,
+    *,
+    window_lister=None,
+) -> int:
+    """One above Alcove's HIGHEST on-screen window layer.
+
+    We draw a bracket around Alcove's capsule, which only works while we
+    are above it. The level used to be a hardcoded near-INT32_MAX guess;
+    it is right today purely by luck, and nothing would ever tell us if
+    that stopped being true -- the bracket would just vanish behind
+    Alcove with no error. Measure instead, and keep the constant as the
+    floor so we never end up BELOW the old behavior.
+    """
+    lister = window_lister or _on_screen_windows
+    try:
+        levels = [
+            int(entry.get("kCGWindowLayer", 0))
+            for entry in lister()
+            if str(entry.get("kCGWindowOwnerName", "")) == ALCOVE_OWNER_NAME
+        ]
+    except Exception:
+        return default
+    if not levels:
+        return default
+    # Never exceed the maximum a window level may legally take.
+    return max(default, min(max(levels) + 1, 2147483631))
 
 
 def _screen_capture_values(screen):
@@ -2711,7 +2763,9 @@ class VirtualStatusDevice(NSObject):
         )
         if frame_changed:
             self.window.setFrame_display_(window_frame, True)
-        self.window.setLevel_(ABOVE_ALCOVE_WINDOW_LEVEL if alcove_active else STATUS_WINDOW_LEVEL)
+        self.window.setLevel_(
+            alcove_window_level() if alcove_active else STATUS_WINDOW_LEVEL
+        )
         if self.view is not None:
             set_geometry_identity = getattr(
                 self.view, "setRenderGeometryIdentity_", None
