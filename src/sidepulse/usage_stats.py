@@ -45,10 +45,36 @@ from .capacity_types import SourceKey
 from .private_io import atomic_private_write, ensure_private_directory, read_private_text
 from .providers import NegotiatedProviderSource, negotiated_provider_sources
 
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 USAGE_CACHE_MAX_FILES = 4096
 USAGE_INVENTORY_MAX_FILES = 4096
 USAGE_FILE_MAX_BYTES = 64 * 1024 * 1024
+
+# The scan cache is an accelerator, never the source of truth: the transcripts
+# on disk are. So it is allowed to forget. Three bounds keep it from becoming
+# the largest thing this process owns (measured at 18.2 MB / 211k records
+# before these landed, which is most of the app's resident memory):
+#
+#   1. Retention -- records older than the widest window the UI can currently
+#      ask for are dropped on write. Widening the graph range costs one cold
+#      rescan, once, instead of every process paying for a year of history.
+#   2. A byte budget on write, so a pathological corpus cannot outgrow the cap
+#      between retention passes.
+#   3. A byte ceiling on read, so an oversized cache written by any other
+#      version degrades to a cold scan instead of being parsed into memory.
+USAGE_CACHE_MAX_BYTES = 8 * 1024 * 1024
+USAGE_CACHE_RETENTION_HEADROOM_SECONDS = 3 * 24 * 60 * 60
+# Conservative per-record cost: a serialized record plus its amortized share of
+# the interning tables. Measured at ~80 bytes/record; budgeted at 110 so the
+# estimate overshoots and the cap binds early rather than late.
+_CACHE_BYTES_PER_RECORD = 110
+_CACHE_BYTES_PER_ENTRY = 320
+
+# The dedupe table was the single largest line item in the cache: one 64-char
+# HMAC per usage event, ~99k of them. 128 bits is still absurd headroom for a
+# per-machine table this size (birthday collision odds ~1e-29), and it is an
+# HMAC under a per-cache secret, so truncation costs no forgery resistance.
+DEDUPE_DIGEST_HEX_CHARS = 32
 USAGE_MARKER = '"usage"'
 CODEX_MARKER = '"token_count"'
 PRICING_TABLE_VERSION = "sidepulse-anthropic-v1"
@@ -434,7 +460,7 @@ def _record_from_line(line: str, session_id: str, dedupe_secret: bytes) -> tuple
         dedupe_secret,
         raw_dedupe.encode("utf-8"),
         hashlib.sha256,
-    ).hexdigest()
+    ).hexdigest()[:DEDUPE_DIGEST_HEX_CHARS]
     counts = _token_counts(
         usage,
         (
@@ -764,7 +790,12 @@ def _load_cache(
     try:
         cache_path.lstat()
         ensure_private_directory(cache_path.parent)
-        data = json.loads(read_private_text(cache_path))
+        # An oversized cache is refused rather than parsed: read_private_text
+        # raises OSError past the cap, which lands in the handler below as an
+        # ordinary cold scan. The next write replaces it with a capped one.
+        data = json.loads(
+            read_private_text(cache_path, max_bytes=USAGE_CACHE_MAX_BYTES)
+        )
     except (OSError, ValueError):
         return {}
     if not isinstance(data, dict) or data.get("version") != CACHE_VERSION:
@@ -1067,6 +1098,22 @@ def build_usage_inventory(
     return LocalUsageInventory(tuple(sources))
 
 
+def _cached_entry_covers(entry: object, since_epoch: float) -> bool:
+    """Does this cache entry hold enough history to answer this window?
+
+    Retention lets an entry keep only part of a file. The entry still matches
+    its file on (mtime, size, device, inode), so nothing else here can tell a
+    truncated entry from a complete one -- only the floor it recorded can.
+    """
+    if not isinstance(entry, dict):
+        return False
+    try:
+        cached_since = float(entry.get("since", 0.0))
+    except (TypeError, ValueError):
+        return False
+    return cached_since <= since_epoch
+
+
 def _cache_file_key(provider_id: str, info: os.stat_result) -> str:
     return f"{provider_id}:{info.st_dev}:{info.st_ino}"
 
@@ -1109,6 +1156,16 @@ def _scan_inventory_usage(
         else secrets.token_bytes(32)
     )
 
+    # A cache entry may hold only part of a file's history. It therefore
+    # records the floor it was truncated to, and is refused below unless that
+    # floor still covers the window being asked for -- otherwise a partial
+    # entry would read as a complete one and silently undercount usage.
+    retention_epoch = (
+        max(0.0, since_epoch - USAGE_CACHE_RETENTION_HEADROOM_SECONDS)
+        if since_epoch > 0.0
+        else 0.0
+    )
+
     sessions_table: list[str] = []
     sessions_index: dict[str, int] = {}
     models_table: list[str] = []
@@ -1133,13 +1190,18 @@ def _scan_inventory_usage(
             observed_root_keys.add(source.root_key)
         for candidate in source.candidates:
             key = _cache_file_key(source.provider_id, candidate.info)
-            cached_entry = _decode_cached_records(
-                cached_files.get(key),
-                coverage.provider_id,
-                candidate.info,
-                cached_sessions,
-                cached_models,
-                cached_dedupes,
+            raw_cached_entry = cached_files.get(key)
+            cached_entry = (
+                _decode_cached_records(
+                    raw_cached_entry,
+                    coverage.provider_id,
+                    candidate.info,
+                    cached_sessions,
+                    cached_models,
+                    cached_dedupes,
+                )
+                if _cached_entry_covers(raw_cached_entry, since_epoch)
+                else None
             )
             if cached_entry is not None:
                 cached_records, cached_malformed_lines, cached_rate_windows = cached_entry
@@ -1200,6 +1262,11 @@ def _scan_inventory_usage(
             if cached_root_key is not None and not isinstance(cached_root_key, str):
                 continue
             if cached_root_key in observed_root_keys:
+                continue
+            if not _cached_entry_covers(entry, since_epoch):
+                # Written for a narrower window than the one being asked for
+                # now. Drop it so the file is rescanned rather than reporting
+                # a truncated history as complete.
                 continue
             cached_malformed_lines = int(entry.get("malformed_lines", 0))
             raw_windows = entry.get("rate_limit_windows", [])
@@ -1273,6 +1340,8 @@ def _scan_inventory_usage(
     )
     cache_candidates.sort(key=lambda item: (-item[1], item[0]))
     selected_cache_candidates = cache_candidates[: max(0, cache_max_files)]
+    # Newest first, so both bounds below drop the least useful history.
+    cache_budget = USAGE_CACHE_MAX_BYTES
     new_files: dict[str, dict] = {}
     for (
         key,
@@ -1286,7 +1355,21 @@ def _scan_inventory_usage(
         records,
         rate_windows,
     ) in selected_cache_candidates:
+        if retention_epoch > 0.0:
+            records = [record for record in records if record[3] >= retention_epoch]
+            if not records and not rate_windows:
+                # Nothing here is reachable from any window the UI can ask
+                # for. Re-reading this file later is cheaper than carrying it.
+                continue
+        cost = _CACHE_BYTES_PER_ENTRY + _CACHE_BYTES_PER_RECORD * len(records)
+        if cost > cache_budget and new_files:
+            # Candidates are newest first, so everything past here is older.
+            # The first entry is always admitted: an empty cache would mean a
+            # cold scan on every single refresh.
+            break
+        cache_budget -= cost
         new_files[key] = {
+            "since": retention_epoch,
             "size": size,
             "mtime": mtime,
             "device": device,
