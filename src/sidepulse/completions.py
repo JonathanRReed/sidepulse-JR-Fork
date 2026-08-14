@@ -73,13 +73,38 @@ def canonical_current_statuses(
     }
 
 
+def parents_with_running_subagents(statuses: Sequence[AgentStatus]) -> set[str]:
+    """Main sessions that still have at least one sub-agent running.
+
+    Sub-agents are never shown and never signal on their own -- but a
+    parent is not FINISHED while its own workers are still going. One
+    main agent can fan out to 100+ workers, so celebrating the parent's
+    turn-end mid-fan-out is both wrong and, at that scale, relentless.
+    """
+    running: set[str] = set()
+    for status in statuses:
+        if not status.is_subagent or status.mode == AgentMode.COMPLETED:
+            continue
+        parent = getattr(status, "parent_agent_id", None)
+        if parent:
+            running.add(parent)
+    return running
+
+
 def detect_completion_batch(
     previous_modes: Mapping[str, AgentMode],
     statuses: Sequence[AgentStatus],
     now: datetime,
 ) -> CompletionBatch:
-    """Return fresh main-session active-to-completed transitions."""
+    """Return fresh main-session active-to-completed transitions.
+
+    "Done" means the MAIN agent is finished and nothing it spawned is
+    still working -- the owner's definition, and the one that keeps a
+    celebration meaningful instead of firing on every turn boundary
+    while a hundred workers keep running.
+    """
     current_by_agent = canonical_current_statuses(statuses)
+    busy_parents = parents_with_running_subagents(statuses)
 
     eligible_by_agent: dict[str, AgentStatus] = {}
     for status in current_by_agent.values():
@@ -87,6 +112,7 @@ def detect_completion_batch(
             status.mode != AgentMode.COMPLETED
             or previous_modes.get(status.agent_id) not in _ACTIVE_MODES
             or status.event_name == "SessionEnd"
+            or status.agent_id in busy_parents
         ):
             continue
         if not is_recent(
