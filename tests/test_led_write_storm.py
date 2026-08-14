@@ -70,3 +70,40 @@ def test_a_real_change_still_writes(tmp_path: Path) -> None:
         relay_elapsed_seconds=0.4,
     )
     assert changed.changed is True
+
+
+def test_screen_bar_borrows_the_hardware_animation_by_default() -> None:
+    """One light language in two places.
+
+    Linked (the default), the notch must not render a different
+    animation than the LEDs -- two surfaces disagreeing about the same
+    moment is the bug this option exists to prevent.
+    """
+    from sidepulse.settings import AgentMonitorSettings, DeviceDisplaySetting
+
+    settings = AgentMonitorSettings(
+        devices=(
+            DeviceDisplaySetting(
+                device_id="virtual:status-bar", name="Screen Bar", path="virtual:status-bar",
+                blend_mode="cycle",
+            ),
+            DeviceDisplaySetting(
+                device_id="/Volumes/SidePulse", name="SidePulse Pro", path="/Volumes/SidePulse",
+                blend_mode="relay",
+            ),
+        )
+    )
+    assert settings.link_screen_bar_to_hardware is True
+
+    class _Controller:
+        pass
+
+    from sidepulse.status_bar import StatusBarController
+
+    controller = _Controller()
+    controller.settings = settings
+    # Linked: the notch borrows the hardware's animation, ignoring its own.
+    assert StatusBarController.screen_bar_blend_override(controller) == "relay"
+    # Unlinked: the notch keeps its own choice.
+    controller.settings = settings.with_link_screen_bar_to_hardware(False)
+    assert StatusBarController.screen_bar_blend_override(controller) == "cycle"

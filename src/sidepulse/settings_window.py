@@ -1118,6 +1118,20 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         ),
     )
     glow_inner.addArrangedSubview_(gauges_row)
+    native_ui.add_separator(glow_inner)
+    link_row, link_switch = native_ui.make_switch_row(
+        "Match the hardware's animation",
+        target,
+        "toggleLinkScreenBarToHardware:",
+        help_text=(
+            "One light language in two places: the Screen Bar renders "
+            "the same animation your SidePulse hardware is running, so "
+            "the notch and the LEDs are never two different opinions "
+            "about the same moment. Turn this off to give the Screen "
+            "Bar its own animation."
+        ),
+    )
+    glow_inner.addArrangedSubview_(link_row)
     stack.addArrangedSubview_(glow_outer)
     outer, inner = native_ui.make_card()
 
@@ -1230,6 +1244,7 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
     buttons = {
         "screen_bar_wraps_menu_bar": wraps_switch,
         "screen_bar_gauges": gauges_switch,
+        "link_screen_bar_to_hardware": link_switch,
         "screen_bar_follow_alcove": follow_switch,
     }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons

@@ -1942,6 +1942,27 @@ class StatusBarController(NSObject):
             return projection.visible_rows
         return tuple(row for row in projection.visible_rows if row.provider == pin)
 
+    def screen_bar_blend_override(self) -> str | None:
+        """Which animation the Screen Bar should render with.
+
+        Linked (the default), the notch borrows the animation the
+        HARDWARE is running, so the two surfaces are never two different
+        opinions about the same moment -- one light language, two
+        places. Unlinked, the Screen Bar keeps its own per-device
+        choice, which is what someone tuning the notch on its own
+        expects.
+        """
+        if not self.settings.link_screen_bar_to_hardware:
+            return self.settings.device_blend_mode(VIRTUAL_DEVICE_ID)
+        for device in self.settings.devices:
+            if device.device_id == VIRTUAL_DEVICE_ID:
+                continue
+            if device.blend_mode:
+                return device.blend_mode
+        # No hardware opinion: fall through to the global mode, which is
+        # what the hardware itself would render.
+        return None
+
     def should_render_multi_agent(
         self,
         resolved_glance,
@@ -7516,6 +7537,14 @@ class StatusBarController(NSObject):
         self.refresh_(None)
 
     @objc.IBAction
+    def toggleLinkScreenBarToHardware_(self, sender):
+        self.settings = self.settings.with_link_screen_bar_to_hardware(
+            checkbox_is_on(sender)
+        )
+        save_settings(self.settings)
+        self.refresh_(None)
+
+    @objc.IBAction
     def toggleScreenBarGauges_(self, sender):
         self.settings = self.settings.with_screen_bar_gauges_enabled(
             checkbox_is_on(sender)
@@ -7800,6 +7829,10 @@ class StatusBarController(NSObject):
         set_checkbox_state(
             self.settings_buttons.get("screen_bar_wraps_menu_bar"),
             self.settings.virtual_status_device_wraps_menu_bar,
+        )
+        set_checkbox_state(
+            self.settings_buttons.get("link_screen_bar_to_hardware"),
+            self.settings.link_screen_bar_to_hardware,
         )
         set_checkbox_state(
             self.settings_buttons.get("screen_bar_gauges"),
@@ -9542,7 +9575,7 @@ class StatusBarController(NSObject):
             )
         else:
             colors_for_render = self.agent_render_colors()
-            override = self.settings.device_blend_mode(VIRTUAL_DEVICE_ID)
+            override = self.screen_bar_blend_override()
             if override:
                 colors_for_render = colors_for_render.with_blend_mode(override)
             presentation = None

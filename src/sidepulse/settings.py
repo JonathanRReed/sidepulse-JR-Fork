@@ -320,6 +320,12 @@ class AgentMonitorSettings:
     screen_bar_min_glow: float = 0.25
     # Story #14: wing tips as standing micro-gauges (quota ember left,
     # unseen-done green right). Screen-Bar-only luxury; off by default.
+    # One light language across both surfaces: the Screen Bar renders
+    # with the SAME animation the hardware is running, so the notch and
+    # the LEDs are never two different opinions about the same moment.
+    # On by default -- a user who owns the hardware wants them to agree,
+    # and a user who does not never notices the setting exists.
+    link_screen_bar_to_hardware: bool = True
     screen_bar_gauges_enabled: bool = False
     # Follow Alcove's visible capsule width (alpha-measured) so an
     # expanded live activity never outgrows the bracket. On by default;
@@ -867,6 +873,9 @@ class AgentMonitorSettings:
         del enabled
         return replace(self, claude_plan_limits_enabled=False)
 
+    def with_link_screen_bar_to_hardware(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, link_screen_bar_to_hardware=bool(enabled))
+
     def with_screen_bar_gauges_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, screen_bar_gauges_enabled=bool(enabled))
 
@@ -1205,6 +1214,7 @@ class AgentMonitorSettings:
             "tips_enabled": self.tips_enabled,
             "menu_bar_label_enabled": self.menu_bar_label_enabled,
             "screen_bar_min_glow": self.screen_bar_min_glow,
+            "link_screen_bar_to_hardware": self.link_screen_bar_to_hardware,
             "screen_bar_gauges_enabled": self.screen_bar_gauges_enabled,
             "screen_bar_follow_alcove": self.screen_bar_follow_alcove,
             "capacity_history_enabled": self.capacity_history_enabled,
@@ -1494,6 +1504,9 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         tips_enabled=_bool_setting(data.get("tips_enabled"), True),
         menu_bar_label_enabled=_bool_setting(data.get("menu_bar_label_enabled"), False),
         screen_bar_min_glow=_fraction_setting(data.get("screen_bar_min_glow"), 0.25),
+        link_screen_bar_to_hardware=_bool_setting(
+            data.get("link_screen_bar_to_hardware"), True
+        ),
         screen_bar_gauges_enabled=_bool_setting(data.get("screen_bar_gauges_enabled"), False),
         screen_bar_follow_alcove=_bool_setting(data.get("screen_bar_follow_alcove"), True),
         claude_plan_limits_enabled=False,
