@@ -221,6 +221,7 @@ from .ipc import (
 )
 from .keep_awake import KEEPALIVE_FILE_NAME, KeepAwakeController
 from .led_status import (
+    NEUTRAL_CHANNEL_GAINS,
     MAX_CHANNEL_GAIN,
     MIN_CHANNEL_GAIN,
     AgentLedController,
@@ -1940,6 +1941,36 @@ class StatusBarController(NSObject):
         if not pin:
             return projection.visible_rows
         return tuple(row for row in projection.visible_rows if row.provider == pin)
+
+    def screen_bar_channel_gains(self, virtual_device) -> tuple[float, float, float]:
+        """The gains the Screen Bar should render with.
+
+        Channel gain corrects one physical strip's own LED die response, and
+        was applied ONLY to what gets written to hardware -- the Screen Bar
+        kept the nominal colour. The intent was that the corrected strip
+        *emits* the nominal colour, so both surfaces would look the same.
+
+        On the owner's device the correction is green x0.38, which drives
+        white as #FF61FF, yellow as #FF6100 and cyan as #0061FF. Whatever
+        the strip emits, the two surfaces visibly disagreed -- reported as
+        "the colours flashing on the hardware are not the same as the
+        colours on the screen".
+
+        Linked (the default), the Screen Bar now borrows the hardware's
+        gains, so it previews what the strip is actually driven with. That is
+        what "one light language, two places" has to mean for colour as well
+        as animation. Unlinked, it keeps its own calibration.
+        """
+        own = virtual_device.channel_gains()
+        if not self.settings.link_screen_bar_to_hardware:
+            return own
+        for device in self.settings.devices:
+            if device.device_id == VIRTUAL_DEVICE_ID:
+                continue
+            gains = device.channel_gains()
+            if gains != NEUTRAL_CHANNEL_GAINS:
+                return gains
+        return own
 
     def screen_bar_blend_override(self) -> str | None:
         """Which animation the Screen Bar should render with.
@@ -9131,7 +9162,9 @@ class StatusBarController(NSObject):
                         display=device.led_display,
                         brightness=device.brightness,
                         auto_brightness_enabled=device.auto_brightness_enabled,
-                        channel_gains=self.apply_night_warmth(device.channel_gains()),
+                        channel_gains=self.apply_night_warmth(
+                            self.screen_bar_channel_gains(device)
+                        ),
                         resting_glow=device.resting_glow,
                         signal_policy=device.signal_policy,
                         reason="on-screen device",
