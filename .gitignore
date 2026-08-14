@@ -14,3 +14,10 @@ uv.lock
 work/reference-sources/
 work/final-candidate-build/
 work/final-candidate-dist/
+# Same class, missed when the list above was written, and it is TRACKED:
+# 181MB of venv, PyInstaller cache, pip cache and a built .pkg, all
+# reproducible from packaging/build_macos_pkg.sh. Every build rewrites the
+# pip-cache blobs, so `git status` is permanently dirty with binary churn.
+# This line only bites after the files leave the index:
+#   git rm -r --cached work/build-live
+work/build-live/

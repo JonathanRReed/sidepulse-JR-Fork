@@ -47,7 +47,7 @@
  [],
  False,
  False,
- 1786690049,
+ 1786708788,
  [('runw',
    '/Users/jonathanreed/Documents/Codex/2026-08-12/hey-so-i-was-working-on/work/sidepulse-manager-completion/work/build-live/venv/lib/python3.13/site-packages/PyInstaller/bootloader/Darwin-64bit/runw',
    'EXECUTABLE')],
