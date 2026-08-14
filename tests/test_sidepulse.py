@@ -1441,7 +1441,18 @@ for (const event of [
 
         self.assertTrue(device._animation_active)
         self.assertTrue(published[-1].animation_active)
-        self.assertEqual(device._frame_interval_current, virtual_device.FRAME_INTERVAL)
+        # Promoted off the idle-dropped rate. Continuous motion settles
+        # at the gentle cadence rather than transition framerate: a slow
+        # breathe looks identical there and running it at 60-120Hz was
+        # the app's single largest CPU draw.
+        self.assertLess(
+            device._frame_interval_current, 1.0 / virtual_device.IDLE_FRAME_RATE
+        )
+        self.assertAlmostEqual(
+            device._frame_interval_current,
+            1.0 / virtual_device.GENTLE_MOTION_FPS,
+            places=4,
+        )
         self.assertIsNone(device.timer)
 
     def test_screen_bar_frame_callback_never_promotes_cadence(self) -> None:

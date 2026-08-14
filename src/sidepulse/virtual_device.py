@@ -39,6 +39,7 @@ from .presentation_policy import MotionClass
 from .presentation_scheduler import PresentationSchedulerInputs
 from .render_policy import (
     ACTIVE_RENDER_FPS,
+    GENTLE_MOTION_FPS,
     STATIC_WATCH_FPS,
     BoundedRenderCache,
     GlowGeometryKey,
@@ -2076,9 +2077,42 @@ class VirtualStatusDevice(NSObject):
         self._runtime_environment_cache = (now, environment)
         return environment
 
+    def _panel_refresh_hz(self) -> float | None:
+        """The display's real refresh rate, cached briefly.
+
+        Cadences are snapped to an integer divisor of this so every
+        frame lands on a vsync boundary -- a rate that is not a whole
+        fraction of the panel reads as judder, which is the opposite of
+        what a slower cadence is for.
+        """
+        cached = getattr(self, "_panel_refresh_cache", None)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < 5.0:
+            return cached[1]
+        refresh = None
+        try:
+            screen = NSScreen.mainScreen()
+            maximum = getattr(screen, "maximumFramesPerSecond", None)
+            if callable(maximum):
+                value = float(maximum())
+                if value > 0.0:
+                    refresh = value
+        except Exception:
+            refresh = None
+        self._panel_refresh_cache = (now, refresh)
+        return refresh
+
     def _refresh_render_cadence(
         self, animation_active: bool, *, force: bool = False
     ):
+        # CONTINUOUS motion is the app's RESTING state -- a slow breathe
+        # that looks identical at a fraction of the framerate. Only
+        # FINITE cues are real transitions worth the full pipeline.
+        # Treating "anything is animating" as "run at 60-120 Hz" meant
+        # the idle pulse never let the surface settle, which was the
+        # single largest CPU draw in the app.
+        motion = getattr(self._sampler_command, "motion", None)
+        gentle = motion is MotionClass.CONTINUOUS
         schedule = choose_render_schedule(
             self._runtime_environment(force=force),
             animation_active,
@@ -2088,6 +2122,8 @@ class VirtualStatusDevice(NSObject):
                 "next_visual_change_at",
                 None,
             ),
+            gentle_motion=gentle,
+            refresh_hz=self._panel_refresh_hz(),
         )
         self._render_schedule = schedule
         cadence = schedule.cadence

@@ -10,6 +10,31 @@ from sidepulse.accessibility_display import AccessibilityDisplayPreferences
 
 ACTIVE_RENDER_FPS = 60.0
 STATIC_WATCH_FPS = 4.0
+# A slow breathe does not need transition framerates. Rendering an idle
+# pulse at 60-120 Hz was the single largest CPU draw in the app, and it
+# never stopped, because "is anything animating" was true whenever any
+# agent existed.
+GENTLE_MOTION_FPS = 30.0
+
+
+def refresh_divisor_fps(refresh_hz: float | None, target_fps: float) -> float:
+    """Snap a target framerate to an integer divisor of the panel.
+
+    A cadence that is not a whole fraction of the display's refresh
+    beats against vsync and reads as judder -- the exact opposite of
+    what a slower cadence is for. 20 fps asked of a 120 Hz panel becomes
+    exactly every sixth frame; asked of a 90 Hz panel it becomes 18
+    (every fifth) rather than a cadence that slips a frame forever.
+    """
+    if not refresh_hz or refresh_hz <= 0.0 or target_fps <= 0.0:
+        return target_fps
+    if target_fps >= refresh_hz:
+        return float(refresh_hz)
+    for divisor in range(1, 241):
+        candidate = refresh_hz / divisor
+        if candidate <= target_fps + 1e-9:
+            return candidate
+    return target_fps
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,13 +96,22 @@ class RenderSchedule:
 
 
 def choose_render_cadence(
-    environment: RenderEnvironment, animation_active: bool
+    environment: RenderEnvironment,
+    animation_active: bool,
+    *,
+    gentle_motion: bool = False,
+    refresh_hz: float | None = None,
 ) -> RenderCadence:
     """Choose one deterministic paint and sampling cadence.
 
-    Active animation gets the 60 Hz pipeline required for smooth motion.
-    Static output keeps only a low-frequency change watcher. A hidden or
-    sleeping surface does no paint or WASM work at all.
+    Transitions get the full pipeline required for smooth motion.
+    ``gentle_motion`` marks slow, continuous breathing -- the resting
+    state of the whole app -- which looks identical at a fraction of the
+    cost. Static output keeps only a low-frequency change watcher, and a
+    hidden or sleeping surface does no paint or WASM work at all.
+
+    Whatever the chosen rate, it is snapped to an integer divisor of
+    ``refresh_hz`` so every frame lands on a real vsync boundary.
     """
     if not environment.visible or environment.display_asleep:
         return RenderCadence(fps=0.0, sample_fps=0.0)
@@ -88,7 +122,7 @@ def choose_render_cadence(
         fps = 1.0 if constrained else STATIC_WATCH_FPS
         return RenderCadence(fps=fps, sample_fps=fps)
 
-    fps = ACTIVE_RENDER_FPS
+    fps = GENTLE_MOTION_FPS if gentle_motion else ACTIVE_RENDER_FPS
     if thermal == "fair":
         fps = min(fps, 45.0)
     elif thermal == "serious":
@@ -112,9 +146,15 @@ def choose_render_schedule(
     *,
     display_link_available: bool,
     next_visual_change_at: float | None = None,
+    gentle_motion: bool = False,
+    refresh_hz: float | None = None,
 ) -> RenderSchedule:
     """Choose the render driver while preserving the established cadence policy."""
-    cadence = choose_render_cadence(environment, animation_active)
+    cadence = choose_render_cadence(
+        environment,
+        animation_active,
+        gentle_motion=gentle_motion,
+    )
     if cadence.fps <= 0.0:
         driver = RenderDriverKind.PAUSED
     elif (
@@ -128,6 +168,13 @@ def choose_render_schedule(
         driver = RenderDriverKind.DISPLAY_LINK
     else:
         driver = RenderDriverKind.TIMER
+    if driver is RenderDriverKind.TIMER:
+        # A timer has to hit vsync on its own, so its rate must be a
+        # whole fraction of the panel or the motion visibly slips. A
+        # display link is already locked to the display and negotiates
+        # its own frame range, so snapping there would only fight it.
+        snapped = refresh_divisor_fps(refresh_hz, cadence.fps)
+        cadence = RenderCadence(fps=snapped, sample_fps=snapped)
     return RenderSchedule(
         driver=driver,
         cadence=cadence,
