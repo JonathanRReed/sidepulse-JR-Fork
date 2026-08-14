@@ -485,6 +485,22 @@ PROVIDER_BRAND_COLORS: dict[str, str] = {
     "claude": "#D97757",
     "devin": "#1D3461",
     "grok": "#8E8E93",
+    # Not Antigravity's real brand colour, and deliberately so. Its icon's
+    # dominant blue (~#3D8AFF) is 4.5 degrees from codex's #2B8FFF -- two
+    # near-identical blues on a strip is the grok/opencode systemGray clash
+    # again. CURATED_PALETTE is also structurally exhausted at eight
+    # providers, and the positional fallback handed antigravity #FF3B30,
+    # ten degrees from the Ask/blocked seed: a provider that looks
+    # permanently blocked.
+    #
+    # This colour was chosen by dE2000 under NORMAL, DEUTERANOPIA and
+    # PROTANOPIA simulation against all twelve spoken-for colours, not by
+    # hue degrees -- raw hue distance is what let the grok clash through.
+    # It wins at minimum dE 28.3; the runner-up hues in the same band score
+    # 19-25 because they collapse toward the Done seed for a dichromat.
+    # What separates this one is LIGHTNESS, which survives dichromacy when
+    # hue does not. See test_provider_colour_dichromacy.py.
+    "antigravity": "#ABE17E",
 }
 
 
