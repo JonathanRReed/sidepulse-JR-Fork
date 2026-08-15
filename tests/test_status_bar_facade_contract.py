@@ -51,3 +51,9 @@ def test_facade_forwards_assignment_and_deletion() -> None:
     }
 
     assert {"__getattr__", "__setattr__", "__delattr__", "__dir__"} <= method_names
+
+
+def test_source_introspection_points_at_the_retained_runtime() -> None:
+    source = FACADE.read_text(encoding="utf-8")
+
+    assert "_facade_module.__file__ = _legacy.__file__" in source
