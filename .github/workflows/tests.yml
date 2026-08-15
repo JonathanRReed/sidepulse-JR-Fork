@@ -1,5 +1,7 @@
-name: Manual verification
+name: Tests (manual)
 
+# Local verification is authoritative while GitHub-hosted minutes are unavailable.
+# Run this workflow manually when credits are restored or for an independent check.
 on:
   workflow_dispatch:
 
@@ -7,24 +9,39 @@ permissions:
   contents: read
 
 concurrency:
-  group: sidepulse-verification-${{ github.ref }}
+  group: sidepulse-tests-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  verify:
-    runs-on: macos-latest
-    timeout-minutes: 90
+  portable:
+    name: Portable lint, tests, and package
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
-      - name: Install test environment
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install --editable ".[test]"
-      - name: Lint
-        run: ruff check src tests
-      - name: Test
-        run: python -m pytest tests/ -q
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Verify portable surfaces
+        run: ./scripts/verify.sh --no-bootstrap --portable
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sidepulse-python-dist
+          path: dist/
+          if-no-files-found: error
+
+  macos:
+    name: Full pytest on macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Full suite
+        run: python -m pytest tests -q

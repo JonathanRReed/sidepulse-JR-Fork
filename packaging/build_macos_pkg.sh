@@ -6,7 +6,7 @@ VERSION="$(/usr/bin/sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT_DIR/pyproject.
 ARCH="$(/usr/bin/uname -m)"
 BUILD_DIR="${BUILD_ROOT:-$ROOT_DIR/build/macos-pkg}"
 DIST_DIR="${OUTPUT_ROOT:-$ROOT_DIR/dist}"
-BUILD_PYTHON="${BUILD_PYTHON:-/usr/bin/python3}"
+REQUESTED_BUILD_PYTHON="${BUILD_PYTHON:-}"
 VENV_DIR="$BUILD_DIR/venv"
 APP_PATH="$BUILD_DIR/pyinstaller/SidePulse.app"
 COMPONENT_PKG="$BUILD_DIR/SidePulse-component.pkg"
@@ -18,6 +18,54 @@ APP_SIGN_IDENTITY="${APP_SIGN_IDENTITY:-}"
 INSTALLER_SIGN_IDENTITY="${INSTALLER_SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 ALLOW_UNSIGNED="${ALLOW_UNSIGNED:-0}"
+
+select_build_python() {
+    local candidate resolved
+    local candidates=()
+
+    if [ -n "$REQUESTED_BUILD_PYTHON" ]; then
+        candidates=("$REQUESTED_BUILD_PYTHON")
+    else
+        candidates=(
+            /opt/homebrew/bin/python3.13
+            python3.13
+            python3.12
+            python3.11
+            python3.10
+            /opt/homebrew/bin/python3
+            /usr/local/bin/python3
+            python3
+        )
+    fi
+
+    for candidate in "${candidates[@]}"; do
+        if [[ "$candidate" = /* ]]; then
+            resolved="$candidate"
+        else
+            resolved="$(command -v "$candidate" 2>/dev/null || true)"
+        fi
+        if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
+            continue
+        fi
+        if "$resolved" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' 2>/dev/null; then
+            printf '%s\n' "$resolved"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [ -z "$VERSION" ]; then
+    echo "Could not read the SidePulse version from pyproject.toml." >&2
+    exit 2
+fi
+
+BUILD_PYTHON="$(select_build_python || true)"
+if [ -z "$BUILD_PYTHON" ]; then
+    echo "SidePulse requires Python 3.10+ to build the macOS package." >&2
+    echo "Install Homebrew Python 3.13 or set BUILD_PYTHON to a supported interpreter." >&2
+    exit 2
+fi
 
 if { [ -z "$APP_SIGN_IDENTITY" ] || [ -z "$INSTALLER_SIGN_IDENTITY" ]; } && [ "$ALLOW_UNSIGNED" != "1" ]; then
     echo "Set APP_SIGN_IDENTITY to a Developer ID Application identity and" >&2
@@ -40,7 +88,7 @@ esac
 case "$BUILD_PYTHON" in
     /*) ;;
     *)
-        echo "BUILD_PYTHON must be an absolute path: $BUILD_PYTHON" >&2
+        echo "BUILD_PYTHON must resolve to an absolute path: $BUILD_PYTHON" >&2
         exit 2
         ;;
 esac
@@ -48,7 +96,12 @@ if [ ! -x "$BUILD_PYTHON" ]; then
     echo "BUILD_PYTHON is missing or not executable: $BUILD_PYTHON" >&2
     exit 2
 fi
+"$BUILD_PYTHON" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' || {
+    echo "SidePulse requires Python 3.10+; got $($BUILD_PYTHON -V 2>&1)." >&2
+    exit 2
+}
 
+echo "Building SidePulse $VERSION for $ARCH with $($BUILD_PYTHON -V 2>&1)"
 /bin/rm -rf "$BUILD_DIR"
 /bin/mkdir -p "$BUILD_DIR" "$DIST_DIR"
 export PIP_CACHE_DIR="$BUILD_DIR/pip-cache"
@@ -56,7 +109,7 @@ export PIP_DISABLE_PIP_VERSION_CHECK=1
 export PYINSTALLER_CONFIG_DIR="$BUILD_DIR/pyinstaller-cache"
 "$BUILD_PYTHON" -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
-"$VENV_DIR/bin/python" -m pip install 'pyinstaller>=6.10' "$ROOT_DIR"
+"$VENV_DIR/bin/python" -m pip install 'pyinstaller>=6.10,<7' "$ROOT_DIR"
 
 "$VENV_DIR/bin/pyinstaller" \
     --noconfirm --clean --windowed \
@@ -101,11 +154,9 @@ fi
 # Assert the signature we actually got is the one we asked for.
 #
 # codesign exiting 0 proves a signature exists, not that it is the right one.
-# PyInstaller ad-hoc signs the bundle itself (-s -) before this script re-signs
-# it, so a re-sign that silently no-ops leaves a VALID ad-hoc bundle that
-# verifies cleanly here and then loses every TCC grant on the user's machine.
-# A peer project shipped exactly that: a release script defaulting its identity
-# to "-", exiting 0, with the notarize step also exiting 0.
+# PyInstaller ad-hoc signs the bundle itself before this script re-signs it, so
+# a re-sign that silently no-ops leaves a valid ad-hoc bundle that would lose
+# every TCC grant on the user's machine.
 if [ -n "$APP_SIGN_IDENTITY" ]; then
     SIGNED_TEAM="$(/usr/bin/codesign -dv --verbose=4 "$APP_PATH" 2>&1 \
         | /usr/bin/awk -F= '/^TeamIdentifier=/ {print $2}')"

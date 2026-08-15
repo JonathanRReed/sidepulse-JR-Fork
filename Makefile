@@ -1,30 +1,40 @@
-.PHONY: bootstrap lint test test-targeted build verify clean
-
-VENV ?= .venv
-PYTHON := $(VENV)/bin/python
-RUFF := $(VENV)/bin/ruff
+.PHONY: bootstrap format lint test test-portable package clean-install verify verify-portable release install-user clean
 
 bootstrap:
-	SIDEPULSE_VENV="$(abspath $(VENV))" ./scripts/bootstrap-dev.sh
+	./scripts/bootstrap-dev.sh
+
+format: bootstrap
+	.venv/bin/python -m ruff check --fix src tests packaging scripts
 
 lint: bootstrap
-	$(RUFF) check src tests
+	.venv/bin/python -m ruff check src tests packaging scripts
 
 test: bootstrap
-	$(PYTHON) -m pytest tests/ -q
+	.venv/bin/python -m pytest tests -q
 
-test-targeted: bootstrap
-	$(PYTHON) -m pytest tests/test_device_projection.py tests/test_packaging_contract.py -q
+test-portable: bootstrap
+	./scripts/verify.sh --no-bootstrap --portable --skip-build
 
-build: bootstrap
-	$(PYTHON) -m pip install --quiet build twine
+package: bootstrap
 	rm -rf build dist
-	$(PYTHON) -m build
-	$(PYTHON) -m twine check dist/*
+	.venv/bin/python -m build --no-isolation
+	.venv/bin/python -m twine check dist/*
+
+clean-install: package
+	.venv/bin/python scripts/verify_clean_install.py
 
 verify:
-	SIDEPULSE_VENV="$(abspath $(VENV))" ./scripts/verify.sh
+	./scripts/verify.sh
+
+verify-portable:
+	./scripts/verify.sh --portable
+
+release:
+	./scripts/publish_release.sh
+
+install-user:
+	./scripts/install-user.sh
 
 clean:
-	rm -rf .pytest_cache .ruff_cache build dist htmlcov
-	find src tests -type d -name __pycache__ -prune -exec rm -rf {} +
+	rm -rf build dist .pytest_cache .ruff_cache .coverage htmlcov
+	find src tests packaging scripts -type d -name __pycache__ -prune -exec rm -rf {} +
