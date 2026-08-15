@@ -13,9 +13,9 @@ This specification turns the existing SidePulse rescue, JR-BAR vision, master pl
 3. define a stable integration SDK;
 4. integrate CodexBar without copying its authentication and provider logic;
 5. add a first-class T3 Code compatibility mode;
-6. build a coherent native UI system instead of extending the existing settings monolith;
+6. build a coherent native UI and reusable design system instead of extending the existing settings monolith;
 7. replace ad hoc effects with Animation Studio 2 and a safe cross-surface motion system;
-8. establish production telemetry, security, migration, test, packaging, and release gates.
+8. establish production telemetry, security, migration, test, packaging, supply-chain, and release gates.
 
 The product remains an ambient attention system. T3 owns orchestration. CodexBar owns provider accounting. SidePulse decides what matters now and expresses that decision consistently through the physical light, Screen Bar, menu-bar glance, Command Center, and diagnostics.
 
@@ -83,6 +83,12 @@ SidePulse remains read-mostly and attention-oriented.
 - CodexBar credentials, browser sessions, provider tokens, and provider-specific refresh logic remain owned by CodexBar.
 
 The existing bundle identifier, LaunchAgent identity, state paths, and permission-bearing application identity stay unchanged throughout the migration.
+
+### 2.3 Supported platform
+
+The first native production host targets macOS 14 or newer on Apple Silicon. The existing Python/PyObjC host remains the rollback path during the migration window. No existing architecture or operating-system support is removed silently; any later support-matrix change requires an explicit release note and installer guard.
+
+The native host is built as an Xcode application target. Shared protocol and view-model code may live in local Swift packages, but signing, entitlements, assets, embedded helpers, and installed-upgrade tests remain owned by the Xcode application project.
 
 ## 3. Production outcomes
 
@@ -156,7 +162,7 @@ SidePulse.app host
 
 The helper is launched and supervised by the host. It is not a separate login item or independently persistent daemon. It exits when the host exits. This avoids a second user-visible service and avoids moving TCC-sensitive operations into a new executable identity.
 
-The host and helper communicate through an inherited Unix socket pair. The socket is not published globally. The host generates an ephemeral 256-bit session secret and sends it over an inherited file descriptor, never through command-line arguments or environment visible to unrelated processes.
+The host and helper communicate through an inherited Unix socket pair. The socket is not published globally. The host generates an ephemeral 256-bit session secret and sends it over an inherited file descriptor, never through command-line arguments or an environment visible to unrelated processes.
 
 ### 4.3 Stage 3: native host
 
@@ -237,7 +243,7 @@ class StateDelta:
     removals: tuple[EntityRef, ...]
 ```
 
-Consumers may request a full snapshot when generations do not line up. Normal updates use deltas.
+Consumers request a full snapshot when generations do not line up. Normal updates use deltas.
 
 ### 5.3 Bounded coalescing
 
@@ -438,6 +444,32 @@ An adapter may be read-only. Unsupported actions are absent, not disabled button
 - stopping an adapter cancels its workers and removes its facts through one deterministic teardown delta;
 - version incompatibility produces a visible diagnostics state and actionable remediation.
 
+### 9.3 Compatibility manifest
+
+External integrations are pinned and tested through `integrations/compatibility.json`.
+
+Each entry records:
+
+```json
+{
+  "integration": "t3code",
+  "minimumVersion": "x.y.z",
+  "maximumTestedVersion": "x.y.z",
+  "protocolFingerprint": "sha256:...",
+  "sourceCommit": "...",
+  "fixtureVersion": 1
+}
+```
+
+Rules:
+
+- `minimumVersion` is the oldest supported external release;
+- `maximumTestedVersion` is informational when protocol fingerprints still match;
+- a fingerprint mismatch disables mutable capabilities first, then falls back to read-only snapshot behavior when safe;
+- a fixture and protocol update land in the same commit;
+- the installed external version and compatibility decision appear in Diagnostics;
+- compatibility is verified locally before every SidePulse release.
+
 ## 10. CodexBar integration
 
 ### 10.1 Ownership
@@ -449,11 +481,14 @@ CodexBar remains the source of truth for provider usage, credits, costs, reset w
 Preferred path:
 
 1. discover `codexbar` and validate its version;
-2. launch `codexbar serve` as a supervised child on loopback;
-3. generate a random dashboard token and pass it through `CODEXBAR_DASHBOARD_TOKEN`, never through process arguments;
-4. query `/health` and `/dashboard/v1/snapshot`;
-5. poll at an adaptive cadence and retain last-known-good snapshots;
-6. terminate the child when integration is disabled or SidePulse exits.
+2. choose a random loopback port from the dynamic range, verify it is free, and retry boundedly if `serve` reports `EADDRINUSE`;
+3. launch `codexbar serve` as a supervised child bound only to `127.0.0.1`;
+4. generate a random dashboard token and pass it through `CODEXBAR_DASHBOARD_TOKEN`, never through process arguments;
+5. query `/health` and `/dashboard/v1/snapshot`;
+6. poll at an adaptive cadence and retain last-known-good snapshots;
+7. terminate the child when integration is disabled or SidePulse exits.
+
+The child must confirm its selected port and version before the adapter becomes healthy. Port retries are limited and visible in diagnostics. SidePulse never binds CodexBar to a non-loopback interface.
 
 Fallback path:
 
@@ -461,8 +496,6 @@ Fallback path:
 - cap stdout and stderr;
 - parse only the documented dashboard schema;
 - never invoke an interactive cookie or Keychain refresh from the background.
-
-SidePulse does not connect to a non-loopback CodexBar server in the first production release.
 
 ### 10.3 Projection
 
@@ -485,7 +518,7 @@ CodexBar rows preserve:
 - Command Center shows every enabled provider and account.
 - Physical LEDs do not display quota by default.
 - Screen Bar may show a finite capacity warning only when a configured threshold is crossed.
-- Diagnostics shows the CodexBar version, connection mode, source age, last error, and cache state.
+- Diagnostics shows the CodexBar version, connection mode, source age, last error, cache state, and compatibility result.
 
 ## 11. T3 Code compatibility mode
 
@@ -615,7 +648,8 @@ Settings contains only preferences, integrations, devices, notification policy, 
 ### 12.2 Native structure
 
 ```text
-NativeHost/
+macos/SidePulseHost/
+  SidePulseHost.xcodeproj
   App/
     SidePulseApp.swift
     AppDelegate.swift
@@ -632,6 +666,10 @@ NativeHost/
     DeepLinkService.swift
     PermissionService.swift
     HostObservationService.swift
+  DesignSystem/
+    Tokens/
+    Components/
+    Motion/
   Views/
     Glance/
     CommandCenter/
@@ -646,7 +684,43 @@ NativeHost/
 
 The root scenes compose views. They do not own provider clients, subprocesses, persistence, or protocol decoding.
 
-### 12.3 Interaction rules
+### 12.3 Design system
+
+The native host uses semantic tokens rather than pane-local styling.
+
+Token groups:
+
+- spacing: 4, 8, 12, 16, 24, 32;
+- corner roles: compact control, card, panel, overlay;
+- typography roles: eyebrow, label, body, emphasized body, metric, title, monospaced diagnostic;
+- color roles: background, elevated background, separator, primary text, secondary text, provider identity, lifecycle state, warning, destructive, success;
+- material and elevation roles: menu, card, inspector, overlay;
+- motion roles: immediate, quick, standard, deliberate, ambient;
+- density roles: comfortable and compact.
+
+Required reusable components:
+
+- `ProviderIdentityView`;
+- `LifecycleBadge`;
+- `StableSessionRow`;
+- `NeedsYouCard`;
+- `CapacityWindowView`;
+- `FreshnessLabel`;
+- `SourceHealthBadge`;
+- `BranchWorktreeChip`;
+- `PullRequestChip`;
+- `MetricCard`;
+- `DecisionTraceView`;
+- `EmptyStateView`;
+- `PermissionCallout`;
+- `DevicePreview`;
+- `AnimationTimeline`.
+
+Components accept semantic models and actions. They never fetch data or inspect provider-specific files. Provider branding is a token input, while lifecycle meaning remains controlled by the SidePulse state system.
+
+The design system has snapshot fixtures for normal, compact, high contrast, increased contrast, Reduce Motion, Differentiate Without Color, and large text. A component is not production-ready until all required states are represented.
+
+### 12.4 Interaction rules
 
 - One stable split-view structure per window.
 - Named commands and actions, not inline process logic.
@@ -755,7 +829,9 @@ The first production library includes:
 
 Decorative recipes are opt-in. Default operation follows the four-state calm light language.
 
-## 14. Security and privacy
+## 14. Security, privacy, and supply chain
+
+### 14.1 Runtime security
 
 - Local protocols use inherited descriptors or user-private sockets with `0600` permissions.
 - Child processes receive sanitized environments.
@@ -769,6 +845,17 @@ Decorative recipes are opt-in. Default operation follows the four-state calm lig
 - Session prompts, transcript content, repository file contents, command output, tokens, cookies, and secrets are excluded from telemetry.
 - Mutable request responses require a recent explicit user gesture and correlation to a still-open request.
 - Deep links are allowlisted and structurally encoded. No user-controlled shell interpolation is permitted.
+
+### 14.2 Supply-chain controls
+
+- Python dependencies are locked with hashes for release builds.
+- Swift package revisions are pinned.
+- The T3 bridge records its exact source commit and generated protocol fingerprint.
+- Embedded helper checksums are included in the release manifest and verified during packaging.
+- The signed app ships an SBOM containing direct Python, Swift, native helper, and bundled binary dependencies.
+- Release verification scans for unexpected writable executable paths, unsigned nested code, absolute developer paths, and debug entitlements.
+- Dependency upgrades are isolated from feature changes and require clean-install plus signed-package verification.
+- No automatic external telemetry or crash upload is enabled. Support export is explicit and local-first.
 
 ## 15. Persistence and migration
 
@@ -816,7 +903,7 @@ Each store has an integer schema version, atomic writer, corruption recovery, an
 - coalescing and backpressure;
 - persistence and migration;
 - adapter capability negotiation;
-- CodexBar dashboard fixtures, stale fallback, partial errors, and process supervision;
+- CodexBar dashboard fixtures, stale fallback, partial errors, port retry, and process supervision;
 - T3 normalized event fixtures and duplicate reconciliation;
 - animation recipe schema, safety, compiler, and hardware grammar;
 - performance budget unit contracts;
@@ -828,6 +915,7 @@ Each store has an integer schema version, atomic writer, corruption recovery, an
 - store reconciliation;
 - stable sorting and selection;
 - Glance, Command Center, Studio, Diagnostics, and Settings view models;
+- design-system component states;
 - accessibility labels and reduced-motion projection;
 - deep-link allowlisting;
 - migration and feature-flag behavior.
@@ -881,7 +969,21 @@ studio.v2
 
 Flags are persisted, surfaced in Diagnostics, and removable after their rollback window closes. Hidden environment overrides exist only for development and tests.
 
-### 18.2 Rollout order
+### 18.2 Branch and review policy
+
+Each wave is implemented on its own branch and pull request. A wave may be stacked on an unmerged prerequisite, but it is rebased or retargeted after that prerequisite lands. No production wave is delivered as one repository-wide mega-commit.
+
+Every pull request contains:
+
+- the exact acceptance criteria it closes;
+- focused test evidence;
+- performance evidence when relevant;
+- migration and rollback notes;
+- an explicit list of remaining Mac-only, hardware-only, or signing-only checks.
+
+GitHub Actions remain manual-only while hosted credits are unavailable. The authoritative gate runs locally on the owner's Mac and attaches its machine-readable report to the pull request or release.
+
+### 18.3 Rollout order
 
 #### Wave 1: performance evidence and scoped refresh
 
@@ -932,7 +1034,7 @@ Exit: a real T3 session, child-agent run, approval request, completion, branch, 
 
 #### Wave 6: native Glance and Command Center
 
-- build the native host scenes and stores;
+- build the native host scenes, stores, and design-system foundation;
 - retain the same helper protocol;
 - ship native Glance first, then Command Center;
 - preserve legacy host rollback.
@@ -952,7 +1054,7 @@ Exit: every recipe validates on all supported surfaces and accessibility modes.
 - complete remaining native scenes;
 - close migration and rollback paths;
 - remove obsolete PyObjC UI only after parity;
-- run full signed package, notarization, TCC upgrade, performance, and real-device gates.
+- run full signed package, notarization, TCC upgrade, performance, SBOM, and real-device gates.
 
 Exit: production release candidate meets every outcome in this specification.
 
