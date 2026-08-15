@@ -79,7 +79,8 @@ def guard_draw(method):
     def drawRect_(self, rect):
         try:
             return method(self, rect)
-        except Exception as error:  # noqa: BLE001 - the point is to catch all.
+        except Exception as error:
+            # Catching every exception is the safety boundary for AppKit draw callbacks.
             record_draw_failure(type(self).__name__, error)
             return None
 
