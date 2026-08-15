@@ -1,6 +1,0 @@
-stamp=20260813T220457Z
-app_backup=/Users/jonathanreed/Applications/SidePulse.app.backup-20260813T220457Z
-plist_backup=/Users/jonathanreed/Library/LaunchAgents/io.sidepulse.agentstatus.plist.backup-20260813T220457Z
-candidate_sha256=7a722aab9f05d26ca7757c48194e7d21ce382e28d86501f56f41231200685486
-status-bar: installed and started
-  plist: /Users/jonathanreed/Library/LaunchAgents/io.sidepulse.agentstatus.plist
