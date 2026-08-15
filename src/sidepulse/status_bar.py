@@ -3,8 +3,7 @@
 The original controller grew into a single, very large module. It remains the
 runtime implementation while deterministic decisions are extracted into small,
 testable modules. This facade preserves the public ``sidepulse.status_bar``
-module contract, including test monkeypatches and source introspection, and
-replaces only the per-device projection methods with repaired implementations.
+module contract, including test monkeypatches and source introspection.
 """
 
 from __future__ import annotations
@@ -16,20 +15,24 @@ from . import status_bar_legacy as _legacy
 from .device_projection import light_rows_for_provider, projection_for_provider
 
 
-def _projected_rows_for_device(self, projection, device):
-    provider_pin = self.settings.device_provider_pin(device.device_id)
-    return light_rows_for_provider(projection, provider_pin)
+# PyObjC registers Objective-C methods when a Python subclass is created. Do
+# not assign methods onto an existing Cocoa class after creation. The reload
+# guard reuses the registered subclass instead of attempting to define a second
+# Objective-C class with the same process-global name.
+if _legacy.StatusBarController.__name__ == "JRStatusBarController":
+    JRStatusBarController = _legacy.StatusBarController
+else:
 
+    class JRStatusBarController(_legacy.StatusBarController):
+        def projected_rows_for_device(self, projection, device):
+            provider_pin = self.settings.device_provider_pin(device.device_id)
+            return light_rows_for_provider(projection, provider_pin)
 
-def _projection_for_device(self, projection, device):
-    provider_pin = self.settings.device_provider_pin(device.device_id)
-    return projection_for_provider(projection, provider_pin)
+        def projection_for_device(self, projection, device):
+            provider_pin = self.settings.device_provider_pin(device.device_id)
+            return projection_for_provider(projection, provider_pin)
 
-
-# Repair the live controller at the narrowest boundary. Existing callers keep
-# the same class object and all AppKit state remains owned by the legacy module.
-_legacy.StatusBarController.projected_rows_for_device = _projected_rows_for_device
-_legacy.StatusBarController.projection_for_device = _projection_for_device
+    _legacy.StatusBarController = JRStatusBarController
 
 
 class _StatusBarFacade(ModuleType):
