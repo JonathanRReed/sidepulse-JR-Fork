@@ -1,4 +1,4 @@
-"""Compatibility launcher for installations that used agent_monitor."""
+"""Compatibility launcher for installations that used sidepulse_cli."""
 
 from __future__ import annotations
 

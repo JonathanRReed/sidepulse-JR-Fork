@@ -1,102 +1,75 @@
 # SidePulse Architecture
 
-The context document: what the domains are, where state lives, and the
-invariants that are expensive to rediscover. Read this before touching
-`status_bar.py`.
+This document records the boundaries, state owners, and invariants that are expensive to rediscover. Read it before changing the status-bar runtime, the display pipeline, or packaging.
 
-## What the product is
+## Product
 
-A macOS menu-bar app that turns AI-agent activity (Claude Code, Codex,
-Gemini, and friends) into ambient light: physical SidePulse LED devices
-(USB volumes with a `LEDS.LED` program file), plus an on-screen "Screen
-Bar" that hugs the MacBook notch and mirrors the same animations.
-Signals beyond agents ride the same pipeline: notifications, calendar,
-reminders, severe weather, battery, a working timer, and user-authored
-Studio programs.
+SidePulse is a macOS menu-bar application and command-line tool that turns AI-agent activity into ambient light. It targets physical SidePulse LED devices mounted as USB volumes and an on-screen Screen Bar around the MacBook notch. Agent state shares the signal pipeline with notifications, calendar events, reminders, severe weather, battery state, timers, quota information, and user-authored LED programs.
+
+## Controller boundary
+
+The historical AppKit controller grew beyond 18,000 lines. It is retained in `status_bar_legacy.py` because a large mechanical rewrite would put working macOS behavior, permissions, timers, and device control at unnecessary risk.
+
+`status_bar.py` is now the public compatibility facade. It preserves the existing import and monkeypatch contract, delegates the application entrypoint to the retained runtime, and replaces selected controller methods with implementations extracted into small modules. New deterministic behavior must not be added to `status_bar_legacy.py`. Extract it, test it without AppKit, then wire it through the facade.
 
 ## Domain map
 
-| Domain | Module(s) | State it owns |
+| Domain | Module(s) | State or responsibility |
 | --- | --- | --- |
-| Event ingestion | `ipc.py`, `hook.py`, `collector.py` | Hook events over a unix socket; transcript fallback scanning; `LiveAgentMonitor.statuses_by_key` (pruned at 24h); warm-start cache `latest.json` (debounced writes) |
-| Status semantics | `collector.py` | `AgentStatus`/`MonitorSnapshot`; fresh vs stale (snapshot ALWAYS carries stale statuses — render layers decide visibility) |
-| Signals | `signals.py` | `SignalStyle` (color/pattern/speed/intensity), escalation tiers (a ceiling, not a mode), one-shot vs continuous pattern rules |
-| Rendering | `led_status.py`, `colors.py` | `style_to_program()` — the ONE style renderer; mode/agent/identity colors; blend modes; brightness + per-channel calibration gains |
-| Device I/O | `device_writer.py` | Discovery (`/Volumes` scan), size validation, atomic program writes |
-| Firmware grammar | `led_wasm.py` (+ packaged `sdled.wasm`) | The REAL parser; Screen Bar animation stepping; Studio program validation |
-| Screen Bar | `virtual_device.py` | Pixel-measured notch geometry, bracket/wings drawing, ~90ms temporal smoothing, change-gated 60fps redraw |
-| Orchestration + UI | `status_bar.py` | The controller: timers, watchers, precedence arbiter, menu; ~9k lines |
-| Settings window | `settings_window.py` | Every pane builder + window assembly, extracted from status_bar; runs against status_bar's namespace (see its docstring) |
-| Persistence | `settings.py` | `AgentMonitorSettings`, frozen-dataclass `with_*` mutators, atomic unique-scratch saves |
-| Packaging | `app_bundle.py`, `status_bar_launch.py` | The sealed `SidePulse.app` + launchd agent |
+| Public runtime boundary | `status_bar.py` | Stable import surface, direct-module entrypoint, compatibility forwarding, narrow runtime patches |
+| Historical AppKit runtime | `status_bar_legacy.py` | Window and menu lifecycle, timers, watchers, worker coordination, precedence integration, application assembly |
+| Per-device projection | `device_projection.py`, `attention.py` | Canonical main/worker split, provider pin filtering, provider-local worker representative, lifecycle priority |
+| Event ingestion | `ipc.py`, `hook.py`, `hook_entry.py`, `collector.py` | Hook events over a Unix socket, transcript fallback scanning, status collection, warm-start state |
+| Compatibility entrypoints | `agent_monitor/`, `sidepulse_cli/` | Delegation for old installed hook module names; fail-open when arguments are missing |
+| Canonical operator semantics | `operator_state.py`, `provider_facts.py`, `attention.py`, `mailbox.py` | Work identity, requests, transitions, parent/worker relationships, actionable attention |
+| Signals and presentation | `signals.py`, `signal_coordinator.py`, `presentation_policy.py`, `presentation_scheduler.py` | Semantic precedence, finite cues, continuous state, interruption policy, schedule decisions |
+| Rendering | `led_status.py`, `colors.py`, `animation.py`, `render_policy.py` | LED programs, colors, transfer functions, motion, frame cadence, brightness, calibration |
+| Screen Bar | `virtual_device.py`, `screen_bar_pipeline.py`, `alcove_observation.py` | Notch geometry, Alcove observation, frame scheduling, draw safety, on-screen rendering |
+| Device I/O | `device_writer.py`, `sd_eject_guard_launch.py` | Discovery, size validation, atomic program writes, eject protection |
+| Firmware grammar | `led_wasm.py`, packaged `sdled.wasm` | Authoritative LED parser and animation stepping |
+| Usage and capacity | `usage_stats.py`, `provider_capacity.py`, `capacity_*` modules | Local usage aggregation, provider evidence, authority gates, forecasts, history, reset handling |
+| Persistence | `settings.py`, `*_store.py`, `private_io.py` | Settings, ledgers, histories, atomic private-file writes, recovery from corrupt data |
+| Packaging and launch | `app_bundle.py`, `status_bar_launch.py`, `packaging/` | Sealed app bundle, launch agent, signing, verification, installer and notarization |
 
-## The display pipeline (per refresh)
+## Display pipeline
 
+```text
+provider hook or fallback scan
+  -> collector / canonical operator state
+  -> AttentionProjection
+  -> provider/device projection
+  -> signal and presentation resolver
+  -> LED or Screen Bar program
+  -> brightness and surface transfer
+  -> atomic LED write and/or change-gated Screen Bar frame
 ```
-hook event / 15s timer
-  → LiveAgentMonitor.snapshot()
-  → for each device: active_led_display_kind_for_device()   # precedence arbiter
-  → signal_display_entries()[kind]                          # program factory table
-  → style_to_program() / timer_fill_program() / studio program
-  → apply brightness → apply channel gains → write LEDS.LED
-  → Screen Bar phase-locks to the physical write completion
-```
 
-**Precedence** (first claim wins): test > escalation takeover > weather >
-low battery > notification > completion > reminders > calendar >
-battery > timer > studio > agent. Adding a persistent signal is one row
-in `signal_display_entries()` plus one claim in
-`active_led_display_kind_for_device()`.
+Actionable attention is global and deliberately bypasses provider pins. Stable lifecycle rows follow a device pin. Main agents remain visible as individual rows. When a provider has only background workers, exactly one urgent worker represents that provider's background crowd. The canonical worker set must never be copied into `visible_rows`; `AttentionProjection.__post_init__` demotes workers and would otherwise duplicate them.
 
-## Invariants that were paid for in blood
+The persistent-signal precedence remains first-claim-wins. Test and escalation signals outrank weather, battery, notifications, completion, reminders, calendar, timer, Studio, and ordinary agent state. New signals must enter through the shared presentation and scheduling layers instead of bypassing them from a UI callback.
 
-- **Never emit `N:off` in an indexed DSL segment.** The firmware parse
-  error strobes red and kills the program. Always `#000000`. This
-  regressed twice.
-- **`validate_led_text` is only a size check.** Real grammar validation
-  is `SdLedWasmController.parse()` — Studio uses it; anything else that
-  accepts user-authored programs must too.
-- **NSColorWell is banned.** Its SwiftUI backing segfaults in this
-  PyObjC host. Color pickers are swatch rows + the classic
-  NSColorPanel with exclusive routing.
-- **Never size the Screen Bar from Alcove's window.** Pixel-measure the
-  notch (`measured_notch_bounds`). Tried twice, reverted twice.
-- **Settings writes must be atomic AND uniquely named.** Two writers
-  (LED worker + main thread) once shared a scratch file; a truncated
-  `settings.json` loads as all-defaults.
-- **TCC/FDA is bound to the sealed app bundle.** Any `Info.plist`
-  change re-signs the bundle and macOS silently drops Full Disk
-  Access; batch usage-key changes.
-- **Weather uses IP geolocation, never CoreLocation** — a Location
-  prompt would mean another `Info.plist` key and another lost FDA
-  grant.
-- **Watchers fail quietly.** Notification/calendar/reminders/weather
-  raise their own `*UnavailableError`, callers back off; a worker
-  thread must ALWAYS post its completion payload or its in-flight flag
-  strands.
+## Invariants
 
-## Testing rules
+- Never emit `N:off` in an indexed LED DSL segment. Use `#000000`. The firmware parser treats the former as an error.
+- `validate_led_text` validates size, not grammar. User-authored programs must pass through `SdLedWasmController.parse()`.
+- `NSColorWell` is not used in this PyObjC host. Use swatches and the classic `NSColorPanel` route.
+- Screen Bar geometry is derived from measured screen pixels. Alcove windows are observations, not authoritative notch geometry.
+- Settings and private state writes are atomic, uniquely named, permission-restricted, and recoverable. Two writers must never share one scratch path.
+- TCC grants belong to the sealed application identity. Ad-hoc or differently signed builds are different applications and lose permission continuity.
+- Background watchers fail quietly, back off, and always release their in-flight state.
+- Hook entrypoints fail open. A stale compatibility command may lose one update; it must never block the user's agent session.
+- Physical-device writes are isolated from tests. Controller tests must replace settings, latest-state paths, and device discovery before construction.
+- A requested value, an assumed value, and the value delivered by AppKit or hardware must be reconciled. Frame rate, window geometry, signing identity, and provider evidence all follow this rule.
 
-- Every controller-building test goes through `isolate_controller()`
-  (fakes settings paths, `latest.json`, and device discovery BEFORE
-  construction). An un-isolated `refresh_()` once wrote an LED program
-  to the developer's real mounted device mid-test-run.
-- Gate: REINSTALL FIRST (`pip install --force-reinstall --no-deps .`) — the venv's pytest imports the INSTALLED package, not `src/`; a green run without reinstalling tests yesterday's code. Then `python -m pytest tests/ -q` (exit code checked directly — a
-  `| tail` pipe once swallowed a red run), then `ruff check src tests`
-  (config pinned in `pyproject.toml`).
-- Verify UI work rendered, not just built: window-ID `screencapture`
-  and AX-driven dropdown clicks; the settings window is drivable
-  headlessly.
+## Verification and release
 
-## Known debt (deliberate)
+The authoritative gate is `./scripts/verify.sh` on macOS. It installs the fork in an isolated development environment, runs Ruff, validates versions, executes the complete test suite, builds distributions, checks metadata, and installs the wheel into a fresh virtual environment. `./scripts/verify.sh --portable` runs the platform-neutral rescue gate elsewhere.
 
-- `status_bar.py` is ~9k lines after the settings-window extraction
-  (settings_window.py, 2026-08-12). Remaining cuts if wanted: the menu
-  builders and the widget/control factories — same mechanical shape,
-  one module per commit.
-- Open Signal API (external processes claiming a signal slot) is the
-  approved next feature. Its outbound half exists: post_webhook and
-  the per-event webhook bridge (escalation, completion, quota,
-  weather, timebox).
-- Per-agent mode-animation overrides and session stats are explicitly
-  deferred (see `docs/FORK-ROADMAP.md`).
+GitHub Actions are manual-only while hosted minutes are unavailable. A release is created locally from the owner's Mac through `scripts/publish_release.sh`. The script requires a clean `main`, matching source/package/changelog versions, complete verification, Developer ID signing, notarization, checksums, and a GitHub Release. This fork does not automatically publish the upstream-owned `sidepulse` project name to PyPI.
+
+## Deliberate debt
+
+- `status_bar_legacy.py` remains large. Extract one pure decision boundary at a time, with regression tests and a facade wiring change in the same commit.
+- Existing file-specific Ruff exceptions document inherited ordering debt. Do not add new exceptions for extracted modules.
+- The complete AppKit, TCC, signed-package, and physical-hardware gates require macOS. A portable pass is necessary but not sufficient for release.
+- Upstream changes are reviewed behavior by behavior. Do not merge the upstream controller wholesale into the divergent fork.

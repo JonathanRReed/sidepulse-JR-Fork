@@ -1,0 +1,107 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+VENV_DIR="${SIDEPULSE_DEV_VENV:-${VENV_DIR:-$ROOT_DIR/.venv}}"
+PYTHON="${PYTHON:-$VENV_DIR/bin/python}"
+BOOTSTRAP=1
+FIX=0
+PORTABLE=0
+SKIP_BUILD=0
+SKIP_CLEAN_INSTALL=0
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/verify.sh [options]
+
+  --fix                 Apply Ruff's safe fixes before checking.
+  --portable            Run only platform-neutral tests.
+  --no-bootstrap        Use an existing development environment.
+  --skip-build          Skip wheel/sdist build and Twine validation.
+  --skip-clean-install  Skip installation of the built wheel into a fresh venv.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --fix) FIX=1 ;;
+        --portable) PORTABLE=1 ;;
+        --no-bootstrap) BOOTSTRAP=0 ;;
+        --skip-build) SKIP_BUILD=1 ;;
+        --skip-clean-install) SKIP_CLEAN_INSTALL=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
+if [ "$BOOTSTRAP" -eq 1 ]; then
+    "$ROOT_DIR/scripts/bootstrap-dev.sh"
+fi
+
+if [ ! -x "$PYTHON" ]; then
+    echo "Missing development environment. Run ./scripts/bootstrap-dev.sh first." >&2
+    exit 2
+fi
+
+cd "$ROOT_DIR"
+
+if [ "$FIX" -eq 1 ]; then
+    "$PYTHON" -m ruff check --fix src tests packaging scripts
+fi
+
+"$PYTHON" -m ruff check src tests packaging scripts
+"$PYTHON" -m compileall -q src tests packaging scripts
+"$PYTHON" scripts/validate_release_version.py
+
+if [ "$PORTABLE" -eq 1 ]; then
+    "$PYTHON" -m pytest \
+        tests/test_device_projection.py \
+        tests/test_packaging_contract.py \
+        tests/test_status_bar_facade_contract.py \
+        tests/test_version_contract.py \
+        tests/test_legacy_hook_entrypoints.py \
+        tests/test_build_script_contract.py \
+        tests/test_repository_hygiene.py \
+        tests/test_workflow_contract.py \
+        tests/test_install_user.py \
+        -q
+elif [ "$(uname -s)" = "Darwin" ]; then
+    "$PYTHON" -m pytest tests -q
+else
+    echo "Full SidePulse verification requires macOS and PyObjC." >&2
+    echo "Use --portable for the platform-neutral rescue gate." >&2
+    exit 3
+fi
+
+if [ "$SKIP_BUILD" -eq 0 ]; then
+    rm -rf build dist
+    "$PYTHON" -m build --no-isolation
+    "$PYTHON" -m twine check dist/*
+    if [ "$SKIP_CLEAN_INSTALL" -eq 0 ]; then
+        "$PYTHON" scripts/verify_clean_install.py
+    fi
+fi
+
+git diff --check
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    tracked_work="$(git ls-files work)"
+    if [ -n "$tracked_work" ]; then
+        echo "Generated work files remain tracked:" >&2
+        printf '%s\n' "$tracked_work" >&2
+        exit 1
+    fi
+
+    while IFS= read -r -d '' generated; do
+        if [ -e "$generated" ]; then
+            echo "Generated installer remains tracked: $generated" >&2
+            exit 1
+        fi
+    done < <(git ls-files -z '*.pkg' '*.dmg')
+fi
+
+if [ "$(uname -s)" = "Darwin" ] && [ "${SIDEPULSE_VERIFY_MACOS_PACKAGE:-0}" = "1" ]; then
+    BUILD_PYTHON="$PYTHON" "$ROOT_DIR/packaging/build_macos_pkg.sh"
+fi
+
+printf '%s\n' "SidePulse verification passed."
