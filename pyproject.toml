@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sidepulse"
-version = "0.2.1"
+version = "0.2.2"
 description = "Command-line and macOS tools for SidePulse Pro and SidePulse Dot."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Peter Kuhar", email = "peter@pkuhar.com" }]
+maintainers = [{ name = "Jonathan Reed", email = "Contact@JonathanRReed.com" }]
 keywords = ["sidepulse", "led", "macbook", "agent", "status", "cli"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -30,16 +31,11 @@ classifiers = [
 dependencies = [
     "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=10; sys_platform == 'darwin'",
-    # WebKit also provides the JavaScriptCore bindings led_wasm needs
-    # (the wheel ships the JavaScriptCore module itself -- there is no
-    # separate pyobjc-framework-JavaScriptCore distribution).
+    # WebKit also provides the JavaScriptCore bindings led_wasm needs.
     "pyobjc-framework-WebKit>=10; sys_platform == 'darwin'",
-    "pyobjc-framework-ScriptingBridge>=10; sys_platform == 'darwin'",
-    # Calendar alerts ("glow before events start") -- see calendar_watch.py.
+    # Calendar alerts ("glow before events start") use EventKit.
     "pyobjc-framework-EventKit>=10; sys_platform == 'darwin'",
-    # Round-trip YAML editing for the Hermes Agent hook installer --
-    # ruamel preserves the user's own comments and formatting in
-    # ~/.hermes/config.yaml, which plain PyYAML would destroy.
+    # Preserve comments and formatting while editing Hermes YAML config.
     "ruamel.yaml>=0.18",
 ]
 
@@ -50,21 +46,19 @@ Issues = "https://github.com/JonathanRReed/sidepulse-JR-Fork/issues"
 Upstream = "https://github.com/inteliwear/sidepulse"
 
 [project.optional-dependencies]
-# Kept for backwards compatibility; the status-bar dependencies are installed by
-# default now, so this extra is a no-op alias.
+# Backwards-compatible alias. Status-bar dependencies install by default.
 status-bar = []
 test = [
     "pytest>=8,<10",
     "ruff==0.16.3",
-    # pyproject parsing on Python 3.10.
-    "tomli>=2; python_version < '3.11'",
+    "tomli>=2.2; python_version < '3.11'",
 ]
 dev = [
-    "build>=1.2",
+    "build>=1.2,<2",
     "pytest>=8,<10",
     "ruff==0.16.3",
-    "tomli>=2; python_version < '3.11'",
-    "twine>=6",
+    "tomli>=2.2; python_version < '3.11'",
+    "twine>=6,<7",
 ]
 
 [project.scripts]
@@ -74,18 +68,19 @@ agent-status-bar = "sidepulse.status_bar:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["sidepulse*"]
+include = ["sidepulse*", "agent_monitor*", "sidepulse_cli*"]
 
 [tool.setuptools.package-data]
 "sidepulse.resources" = ["sd_eject_guard.c", "sdled.wasm"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-config", "--strict-markers"]
+
 [tool.ruff]
-# Keep the lint surface deterministic. Ruff 0.16's expanded defaults flag this
-# app's deliberate quiet-failure excepts (BLE001/S110 -- watchers and TCC
-# probes are designed to swallow errors and back off quietly).
+# Keep the lint surface deterministic. The retained AppKit controller is frozen
+# behind status_bar.py; all new behavior belongs in linted, testable modules.
 line-length = 120
-# The retained AppKit controller is frozen behind status_bar.py. New behavior
-# belongs in linted, testable modules and is wired through the facade.
 extend-exclude = ["src/sidepulse/status_bar_legacy.py"]
 
 [tool.ruff.lint]
@@ -99,8 +94,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # These exceptions document inherited, non-functional ordering debt. They are
-# intentionally narrow: global undefined-name, syntax, and correctness checks
-# remain enabled, and all newly extracted modules must pass without exceptions.
+# intentionally narrow: undefined-name, syntax, and correctness checks remain
+# enabled, and every newly extracted module must pass without exceptions.
 "src/sidepulse/settings.py" = ["I001"]
 "src/sidepulse/settings_window.py" = ["F821"]
 "src/sidepulse/usage_card.py" = ["RUF022"]
