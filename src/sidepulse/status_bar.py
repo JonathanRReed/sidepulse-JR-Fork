@@ -3,8 +3,8 @@
 The original controller grew into a single, very large module. It remains the
 runtime implementation while deterministic decisions are extracted into small,
 testable modules. This facade preserves the public ``sidepulse.status_bar``
-module contract, including test monkeypatches of module globals, and replaces
-only the per-device projection methods with the repaired implementation.
+module contract, including test monkeypatches and source introspection, and
+replaces only the per-device projection methods with repaired implementations.
 """
 
 from __future__ import annotations
@@ -65,7 +65,12 @@ class _StatusBarFacade(ModuleType):
 
 
 __all__ = tuple(name for name in dir(_legacy) if not name.startswith("_"))
-sys.modules[__name__].__class__ = _StatusBarFacade
+_facade_module = sys.modules[__name__]
+_facade_module.__class__ = _StatusBarFacade
+# Existing wiring tests and diagnostic tooling inspect status_bar.__file__ to
+# verify that controller methods call their janitors and workers. Point source
+# introspection at the retained implementation, just as attribute access does.
+_facade_module.__file__ = _legacy.__file__
 
 
 # ``python -m sidepulse.status_bar`` executes this facade, not the retained
