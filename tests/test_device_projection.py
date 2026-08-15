@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sidepulse.attention import AttentionProjection, LifecycleMode, ProjectedAgentRow
 from sidepulse.device_projection import light_rows_for_provider, projection_for_provider
@@ -14,6 +14,7 @@ def _row(
     lifecycle: LifecycleMode = LifecycleMode.ACTIVE,
     *,
     worker: bool = False,
+    updated_at: datetime = _NOW,
 ) -> ProjectedAgentRow:
     return ProjectedAgentRow(
         agent_id=agent_id,
@@ -22,7 +23,7 @@ def _row(
         lifecycle_mode=lifecycle,
         actionable=False,
         is_subagent=worker,
-        updated_at=_NOW,
+        updated_at=updated_at,
         source_status=None,
     )
 
@@ -41,7 +42,7 @@ def _projection() -> AttentionProjection:
         ),
         transient_signals=(),
         dominant_provider="codex",
-        click_target_agent_id="codex:main",
+        click_target_agent_id=None,
     )
 
 
@@ -52,16 +53,12 @@ def test_provider_pin_filters_main_and_worker_rows() -> None:
     assert tuple(row.agent_id for row in projection.worker_rows) == ("claude:worker",)
     assert projection.lifecycle_mode is LifecycleMode.WAITING
     assert projection.dominant_provider == "claude"
-    assert projection.click_target_agent_id is None
 
 
-def test_unpinned_projection_preserves_worker_rows() -> None:
+def test_unpinned_projection_preserves_the_canonical_projection() -> None:
     original = _projection()
-    projection = projection_for_provider(original, None)
 
-    assert projection.visible_rows == original.visible_rows
-    assert projection.worker_rows == original.worker_rows
-    assert projection.lifecycle_mode is LifecycleMode.WAITING
+    assert projection_for_provider(original, None) is original
 
 
 def test_actionable_attention_bypasses_provider_pin() -> None:
@@ -88,20 +85,50 @@ def test_pin_without_matching_rows_returns_idle_projection() -> None:
     assert projection.click_target_agent_id is None
 
 
-def test_light_rows_uses_orphaned_worker_standin_before_filtering() -> None:
+def test_provider_local_orphan_worker_is_chosen_before_cross_provider_priority() -> None:
     projection = AttentionProjection(
-        lifecycle_mode=LifecycleMode.ACTIVE,
+        lifecycle_mode=LifecycleMode.WAITING,
         actionable_attention=(),
         visible_rows=(),
         worker_rows=(
-            _row("codex:worker", "codex", worker=True),
-            _row("claude:worker", "claude", LifecycleMode.WAITING, worker=True),
+            _row("codex:worker", "codex", LifecycleMode.WAITING, worker=True),
+            _row(
+                "claude:worker",
+                "claude",
+                LifecycleMode.ACTIVE,
+                worker=True,
+                updated_at=_NOW - timedelta(seconds=1),
+            ),
         ),
         transient_signals=(),
-        dominant_provider=None,
+        dominant_provider="codex",
         click_target_agent_id=None,
     )
 
     assert tuple(row.agent_id for row in light_rows_for_provider(projection, "claude")) == (
         "claude:worker",
     )
+
+    projected = projection_for_provider(projection, "claude")
+    assert projected.visible_rows == ()
+    assert tuple(row.agent_id for row in projected.worker_rows) == ("claude:worker",)
+    assert projected.light_rows[0].agent_id == "claude:worker"
+    assert projected.lifecycle_mode is LifecycleMode.ACTIVE
+
+
+def test_projection_does_not_duplicate_orphan_worker_rows() -> None:
+    worker = _row("claude:worker", "claude", worker=True)
+    projection = AttentionProjection(
+        lifecycle_mode=LifecycleMode.ACTIVE,
+        actionable_attention=(),
+        visible_rows=(),
+        worker_rows=(worker,),
+        transient_signals=(),
+        dominant_provider="claude",
+        click_target_agent_id=None,
+    )
+
+    projected = projection_for_provider(projection, "claude")
+
+    assert projected.visible_rows == ()
+    assert projected.worker_rows == (worker,)

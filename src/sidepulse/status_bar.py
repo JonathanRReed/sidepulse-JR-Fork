@@ -54,9 +54,21 @@ class _StatusBarFacade(ModuleType):
             return
         setattr(_legacy, name, value)
 
+    def __delattr__(self, name: str) -> None:
+        if name in {"__all__", "__class__"} or name.startswith("_facade_"):
+            super().__delattr__(name)
+            return
+        delattr(_legacy, name)
+
     def __dir__(self) -> list[str]:
         return sorted(set(super().__dir__()) | set(dir(_legacy)))
 
 
 __all__ = tuple(name for name in dir(_legacy) if not name.startswith("_"))
 sys.modules[__name__].__class__ = _StatusBarFacade
+
+
+# ``python -m sidepulse.status_bar`` executes this facade, not the retained
+# runtime module, so the entrypoint guard must live here.
+if __name__ == "__main__":
+    raise SystemExit(_legacy.main())
