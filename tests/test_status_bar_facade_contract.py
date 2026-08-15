@@ -38,6 +38,40 @@ def test_direct_module_execution_delegates_to_runtime_main() -> None:
     ), "status-bar facade does not delegate direct execution to runtime main"
 
 
+def test_controller_override_is_a_real_subclass() -> None:
+    tree = _tree()
+    controller = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "JRStatusBarController"
+    )
+    method_names = {
+        node.name
+        for node in controller.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    assert {
+        "projected_rows_for_device",
+        "projection_for_device",
+    } <= method_names
+
+    forbidden_assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+        and any(
+            isinstance(candidate, ast.Attribute)
+            and candidate.attr in {
+                "projected_rows_for_device",
+                "projection_for_device",
+            }
+            for candidate in ast.walk(node)
+        )
+    ]
+    assert forbidden_assignments == [], "do not mutate Cocoa methods after class creation"
+
+
 def test_facade_forwards_assignment_and_deletion() -> None:
     class_definition = next(
         node
