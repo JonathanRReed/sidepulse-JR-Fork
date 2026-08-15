@@ -34,6 +34,7 @@ dependencies = [
     # (the wheel ships the JavaScriptCore module itself -- there is no
     # separate pyobjc-framework-JavaScriptCore distribution).
     "pyobjc-framework-WebKit>=10; sys_platform == 'darwin'",
+    "pyobjc-framework-ScriptingBridge>=10; sys_platform == 'darwin'",
     # Calendar alerts ("glow before events start") -- see calendar_watch.py.
     "pyobjc-framework-EventKit>=10; sys_platform == 'darwin'",
     # Round-trip YAML editing for the Hermes Agent hook installer --
@@ -44,13 +45,27 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://sidepulse.io"
-Repository = "https://github.com/inteliwear/sidepulse"
-Issues = "https://github.com/inteliwear/sidepulse/issues"
+Repository = "https://github.com/JonathanRReed/sidepulse-JR-Fork"
+Issues = "https://github.com/JonathanRReed/sidepulse-JR-Fork/issues"
+Upstream = "https://github.com/inteliwear/sidepulse"
 
 [project.optional-dependencies]
 # Kept for backwards compatibility; the status-bar dependencies are installed by
 # default now, so this extra is a no-op alias.
 status-bar = []
+test = [
+    "pytest>=8,<10",
+    "ruff==0.16.3",
+    # pyproject parsing on Python 3.10.
+    "tomli>=2; python_version < '3.11'",
+]
+dev = [
+    "build>=1.2",
+    "pytest>=8,<10",
+    "ruff==0.16.3",
+    "tomli>=2; python_version < '3.11'",
+    "twine>=6",
+]
 
 [project.scripts]
 sidepulse = "sidepulse.cli:sidepulse_main"
@@ -65,10 +80,13 @@ include = ["sidepulse*"]
 "sidepulse.resources" = ["sd_eject_guard.c", "sdled.wasm"]
 
 [tool.ruff]
-# Pin the lint surface: ruff 0.16's expanded defaults flag this app's
-# deliberate quiet-failure excepts (BLE001/S110 -- watchers and TCC
-# probes are DESIGNED to swallow errors and back off quietly).
+# Keep the lint surface deterministic. Ruff 0.16's expanded defaults flag this
+# app's deliberate quiet-failure excepts (BLE001/S110 -- watchers and TCC
+# probes are designed to swallow errors and back off quietly).
 line-length = 120
+# The retained AppKit controller is frozen behind status_bar.py. New behavior
+# belongs in linted, testable modules and is wired through the facade.
+extend-exclude = ["src/sidepulse/status_bar_legacy.py"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "UP", "RUF"]
@@ -80,7 +98,6 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# settings_window.py runs against status_bar's namespace, installed at
-# runtime (see its module docstring) -- undefined-name analysis cannot
-# see injected globals.
+# settings_window.py runs against status_bar's namespace, installed at runtime
+# (see its module docstring) -- undefined-name analysis cannot see injected globals.
 "src/sidepulse/settings_window.py" = ["F821"]
