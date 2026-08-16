@@ -2,8 +2,10 @@ import subprocess
 import threading
 
 from sidepulse.battery import (
+    BATTERY_MODEL_TIMEOUT_SECONDS,
     BATTERY_READ_TIMEOUT_SECONDS,
     BatterySnapshot,
+    default_full_charge_watts,
     read_battery_snapshot,
 )
 from sidepulse.battery_runtime import (
@@ -25,6 +27,22 @@ def test_battery_reader_has_a_strict_subprocess_timeout() -> None:
         pass
 
     assert calls[0][1]["timeout"] == BATTERY_READ_TIMEOUT_SECONDS
+
+
+def test_hardware_model_probes_are_also_strictly_bounded() -> None:
+    calls = []
+
+    def runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    default_full_charge_watts.cache_clear()
+    assert default_full_charge_watts(runner=runner) == 100.0
+    assert len(calls) == 2
+    assert all(
+        kwargs["timeout"] == BATTERY_MODEL_TIMEOUT_SECONDS
+        for _args, kwargs in calls
+    )
 
 
 def test_request_returns_immediately_and_installs_result_asynchronously() -> None:
