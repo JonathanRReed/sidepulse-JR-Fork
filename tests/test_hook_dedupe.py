@@ -56,3 +56,24 @@ def test_concurrent_processes_accept_only_one_copy(tmp_path: Path) -> None:
     results = [queue.get(timeout=2) for _ in processes]
     assert results.count(True) == 1
     assert results.count(False) == 3
+
+
+def test_run_once_records_only_after_callback_succeeds(tmp_path: Path) -> None:
+    dedupe = HookEventDeduplicator(tmp_path / "state.json")
+    calls: list[str] = []
+
+    def fail() -> None:
+        calls.append("fail")
+        raise RuntimeError("write failed")
+
+    try:
+        dedupe.run_once("event", fail)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("callback failure must propagate")
+
+    assert dedupe.tokens() == ()
+    assert dedupe.run_once("event", lambda: calls.append("ok")) is True
+    assert dedupe.run_once("event", lambda: calls.append("duplicate")) is False
+    assert calls == ["fail", "ok"]
