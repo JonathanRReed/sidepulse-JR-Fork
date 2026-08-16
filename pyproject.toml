@@ -64,6 +64,7 @@ dev = [
 
 [project.scripts]
 sidepulse = "sidepulse.cli:sidepulse_main"
+sidepulse-integrations = "sidepulse.integration_cli:main"
 agent-monitor = "sidepulse.cli:main"
 agent-status-bar = "sidepulse.status_bar:main"
 
@@ -72,7 +73,11 @@ where = ["src"]
 include = ["sidepulse*", "agent_monitor*", "sidepulse_cli*"]
 
 [tool.setuptools.package-data]
-"sidepulse.resources" = ["sd_eject_guard.c", "sdled.wasm"]
+"sidepulse.resources" = [
+    "integration_compatibility.json",
+    "sd_eject_guard.c",
+    "sdled.wasm",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
