@@ -1,6 +1,6 @@
 # SidePulse feature and readiness matrix
 
-Updated: 2026-08-15
+Updated: 2026-08-16
 
 This document is the status authority for product claims. A feature is **shipped** only when it is reachable from the installed application and covered at its source-to-effect seam. A feature is **release-verified** only after the signed macOS release gate has passed for that exact commit.
 
@@ -24,7 +24,7 @@ This document is the status authority for product claims. A feature is **shipped
 | Calendar and Reminders | Shipped | Off | TCC permission, timeout, stale-result, and no-private-title tests |
 | Severe weather | Shipped | Off | Bounded JSON, location freshness, US-only disclosure, and retry tests |
 | Closed-lid awake policy | Shipped | Off | Privileged-helper install/uninstall, process cleanup, and sleep/wake tests |
-| Signed `.pkg`, LaunchAgent, helper setup, uninstall, notarization, and stapling | Implemented, release-gated | N/A | `scripts/verify_macos_release.sh` |
+| Signed `.pkg`, payload-only installation, explicit first-run setup, LaunchAgent, helper setup, uninstall, notarization, and stapling | Implemented, release-gated | N/A | `scripts/verify_macos_release.sh` |
 | Built-in timing diagnostics and typed refresh admission | Implemented in production hardening branch | On | Instruments trace and performance budgets |
 | CodexBar structured usage bridge | Planned production wave | Off | Protocol/version negotiation, source freshness, no credential duplication |
 | T3 Code thread, worktree, branch, provider, and pull-request compatibility | Planned production wave | Off | T3 protocol contract, identity preservation, stale-version fallback |
@@ -46,5 +46,7 @@ The production-hardening branch may be merged after its code review and portable
 ```bash
 ./scripts/verify_macos_release.sh
 ```
+
+The package installs only the signed application payload and an owned CLI link. It deliberately does not mutate provider hooks, LaunchAgents, privileged helpers, or eject-guard services from `postinstall`. Those integrations are applied through SidePulse’s reviewed first-run setup or explicitly by the authorized release gate.
 
 That gate is intentionally separate from merge readiness because this environment cannot provide the owner’s SidePulse hardware, Developer ID identities, notarization profile, installed settings history, TCC database, or Instruments trace.

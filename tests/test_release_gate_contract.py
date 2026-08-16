@@ -16,6 +16,7 @@ def test_authoritative_release_gate_requires_every_external_evidence_class() -> 
         "verify_hardware_release.py",
         "verify_installed_upgrade.py",
         "git rev-parse origin/main",
+        '"$installed_binary" status-bar start',
     ):
         assert required in text
 

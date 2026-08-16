@@ -3,14 +3,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_package_setup_failures_are_not_suppressed() -> None:
+def test_package_installs_payload_without_mutating_external_integrations() -> None:
     text = (ROOT / "packaging" / "scripts" / "postinstall").read_text()
 
-    assert "|| true" not in text
-    assert "setup --sd-eject-guard-scope user" in text
-    assert "status-bar install-sleep-helper" in text
+    assert "setup --sd-eject-guard-scope user" not in text
+    assert "status-bar install-sleep-helper" not in text
+    assert "agent-monitor" not in text
+    assert "sdejectguard" not in text
     assert "setup-pending" in text
     assert "setup-complete" in text
+    assert "explicit user action" in text
 
 
 def test_package_never_replaces_an_unowned_cli_path() -> None:

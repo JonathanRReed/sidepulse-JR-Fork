@@ -96,6 +96,15 @@ if [ -z "$expected_team" ] || [ "$expected_team" = "not set" ]; then
 fi
 
 /usr/bin/sudo /usr/sbin/installer -pkg "$pkg" -target /
+installed_binary="/Applications/SidePulse.app/Contents/MacOS/SidePulse"
+if [ ! -x "$installed_binary" ]; then
+    echo "Installed SidePulse executable is missing." >&2
+    exit 1
+fi
+# The package is payload-only by design. Exercise the explicit, user-owned
+# LaunchAgent path here so the installed smoke test never relies on hidden
+# postinstall mutations.
+"$installed_binary" status-bar start
 "$PYTHON" scripts/verify_installed_upgrade.py \
     --before-settings "$before_settings" \
     --settings "$SETTINGS_PATH" \

@@ -7,6 +7,7 @@ CLI_LINK="$CLI_DIR/sidepulse"
 RECEIPT_DIR="/var/db/sidepulse"
 PENDING_RECEIPT="$RECEIPT_DIR/setup-pending"
 COMPLETE_RECEIPT="$RECEIPT_DIR/setup-complete"
+LAUNCH_AGENT_NAME="io.sidepulse.agentstatus.plist"
 
 log() {
     /bin/echo "SidePulse postinstall: $*"
@@ -34,42 +35,26 @@ else
     log "left existing $CLI_LINK unchanged because SidePulse does not own it"
 fi
 
+# A package install owns only package payload. Provider hooks, LaunchAgents,
+# the sleep helper, and the eject guard are external mutable state and require
+# an explicit user action. Running those changes from postinstall made a later
+# failure impossible to roll back safely without removing pre-existing setup.
 CONSOLE_USER="$(/usr/bin/stat -f '%Su' /dev/console)"
-if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ] || [ "$CONSOLE_USER" = "loginwindow" ]; then
+CONSOLE_HOME=""
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ] && [ "$CONSOLE_USER" != "loginwindow" ]; then
+    CONSOLE_HOME="$(/usr/bin/dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')"
+fi
+
+if [ -n "$CONSOLE_HOME" ] && [ -f "$CONSOLE_HOME/Library/LaunchAgents/$LAUNCH_AGENT_NAME" ]; then
+    /bin/date -u '+%Y-%m-%dT%H:%M:%SZ' > "$COMPLETE_RECEIPT"
+    /bin/chmod 644 "$COMPLETE_RECEIPT"
+    /bin/rm -f "$PENDING_RECEIPT"
+    log "application upgraded; existing explicit SidePulse setup remains in place"
+else
     /bin/date -u '+%Y-%m-%dT%H:%M:%SZ' > "$PENDING_RECEIPT"
     /bin/chmod 644 "$PENDING_RECEIPT"
     /bin/rm -f "$COMPLETE_RECEIPT"
-    log "no logged-in GUI user; app installed and first-launch setup is pending"
-    exit 0
+    log "application installed; open SidePulse and complete the reviewed first-run setup"
 fi
 
-CONSOLE_UID="$(/usr/bin/id -u "$CONSOLE_USER")" || fail "could not resolve console user id"
-CONSOLE_HOME="$(/usr/bin/dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')"
-if [ -z "$CONSOLE_HOME" ] || [ ! -d "$CONSOLE_HOME" ]; then
-    fail "could not resolve a safe home directory for $CONSOLE_USER"
-fi
-
-# The package installer is already privileged, so helper installation must
-# either complete or make the package fail visibly. A partial install may not
-# masquerade as success.
-/usr/bin/env \
-    SUDO_USER="$CONSOLE_USER" \
-    USER="$CONSOLE_USER" \
-    LOGNAME="$CONSOLE_USER" \
-    HOME="$CONSOLE_HOME" \
-    "$APP_BINARY" status-bar install-sleep-helper
-
-# Configure user-owned hooks and LaunchAgents inside the actual GUI session.
-/bin/launchctl asuser "$CONSOLE_UID" \
-    /usr/bin/sudo -H -u "$CONSOLE_USER" \
-    /usr/bin/env \
-        HOME="$CONSOLE_HOME" \
-        USER="$CONSOLE_USER" \
-        LOGNAME="$CONSOLE_USER" \
-        "$APP_BINARY" setup --sd-eject-guard-scope user
-
-/bin/date -u '+%Y-%m-%dT%H:%M:%SZ' > "$COMPLETE_RECEIPT"
-/bin/chmod 644 "$COMPLETE_RECEIPT"
-/bin/rm -f "$PENDING_RECEIPT"
-log "application, helper, hooks, and LaunchAgent configured"
 exit 0
