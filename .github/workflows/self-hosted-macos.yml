@@ -14,6 +14,9 @@ on:
         options:
           - tests
           - release
+  push:
+    branches:
+      - verify/production-release-blockers-20260816
 
 permissions:
   contents: read
@@ -30,7 +33,7 @@ jobs:
   macos:
     runs-on: [self-hosted, macOS, ARM64, sidepulse-production]
     timeout-minutes: 90
-    environment: ${{ inputs.mode == 'release' && 'sidepulse-production' || '' }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'release' && 'sidepulse-production' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,11 +41,14 @@ jobs:
           clean: true
       - name: Bootstrap reviewed environment
         run: ./scripts/bootstrap-dev.sh
+      - name: Portable production gate
+        if: github.event_name == 'push'
+        run: ./scripts/verify.sh --no-bootstrap --portable
       - name: Full macOS suite
-        if: inputs.mode == 'tests'
+        if: github.event_name == 'push' || inputs.mode == 'tests'
         run: ./scripts/verify.sh --no-bootstrap
       - name: Signed installed release gate
-        if: inputs.mode == 'release'
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'release'
         env:
           APP_SIGN_IDENTITY: ${{ secrets.APP_SIGN_IDENTITY }}
           INSTALLER_SIGN_IDENTITY: ${{ secrets.INSTALLER_SIGN_IDENTITY }}
