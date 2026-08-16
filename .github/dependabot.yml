@@ -1,0 +1,43 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - security-review
+    commit-message:
+      prefix: deps
+    groups:
+      python-runtime:
+        patterns:
+          - "pyobjc-*"
+          - "ruamel.yaml*"
+      python-development:
+        dependency-type: development
+        patterns:
+          - "pytest"
+          - "ruff"
+          - "build"
+          - "twine"
+          - "wheel"
+          - "setuptools"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:15"
+      timezone: America/Chicago
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - security-review
+    commit-message:
+      prefix: ci
