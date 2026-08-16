@@ -111,3 +111,15 @@ def test_malformed_integration_settings_fail_closed_read_only(
     assert loaded.settings.codexbar_enabled is False
     with pytest.raises(IntegrationSettingsWriteRefusedError):
         save_integration_settings(loaded.settings, target, loaded=loaded)
+
+
+def test_untracked_save_refuses_a_malformed_existing_document(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "integrations.json"
+    target.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(IntegrationSettingsWriteRefusedError):
+        save_integration_settings(load_integration_settings().settings, target)
+
+    assert target.read_text(encoding="utf-8") == "{not-json"

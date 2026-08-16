@@ -74,3 +74,19 @@ def test_external_status_boundary_rejects_duplicate_or_unbounded_rows() -> None:
                 for index in range(1_025)
             ),
         )
+
+
+def test_external_status_iterable_is_consumed_only_through_the_limit() -> None:
+    monitor = LiveAgentMonitor()
+    consumed = 0
+
+    def rows():
+        nonlocal consumed
+        for index in range(10_000):
+            consumed += 1
+            yield _status(f"codex:session:bounded-{index}")
+
+    with pytest.raises(ValueError):
+        monitor.replace_external_statuses("t3code", rows())
+
+    assert consumed == 1_025

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+from itertools import islice
 from types import MappingProxyType, ModuleType
 
 from . import _collector_legacy as _legacy
@@ -11,6 +12,7 @@ from .models import AgentStatus
 
 MAX_EXTERNAL_STATUS_SOURCES = 16
 MAX_EXTERNAL_STATUSES_PER_SOURCE = 1_024
+MAX_EXTERNAL_STATUSES_TOTAL = 4_096
 _EXTERNAL_SOURCE_ID = re.compile(r"[a-z][a-z0-9._-]{0,63}\Z")
 _LegacyLiveAgentMonitor = _legacy.LiveAgentMonitor
 
@@ -33,7 +35,12 @@ class LiveAgentMonitor(_LegacyLiveAgentMonitor):
             or _EXTERNAL_SOURCE_ID.fullmatch(source_id) is None
         ):
             raise ValueError("invalid external status source")
-        normalized = tuple(statuses)
+        try:
+            normalized = tuple(
+                islice(iter(statuses), MAX_EXTERNAL_STATUSES_PER_SOURCE + 1)
+            )
+        except TypeError as exc:
+            raise ValueError("invalid external status projection") from exc
         if (
             len(normalized) > MAX_EXTERNAL_STATUSES_PER_SOURCE
             or not all(type(status) is AgentStatus for status in normalized)
@@ -45,6 +52,15 @@ class LiveAgentMonitor(_LegacyLiveAgentMonitor):
                 len(self._external_statuses_by_source) >= MAX_EXTERNAL_STATUS_SOURCES
             ):
                 raise ValueError("too many external status sources")
+            previous_count = len(self._external_statuses_by_source.get(source_id, ()))
+            current_total = sum(
+                len(rows) for rows in self._external_statuses_by_source.values()
+            )
+            if (
+                current_total - previous_count + len(normalized)
+                > MAX_EXTERNAL_STATUSES_TOTAL
+            ):
+                raise ValueError("too many external statuses")
             if normalized:
                 self._external_statuses_by_source[source_id] = normalized
             else:
