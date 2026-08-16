@@ -272,3 +272,43 @@ def test_bounded_command_rejects_oversized_stdout() -> None:
             maximum_stdout=100,
         )
     assert overflow.value.reason == CODEXBAR_REASON_SCHEMA
+
+
+def test_dashboard_parser_rejects_a_malformed_or_duplicate_provider_row() -> None:
+    malformed = _snapshot_document()
+    malformed["providers"] = [{"id": "codex", "enabled": True}]
+    with pytest.raises(CodexBarCompatibilityError) as invalid:
+        parse_codexbar_snapshot(
+            json.dumps(malformed),
+            connection_mode="dashboard",
+        )
+    assert invalid.value.reason == CODEXBAR_REASON_SCHEMA
+
+    duplicate = _snapshot_document()
+    duplicate["providers"] = [
+        duplicate["providers"][0],
+        duplicate["providers"][0],
+    ]
+    with pytest.raises(CodexBarCompatibilityError) as repeated:
+        parse_codexbar_snapshot(
+            json.dumps(duplicate),
+            connection_mode="dashboard",
+        )
+    assert repeated.value.reason == CODEXBAR_REASON_SCHEMA
+
+
+def test_codexbar_child_environment_does_not_forward_unrelated_secrets(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HOME", "/tmp/home")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "must-not-leak")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak")
+
+    environment = codexbar_compat._codexbar_environment(token="token")
+
+    assert environment["HOME"] == "/tmp/home"
+    assert environment["PATH"] == "/usr/bin"
+    assert environment["CODEXBAR_DASHBOARD_TOKEN"] == "token"
+    assert "AWS_SECRET_ACCESS_KEY" not in environment
+    assert "OPENAI_API_KEY" not in environment
