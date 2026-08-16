@@ -15,14 +15,20 @@ from types import ModuleType
 
 from . import status_bar_legacy as _legacy
 from .battery_runtime import BatteryObservation, BatteryObservationService
+from .core_state import CoreDomain, CoreStateStore, StateDelta
 from .device_projection import light_rows_for_provider, projection_for_provider
+from .intake_runtime import IntakeProbeResult, IntakeProbeService
+from .ledger_runtime import LedgerPublishResult, RemoteLedgerPublisher
 from .performance_metrics import PerformanceRegistry, PerformanceSnapshot
+from .refresh_admission import RefreshAdmission, admit_refresh
 from .transcript_runtime import TranscriptFallbackBatch, TranscriptFallbackService
 from .webhook_delivery import (
-    WebhookValidationError,
-    deliver_webhook,
-    validate_webhook_url,
+    WebhookDeliveryReceipt,
+    WebhookDeliveryService,
 )
+
+EVENT_COALESCE_SECONDS = 0.05
+FULL_REFRESH_HEARTBEAT_SECONDS = 1.0
 
 _LegacyStatusBarController = _legacy.StatusBarController
 
@@ -100,11 +106,8 @@ else:
                 return
             previous = getattr(self, "_production_battery_observation", None)
             self._production_battery_observation = observation
-            if (
-                getattr(self, "_runtime_started", False)
-                and observation != previous
-            ):
-                self.refresh_(None)
+            if getattr(self, "_runtime_started", False) and observation != previous:
+                self.schedule_event_refresh()
 
         def _transcript_service(self) -> TranscriptFallbackService:
             service = getattr(self, "_production_transcript_service", None)
@@ -176,8 +179,129 @@ else:
             if accepted and getattr(self, "_runtime_started", False):
                 self.schedule_event_refresh()
 
+        def _intake_service(self) -> IntakeProbeService:
+            service = getattr(self, "_production_intake_service", None)
+            if service is None:
+                service = IntakeProbeService(_legacy.probe_providers)
+                self._production_intake_service = service
+            return service
+
+        def refresh_intake_report(self, *, force: bool = False):
+            """Recompute from cached facts while provider probing runs off-main."""
+            now = time.monotonic()
+            probes = getattr(self, "_intake_probes", None)
+            probed_at = float(getattr(self, "_intake_probed_at", 0.0) or 0.0)
+            if force or probes is None or now - probed_at > 30.0:
+                self._intake_service().request(self._intake_probe_ready)
+            if not probes:
+                self.current_intake_report = None
+                return None
+            self._intake_probed_at = now
+            return _LegacyStatusBarController.refresh_intake_report(
+                self,
+                force=False,
+            )
+
+        def _intake_probe_ready(self, result: IntakeProbeResult) -> None:
+            try:
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "applyIntakeProbeResult:",
+                    result,
+                    False,
+                )
+            except Exception:
+                return
+
+        @_legacy.objc.IBAction
+        def applyIntakeProbeResult_(self, result) -> None:
+            if not isinstance(result, IntakeProbeResult):
+                return
+            self._intake_probed_at = time.monotonic()
+            if result.accepted:
+                self._intake_probes = result.probes
+                _LegacyStatusBarController.refresh_intake_report(
+                    self,
+                    force=False,
+                )
+                if getattr(self, "_runtime_started", False):
+                    self.schedule_event_refresh()
+            else:
+                _legacy.log_status_bar(
+                    f"intake probe unavailable: {result.reason}"
+                )
+
+        def _ledger_publisher(self) -> RemoteLedgerPublisher:
+            publisher = getattr(self, "_production_ledger_publisher", None)
+            if publisher is None:
+                publisher = RemoteLedgerPublisher(_legacy.publish_local_ledger)
+                self._production_ledger_publisher = publisher
+            return publisher
+
+        def publish_local_ledger_now(self, statuses, *, generated_at=None):
+            """Publish the optional peer ledger off-main with latest-wins bounds."""
+            remote = self.settings.remote_peers
+            if not remote.publish_enabled:
+                self._published_ledger_signature = None
+                self._ledger_publish_pending_signature = None
+                return None
+            normalized_statuses = tuple(statuses)
+            signature = _legacy.local_ledger_signature(normalized_statuses)
+            now = time.monotonic()
+            last_at = getattr(self, "_published_ledger_at", None)
+            if (
+                signature == getattr(self, "_published_ledger_signature", None)
+                and last_at is not None
+                and now - last_at < _legacy.REMOTE_PUBLISH_HEARTBEAT_SECONDS
+            ):
+                return getattr(self, "_published_ledger_path", None)
+            if signature == getattr(
+                self,
+                "_ledger_publish_pending_signature",
+                None,
+            ):
+                return getattr(self, "_published_ledger_path", None)
+            self._ledger_publish_pending_signature = signature
+            self._ledger_publisher().request(
+                statuses=normalized_statuses,
+                generated_at=generated_at,
+                settings=remote,
+                signature=signature,
+                callback=self._ledger_publish_ready,
+            )
+            return getattr(self, "_published_ledger_path", None)
+
+        def _ledger_publish_ready(self, result: LedgerPublishResult) -> None:
+            try:
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "applyLedgerPublishResult:",
+                    result,
+                    False,
+                )
+            except Exception:
+                return
+
+        @_legacy.objc.IBAction
+        def applyLedgerPublishResult_(self, result) -> None:
+            if not isinstance(result, LedgerPublishResult):
+                return
+            if getattr(self, "_ledger_publish_pending_signature", None) != (
+                result.request.signature
+            ):
+                return
+            self._ledger_publish_pending_signature = None
+            if not result.accepted:
+                _legacy.log_status_bar(
+                    f"remote_peers publish error: {result.reason}"
+                )
+                return
+            self._published_ledger_signature = result.request.signature
+            self._published_ledger_at = time.monotonic()
+            self._published_ledger_path = result.path
+
         def _capture_hardware_render_colors(self) -> None:
             """Read AppKit-dependent preview state on the main thread only."""
+            if threading.current_thread() is not threading.main_thread():
+                raise RuntimeError("hardware render context must be captured on main")
             try:
                 colors = _LegacyStatusBarController.agent_render_colors(self)
             except Exception:
@@ -218,6 +342,81 @@ else:
                     outcome=outcome,
                 )
 
+        def _core_state_store(self) -> CoreStateStore:
+            store = getattr(self, "_production_core_state", None)
+            if store is None:
+                store = CoreStateStore()
+                self._production_core_state = store
+            return store
+
+        def _observe_refresh_state(self) -> StateDelta:
+            monitor = getattr(self, "monitor", None)
+            attention = getattr(self, "current_attention_projection", None)
+            values = {
+                CoreDomain.AGENTS: (
+                    getattr(monitor, "statuses_by_key", None),
+                    getattr(self, "transcript_watermark", None),
+                    getattr(self, "last_refresh_hint", None),
+                ),
+                CoreDomain.OPERATOR: (
+                    getattr(self, "canonical_operator_state", None),
+                    getattr(self, "activity_ledger", None),
+                    getattr(self, "local_triage_state", None),
+                ),
+                CoreDomain.ATTENTION: (
+                    attention,
+                    getattr(self, "active_signal", None),
+                    getattr(self, "current_calendar_alert", None),
+                    getattr(self, "current_reminder_alert", None),
+                    getattr(self, "current_weather_alert", None),
+                ),
+                CoreDomain.BATTERY: getattr(
+                    self,
+                    "_production_battery_observation",
+                    None,
+                ),
+                CoreDomain.SETTINGS: self.settings,
+                CoreDomain.REMOTE: (
+                    getattr(self, "_remote_refresh", None),
+                    getattr(self, "current_merged_ledger", None),
+                ),
+                CoreDomain.PRESENTATION: (
+                    getattr(self, "current_glance", None),
+                    getattr(self, "active_finite_cue", None),
+                    getattr(self, "completion_sweep", None),
+                ),
+                CoreDomain.DEVICES: (
+                    self.settings.devices,
+                    getattr(self, "connected_devices", None),
+                ),
+                CoreDomain.USAGE: (
+                    getattr(self, "current_capacity_projection", None),
+                    getattr(self, "current_usage_view", None),
+                ),
+            }
+            urgent = bool(
+                getattr(attention, "requests", ())
+                or getattr(attention, "failures", ())
+                or getattr(self, "current_escalation_stage", 0)
+            )
+            return self._core_state_store().observe(
+                values,
+                urgent_domains=(
+                    frozenset({CoreDomain.ATTENTION}) if urgent else frozenset()
+                ),
+            )
+
+        def _dynamic_display_requires_refresh(self) -> bool:
+            return bool(
+                getattr(self, "active_finite_cue", None)
+                or getattr(self, "completion_sweep", None)
+                or self.settings.led_display
+                in {
+                    getattr(_legacy, "LED_DISPLAY_TIMER", "timer"),
+                    getattr(_legacy, "LED_DISPLAY_BATTERY", "battery"),
+                }
+            )
+
         @_legacy.objc.IBAction
         def refresh_(self, sender):
             if getattr(self, "_production_refresh_active", False):
@@ -228,6 +427,32 @@ else:
                     outcome="coalesced",
                 )
                 return None
+
+            store = self._core_state_store()
+            first_observation = not store.snapshot.fingerprints
+            delta = self._observe_refresh_state()
+            now = time.monotonic()
+            heartbeat_due = (
+                now - float(getattr(self, "_production_last_full_refresh", 0.0))
+                >= FULL_REFRESH_HEARTBEAT_SECONDS
+            )
+            forced = bool(getattr(self, "_production_force_refresh", False))
+            self._production_force_refresh = False
+            admission: RefreshAdmission = admit_refresh(
+                delta,
+                first_observation=first_observation,
+                heartbeat_due=heartbeat_due,
+                dynamic_display=self._dynamic_display_requires_refresh(),
+                forced=forced,
+            )
+            if not admission.admitted:
+                self._performance().record(
+                    "refresh_skipped",
+                    0.0,
+                    outcome=admission.reason,
+                )
+                return None
+
             self._production_refresh_active = True
             started = time.perf_counter()
             outcome = "ok"
@@ -242,6 +467,7 @@ else:
                     (time.perf_counter() - started) * 1000.0,
                     outcome=outcome,
                 )
+                self._production_last_full_refresh = time.monotonic()
                 self._production_refresh_active = False
                 pending = bool(
                     getattr(self, "_production_refresh_pending", False)
@@ -256,6 +482,32 @@ else:
                         )
                     except Exception:
                         pass
+
+        @_legacy.objc.IBAction
+        def refreshFromEvent_(self, _sender):
+            self.event_refresh_pending = False
+            now = time.monotonic()
+            last = float(getattr(self, "_last_event_refresh_at", 0.0) or 0.0)
+            if now - last < EVENT_COALESCE_SECONDS:
+                if getattr(self, "_trailing_refresh_timer", None) is None:
+                    self._trailing_refresh_timer = (
+                        _legacy.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                            EVENT_COALESCE_SECONDS,
+                            self,
+                            "trailingRefreshFire:",
+                            None,
+                            False,
+                        )
+                    )
+                return
+            self._last_event_refresh_at = now
+            self.refresh_(None)
+
+        @_legacy.objc.IBAction
+        def trailingRefreshFire_(self, _timer):
+            self._trailing_refresh_timer = None
+            self._last_event_refresh_at = time.monotonic()
+            self.refresh_(None)
 
         def applicationDidFinishLaunching_(self, notification):
             started = time.perf_counter()
@@ -357,47 +609,54 @@ else:
                 "Secure webhook set." if url else "Stage-3 webhook off."
             )
 
+        def _webhook_service(self) -> WebhookDeliveryService:
+            service = getattr(self, "_production_webhook_service", None)
+            if service is None:
+                service = WebhookDeliveryService()
+                self._production_webhook_service = service
+            return service
+
+        def _webhook_delivery_finished(
+            self,
+            receipt: WebhookDeliveryReceipt,
+        ) -> None:
+            event_name = receipt.request.event
+            if receipt.result.delivered:
+                _legacy.log_status_bar(f"webhook delivered: {event_name}")
+            else:
+                _legacy.log_status_bar(
+                    f"webhook failed ({event_name}): {receipt.result.reason.value}"
+                )
+
         def post_webhook(self, payload_dict: dict) -> None:
-            """Deliver privacy-minimized JSON with no redirects or private targets."""
+            """Queue privacy-minimized JSON on one bounded delivery worker."""
             url = (self.settings.escalation_webhook_url or "").strip()
             if not url or not isinstance(payload_dict, dict):
                 return
-            payload = dict(payload_dict)
-            event_name = str(payload.get("event") or "sidepulse.event")[:64]
-
-            def _post() -> None:
-                try:
-                    endpoint = validate_webhook_url(url)
-                except WebhookValidationError as exc:
-                    _legacy.log_status_bar(
-                        f"webhook refused ({event_name}): {exc.reason.value}"
-                    )
-                    return
-                result = deliver_webhook(endpoint, payload)
-                if result.delivered:
-                    _legacy.log_status_bar(f"webhook delivered: {event_name}")
-                else:
-                    _legacy.log_status_bar(
-                        f"webhook failed ({event_name}): {result.reason.value}"
-                    )
-
-            threading.Thread(
-                target=_post,
-                name="SidePulseWebhookDelivery",
-                daemon=True,
-            ).start()
+            reason = self._webhook_service().submit(
+                url,
+                payload_dict,
+                callback=self._webhook_delivery_finished,
+            )
+            if reason is not None:
+                event_name = str(
+                    payload_dict.get("event") or "sidepulse.event"
+                )[:64]
+                _legacy.log_status_bar(
+                    f"webhook refused ({event_name}): {reason.value}"
+                )
 
         def applicationWillTerminate_(self, notification):
-            battery_service = getattr(self, "_production_battery_service", None)
-            if battery_service is not None:
-                battery_service.close()
-            transcript_service = getattr(
-                self,
+            for attribute in (
+                "_production_battery_service",
                 "_production_transcript_service",
-                None,
-            )
-            if transcript_service is not None:
-                transcript_service.close()
+                "_production_intake_service",
+                "_production_ledger_publisher",
+                "_production_webhook_service",
+            ):
+                service = getattr(self, attribute, None)
+                if service is not None:
+                    service.close()
             return _LegacyStatusBarController.applicationWillTerminate_(
                 self,
                 notification,
