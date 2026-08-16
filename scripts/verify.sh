@@ -61,6 +61,7 @@ if [ "$PORTABLE" -eq 1 ]; then
         tests/test_packaging_contract.py \
         tests/test_status_bar_facade_contract.py \
         tests/test_status_bar_production_boundary.py \
+        tests/test_external_integration_wiring.py \
         tests/test_architecture_ratchets.py \
         tests/test_unwired_modules_ratchet.py \
         tests/test_core_state.py \
@@ -68,6 +69,7 @@ if [ "$PORTABLE" -eq 1 ]; then
         tests/test_refresh_admission.py \
         tests/test_background_services.py \
         tests/test_version_contract.py \
+        tests/test_module_entrypoint.py \
         tests/test_legacy_hook_entrypoints.py \
         tests/test_build_script_contract.py \
         tests/test_repository_hygiene.py \
@@ -76,6 +78,13 @@ if [ "$PORTABLE" -eq 1 ]; then
         tests/test_settings_schema_coverage.py \
         tests/test_settings_compatibility.py \
         tests/test_settings_concurrency.py \
+        tests/test_integration_settings.py \
+        tests/test_integration_compatibility_manifest.py \
+        tests/test_integration_cli.py \
+        tests/test_integration_cli_entrypoint.py \
+        tests/test_collector_external_statuses.py \
+        tests/test_t3_compat.py \
+        tests/test_codexbar_compat.py \
         tests/test_battery_runtime.py \
         tests/test_transcript_runtime.py \
         tests/test_transcript_coalescing.py \

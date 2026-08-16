@@ -24,3 +24,16 @@ def test_public_cli_routes_integration_commands_without_changing_legacy_args(
         ("integrations", ["status", "--json"]),
         ("legacy", ["doctor", "--json"]),
     ]
+
+
+def test_packaged_application_routes_cli_arguments_through_the_public_router() -> None:
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "packaging"
+        / "sidepulse_entry.py"
+    ).read_text(encoding="utf-8")
+
+    assert "from sidepulse.cli_entry import sidepulse_main" in source
+    assert "from sidepulse.cli import sidepulse_main" not in source

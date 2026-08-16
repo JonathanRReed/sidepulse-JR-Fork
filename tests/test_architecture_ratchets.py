@@ -6,17 +6,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "sidepulse"
 
-# These are the audited byte sizes at the start of the production rescue.
-# They may shrink. Increasing one requires extracting behavior instead of
-# extending the historical monolith.
+# These are the audited byte sizes at the start of the production rescue or at
+# the point a compatibility implementation was frozen behind a facade.
+# They may shrink. Increasing one requires extracting behavior.
 LEGACY_SIZE_CEILINGS = {
     SRC / "status_bar_legacy.py": 782_668,
+    SRC / "_collector_legacy.py": 117_707,
+    SRC / "_codexbar_compat_legacy.py": 31_000,
+    SRC / "_integration_settings_legacy.py": 12_000,
     SRC / "settings_window.py": 220_568,
     ROOT / "tests" / "test_sidepulse.py": 1_065_785,
 }
 
-# Existing non-legacy modules are allowed enough room for coherent ownership,
-# but no new Python source file may become another controller-sized subsystem.
 NON_LEGACY_MODULE_MAX_BYTES = 184_320
 EXEMPT_SOURCE_MODULES = {
     "status_bar_legacy.py",
@@ -25,13 +26,17 @@ EXEMPT_SOURCE_MODULES = {
 
 PURE_PRODUCTION_MODULES = {
     "battery_runtime.py",
+    "codexbar_compat.py",
     "core_state.py",
     "firmware_validation.py",
+    "integration_compatibility.py",
+    "integration_settings.py",
     "intake_runtime.py",
     "ledger_runtime.py",
     "performance_metrics.py",
     "presentation_compiler.py",
     "refresh_admission.py",
+    "t3_compat.py",
     "transcript_runtime.py",
     "webhook_delivery.py",
 }
@@ -71,9 +76,16 @@ def test_pure_production_modules_do_not_use_baseexception_or_dynamic_exec() -> N
     assert not failures, f"unsafe production constructs: {failures}"
 
 
-def test_production_facade_does_not_grow_into_a_second_monolith() -> None:
-    facade = SRC / "status_bar.py"
-    assert facade.stat().st_size <= 80_000, (
-        "status_bar.py exceeded 80 KB. Split battery, transcript, intake, "
-        "ledger, refresh admission, and diagnostics ownership further."
-    )
+def test_production_facades_do_not_grow_into_second_monoliths() -> None:
+    ceilings = {
+        SRC / "status_bar.py": 80_000,
+        SRC / "collector.py": 20_000,
+        SRC / "codexbar_compat.py": 20_000,
+        SRC / "integration_settings.py": 12_000,
+    }
+    oversized = {
+        path.name: path.stat().st_size
+        for path, ceiling in ceilings.items()
+        if path.stat().st_size > ceiling
+    }
+    assert not oversized, f"production facades are too large: {oversized}"

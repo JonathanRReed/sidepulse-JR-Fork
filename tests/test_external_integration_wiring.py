@@ -6,6 +6,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 STATUS_BAR = ROOT / "src" / "sidepulse" / "status_bar.py"
 BACKGROUND_MODULES = (
+    "_codexbar_compat_legacy.py",
+    "_integration_settings_legacy.py",
     "codexbar_compat.py",
     "integration_compatibility.py",
     "integration_settings.py",

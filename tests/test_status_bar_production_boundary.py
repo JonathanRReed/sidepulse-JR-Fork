@@ -4,10 +4,9 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STATUS_BAR_FILES = (
-    ROOT / "src" / "sidepulse" / "status_bar.py",
-    ROOT / "src" / "sidepulse" / "_status_bar_production.py",
-)
+STATUS_BAR = ROOT / "src" / "sidepulse" / "status_bar.py"
+PRODUCTION_STATUS_BAR = ROOT / "src" / "sidepulse" / "_status_bar_production.py"
+STATUS_BAR_FILES = (STATUS_BAR, PRODUCTION_STATUS_BAR)
 BACKGROUND_MODULES = (
     "battery_runtime.py",
     "transcript_runtime.py",
@@ -22,20 +21,23 @@ BACKGROUND_MODULES = (
 )
 
 
-def _trees() -> tuple[ast.Module, ...]:
-    return tuple(
-        ast.parse(path.read_text(encoding="utf-8"))
-        for path in STATUS_BAR_FILES
-    )
+def _tree(path: Path) -> ast.Module:
+    return ast.parse(path.read_text(encoding="utf-8"))
 
 
-def _method(name: str) -> ast.FunctionDef:
-    # The final wrapper is intentionally searched first so a corrective
-    # override wins over the implementation it replaces.
-    for tree in _trees():
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == name:
-                return node
+def _method(path: Path, name: str) -> ast.FunctionDef:
+    for node in ast.walk(_tree(path)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"missing production status-bar method: {name}")
+
+
+def _effective_method(name: str) -> ast.FunctionDef:
+    for path in STATUS_BAR_FILES:
+        try:
+            return _method(path, name)
+        except AssertionError:
+            continue
     raise AssertionError(f"missing production status-bar method: {name}")
 
 
@@ -70,19 +72,24 @@ def _stored_attributes(node: ast.AST) -> frozenset[str]:
     )
 
 
-def test_full_refresh_is_admitted_through_typed_state_deltas() -> None:
-    calls = _call_names(_method("refresh_"))
+def test_full_refresh_is_admitted_through_both_facade_layers() -> None:
+    public_calls = _call_names(_method(STATUS_BAR, "refresh_"))
+    production_calls = _call_names(_method(PRODUCTION_STATUS_BAR, "refresh_"))
 
-    assert "self._observe_refresh_state" in calls
-    assert "admit_refresh" in calls
-    assert "_LegacyStatusBarController.refresh_" in calls
-    assert calls.index("admit_refresh") < calls.index("_LegacyStatusBarController.refresh_")
+    assert "self._request_external_integrations" in public_calls
+    assert "_ProductionStatusBarController.refresh_" in public_calls
+    assert "self._observe_refresh_state" in production_calls
+    assert "admit_refresh" in production_calls
+    assert "_LegacyStatusBarController.refresh_" in production_calls
+    assert production_calls.index("admit_refresh") < production_calls.index(
+        "_LegacyStatusBarController.refresh_"
+    )
 
 
 def test_slow_refresh_producers_delegate_to_latest_wins_services() -> None:
-    transcript = _call_names(_method("ingest_transcript_fallback"))
-    intake = _call_names(_method("refresh_intake_report"))
-    ledger = _call_names(_method("publish_local_ledger_now"))
+    transcript = _call_names(_effective_method("ingest_transcript_fallback"))
+    intake = _call_names(_effective_method("refresh_intake_report"))
+    ledger = _call_names(_effective_method("publish_local_ledger_now"))
 
     assert "self._transcript_service" in transcript
     assert "monitor.input_signature" not in transcript
@@ -93,14 +100,14 @@ def test_slow_refresh_producers_delegate_to_latest_wins_services() -> None:
 
 
 def test_intake_refresh_does_not_renew_the_probe_timestamp() -> None:
-    method = _method("refresh_intake_report")
+    method = _effective_method("refresh_intake_report")
 
     assert "_intake_probed_at" not in _stored_attributes(method)
     assert "self._intake_service" in _call_names(method)
 
 
 def test_escalation_urgency_calls_the_stage_reader() -> None:
-    calls = _call_names(_method("_observe_refresh_state"))
+    calls = _call_names(_effective_method("_observe_refresh_state"))
 
     assert "stage_reader" in calls
 
@@ -135,7 +142,9 @@ def test_refresh_boundary_has_no_direct_blocking_io_calls() -> None:
         "Path.write_text",
         "Path.write_bytes",
         "os.fsync",
+        "sqlite3.connect",
     }
-    calls = set(_call_names(_method("refresh_")))
+    calls = set(_call_names(_method(STATUS_BAR, "refresh_")))
+    calls.update(_call_names(_method(PRODUCTION_STATUS_BAR, "refresh_")))
 
     assert not (calls & forbidden)
