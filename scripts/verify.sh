@@ -69,6 +69,8 @@ if [ "$PORTABLE" -eq 1 ]; then
         tests/test_settings_schema_coverage.py \
         tests/test_settings_compatibility.py \
         tests/test_battery_runtime.py \
+        tests/test_transcript_runtime.py \
+        tests/test_performance_metrics.py \
         tests/test_presentation_safety_compiler.py \
         tests/test_firmware_write_boundary.py \
         tests/test_release_gate_contract.py \

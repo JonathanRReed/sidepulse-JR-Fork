@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 from types import ModuleType
 
 from . import status_bar_legacy as _legacy
 from .battery_runtime import BatteryObservation, BatteryObservationService
 from .device_projection import light_rows_for_provider, projection_for_provider
+from .performance_metrics import PerformanceRegistry, PerformanceSnapshot
+from .transcript_runtime import TranscriptFallbackBatch, TranscriptFallbackService
 from .webhook_delivery import (
     WebhookValidationError,
     deliver_webhook,
@@ -30,6 +33,29 @@ else:
 
     class JRStatusBarController(_LegacyStatusBarController):
         """Production boundary around the retained controller implementation."""
+
+        def _performance(self) -> PerformanceRegistry:
+            registry = getattr(self, "_production_performance_registry", None)
+            if registry is None:
+                registry = PerformanceRegistry()
+                self._production_performance_registry = registry
+            return registry
+
+        def performance_snapshot(self) -> PerformanceSnapshot:
+            return self._performance().snapshot()
+
+        def performance_diagnostics_text(self) -> str:
+            report = self.performance_snapshot()
+            if not report.metrics:
+                return "Performance\nNo timing observations in this run."
+            lines = ["Performance (current run)"]
+            for metric in report.metrics:
+                lines.append(
+                    f"{metric.name}: P50 {metric.p50_ms:.1f} ms · "
+                    f"P95 {metric.p95_ms:.1f} ms · max {metric.maximum_ms:.1f} ms · "
+                    f"n={metric.count}"
+                )
+            return "\n".join(lines)
 
         def projected_rows_for_device(self, projection, device):
             provider_pin = self.settings.device_provider_pin(device.device_id)
@@ -80,6 +106,76 @@ else:
             ):
                 self.refresh_(None)
 
+        def _transcript_service(self) -> TranscriptFallbackService:
+            service = getattr(self, "_production_transcript_service", None)
+            if service is None:
+                service = TranscriptFallbackService()
+                self._production_transcript_service = service
+            return service
+
+        def ingest_transcript_fallback(self) -> None:
+            """Schedule transcript discovery; never walk or sort files on AppKit."""
+            monitor = getattr(self, "transcript_monitor", None)
+            if monitor is None:
+                return
+            self._transcript_service().request(
+                monitor,
+                known_signature=getattr(
+                    self,
+                    "transcript_fallback_signature",
+                    None,
+                ),
+                callback=self._transcript_batch_ready,
+            )
+
+        def _transcript_batch_ready(self, batch: TranscriptFallbackBatch) -> None:
+            try:
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "applyTranscriptFallbackBatch:",
+                    batch,
+                    False,
+                )
+            except Exception:
+                return
+
+        @_legacy.objc.IBAction
+        def applyTranscriptFallbackBatch_(self, batch) -> None:
+            if not isinstance(batch, TranscriptFallbackBatch):
+                return
+            monitor = getattr(self, "transcript_monitor", None)
+            if monitor is None or batch.monitor_identity != id(monitor):
+                return
+            if not batch.accepted:
+                _legacy.log_status_bar(
+                    f"transcript fallback unavailable: {batch.reason}"
+                )
+                return
+            watermark = getattr(self, "transcript_watermark", None)
+            newest = watermark
+            accepted = 0
+            for record in batch.records:
+                logged_at = getattr(record, "logged_at", None)
+                if logged_at is None or (
+                    watermark is not None and logged_at <= watermark
+                ):
+                    continue
+                try:
+                    self.monitor.ingest_record(record)
+                except Exception:
+                    _legacy.log_status_bar(
+                        "transcript fallback record refused: ingest_failed"
+                    )
+                    continue
+                accepted += 1
+                if newest is None or logged_at > newest:
+                    newest = logged_at
+            if accepted:
+                self.monitor.statuses_by_key = self.monitor.current_statuses_by_key()
+                self.transcript_watermark = newest
+            self.transcript_fallback_signature = batch.signature
+            if accepted and getattr(self, "_runtime_started", False):
+                self.schedule_event_refresh()
+
         def _capture_hardware_render_colors(self) -> None:
             """Read AppKit-dependent preview state on the main thread only."""
             try:
@@ -103,6 +199,149 @@ else:
         def sync_leds_now(self, *args, **kwargs):
             self._capture_hardware_render_colors()
             return _LegacyStatusBarController.sync_leds_now(self, *args, **kwargs)
+
+        def _sync_hardware_device(self, request):
+            started = time.perf_counter()
+            outcome = "ok"
+            try:
+                return _LegacyStatusBarController._sync_hardware_device(
+                    self,
+                    request,
+                )
+            except BaseException:
+                outcome = "error"
+                raise
+            finally:
+                self._performance().record(
+                    "hardware_render",
+                    (time.perf_counter() - started) * 1000.0,
+                    outcome=outcome,
+                )
+
+        @_legacy.objc.IBAction
+        def refresh_(self, sender):
+            if getattr(self, "_production_refresh_active", False):
+                self._production_refresh_pending = True
+                self._performance().record(
+                    "refresh_coalesced",
+                    0.0,
+                    outcome="coalesced",
+                )
+                return None
+            self._production_refresh_active = True
+            started = time.perf_counter()
+            outcome = "ok"
+            try:
+                return _LegacyStatusBarController.refresh_(self, sender)
+            except BaseException:
+                outcome = "error"
+                raise
+            finally:
+                self._performance().record(
+                    "refresh",
+                    (time.perf_counter() - started) * 1000.0,
+                    outcome=outcome,
+                )
+                self._production_refresh_active = False
+                pending = bool(
+                    getattr(self, "_production_refresh_pending", False)
+                )
+                self._production_refresh_pending = False
+                if pending and getattr(self, "_runtime_started", False):
+                    try:
+                        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                            "refresh:",
+                            None,
+                            False,
+                        )
+                    except Exception:
+                        pass
+
+        def applicationDidFinishLaunching_(self, notification):
+            started = time.perf_counter()
+            outcome = "ok"
+            try:
+                return _LegacyStatusBarController.applicationDidFinishLaunching_(
+                    self,
+                    notification,
+                )
+            except BaseException:
+                outcome = "error"
+                raise
+            finally:
+                self._performance().record(
+                    "warm_launch",
+                    (time.perf_counter() - started) * 1000.0,
+                    outcome=outcome,
+                )
+
+        def menuWillOpen_(self, menu):
+            started = time.perf_counter()
+            outcome = "ok"
+            try:
+                return _LegacyStatusBarController.menuWillOpen_(self, menu)
+            except BaseException:
+                outcome = "error"
+                raise
+            finally:
+                self._performance().record(
+                    "menu_open",
+                    (time.perf_counter() - started) * 1000.0,
+                    outcome=outcome,
+                )
+
+        def update_status_menu(self, snapshot, state) -> None:
+            started = time.perf_counter()
+            outcome = "ok"
+            try:
+                return _LegacyStatusBarController.update_status_menu(
+                    self,
+                    snapshot,
+                    state,
+                )
+            except BaseException:
+                outcome = "error"
+                raise
+            finally:
+                self._performance().record(
+                    "menu_apply",
+                    (time.perf_counter() - started) * 1000.0,
+                    outcome=outcome,
+                )
+
+        def ensure_settings_pane(self, key: str) -> None:
+            started = time.perf_counter()
+            outcome = "ok"
+            try:
+                return _LegacyStatusBarController.ensure_settings_pane(self, key)
+            except BaseException:
+                outcome = "error"
+                raise
+            finally:
+                self._performance().record(
+                    "settings_pane_build",
+                    (time.perf_counter() - started) * 1000.0,
+                    outcome=outcome,
+                )
+
+        def refresh_settings_window(self) -> None:
+            started = time.perf_counter()
+            outcome = "ok"
+            try:
+                return _LegacyStatusBarController.refresh_settings_window(self)
+            except BaseException:
+                outcome = "error"
+                raise
+            finally:
+                self._performance().record(
+                    "settings_refresh",
+                    (time.perf_counter() - started) * 1000.0,
+                    outcome=outcome,
+                )
+
+        def why_panel_body(self) -> str:
+            body = _LegacyStatusBarController.why_panel_body(self)
+            return f"{body}\n\n{self.performance_diagnostics_text()}"
 
         @_legacy.objc.IBAction
         def applyEscalationWebhook_(self, sender):
@@ -149,9 +388,16 @@ else:
             ).start()
 
         def applicationWillTerminate_(self, notification):
-            service = getattr(self, "_production_battery_service", None)
-            if service is not None:
-                service.close()
+            battery_service = getattr(self, "_production_battery_service", None)
+            if battery_service is not None:
+                battery_service.close()
+            transcript_service = getattr(
+                self,
+                "_production_transcript_service",
+                None,
+            )
+            if transcript_service is not None:
+                transcript_service.close()
             return _LegacyStatusBarController.applicationWillTerminate_(
                 self,
                 notification,
