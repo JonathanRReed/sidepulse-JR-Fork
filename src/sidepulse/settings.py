@@ -8,6 +8,7 @@ and preserves the public API.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from dataclasses import dataclass, replace
@@ -45,6 +46,10 @@ class SettingsWriteRefusedError(RuntimeError):
     """A settings document is newer than this writer can safely preserve."""
 
 
+class SettingsConcurrentWriteError(SettingsWriteRefusedError):
+    """The durable settings document changed after this process loaded it."""
+
+
 @dataclass(frozen=True, slots=True)
 class SettingsCompatibility:
     source_version: int
@@ -73,6 +78,7 @@ class LoadedSettings:
 _STATE_LOCK = threading.RLock()
 _COMPATIBILITY_BY_PATH: dict[Path, SettingsCompatibility] = {}
 _SOURCE_DOCUMENT_BY_PATH: dict[Path, dict[str, object]] = {}
+_SOURCE_DIGEST_BY_PATH: dict[Path, str | None] = {}
 
 _ORIGINAL_DEVICE_TO_DICT = _legacy.DeviceDisplaySetting.to_dict
 _ORIGINAL_DEVICE_SETTINGS_LOADER = _legacy._device_display_settings
@@ -84,6 +90,31 @@ _ORIGINAL_LOAD_SETTINGS = _legacy.load_settings
 
 def _settings_path(path: Path | None) -> Path:
     return (path or _legacy.default_settings_path()).expanduser().absolute()
+
+
+def _document_digest(document: dict[str, object]) -> str:
+    payload = json.dumps(
+        document,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _read_document(target: Path) -> dict[str, object]:
+    target.lstat()
+    _legacy.ensure_private_directory(target.parent)
+    value = json.loads(
+        _legacy.read_private_text(
+            target,
+            max_bytes=SETTINGS_DOCUMENT_MAX_BYTES,
+        )
+    )
+    if not isinstance(value, dict):
+        raise ValueError("settings document must be an object")
+    return value
 
 
 def _device_to_dict(self) -> dict[str, object]:
@@ -157,32 +188,59 @@ def _remember_document(
     target: Path,
     compatibility: SettingsCompatibility,
     document: dict[str, object],
+    *,
+    source_digest: str | None,
 ) -> None:
     with _STATE_LOCK:
         _COMPATIBILITY_BY_PATH[target] = compatibility
         _SOURCE_DOCUMENT_BY_PATH[target] = dict(document)
+        _SOURCE_DIGEST_BY_PATH[target] = source_digest
 
 
 def _forget_document(target: Path) -> None:
     with _STATE_LOCK:
         _COMPATIBILITY_BY_PATH.pop(target, None)
         _SOURCE_DOCUMENT_BY_PATH.pop(target, None)
+        _SOURCE_DIGEST_BY_PATH.pop(target, None)
+
+
+def _merge_unknown_fields(source: object, encoded: object, *, key: str = "") -> object:
+    if isinstance(source, dict) and isinstance(encoded, dict):
+        merged = {
+            source_key: source_value
+            for source_key, source_value in source.items()
+            if source_key not in encoded
+        }
+        for encoded_key, encoded_value in encoded.items():
+            merged[encoded_key] = _merge_unknown_fields(
+                source.get(encoded_key),
+                encoded_value,
+                key=encoded_key,
+            )
+        return merged
+    if key == "devices" and isinstance(source, list) and isinstance(encoded, list):
+        source_by_id = {
+            item.get("id"): item
+            for item in source
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        return [
+            _merge_unknown_fields(
+                source_by_id.get(item.get("id")) if isinstance(item, dict) else None,
+                item,
+            )
+            for item in encoded
+        ]
+    return encoded
 
 
 def load_settings_document(path: Path | None = None) -> LoadedSettings:
     target = _settings_path(path)
     try:
-        target.lstat()
-        _legacy.ensure_private_directory(target.parent)
-        data = json.loads(
-            _legacy.read_private_text(
-                target,
-                max_bytes=SETTINGS_DOCUMENT_MAX_BYTES,
-            )
-        )
+        data = _read_document(target)
     except FileNotFoundError:
         compatibility = SettingsCompatibility(CURRENT_SETTINGS_SCHEMA_VERSION)
-        _remember_document(target, compatibility, {})
+        _remember_document(target, compatibility, {}, source_digest=None)
         return LoadedSettings(_legacy.AgentMonitorSettings(), compatibility)
     except OSError:
         compatibility = SettingsCompatibility(CURRENT_SETTINGS_SCHEMA_VERSION)
@@ -194,12 +252,7 @@ def load_settings_document(path: Path | None = None) -> LoadedSettings:
         _forget_document(target)
         return LoadedSettings(_legacy.AgentMonitorSettings(), compatibility)
 
-    if not isinstance(data, dict):
-        _legacy._preserve_corrupt_settings(target)
-        compatibility = SettingsCompatibility(CURRENT_SETTINGS_SCHEMA_VERSION)
-        _forget_document(target)
-        return LoadedSettings(_legacy.AgentMonitorSettings(), compatibility)
-
+    source_digest = _document_digest(data)
     try:
         source_version = _settings_schema_version(data)
     except ValueError:
@@ -215,7 +268,12 @@ def load_settings_document(path: Path | None = None) -> LoadedSettings:
             migrated=False,
         )
         settings = _ORIGINAL_LOAD_SETTINGS(target)
-        _remember_document(target, compatibility, data)
+        _remember_document(
+            target,
+            compatibility,
+            data,
+            source_digest=source_digest,
+        )
         return LoadedSettings(settings, compatibility)
 
     if source_version < MIN_READABLE_SETTINGS_SCHEMA_VERSION:
@@ -228,7 +286,12 @@ def load_settings_document(path: Path | None = None) -> LoadedSettings:
         migrated = _migrate_settings_document(data, source_version)
     except ValueError:
         compatibility = SettingsCompatibility(source_version, read_only=True)
-        _remember_document(target, compatibility, data)
+        _remember_document(
+            target,
+            compatibility,
+            data,
+            source_digest=source_digest,
+        )
         return LoadedSettings(_legacy.AgentMonitorSettings(), compatibility)
 
     compatibility = SettingsCompatibility(
@@ -237,7 +300,12 @@ def load_settings_document(path: Path | None = None) -> LoadedSettings:
         migrated=source_version != CURRENT_SETTINGS_SCHEMA_VERSION,
     )
     settings = _ORIGINAL_LOAD_SETTINGS(target)
-    _remember_document(target, compatibility, migrated)
+    _remember_document(
+        target,
+        compatibility,
+        migrated,
+        source_digest=source_digest,
+    )
     return LoadedSettings(settings, compatibility)
 
 
@@ -253,31 +321,59 @@ def save_settings(
 ) -> Path:
     target = _settings_path(path)
     with _STATE_LOCK:
+        tracked = target in _COMPATIBILITY_BY_PATH
         remembered_compatibility = _COMPATIBILITY_BY_PATH.get(target)
         source_document = dict(_SOURCE_DOCUMENT_BY_PATH.get(target, {}))
-    effective = compatibility or remembered_compatibility
-    if effective is not None and effective.read_only:
-        raise SettingsWriteRefusedError(
-            "settings were written by a newer SidePulse version"
-        )
-    if effective is not None and (
-        effective.source_version < MIN_WRITABLE_SETTINGS_SCHEMA_VERSION
-    ):
-        raise SettingsWriteRefusedError("settings schema is not writable")
+        expected_digest = _SOURCE_DIGEST_BY_PATH.get(target)
+        if tracked:
+            try:
+                current_document = _read_document(target)
+                current_digest = _document_digest(current_document)
+            except FileNotFoundError:
+                current_digest = None
+            if current_digest != expected_digest:
+                raise SettingsConcurrentWriteError(
+                    "settings changed after they were loaded; reload before saving"
+                )
+        elif target.exists():
+            current_document = _read_document(target)
+            current_version = _settings_schema_version(current_document)
+            if current_version > CURRENT_SETTINGS_SCHEMA_VERSION:
+                raise SettingsWriteRefusedError(
+                    "settings were written by a newer SidePulse version"
+                )
+            source_document = current_document
 
-    encoded = settings.to_dict()
-    encoded["settings_schema_version"] = CURRENT_SETTINGS_SCHEMA_VERSION
-    unknown = {
-        key: value
-        for key, value in source_document.items()
-        if key not in encoded and key != "settings_schema_version"
-    }
-    document = {**unknown, **encoded}
-    payload = json.dumps(document, indent=2, sort_keys=True) + "\n"
-    written = _legacy.atomic_private_write(target, payload)
-    current = SettingsCompatibility(CURRENT_SETTINGS_SCHEMA_VERSION)
-    _remember_document(target, current, document)
-    return written
+        effective = compatibility or remembered_compatibility
+        if effective is not None and effective.read_only:
+            raise SettingsWriteRefusedError(
+                "settings were written by a newer SidePulse version"
+            )
+        if effective is not None and (
+            effective.source_version < MIN_WRITABLE_SETTINGS_SCHEMA_VERSION
+        ):
+            raise SettingsWriteRefusedError("settings schema is not writable")
+
+        encoded = settings.to_dict()
+        encoded["settings_schema_version"] = CURRENT_SETTINGS_SCHEMA_VERSION
+        document = _merge_unknown_fields(source_document, encoded)
+        if not isinstance(document, dict):
+            raise SettingsWriteRefusedError("settings encoder returned invalid data")
+        payload = json.dumps(
+            document,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        ) + "\n"
+        written = _legacy.atomic_private_write(target, payload)
+        current = SettingsCompatibility(CURRENT_SETTINGS_SCHEMA_VERSION)
+        _remember_document(
+            target,
+            current,
+            document,
+            source_digest=_document_digest(document),
+        )
+        return written
 
 
 _legacy.CURRENT_SETTINGS_SCHEMA_VERSION = CURRENT_SETTINGS_SCHEMA_VERSION
@@ -293,6 +389,7 @@ _legacy.AgentMonitorSettings.with_applied_calibration_profile = (
 _legacy.SettingsCompatibility = SettingsCompatibility
 _legacy.LoadedSettings = LoadedSettings
 _legacy.SettingsWriteRefusedError = SettingsWriteRefusedError
+_legacy.SettingsConcurrentWriteError = SettingsConcurrentWriteError
 _legacy.load_settings_document = load_settings_document
 _legacy.load_settings = load_settings
 _legacy.save_settings = save_settings
