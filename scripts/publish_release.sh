@@ -13,10 +13,6 @@ elif [ -n "${1:-}" ]; then
 fi
 
 cd "$ROOT_DIR"
-if [ "$(uname -s)" != "Darwin" ] && [ "$PYTHON_ONLY" -eq 0 ]; then
-    echo "A signed SidePulse app/package release must be built on macOS." >&2
-    exit 2
-fi
 if [ ! -x "$PYTHON" ]; then
     echo "Missing development environment. Run ./scripts/bootstrap-dev.sh first." >&2
     exit 2
@@ -25,45 +21,88 @@ if ! command -v gh >/dev/null 2>&1; then
     echo "GitHub CLI is required. Install gh and run gh auth login." >&2
     exit 2
 fi
-if ! git diff --quiet || ! git diff --cached --quiet; then
-    echo "Refusing to release a dirty working tree." >&2
+if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+    echo "Refusing to release a dirty or untracked working tree." >&2
     exit 2
 fi
-if [ "$(git branch --show-current)" != "main" ] && [ "${SIDEPULSE_ALLOW_NON_MAIN_RELEASE:-0}" != "1" ]; then
-    echo "Refusing to release outside main. Set SIDEPULSE_ALLOW_NON_MAIN_RELEASE=1 to override." >&2
+if [ "$(git branch --show-current)" != "main" ]; then
+    echo "Refusing to release outside main." >&2
+    exit 2
+fi
+
+git fetch --quiet origin main --tags
+head_sha="$(git rev-parse HEAD)"
+if [ "$head_sha" != "$(git rev-parse origin/main)" ]; then
+    echo "Local main is not exactly origin/main." >&2
     exit 2
 fi
 
 version="$("$PYTHON" scripts/validate_release_version.py)"
 tag="v$version"
-if git rev-parse "$tag" >/dev/null 2>&1; then
+if git rev-parse "$tag" >/dev/null 2>&1 || \
+   git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
     echo "Tag already exists: $tag" >&2
     exit 2
 fi
-
-./scripts/verify.sh --no-bootstrap
-artifacts=(dist/*.whl dist/*.tar.gz)
-
-if [ "$PYTHON_ONLY" -eq 0 ]; then
-    : "${APP_SIGN_IDENTITY:?Set APP_SIGN_IDENTITY to a Developer ID Application identity}"
-    : "${INSTALLER_SIGN_IDENTITY:?Set INSTALLER_SIGN_IDENTITY to a Developer ID Installer identity}"
-    : "${NOTARY_PROFILE:?Set NOTARY_PROFILE to a notarytool keychain profile}"
-    APP_SIGN_IDENTITY="$APP_SIGN_IDENTITY" \
-    INSTALLER_SIGN_IDENTITY="$INSTALLER_SIGN_IDENTITY" \
-    NOTARY_PROFILE="$NOTARY_PROFILE" \
-    BUILD_PYTHON="$PYTHON" \
-        ./packaging/build_macos_pkg.sh
-    artifacts+=(dist/SidePulse-"$version"-*.pkg)
+if gh release view "$tag" --repo JonathanRReed/sidepulse-JR-Fork >/dev/null 2>&1; then
+    echo "Release already exists: $tag" >&2
+    exit 2
 fi
 
+if [ "$PYTHON_ONLY" -eq 0 ]; then
+    ./scripts/verify_macos_release.sh
+else
+    ./scripts/verify.sh --no-bootstrap --portable
+fi
+
+artifacts=(
+    dist/*.whl
+    dist/*.tar.gz
+    dist/release-environment.txt
+    dist/sidepulse-sbom.cdx.json
+)
+if [ "$PYTHON_ONLY" -eq 0 ]; then
+    artifacts+=(
+        dist/SidePulse-"$version"-*.pkg
+        dist/release-verification.json
+    )
+fi
+for artifact in "${artifacts[@]}"; do
+    if [ ! -f "$artifact" ]; then
+        echo "Release artifact is missing: $artifact" >&2
+        exit 1
+    fi
+done
 shasum -a 256 "${artifacts[@]}" > dist/SHA256SUMS
 artifacts+=(dist/SHA256SUMS)
 
-git tag -a "$tag" -m "SidePulse $version"
-git push origin "$tag"
-gh release create "$tag" "${artifacts[@]}" \
+release_created=0
+rollback() {
+    status=$?
+    if [ "$status" -ne 0 ] && [ "$release_created" -eq 1 ]; then
+        gh release delete "$tag" \
+            --repo JonathanRReed/sidepulse-JR-Fork \
+            --yes \
+            --cleanup-tag >/dev/null 2>&1 || true
+    fi
+    exit "$status"
+}
+trap rollback EXIT
+
+gh release create "$tag" \
     --repo JonathanRReed/sidepulse-JR-Fork \
+    --target "$head_sha" \
     --title "SidePulse $version" \
-    --generate-notes
+    --generate-notes \
+    --draft
+release_created=1
+gh release upload "$tag" "${artifacts[@]}" \
+    --repo JonathanRReed/sidepulse-JR-Fork \
+    --clobber
+gh release edit "$tag" \
+    --repo JonathanRReed/sidepulse-JR-Fork \
+    --draft=false
+release_created=0
+trap - EXIT
 
 printf '%s\n' "Published $tag"

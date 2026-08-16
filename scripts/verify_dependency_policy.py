@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Verify SidePulse's reviewed direct-dependency and build-tool policy."""
+
+from __future__ import annotations
+
+import argparse
+import re
+from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
+    import tomli as tomllib
+
+_EXACT_REQUIREMENT = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]*\[[A-Za-z0-9_,.-]+\]==[^;\s]+(?:\s*;.+)?$"
+    r"|^[A-Za-z0-9][A-Za-z0-9_.-]*==[^;\s]+(?:\s*;.+)?$"
+)
+_CONSTRAINT = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]*==[^;\s]+(?:\s*;.+)?$"
+)
+_REQUIRED_CONSTRAINTS = frozenset(
+    {
+        "pip",
+        "setuptools",
+        "wheel",
+        "pyinstaller",
+        "pyinstaller-hooks-contrib",
+        "packaging",
+        "altgraph",
+        "macholib",
+        "pyobjc-core",
+        "pyobjc-framework-cocoa",
+        "pyobjc-framework-quartz",
+        "pyobjc-framework-webkit",
+        "pyobjc-framework-eventkit",
+        "ruamel-yaml",
+        "pytest",
+        "ruff",
+        "build",
+        "twine",
+    }
+)
+
+
+def _name(requirement: str) -> str:
+    head = requirement.split(";", 1)[0].split("==", 1)[0].strip()
+    head = head.split("[", 1)[0]
+    return re.sub(r"[-_.]+", "-", head).casefold()
+
+
+def _requirements(document: dict) -> tuple[str, ...]:
+    build = document.get("build-system") or {}
+    project = document.get("project") or {}
+    optional = project.get("optional-dependencies") or {}
+    values = [
+        *(build.get("requires") or ()),
+        *(project.get("dependencies") or ()),
+    ]
+    for group in optional.values():
+        values.extend(group or ())
+    return tuple(str(value) for value in values)
+
+
+def validate_dependency_policy(root: Path) -> tuple[str, ...]:
+    failures = []
+    pyproject_path = root / "pyproject.toml"
+    constraints_path = root / "requirements" / "release-constraints.txt"
+    document = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    requirements = _requirements(document)
+    for requirement in requirements:
+        if not _EXACT_REQUIREMENT.fullmatch(requirement):
+            failures.append(f"non-exact direct requirement: {requirement}")
+
+    constraints = []
+    for raw in constraints_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if not _CONSTRAINT.fullmatch(line):
+            failures.append(f"non-exact release constraint: {line}")
+            continue
+        constraints.append(line)
+    constrained_names = {_name(line) for line in constraints}
+    missing = sorted(_REQUIRED_CONSTRAINTS - constrained_names)
+    if missing:
+        failures.append(f"missing release constraints: {', '.join(missing)}")
+
+    for requirement in requirements:
+        name = _name(requirement)
+        if name not in constrained_names and name not in {"tomli"}:
+            failures.append(f"direct requirement is absent from constraints: {name}")
+
+    bootstrap = (root / "scripts" / "bootstrap-dev.sh").read_text(encoding="utf-8")
+    package_build = (root / "packaging" / "build_macos_pkg.sh").read_text(
+        encoding="utf-8"
+    )
+    for path, text in (
+        ("scripts/bootstrap-dev.sh", bootstrap),
+        ("packaging/build_macos_pkg.sh", package_build),
+    ):
+        if "release-constraints.txt" not in text:
+            failures.append(f"{path} does not use release constraints")
+        if 'pip==26.1.2' not in text and 'PINNED_PIP="26.1.2"' not in text:
+            failures.append(f"{path} does not pin pip")
+    if 'PINNED_PYINSTALLER="6.21.0"' not in package_build:
+        failures.append("packaging/build_macos_pkg.sh does not pin PyInstaller")
+    if "release-environment.txt" not in package_build:
+        failures.append("packaging/build_macos_pkg.sh does not snapshot its environment")
+    return tuple(failures)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path.cwd())
+    args = parser.parse_args()
+    try:
+        failures = validate_dependency_policy(args.root.resolve())
+    except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+        print(f"dependency policy could not be evaluated: {exc}")
+        return 2
+    if failures:
+        print("dependency policy failed:")
+        for failure in failures:
+            print(f"- {failure}")
+        return 1
+    print("dependency policy passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

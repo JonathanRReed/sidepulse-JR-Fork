@@ -7,10 +7,14 @@ ARCH="$(/usr/bin/uname -m)"
 BUILD_DIR="${BUILD_ROOT:-$ROOT_DIR/build/macos-pkg}"
 DIST_DIR="${OUTPUT_ROOT:-$ROOT_DIR/dist}"
 REQUESTED_BUILD_PYTHON="${BUILD_PYTHON:-}"
+CONSTRAINTS="$ROOT_DIR/requirements/release-constraints.txt"
+PINNED_PIP="26.1.2"
+PINNED_PYINSTALLER="6.21.0"
 VENV_DIR="$BUILD_DIR/venv"
 APP_PATH="$BUILD_DIR/pyinstaller/SidePulse.app"
 COMPONENT_PKG="$BUILD_DIR/SidePulse-component.pkg"
 OUTPUT_PKG="$DIST_DIR/SidePulse-${VERSION}-${ARCH}.pkg"
+ENVIRONMENT_SNAPSHOT="$DIST_DIR/release-environment.txt"
 APP_ID="io.sidepulse.app"
 APPLE_EVENTS_USAGE_DESCRIPTION="SidePulse uses Automation only to open a reviewed resume command in Terminal or iTerm2 when you choose Open."
 
@@ -57,6 +61,10 @@ select_build_python() {
 
 if [ -z "$VERSION" ]; then
     echo "Could not read the SidePulse version from pyproject.toml." >&2
+    exit 2
+fi
+if [ ! -f "$CONSTRAINTS" ]; then
+    echo "Missing reviewed release constraints: $CONSTRAINTS" >&2
     exit 2
 fi
 
@@ -106,10 +114,21 @@ echo "Building SidePulse $VERSION for $ARCH with $($BUILD_PYTHON -V 2>&1)"
 /bin/mkdir -p "$BUILD_DIR" "$DIST_DIR"
 export PIP_CACHE_DIR="$BUILD_DIR/pip-cache"
 export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_CONSTRAINT="$CONSTRAINTS"
+export PIP_BUILD_CONSTRAINT="$CONSTRAINTS"
+export PYTHONHASHSEED=0
 export PYINSTALLER_CONFIG_DIR="$BUILD_DIR/pyinstaller-cache"
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT_DIR" show -s --format=%ct HEAD)}"
 "$BUILD_PYTHON" -m venv "$VENV_DIR"
-"$VENV_DIR/bin/python" -m pip install --upgrade pip
-"$VENV_DIR/bin/python" -m pip install 'pyinstaller>=6.10,<7' "$ROOT_DIR"
+"$VENV_DIR/bin/python" -m pip install "pip==$PINNED_PIP"
+"$VENV_DIR/bin/python" -m pip install \
+    --constraint "$CONSTRAINTS" \
+    --only-binary=:all: \
+    "pyinstaller==$PINNED_PYINSTALLER" \
+    "$ROOT_DIR"
+"$VENV_DIR/bin/python" -m pip check
+LC_ALL=C "$VENV_DIR/bin/python" -m pip list --format=freeze \
+    | /usr/bin/sort > "$ENVIRONMENT_SNAPSHOT"
 
 "$VENV_DIR/bin/pyinstaller" \
     --noconfirm --clean --windowed \
@@ -134,29 +153,21 @@ export PYINSTALLER_CONFIG_DIR="$BUILD_DIR/pyinstaller-cache"
 /usr/bin/xattr -cr "$APP_PATH"
 
 if [ -n "$APP_SIGN_IDENTITY" ]; then
-    /usr/bin/codesign --force --deep --options runtime --timestamp \
-        --entitlements "$ROOT_DIR/packaging/entitlements.plist" \
-        --sign "$APP_SIGN_IDENTITY" "$APP_PATH"
+    SIGN_IDENTITY="$APP_SIGN_IDENTITY"
 else
     echo "WARNING: no APP_SIGN_IDENTITY -- signing AD HOC." >&2
     echo "         An ad-hoc bundle has a different code identity, so macOS" >&2
     echo "         treats it as a DIFFERENT APP: Full Disk Access, Screen" >&2
     echo "         Recording and Notification grants will be lost, and" >&2
     echo "         Gatekeeper will reject it. Local testing only." >&2
-    /usr/bin/codesign --force --deep --sign - "$APP_PATH"
+    SIGN_IDENTITY="-"
 fi
 
-# Verify both Developer ID and local ad-hoc candidates. A successful signing
-# command is not evidence that every nested item or bundle attribute is valid.
-/usr/bin/xattr -cr "$APP_PATH"
-/usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+"$VENV_DIR/bin/python" "$ROOT_DIR/packaging/sign_macos_app.py" \
+    "$APP_PATH" \
+    --identity "$SIGN_IDENTITY" \
+    --entitlements "$ROOT_DIR/packaging/entitlements.plist"
 
-# Assert the signature we actually got is the one we asked for.
-#
-# codesign exiting 0 proves a signature exists, not that it is the right one.
-# PyInstaller ad-hoc signs the bundle itself before this script re-signs it, so
-# a re-sign that silently no-ops leaves a valid ad-hoc bundle that would lose
-# every TCC grant on the user's machine.
 if [ -n "$APP_SIGN_IDENTITY" ]; then
     SIGNED_TEAM="$(/usr/bin/codesign -dv --verbose=4 "$APP_PATH" 2>&1 \
         | /usr/bin/awk -F= '/^TeamIdentifier=/ {print $2}')"
@@ -170,6 +181,7 @@ if [ -n "$APP_SIGN_IDENTITY" ]; then
 fi
 
 "$VENV_DIR/bin/python" "$ROOT_DIR/packaging/verify_macos_app.py" "$APP_PATH"
+"$VENV_DIR/bin/python" "$ROOT_DIR/packaging/verify_entitlements.py" "$APP_PATH"
 
 if [ ! -x "$ROOT_DIR/packaging/scripts/postinstall" ]; then
     echo "packaging/scripts/postinstall must be executable" >&2

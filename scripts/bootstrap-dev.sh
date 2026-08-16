@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV_DIR="${SIDEPULSE_DEV_VENV:-${VENV_DIR:-$ROOT_DIR/.venv}}"
+CONSTRAINTS="$ROOT_DIR/requirements/release-constraints.txt"
+PINNED_PIP="26.1.2"
 
 select_python() {
     local candidates=()
@@ -39,12 +41,19 @@ if [ -z "$PYTHON_BIN" ]; then
     echo "SidePulse requires Python 3.10+. Install Homebrew Python 3.13 or set PYTHON." >&2
     exit 2
 fi
+if [ ! -f "$CONSTRAINTS" ]; then
+    echo "Missing reviewed dependency constraints: $CONSTRAINTS" >&2
+    exit 2
+fi
 
 if [ ! -x "$VENV_DIR/bin/python" ]; then
     "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi
 
-"$VENV_DIR/bin/python" -m pip install --upgrade pip
-"$VENV_DIR/bin/python" -m pip install -e "$ROOT_DIR[dev]"
+"$VENV_DIR/bin/python" -m pip install "pip==$PINNED_PIP"
+"$VENV_DIR/bin/python" -m pip install \
+    --constraint "$CONSTRAINTS" \
+    --editable "$ROOT_DIR[dev]"
+"$VENV_DIR/bin/python" -m pip check
 printf 'Development environment ready: %s (%s)\n' \
     "$VENV_DIR" "$("$VENV_DIR/bin/python" -V 2>&1)"

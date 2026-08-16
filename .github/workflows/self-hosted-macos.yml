@@ -1,0 +1,54 @@
+name: Self-hosted macOS production gate
+
+# Runs on the owner's Mac and consumes no GitHub-hosted minutes. The runner
+# label is intentionally specific so arbitrary self-hosted machines cannot
+# receive signing or hardware work.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run full tests, or the signed release gate"
+        required: true
+        default: tests
+        type: choice
+        options:
+          - tests
+          - release
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sidepulse-self-hosted-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONHASHSEED: "0"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  macos:
+    runs-on: [self-hosted, macOS, ARM64, sidepulse-production]
+    timeout-minutes: 90
+    environment: ${{ inputs.mode == 'release' && 'sidepulse-production' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          clean: true
+      - name: Bootstrap reviewed environment
+        run: ./scripts/bootstrap-dev.sh
+      - name: Full macOS suite
+        if: inputs.mode == 'tests'
+        run: ./scripts/verify.sh --no-bootstrap
+      - name: Signed installed release gate
+        if: inputs.mode == 'release'
+        env:
+          APP_SIGN_IDENTITY: ${{ secrets.APP_SIGN_IDENTITY }}
+          INSTALLER_SIGN_IDENTITY: ${{ secrets.INSTALLER_SIGN_IDENTITY }}
+          NOTARY_PROFILE: ${{ secrets.NOTARY_PROFILE }}
+          SIDEPULSE_PERFORMANCE_EVIDENCE: ${{ vars.PERFORMANCE_EVIDENCE_PATH }}
+          SIDEPULSE_HARDWARE_CONFIRM: "1"
+          SIDEPULSE_RUN_INSTALLED_UPGRADE: "1"
+          SIDEPULSE_REQUIRED_HARDWARE: ${{ vars.REQUIRED_HARDWARE }}
+        run: ./scripts/verify_macos_release.sh

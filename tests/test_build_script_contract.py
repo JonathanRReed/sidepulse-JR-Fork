@@ -21,3 +21,15 @@ def test_package_builder_verifies_delivered_signature_identity() -> None:
     assert "TeamIdentifier" in text
     assert "codesign --verify --deep --strict" in text
     assert "verify_macos_app.py" in text
+
+
+def test_clean_install_verifies_external_integration_artifacts_and_commands() -> None:
+    text = (ROOT / "scripts" / "verify_clean_install.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"integration_compatibility.json"' in text
+    assert '"sidepulse-integrations"' in text
+    assert '"integrations", "status", "--json"' in text
+    assert '"sidepulse.codexbar_compat"' in text
+    assert '"sidepulse.t3_compat"' in text

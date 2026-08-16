@@ -1,27 +1,60 @@
 #!/bin/sh
 set -eu
 
-CONSOLE_USER="$(/usr/bin/stat -f '%Su' /dev/console)"
-if [ "$CONSOLE_USER" = "root" ] || [ "$CONSOLE_USER" = "loginwindow" ]; then
-    exit 0
+APP_BINARY="/Applications/SidePulse.app/Contents/MacOS/SidePulse"
+CLI_DIR="/usr/local/bin"
+CLI_LINK="$CLI_DIR/sidepulse"
+RECEIPT_DIR="/var/db/sidepulse"
+PENDING_RECEIPT="$RECEIPT_DIR/setup-pending"
+COMPLETE_RECEIPT="$RECEIPT_DIR/setup-complete"
+LAUNCH_AGENT_NAME="io.sidepulse.agentstatus.plist"
+
+log() {
+    /bin/echo "SidePulse postinstall: $*"
+}
+
+fail() {
+    /bin/echo "SidePulse postinstall: $*" >&2
+    exit 1
+}
+
+if [ ! -x "$APP_BINARY" ]; then
+    fail "installed application executable is missing or not executable"
 fi
 
-CONSOLE_UID="$(/usr/bin/id -u "$CONSOLE_USER")"
-CONSOLE_HOME="$(/usr/bin/dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory | /usr/bin/awk '{print $2}')"
-APP_BINARY="/Applications/SidePulse.app/Contents/MacOS/SidePulse"
+/bin/mkdir -p "$CLI_DIR" "$RECEIPT_DIR"
+/bin/chmod 755 "$CLI_DIR" "$RECEIPT_DIR"
 
-/bin/mkdir -p /usr/local/bin
-/bin/ln -sfn "$APP_BINARY" /usr/local/bin/sidepulse
+# Never replace an unrelated user-managed command. We own the link only when
+# it is absent or already points at the packaged SidePulse executable.
+if [ ! -e "$CLI_LINK" ] && [ ! -L "$CLI_LINK" ]; then
+    /bin/ln -s "$APP_BINARY" "$CLI_LINK"
+elif [ -L "$CLI_LINK" ] && [ "$(/usr/bin/readlink "$CLI_LINK")" = "$APP_BINARY" ]; then
+    /bin/ln -sfn "$APP_BINARY" "$CLI_LINK"
+else
+    log "left existing $CLI_LINK unchanged because SidePulse does not own it"
+fi
 
-# Install the narrow pmset helper while the package installer already has
-# privileges. This lets "Keep Awake With Lid Closed" work without exposing a
-# second technical toggle in the app UI.
-/usr/bin/env SUDO_USER="$CONSOLE_USER" USER="$CONSOLE_USER" LOGNAME="$CONSOLE_USER" \
-    "$APP_BINARY" status-bar install-sleep-helper || true
+# A package install owns only package payload. Provider hooks, LaunchAgents,
+# the sleep helper, and the eject guard are external mutable state and require
+# an explicit user action. Running those changes from postinstall made a later
+# failure impossible to roll back safely without removing pre-existing setup.
+CONSOLE_USER="$(/usr/bin/stat -f '%Su' /dev/console)"
+CONSOLE_HOME=""
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ] && [ "$CONSOLE_USER" != "loginwindow" ]; then
+    CONSOLE_HOME="$(/usr/bin/dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')"
+fi
 
-# Configure user-owned hooks and LaunchAgents in the logged-in GUI session.
-/bin/launchctl asuser "$CONSOLE_UID" /usr/bin/sudo -u "$CONSOLE_USER" \
-    /usr/bin/env HOME="$CONSOLE_HOME" USER="$CONSOLE_USER" LOGNAME="$CONSOLE_USER" \
-    "$APP_BINARY" setup --sd-eject-guard-scope user || true
+if [ -n "$CONSOLE_HOME" ] && [ -f "$CONSOLE_HOME/Library/LaunchAgents/$LAUNCH_AGENT_NAME" ]; then
+    /bin/date -u '+%Y-%m-%dT%H:%M:%SZ' > "$COMPLETE_RECEIPT"
+    /bin/chmod 644 "$COMPLETE_RECEIPT"
+    /bin/rm -f "$PENDING_RECEIPT"
+    log "application upgraded; existing explicit SidePulse setup remains in place"
+else
+    /bin/date -u '+%Y-%m-%dT%H:%M:%SZ' > "$PENDING_RECEIPT"
+    /bin/chmod 644 "$PENDING_RECEIPT"
+    /bin/rm -f "$COMPLETE_RECEIPT"
+    log "application installed; open SidePulse and complete the reviewed first-run setup"
+fi
 
 exit 0

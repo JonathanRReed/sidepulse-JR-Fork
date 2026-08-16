@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==83.0.0", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -29,14 +29,14 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
-    "pyobjc-framework-Quartz>=10; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa==12.2.1; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz==12.2.1; sys_platform == 'darwin'",
     # WebKit also provides the JavaScriptCore bindings led_wasm needs.
-    "pyobjc-framework-WebKit>=10; sys_platform == 'darwin'",
+    "pyobjc-framework-WebKit==12.2.1; sys_platform == 'darwin'",
     # Calendar alerts ("glow before events start") use EventKit.
-    "pyobjc-framework-EventKit>=10; sys_platform == 'darwin'",
+    "pyobjc-framework-EventKit==12.2.1; sys_platform == 'darwin'",
     # Preserve comments and formatting while editing Hermes YAML config.
-    "ruamel.yaml>=0.18",
+    "ruamel.yaml==0.19.1",
 ]
 
 [project.urls]
@@ -49,20 +49,22 @@ Upstream = "https://github.com/inteliwear/sidepulse"
 # Backwards-compatible alias. Status-bar dependencies install by default.
 status-bar = []
 test = [
-    "pytest>=8,<10",
+    "pytest==9.1.1",
     "ruff==0.16.3",
-    "tomli>=2.2; python_version < '3.11'",
+    "tomli==2.4.1; python_version < '3.11'",
 ]
 dev = [
-    "build>=1.2,<2",
-    "pytest>=8,<10",
+    "build==1.5.0",
+    "pytest==9.1.1",
     "ruff==0.16.3",
-    "tomli>=2.2; python_version < '3.11'",
-    "twine>=6,<7",
+    "tomli==2.4.1; python_version < '3.11'",
+    "twine==6.2.0",
+    "wheel==0.47.0",
 ]
 
 [project.scripts]
-sidepulse = "sidepulse.cli:sidepulse_main"
+sidepulse = "sidepulse.cli_entry:sidepulse_main"
+sidepulse-integrations = "sidepulse.integration_cli:main"
 agent-monitor = "sidepulse.cli:main"
 agent-status-bar = "sidepulse.status_bar:main"
 
@@ -71,7 +73,11 @@ where = ["src"]
 include = ["sidepulse*", "agent_monitor*", "sidepulse_cli*"]
 
 [tool.setuptools.package-data]
-"sidepulse.resources" = ["sd_eject_guard.c", "sdled.wasm"]
+"sidepulse.resources" = [
+    "integration_compatibility.json",
+    "sd_eject_guard.c",
+    "sdled.wasm",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -97,6 +103,7 @@ ignore = [
 # intentionally narrow: undefined-name, syntax, and correctness checks remain
 # enabled, and every newly extracted module must pass without exceptions.
 "src/sidepulse/settings.py" = ["I001"]
+"src/sidepulse/_settings_legacy.py" = ["I001"]
 "src/sidepulse/settings_window.py" = ["F821"]
 "src/sidepulse/usage_card.py" = ["RUF022"]
 "src/sidepulse/virtual_device.py" = ["I001"]

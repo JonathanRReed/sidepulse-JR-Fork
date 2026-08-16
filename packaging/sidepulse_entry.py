@@ -2,7 +2,7 @@
 
 import sys
 
-from sidepulse.cli import sidepulse_main
+from sidepulse.cli_entry import sidepulse_main
 from sidepulse.status_bar import main as status_bar_main
 
 
