@@ -2688,6 +2688,8 @@ for (const event of [
         self.assertIn("launch_status", target.setup_fields)
         self.assertIn("eject_status", target.setup_fields)
         self.assertIn("sleep_status", target.setup_fields)
+        self.assertFalse(target.setup_fields["message"].usesSingleLineMode())
+        self.assertTrue(target.setup_fields["message"].cell().wraps())
         # The welcome window's own additions: the live demo strip and one
         # contextual connect row per registered provider.
         self.assertIn("demo_view", target.setup_fields)
@@ -4703,6 +4705,30 @@ for (const event of [
 
         self.assertEqual([device.device_id for device in updated.devices], ["/Volumes/SidePulsePro"])
         self.assertEqual(updated.display_for_device("/Volumes/SidePulseDot"), "agent")
+
+    def test_persistable_device_identity_rejects_temp_volumes(self) -> None:
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+
+        self.assertTrue(
+            status_bar.persistable_device_identity(
+                "/Volumes/SidePulse", "/Volumes/SidePulse"
+            )
+        )
+        self.assertTrue(
+            status_bar.persistable_device_identity(
+                status_bar.VIRTUAL_DEVICE_ID, status_bar.VIRTUAL_DEVICE_ID
+            )
+        )
+        self.assertFalse(
+            status_bar.persistable_device_identity(
+                "/var/folders/xx/tmp/volumes/SidePulseDot",
+                "/var/folders/xx/tmp/volumes/SidePulseDot",
+            )
+        )
+        self.assertFalse(status_bar.persistable_device_identity("Dot", "Dot"))
 
     def test_disconnected_device_menu_has_remove_option(self) -> None:
         try:
@@ -9120,6 +9146,20 @@ class RememberConnectedDevicesRaceTests(unittest.TestCase):
     def test_no_race_still_commits_normally(self) -> None:
         self.controller.remember_connected_devices([self._device()])
         self.assertIn("SidePulseDot", {d.device_id for d in self.controller.settings.devices})
+
+    def test_ephemeral_test_volumes_are_not_remembered(self) -> None:
+        root = Path(self._tmp.name) / "volumes" / "SidePulseDot"
+        device = self.status_bar.StatusBarDevice(
+            device_id=str(root),
+            name="SidePulse Dot",
+            root=root,
+            target=root / "LEDS.LED",
+            connected=True,
+            display=LED_DISPLAY_BATTERY,
+        )
+        before = self.controller.settings
+        self.controller.remember_connected_devices([device])
+        self.assertEqual(self.controller.settings.devices, before.devices)
 
     def test_no_op_for_a_disconnected_device(self) -> None:
         device = self.status_bar.StatusBarDevice(

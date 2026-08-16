@@ -16,6 +16,8 @@ import pytest
 
 from sidepulse.status_bar_launch import (
     build_launch_agent_plist,
+    development_python_executable,
+    install_launch_agent,
     launch_agent_path_env,
     production_bundle_executable,
 )
@@ -127,6 +129,28 @@ def test_source_default_launch_agent_fails_closed_without_mutable_wrapper() -> N
     with patch("sidepulse.status_bar_launch.sys.frozen", False, create=True):
         with pytest.raises(RuntimeError, match=r"packaged SidePulse\.app"):
             build_launch_agent_plist()
+
+
+def test_source_install_launch_agent_uses_current_interpreter(tmp_path: Path) -> None:
+    plist_path = tmp_path / "LaunchAgents" / "io.sidepulse.agentstatus.plist"
+    state_dir = tmp_path / "state"
+    with (
+        patch("sidepulse.status_bar_launch.sys.frozen", False, create=True),
+        patch("sidepulse._status_bar_launch_legacy.default_state_dir", return_value=state_dir),
+        patch("sidepulse._status_bar_launch_legacy.restart_launch_agent"),
+        patch("sidepulse._status_bar_launch_legacy.launch_agent_running", return_value=False),
+        patch("sidepulse._status_bar_launch_legacy.remove_legacy_launch_agent", return_value=False),
+    ):
+        result = install_launch_agent(start=False, plist_path=plist_path)
+
+    assert result.changed
+    payload = plistlib.loads(plist_path.read_bytes())
+    assert payload["ProgramArguments"][0] == str(Path(sys.executable))
+
+
+def test_development_python_is_absent_when_frozen() -> None:
+    with patch("sidepulse.status_bar_launch.sys.frozen", True, create=True):
+        assert development_python_executable() is None
 
 
 def test_explicit_development_interpreter_remains_available_with_system_path() -> None:

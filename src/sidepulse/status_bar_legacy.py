@@ -1634,7 +1634,9 @@ def replay_recent_debug_logs(
 
 class StatusBarController(NSObject):
     def init(self):
-        self = objc.super(StatusBarController, self).init()
+        # Production facades rebind the StatusBarController name to a
+        # subclass. objc.super must see the class that defined this init.
+        self = objc.super(_AppKitStatusBarController, self).init()
         if self is None:
             return None
 
@@ -11147,6 +11149,8 @@ class StatusBarController(NSObject):
                 continue
             if device.device_id in entries_by_id:
                 continue
+            if not persistable_device_identity(device.device_id, device.path):
+                continue
             root = Path(device.path).expanduser()
             entries_by_id[device.device_id] = StatusBarDevice(
                 device_id=device.device_id,
@@ -11222,11 +11226,20 @@ class StatusBarController(NSObject):
             for device in devices:
                 if not device.connected:
                     continue
+                if not persistable_device_identity(device.device_id, str(device.root)):
+                    continue
                 updated = updated.with_remembered_device(
                     device_id=device.device_id,
                     name=device.name,
                     path=str(device.root),
                 )
+            persistable = tuple(
+                entry
+                for entry in updated.devices
+                if persistable_device_identity(entry.device_id, entry.path)
+            )
+            if persistable != updated.devices:
+                updated = dataclass_replace(updated, devices=persistable)
             if updated == before:
                 return
             if self.settings is not before:
@@ -16440,6 +16453,9 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     return menu
 
 
+_AppKitStatusBarController = StatusBarController
+
+
 def build_closed_lid_awake_policy_item(policy: str, target: StatusBarController) -> NSMenuItem:
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         CLOSED_LID_AWAKE_LABELS[policy],
@@ -16661,14 +16677,8 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
     root.heightAnchor().constraintEqualToConstant_(height).setActive_(True)
 
     stack = native_ui.make_fill_stack(spacing=14.0)
-    root.addSubview_(stack)
-    NSLayoutConstraint.activateConstraints_(
-        [
-            stack.topAnchor().constraintEqualToAnchor_constant_(root.topAnchor(), 28.0),
-            stack.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 28.0),
-            stack.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -28.0),
-        ]
-    )
+    scroll = native_ui.wrap_in_scroll_pane(stack, padding=0.0)
+    root.addSubview_(scroll)
 
     # Hero: the product introduces itself by DOING the thing -- a live
     # LED strip playing the full-team demo, not a paragraph about LEDs.
@@ -16764,19 +16774,26 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
     mac_inner.addArrangedSubview_(uninstall_cluster)
     stack.addArrangedSubview_(mac_outer)
 
-    # Footer: transient message + the two actions, pinned to the bottom.
-    message = native_ui.make_label("", secondary=True, size=12.0)
+    # Footer: transient message + the two actions, pinned below the
+    # scrollable body so a long error cannot paint over the Mac card.
+    message = native_ui.make_wrapping_label("", secondary=True, size=12.0, max_width=420.0)
     skip_button = native_ui.make_button("Skip for Now", target, "skipFirstLaunchSetup:")
     setup_button = native_ui.make_button("Set Up", target, "runFirstLaunchSetup:")
     setup_button.setKeyEquivalent_("\r")
-    footer = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    actions = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    actions.addArrangedSubview_(native_ui.make_hspacer())
+    actions.addArrangedSubview_(skip_button)
+    actions.addArrangedSubview_(setup_button)
+    footer = native_ui.make_stack(orientation="vertical", spacing=8.0)
     footer.addArrangedSubview_(message)
-    footer.addArrangedSubview_(native_ui.make_hspacer())
-    footer.addArrangedSubview_(skip_button)
-    footer.addArrangedSubview_(setup_button)
+    footer.addArrangedSubview_(actions)
     root.addSubview_(footer)
     NSLayoutConstraint.activateConstraints_(
         [
+            scroll.topAnchor().constraintEqualToAnchor_constant_(root.topAnchor(), 28.0),
+            scroll.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 28.0),
+            scroll.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -28.0),
+            scroll.bottomAnchor().constraintEqualToAnchor_constant_(footer.topAnchor(), -12.0),
             footer.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 28.0),
             footer.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -28.0),
             footer.bottomAnchor().constraintEqualToAnchor_constant_(root.bottomAnchor(), -20.0),
@@ -17653,6 +17670,23 @@ def hook_status_text(config: ProviderConfig) -> str:
 
 def device_id_for_root(root: Path) -> str:
     return str(root.expanduser())
+
+
+def persistable_device_identity(device_id: str, path: str) -> bool:
+    """True for real user mounts and the on-screen bar, not test leftovers.
+
+    Device IDs are mount paths. Pytest and /tmp volumes used to be
+    written into the live settings file and then shown forever as
+    disconnected SidePulse Dots.
+    """
+    if device_id == VIRTUAL_DEVICE_ID or path == VIRTUAL_DEVICE_ID:
+        return True
+    try:
+        candidate = Path(path).expanduser()
+    except (OSError, TypeError, ValueError):
+        return False
+    parts = candidate.parts
+    return len(parts) >= 3 and parts[0] == "/" and parts[1] == "Volumes"
 
 
 def device_connection_signature(

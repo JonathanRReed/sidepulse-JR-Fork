@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 from . import _status_bar_launch_legacy as _legacy
@@ -97,5 +98,39 @@ for _name in dir(_legacy):
     if _name.startswith("__") or _name in globals():
         continue
     globals()[_name] = getattr(_legacy, _name)
+
+
+def development_python_executable() -> Path | None:
+    """Interpreter for a source-checkout LaunchAgent, or None when packaged."""
+    if getattr(sys, "frozen", False):
+        return None
+    executable = sys.executable
+    if not executable:
+        return None
+    return Path(executable)
+
+
+def install_launch_agent(
+    *,
+    start: bool = True,
+    plist_path: Path | None = None,
+    python_executable: Path | str | None = None,
+    legacy_plist_path: Path | None = None,
+):
+    """Install the menu-bar LaunchAgent.
+
+    Packaged builds keep the app-bundle executable. A source checkout
+    uses this interpreter unless the caller passes another one; the
+    plist builder still refuses a bare production install.
+    """
+    if python_executable is None:
+        python_executable = development_python_executable()
+    return _legacy.install_launch_agent(
+        start=start,
+        plist_path=plist_path,
+        python_executable=python_executable,
+        legacy_plist_path=legacy_plist_path,
+    )
+
 
 __all__ = tuple(sorted(name for name in globals() if not name.startswith("_")))

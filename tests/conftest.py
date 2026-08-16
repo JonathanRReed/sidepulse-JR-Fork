@@ -15,6 +15,30 @@ if _ROOT not in sys.path:
 _LIVE_VOLUME_ROOT = Path("/Volumes")
 
 
+@pytest.fixture(autouse=True)
+def isolate_live_settings_file(tmp_path, monkeypatch):
+    """Keep StatusBarController tests from writing the user's settings.json.
+
+    save_settings used to resolve the live path even when a test patched
+    sidepulse.settings.default_settings_path, because the facade called
+    _settings_legacy.default_settings_path directly. Isolate at the
+    source and at the facade so a missed patch cannot leak fixtures.
+    """
+    isolated = tmp_path / "pytest-sidepulse-settings.json"
+
+    def _isolated_path(home=None):
+        return isolated
+
+    monkeypatch.setattr(
+        "sidepulse._settings_legacy.default_settings_path",
+        _isolated_path,
+    )
+    monkeypatch.setattr(
+        "sidepulse.settings.default_settings_path",
+        _isolated_path,
+    )
+
+
 def _is_live_volume_path(path: object) -> bool:
     candidate = Path(path)
     try:

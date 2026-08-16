@@ -31,6 +31,7 @@ EVENT_COALESCE_SECONDS = 0.05
 FULL_REFRESH_HEARTBEAT_SECONDS = 1.0
 
 _LegacyStatusBarController = _legacy.StatusBarController
+_legacy._AppKitStatusBarController = _LegacyStatusBarController
 
 
 if _legacy.StatusBarController.__name__ == "JRStatusBarController":

@@ -464,9 +464,9 @@ def test_launch_agent_trust_refresh_failure_restores_and_restarts_previous_job(
             raise OSError("trust refresh")
 
     with (
-        patch("sidepulse.status_bar_launch.default_state_dir", return_value=tmp_path / "state"),
-        patch("sidepulse.status_bar_launch.launch_agent_running", return_value=True),
-        patch("sidepulse.status_bar_launch.restart_launch_agent", side_effect=restart),
+        patch("sidepulse._status_bar_launch_legacy.default_state_dir", return_value=tmp_path / "state"),
+        patch("sidepulse._status_bar_launch_legacy.launch_agent_running", return_value=True),
+        patch("sidepulse._status_bar_launch_legacy.restart_launch_agent", side_effect=restart),
         pytest.raises(OSError, match="trust refresh"),
     ):
         install_launch_agent(

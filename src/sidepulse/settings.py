@@ -88,8 +88,12 @@ _ORIGINAL_APPLY_CALIBRATION_PROFILE = (
 _ORIGINAL_LOAD_SETTINGS = _legacy.load_settings
 
 
+def default_settings_path(home: Path | None = None) -> Path:
+    return _legacy.default_settings_path(home)
+
+
 def _settings_path(path: Path | None) -> Path:
-    return (path or _legacy.default_settings_path()).expanduser().absolute()
+    return (path or default_settings_path()).expanduser().absolute()
 
 
 def _document_digest(document: dict[str, object]) -> str:
