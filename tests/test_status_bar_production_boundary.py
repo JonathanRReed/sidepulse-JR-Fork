@@ -4,7 +4,10 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STATUS_BAR = ROOT / "src" / "sidepulse" / "status_bar.py"
+STATUS_BAR_FILES = (
+    ROOT / "src" / "sidepulse" / "status_bar.py",
+    ROOT / "src" / "sidepulse" / "_status_bar_production.py",
+)
 BACKGROUND_MODULES = (
     "battery_runtime.py",
     "transcript_runtime.py",
@@ -19,14 +22,20 @@ BACKGROUND_MODULES = (
 )
 
 
-def _tree() -> ast.Module:
-    return ast.parse(STATUS_BAR.read_text(encoding="utf-8"))
+def _trees() -> tuple[ast.Module, ...]:
+    return tuple(
+        ast.parse(path.read_text(encoding="utf-8"))
+        for path in STATUS_BAR_FILES
+    )
 
 
 def _method(name: str) -> ast.FunctionDef:
-    for node in ast.walk(_tree()):
-        if isinstance(node, ast.FunctionDef) and node.name == name:
-            return node
+    # The final wrapper is intentionally searched first so a corrective
+    # override wins over the implementation it replaces.
+    for tree in _trees():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
     raise AssertionError(f"missing production status-bar method: {name}")
 
 
@@ -52,6 +61,15 @@ def _call_names(node: ast.AST) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _stored_attributes(node: ast.AST) -> frozenset[str]:
+    return frozenset(
+        candidate.attr
+        for candidate in ast.walk(node)
+        if isinstance(candidate, ast.Attribute)
+        and isinstance(candidate.ctx, ast.Store)
+    )
+
+
 def test_full_refresh_is_admitted_through_typed_state_deltas() -> None:
     calls = _call_names(_method("refresh_"))
 
@@ -74,8 +92,23 @@ def test_slow_refresh_producers_delegate_to_latest_wins_services() -> None:
     assert "_legacy.publish_local_ledger" not in ledger
 
 
+def test_intake_refresh_does_not_renew_the_probe_timestamp() -> None:
+    method = _method("refresh_intake_report")
+
+    assert "_intake_probed_at" not in _stored_attributes(method)
+    assert "self._intake_service" in _call_names(method)
+
+
+def test_escalation_urgency_calls_the_stage_reader() -> None:
+    calls = _call_names(_method("_observe_refresh_state"))
+
+    assert "stage_reader" in calls
+
+
 def test_hook_bursts_are_coalesced_for_at_most_fifty_milliseconds() -> None:
-    text = STATUS_BAR.read_text(encoding="utf-8")
+    text = "\n".join(
+        path.read_text(encoding="utf-8") for path in STATUS_BAR_FILES
+    )
 
     assert "EVENT_COALESCE_SECONDS = 0.05" in text
     assert '"refreshFromEvent:"' in text
