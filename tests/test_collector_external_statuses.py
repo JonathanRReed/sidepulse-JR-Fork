@@ -22,6 +22,19 @@ def _status(agent_id: str, *, stale: bool = False) -> AgentStatus:
     )
 
 
+def _direct_status(agent_id: str) -> AgentStatus:
+    return AgentStatus(
+        provider="codex",
+        agent_id=agent_id,
+        display_name="Direct Codex session",
+        mode=AgentMode.WORKING,
+        updated_at=datetime.now(timezone.utc),
+        event_name="UserPromptSubmit",
+        session_id=agent_id.rsplit(":", 1)[-1],
+        origin="Direct provider hook",
+    )
+
+
 def test_external_status_projection_is_reachable_in_the_canonical_snapshot() -> None:
     monitor = LiveAgentMonitor()
     status = _status("codex:session:t3-thread")
@@ -56,6 +69,23 @@ def test_stale_external_last_known_good_stays_visible_as_stale() -> None:
 
     assert snapshot.statuses == ()
     assert snapshot.stale_statuses == (status,)
+
+
+def test_stale_external_row_cannot_override_a_fresh_direct_provider_row() -> None:
+    monitor = LiveAgentMonitor()
+    agent_id = "codex:session:shared"
+    direct = _direct_status(agent_id)
+    monitor._compatibility_statuses_by_agent_id[agent_id] = direct
+    monitor.replace_external_statuses(
+        "t3code",
+        (_status(agent_id, stale=True),),
+    )
+
+    snapshot = monitor.snapshot()
+
+    assert snapshot.statuses == (direct,)
+    assert snapshot.stale_statuses == ()
+    assert snapshot.aggregate.mode is AgentMode.WORKING
 
 
 def test_external_status_boundary_rejects_duplicate_or_unbounded_rows() -> None:

@@ -77,6 +77,30 @@ class LiveAgentMonitor(_LegacyLiveAgentMonitor):
             for status in self._external_statuses_by_source[source_id]
         )
 
+    def _supplemental_statuses_locked(self, state, overlays) -> tuple[AgentStatus, ...]:
+        """Retain stale integration rows only when no fresher authority owns the ID."""
+        compatibility = tuple(self._compatibility_statuses_by_agent_id.values())
+        external = self._external_statuses_locked()
+        protected_agent_ids = {status.agent_id for status in compatibility}
+        protected_agent_ids.update(
+            status.agent_id for status in external if not status.stale
+        )
+        protected_agent_ids.update(
+            _legacy.agent_status_from_canonical_work(
+                work,
+                overlay=overlays.get(work.key),
+            ).agent_id
+            for work in state.works
+        )
+        return (
+            *compatibility,
+            *(
+                status
+                for status in external
+                if not (status.stale and status.agent_id in protected_agent_ids)
+            ),
+        )
+
     def snapshot(self):
         now = _legacy._canonical_datetime(self._clock_sampler().wall_epoch)
         with self.lock:
@@ -85,10 +109,7 @@ class LiveAgentMonitor(_LegacyLiveAgentMonitor):
             self._pending_operator_events = ()
             health = self.restore_health
             overlays = MappingProxyType(dict(self._status_overlays_by_work_key))
-            supplemental = (
-                *self._compatibility_statuses_by_agent_id.values(),
-                *self._external_statuses_locked(),
-            )
+            supplemental = self._supplemental_statuses_locked(state, overlays)
         return _legacy._snapshot_from_operator_state(
             state,
             events=events,
@@ -113,10 +134,7 @@ class LiveAgentMonitor(_LegacyLiveAgentMonitor):
             state = self.operator_state
             health = self.restore_health
             overlays = MappingProxyType(dict(self._status_overlays_by_work_key))
-            supplemental = (
-                *self._compatibility_statuses_by_agent_id.values(),
-                *self._external_statuses_locked(),
-            )
+            supplemental = self._supplemental_statuses_locked(state, overlays)
         snapshot = _legacy._snapshot_from_operator_state(
             state,
             events=(),
