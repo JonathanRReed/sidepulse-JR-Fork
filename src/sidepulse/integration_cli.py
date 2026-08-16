@@ -8,6 +8,9 @@ import sys
 from pathlib import Path
 
 from .codexbar_compat import CodexBarClient, CodexBarCompatibilityError
+from .integration_compatibility import (
+    load_integration_compatibility_manifest,
+)
 from .integration_settings import (
     CODEXBAR_CONNECTION_MODES,
     CODEXBAR_IDENTITY_MODES,
@@ -75,6 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _status_document(loaded) -> dict[str, object]:
     settings = loaded.settings
+    manifest = load_integration_compatibility_manifest()
+    t3_compatibility = manifest.entry("t3code")
+    codexbar_compatibility = manifest.entry("codexbar")
     return {
         "settingsPath": str(default_integration_settings_path()),
         "readOnly": loaded.compatibility.read_only,
@@ -82,11 +88,41 @@ def _status_document(loaded) -> dict[str, object]:
             "enabled": settings.t3code_enabled,
             "baseDir": settings.t3code_base_dir,
             "environmentId": settings.t3code_environment_id,
+            "minimumVersion": (
+                t3_compatibility.minimum_version
+                if t3_compatibility is not None
+                else None
+            ),
+            "maximumTestedVersion": (
+                t3_compatibility.maximum_tested_version
+                if t3_compatibility is not None
+                else None
+            ),
+            "connectionMode": (
+                t3_compatibility.connection_mode
+                if t3_compatibility is not None
+                else None
+            ),
         },
         "codexbar": {
             "enabled": settings.codexbar_enabled,
             "identity": settings.codexbar_identity,
             "connectionMode": settings.codexbar_connection_mode,
+            "minimumVersion": (
+                codexbar_compatibility.minimum_version
+                if codexbar_compatibility is not None
+                else None
+            ),
+            "maximumTestedVersion": (
+                codexbar_compatibility.maximum_tested_version
+                if codexbar_compatibility is not None
+                else None
+            ),
+            "protocol": (
+                codexbar_compatibility.connection_mode
+                if codexbar_compatibility is not None
+                else None
+            ),
         },
     }
 
