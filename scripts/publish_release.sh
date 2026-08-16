@@ -58,6 +58,7 @@ fi
 artifacts=(
     dist/*.whl
     dist/*.tar.gz
+    dist/release-environment.txt
     dist/sidepulse-sbom.cdx.json
 )
 if [ "$PYTHON_ONLY" -eq 0 ]; then

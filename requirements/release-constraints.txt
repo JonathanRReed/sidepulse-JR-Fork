@@ -1,0 +1,24 @@
+# Reviewed direct dependencies and build-sensitive transitive dependencies.
+# Release builds install through this file and attach the resolved environment.
+# Update only with a dedicated dependency-review PR and the full macOS gate.
+
+altgraph==0.17.5
+build==1.5.0
+macholib==1.16.4; sys_platform == "darwin"
+packaging==26.2
+pip==26.1.2
+pyinstaller==6.21.0
+pyinstaller-hooks-contrib==2026.6
+pyobjc-core==12.2.1; sys_platform == "darwin"
+pyobjc-framework-Cocoa==12.2.1; sys_platform == "darwin"
+pyobjc-framework-EventKit==12.2.1; sys_platform == "darwin"
+pyobjc-framework-Quartz==12.2.1; sys_platform == "darwin"
+pyobjc-framework-WebKit==12.2.1; sys_platform == "darwin"
+pytest==9.1.1
+ruamel.yaml==0.19.1
+ruamel.yaml.clibz==0.3.7; implementation_name == "cpython"
+ruff==0.16.3
+setuptools==83.0.0
+tomli==2.4.1; python_version < "3.11"
+twine==6.2.0
+wheel==0.47.0

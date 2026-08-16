@@ -59,8 +59,9 @@ version="$("$PYTHON" scripts/validate_release_version.py)"
 arch="$(/usr/bin/uname -m)"
 pkg="$ROOT_DIR/dist/SidePulse-$version-$arch.pkg"
 app="$ROOT_DIR/build/macos-pkg/pyinstaller/SidePulse.app"
-if [ ! -f "$pkg" ] || [ ! -d "$app" ]; then
-    echo "Signed release artifacts are missing." >&2
+environment_snapshot="$ROOT_DIR/dist/release-environment.txt"
+if [ ! -f "$pkg" ] || [ ! -d "$app" ] || [ ! -f "$environment_snapshot" ]; then
+    echo "Signed release artifacts or environment snapshot are missing." >&2
     exit 1
 fi
 
@@ -70,6 +71,7 @@ fi
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$app"
 /usr/sbin/spctl -a -vv "$app"
 "$PYTHON" packaging/verify_macos_app.py "$app"
+"$PYTHON" packaging/verify_entitlements.py "$app"
 
 "$PYTHON" scripts/verify_hardware_release.py \
     --confirm-write \
@@ -99,7 +101,12 @@ fi
     --settings "$SETTINGS_PATH" \
     --expected-team "$expected_team"
 
-artifacts=(dist/*.whl dist/*.tar.gz "$pkg")
+artifacts=(
+    dist/*.whl
+    dist/*.tar.gz
+    "$environment_snapshot"
+    "$pkg"
+)
 sbom_args=(
     --output dist/sidepulse-sbom.cdx.json
     --application-version "$version"

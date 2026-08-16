@@ -49,6 +49,7 @@ if [ "$FIX" -eq 1 ]; then
 fi
 
 "$PYTHON" -m pip check
+"$PYTHON" scripts/verify_dependency_policy.py --root "$ROOT_DIR"
 "$PYTHON" scripts/scan_secrets.py --root "$ROOT_DIR"
 "$PYTHON" -m ruff check src tests packaging scripts
 "$PYTHON" -m compileall -q src tests packaging scripts
@@ -76,6 +77,7 @@ if [ "$PORTABLE" -eq 1 ]; then
         tests/test_webhook_delivery.py \
         tests/test_weather_network_bounds.py \
         tests/test_supply_chain_tools.py \
+        tests/test_dependency_and_entitlements.py \
         -q
 elif [ "$(uname -s)" = "Darwin" ]; then
     "$PYTHON" -m pytest tests -q
@@ -92,10 +94,13 @@ if [ "$SKIP_BUILD" -eq 0 ]; then
     if [ "$SKIP_CLEAN_INSTALL" -eq 0 ]; then
         "$PYTHON" scripts/verify_clean_install.py
     fi
+    LC_ALL=C "$PYTHON" -m pip list --format=freeze \
+        | /usr/bin/sort > dist/release-environment.txt
     version="$("$PYTHON" scripts/validate_release_version.py)"
     sbom_args=(
         --output dist/sidepulse-sbom.cdx.json
         --application-version "$version"
+        --artifact dist/release-environment.txt
     )
     for artifact in dist/*.whl dist/*.tar.gz; do
         sbom_args+=(--artifact "$artifact")
