@@ -49,6 +49,7 @@ if [ "$FIX" -eq 1 ]; then
 fi
 
 "$PYTHON" -m pip check
+"$PYTHON" scripts/scan_secrets.py --root "$ROOT_DIR"
 "$PYTHON" -m ruff check src tests packaging scripts
 "$PYTHON" -m compileall -q src tests packaging scripts
 "$PYTHON" scripts/validate_release_version.py
@@ -70,6 +71,11 @@ if [ "$PORTABLE" -eq 1 ]; then
         tests/test_presentation_safety_compiler.py \
         tests/test_firmware_write_boundary.py \
         tests/test_release_gate_contract.py \
+        tests/test_installer_safety_contract.py \
+        tests/test_launch_agent_safety.py \
+        tests/test_webhook_delivery.py \
+        tests/test_weather_network_bounds.py \
+        tests/test_supply_chain_tools.py \
         -q
 elif [ "$(uname -s)" = "Darwin" ]; then
     "$PYTHON" -m pytest tests -q
@@ -82,10 +88,20 @@ fi
 if [ "$SKIP_BUILD" -eq 0 ]; then
     rm -rf build dist
     "$PYTHON" -m build --no-isolation
-    "$PYTHON" -m twine check dist/*
+    "$PYTHON" -m twine check dist/*.whl dist/*.tar.gz
     if [ "$SKIP_CLEAN_INSTALL" -eq 0 ]; then
         "$PYTHON" scripts/verify_clean_install.py
     fi
+    version="$("$PYTHON" scripts/validate_release_version.py)"
+    sbom_args=(
+        --output dist/sidepulse-sbom.cdx.json
+        --application-version "$version"
+    )
+    for artifact in dist/*.whl dist/*.tar.gz; do
+        sbom_args+=(--artifact "$artifact")
+    done
+    SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
+        "$PYTHON" scripts/generate_sbom.py "${sbom_args[@]}"
 fi
 
 git diff --check

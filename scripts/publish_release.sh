@@ -55,10 +55,23 @@ else
     ./scripts/verify.sh --no-bootstrap --portable
 fi
 
-artifacts=(dist/*.whl dist/*.tar.gz)
+artifacts=(
+    dist/*.whl
+    dist/*.tar.gz
+    dist/sidepulse-sbom.cdx.json
+)
 if [ "$PYTHON_ONLY" -eq 0 ]; then
-    artifacts+=(dist/SidePulse-"$version"-*.pkg)
+    artifacts+=(
+        dist/SidePulse-"$version"-*.pkg
+        dist/release-verification.json
+    )
 fi
+for artifact in "${artifacts[@]}"; do
+    if [ ! -f "$artifact" ]; then
+        echo "Release artifact is missing: $artifact" >&2
+        exit 1
+    fi
+done
 shasum -a 256 "${artifacts[@]}" > dist/SHA256SUMS
 artifacts+=(dist/SHA256SUMS)
 

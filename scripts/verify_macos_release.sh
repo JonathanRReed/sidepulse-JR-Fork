@@ -99,4 +99,26 @@ fi
     --settings "$SETTINGS_PATH" \
     --expected-team "$expected_team"
 
+artifacts=(dist/*.whl dist/*.tar.gz "$pkg")
+sbom_args=(
+    --output dist/sidepulse-sbom.cdx.json
+    --application-version "$version"
+)
+manifest_args=(
+    --root "$ROOT_DIR"
+    --output dist/release-verification.json
+    --version "$version"
+    --app "$app"
+    --performance-evidence "$PERFORMANCE_EVIDENCE"
+    --hardware-requirement "$REQUIRED_HARDWARE"
+    --sbom dist/sidepulse-sbom.cdx.json
+)
+for artifact in "${artifacts[@]}"; do
+    sbom_args+=(--artifact "$artifact")
+    manifest_args+=(--artifact "$artifact")
+done
+SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
+    "$PYTHON" scripts/generate_sbom.py "${sbom_args[@]}"
+"$PYTHON" scripts/generate_release_manifest.py "${manifest_args[@]}"
+
 printf '%s\n' "Authoritative SidePulse macOS release gate passed."
