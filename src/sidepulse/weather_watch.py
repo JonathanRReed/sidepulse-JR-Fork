@@ -1,79 +1,147 @@
-"""Severe-weather alerts for the "flash on an emergency warning" signal.
-
-Sources, chosen to need NO permission prompt and NO API key:
-- Location: the user's manual lat/lon settings if set, otherwise a
-  one-shot IP geolocation (ipapi.co) cached for the process's life.
-  Deliberately NOT CoreLocation -- a Location prompt would mean another
-  Info.plist key, another bundle re-sign, and another lost FDA grant.
-- Alerts: api.weather.gov/alerts/active?point=lat,lon (NWS; requires a
-  User-Agent, covers the US). Only Severe/Extreme alerts count -- the
-  signal is "emergency warning", not "drizzle advisory".
-
-Same quiet-failure contract as every watcher: anything that can't work
-raises WeatherUnavailableError and the caller backs off.
-"""
+"""Bounded, freshness-aware severe-weather network facade."""
 
 from __future__ import annotations
 
 import json
+import math
+import time
 import urllib.request
+from dataclasses import dataclass
+from typing import Callable
 
-USER_AGENT = "SidePulse/1.0 (github.com/JonathanRReed/sidepulse-JR-Fork)"
-ALERT_SEVERITIES = ("Severe", "Extreme")
-_cached_ip_location: tuple[float, float] | None = None
+from . import _weather_watch_legacy as _legacy
+
+WEATHER_RESPONSE_MAX_BYTES = 1024 * 1024
+IP_LOCATION_TTL_SECONDS = 60 * 60.0
+WEATHER_TIMEOUT_SECONDS = 10.0
+_ALLOWED_CONTENT_TYPES = frozenset(
+    {
+        "application/json",
+        "application/geo+json",
+        "application/problem+json",
+    }
+)
 
 
-class WeatherUnavailableError(RuntimeError):
-    """Weather data can't be fetched right now; treat as no signal."""
+@dataclass(frozen=True, slots=True)
+class CachedIPLocation:
+    latitude: float
+    longitude: float
+    expires_at: float
 
 
-def _get_json(url: str, timeout: float = 10.0) -> dict:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+_cached_location: CachedIPLocation | None = None
+_monotonic: Callable[[], float] = time.monotonic
+
+
+def _response_content_type(response) -> str | None:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+        value = headers.get_content_type()
+    except AttributeError:
+        value = headers.get("Content-Type") if hasattr(headers, "get") else None
+        if isinstance(value, str):
+            value = value.split(";", 1)[0].strip().casefold()
+    return value.casefold() if isinstance(value, str) else None
+
+
+def _get_json(
+    url: str,
+    timeout: float = WEATHER_TIMEOUT_SECONDS,
+    *,
+    opener=urllib.request.urlopen,
+) -> dict:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": _legacy.USER_AGENT,
+            "Accept": "application/geo+json, application/json",
+        },
+    )
+    try:
+        with opener(request, timeout=max(0.1, float(timeout))) as response:
+            content_type = _response_content_type(response)
+            if content_type is not None and content_type not in _ALLOWED_CONTENT_TYPES:
+                raise _legacy.WeatherUnavailableError("unexpected_content_type")
+            body = response.read(WEATHER_RESPONSE_MAX_BYTES + 1)
+    except _legacy.WeatherUnavailableError:
+        raise
     except Exception as exc:
-        raise WeatherUnavailableError(str(exc)) from exc
+        raise _legacy.WeatherUnavailableError("network_unavailable") from exc
+    if len(body) > WEATHER_RESPONSE_MAX_BYTES:
+        raise _legacy.WeatherUnavailableError("response_too_large")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise _legacy.WeatherUnavailableError("malformed_response") from exc
+    if not isinstance(payload, dict):
+        raise _legacy.WeatherUnavailableError("malformed_response")
+    return payload
+
+
+def _coordinate(value: object, *, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise _legacy.WeatherUnavailableError("invalid_location")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise _legacy.WeatherUnavailableError("invalid_location") from exc
+    if not math.isfinite(number) or not minimum <= number <= maximum:
+        raise _legacy.WeatherUnavailableError("invalid_location")
+    return number
+
+
+def invalidate_ip_location() -> None:
+    global _cached_location
+    _cached_location = None
 
 
 def ip_location() -> tuple[float, float]:
-    """Approximate (lat, lon) from the network address, cached for the
-    run -- city-level is plenty for county-scale weather alerts."""
-    global _cached_ip_location
-    if _cached_ip_location is not None:
-        return _cached_ip_location
+    """City-level network location with an explicit one-hour freshness bound."""
+    global _cached_location
+    now = _monotonic()
+    cached = _cached_location
+    if cached is not None and now < cached.expires_at:
+        return cached.latitude, cached.longitude
     payload = _get_json("https://ipapi.co/json/")
-    try:
-        location = (float(payload["latitude"]), float(payload["longitude"]))
-    except (KeyError, TypeError, ValueError) as exc:
-        raise WeatherUnavailableError(f"no location in IP lookup: {exc}") from exc
-    _cached_ip_location = location
-    return location
-
-
-def alerts_from_payload(payload: object) -> list[tuple[str, str, str]]:
-    """(id, severity, event) for every Severe/Extreme alert in an NWS
-    alerts payload. Pure and fixture-testable."""
-    if not isinstance(payload, dict):
-        return []
-    alerts: list[tuple[str, str, str]] = []
-    for feature in payload.get("features") or []:
-        try:
-            properties = feature.get("properties") or {}
-            severity = str(properties.get("severity") or "")
-            if severity not in ALERT_SEVERITIES:
-                continue
-            identifier = str(feature.get("id") or properties.get("id") or "")
-            event = str(properties.get("event") or "Weather alert")
-        except AttributeError:
-            continue
-        if identifier:
-            alerts.append((identifier, severity, event))
-    return alerts
-
-
-def active_alerts(latitude: float, longitude: float) -> list[tuple[str, str, str]]:
-    payload = _get_json(
-        f"https://api.weather.gov/alerts/active?point={latitude:.4f},{longitude:.4f}"
+    latitude = _coordinate(payload.get("latitude"), minimum=-90.0, maximum=90.0)
+    longitude = _coordinate(
+        payload.get("longitude"),
+        minimum=-180.0,
+        maximum=180.0,
     )
-    return alerts_from_payload(payload)
+    _cached_location = CachedIPLocation(
+        latitude,
+        longitude,
+        now + IP_LOCATION_TTL_SECONDS,
+    )
+    return latitude, longitude
+
+
+def active_alerts(
+    latitude: float,
+    longitude: float,
+) -> list[tuple[str, str, str]]:
+    lat = _coordinate(latitude, minimum=-90.0, maximum=90.0)
+    lon = _coordinate(longitude, minimum=-180.0, maximum=180.0)
+    payload = _get_json(
+        f"https://api.weather.gov/alerts/active?point={lat:.4f},{lon:.4f}"
+    )
+    return _legacy.alerts_from_payload(payload)
+
+
+_legacy.WEATHER_RESPONSE_MAX_BYTES = WEATHER_RESPONSE_MAX_BYTES
+_legacy.IP_LOCATION_TTL_SECONDS = IP_LOCATION_TTL_SECONDS
+_legacy._get_json = _get_json
+_legacy.ip_location = ip_location
+_legacy.invalidate_ip_location = invalidate_ip_location
+_legacy.active_alerts = active_alerts
+
+for _name in dir(_legacy):
+    if _name.startswith("__") or _name in globals():
+        continue
+    globals()[_name] = getattr(_legacy, _name)
+
+__all__ = tuple(sorted(name for name in globals() if not name.startswith("_")))
