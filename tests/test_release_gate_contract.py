@@ -21,10 +21,11 @@ def test_authoritative_release_gate_requires_every_external_evidence_class() -> 
         assert required in text
 
 
-def test_installed_upgrade_gate_executes_doctor_and_checks_launchagent() -> None:
+def test_installed_upgrade_gate_executes_doctor_integrations_and_launchagent() -> None:
     text = (ROOT / "scripts" / "verify_installed_upgrade.py").read_text()
 
     assert '"doctor"' in text
+    assert '"integrations", "status", "--json"' in text
     assert '"/bin/launchctl", "print"' in text
     assert 'EXPECTED_LAUNCH_AGENT_LABEL = "io.sidepulse.agentstatus"' in text
 

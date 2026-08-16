@@ -56,10 +56,17 @@ assert importlib.metadata.version("sidepulse") == sidepulse.__version__
 resources = importlib.resources.files("sidepulse.resources")
 assert (resources / "sdled.wasm").is_file()
 assert (resources / "sd_eject_guard.c").is_file()
+assert (resources / "integration_compatibility.json").is_file()
 for module in (
     "sidepulse.cli",
+    "sidepulse.cli_entry",
+    "sidepulse.codexbar_compat",
     "sidepulse.hook_entry",
+    "sidepulse.integration_cli",
+    "sidepulse.integration_compatibility",
+    "sidepulse.integration_settings",
     "sidepulse.status_bar_launch",
+    "sidepulse.t3_compat",
     "agent_monitor.hook_entry",
     "sidepulse_cli.hook_entry",
 ):
@@ -68,12 +75,19 @@ for module in (
         run(python, "-c", probe, cwd=root)
 
         bin_dir = environment / "bin"
-        for name in ("sidepulse", "agent-monitor", "agent-status-bar"):
+        for name in (
+            "sidepulse",
+            "sidepulse-integrations",
+            "agent-monitor",
+            "agent-status-bar",
+        ):
             path = bin_dir / name
             if not path.is_file() or not os.access(path, os.X_OK):
                 raise RuntimeError(f"missing installed console script: {path}")
 
         run(bin_dir / "sidepulse", "--help", cwd=root)
+        run(bin_dir / "sidepulse", "integrations", "status", "--json", cwd=root)
+        run(bin_dir / "sidepulse-integrations", "status", "--json", cwd=root)
         run(bin_dir / "agent-monitor", "--help", cwd=root)
         run(python, "-m", "agent_monitor.hook_entry", cwd=root)
         run(python, "-m", "sidepulse_cli.hook_entry", cwd=root)

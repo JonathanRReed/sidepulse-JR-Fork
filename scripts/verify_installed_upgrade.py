@@ -65,6 +65,20 @@ def _run_installed_smoke(app: Path) -> None:
         timeout=60,
         check=True,
     )
+    integrations = subprocess.run(
+        [str(executable), "integrations", "status", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    integration_status = json.loads(integrations.stdout)
+    if not (
+        isinstance(integration_status, dict)
+        and isinstance(integration_status.get("t3code"), dict)
+        and isinstance(integration_status.get("codexbar"), dict)
+    ):
+        raise ValueError("installed integration status is malformed")
     launch_target = f"gui/{os.getuid()}/{EXPECTED_LAUNCH_AGENT_LABEL}"
     launch = subprocess.run(
         ["/bin/launchctl", "print", launch_target],
