@@ -9,11 +9,17 @@ source introspection.
 from __future__ import annotations
 
 import sys
+import threading
 from types import ModuleType
 
 from . import status_bar_legacy as _legacy
 from .battery_runtime import BatteryObservation, BatteryObservationService
 from .device_projection import light_rows_for_provider, projection_for_provider
+from .webhook_delivery import (
+    WebhookValidationError,
+    deliver_webhook,
+    validate_webhook_url,
+)
 
 _LegacyStatusBarController = _legacy.StatusBarController
 
@@ -97,6 +103,50 @@ else:
         def sync_leds_now(self, *args, **kwargs):
             self._capture_hardware_render_colors()
             return _LegacyStatusBarController.sync_leds_now(self, *args, **kwargs)
+
+        @_legacy.objc.IBAction
+        def applyEscalationWebhook_(self, sender):
+            url = str(sender.stringValue()).strip()
+            if url and not url.casefold().startswith("https://"):
+                self.set_settings_message(
+                    "Webhook delivery requires HTTPS. Local and cleartext URLs are refused."
+                )
+                return
+            self.settings = self.settings.with_escalation_webhook_url(url)
+            _legacy.save_settings(self.settings)
+            self.set_settings_message(
+                "Secure webhook set." if url else "Stage-3 webhook off."
+            )
+
+        def post_webhook(self, payload_dict: dict) -> None:
+            """Deliver privacy-minimized JSON with no redirects or private targets."""
+            url = (self.settings.escalation_webhook_url or "").strip()
+            if not url or not isinstance(payload_dict, dict):
+                return
+            payload = dict(payload_dict)
+            event_name = str(payload.get("event") or "sidepulse.event")[:64]
+
+            def _post() -> None:
+                try:
+                    endpoint = validate_webhook_url(url)
+                except WebhookValidationError as exc:
+                    _legacy.log_status_bar(
+                        f"webhook refused ({event_name}): {exc.reason.value}"
+                    )
+                    return
+                result = deliver_webhook(endpoint, payload)
+                if result.delivered:
+                    _legacy.log_status_bar(f"webhook delivered: {event_name}")
+                else:
+                    _legacy.log_status_bar(
+                        f"webhook failed ({event_name}): {result.reason.value}"
+                    )
+
+            threading.Thread(
+                target=_post,
+                name="SidePulseWebhookDelivery",
+                daemon=True,
+            ).start()
 
         def applicationWillTerminate_(self, notification):
             service = getattr(self, "_production_battery_service", None)
