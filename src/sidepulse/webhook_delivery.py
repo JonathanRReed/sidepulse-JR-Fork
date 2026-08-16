@@ -1,4 +1,4 @@
-"""Privacy-minimizing, SSRF-resistant webhook delivery."""
+"""Privacy-minimizing, SSRF-resistant and bounded webhook delivery."""
 
 from __future__ import annotations
 
@@ -7,15 +7,18 @@ import json
 import re
 import socket
 import ssl
+import threading
+from collections import deque
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Mapping
 from urllib.parse import SplitResult, urlsplit
 
 MAX_WEBHOOK_PAYLOAD_BYTES = 8 * 1024
 MAX_WEBHOOK_RESPONSE_BYTES = 4 * 1024
 MAX_WEBHOOK_HEADER_BYTES = 16 * 1024
 MAX_WEBHOOK_ADDRESSES = 8
+MAX_WEBHOOK_QUEUE_DEPTH = 32
 WEBHOOK_TIMEOUT_SECONDS = 8.0
 ALLOWED_WEBHOOK_PORTS = frozenset({443, 8443})
 _EVENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -45,6 +48,8 @@ class WebhookReason(str, Enum):
     REDIRECT_REFUSED = "redirect_refused"
     REMOTE_REJECTED = "remote_rejected"
     MALFORMED_RESPONSE = "malformed_response"
+    QUEUE_FULL = "queue_full"
+    CLOSED = "closed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +69,23 @@ class WebhookResult:
     @property
     def delivered(self) -> bool:
         return self.reason is WebhookReason.DELIVERED
+
+
+@dataclass(frozen=True, slots=True)
+class WebhookDeliveryRequest:
+    generation: int
+    url: str
+    payload: tuple[tuple[str, object], ...]
+
+    @property
+    def event(self) -> str:
+        return str(dict(self.payload).get("event") or "sidepulse.event")[:64]
+
+
+@dataclass(frozen=True, slots=True)
+class WebhookDeliveryReceipt:
+    request: WebhookDeliveryRequest
+    result: WebhookResult
 
 
 class WebhookValidationError(ValueError):
@@ -282,3 +304,97 @@ def deliver_webhook(
                 except OSError:
                     pass
     return WebhookResult(last_reason)
+
+
+class WebhookDeliveryService:
+    """One worker and a bounded FIFO for all outbound webhook effects."""
+
+    def __init__(
+        self,
+        *,
+        maximum_queue_depth: int = MAX_WEBHOOK_QUEUE_DEPTH,
+        validator: Callable[[str], WebhookEndpoint] = validate_webhook_url,
+        deliver: Callable[[WebhookEndpoint, Mapping[str, object]], WebhookResult] = (
+            deliver_webhook
+        ),
+    ) -> None:
+        self._maximum_queue_depth = max(1, int(maximum_queue_depth))
+        self._validator = validator
+        self._deliver = deliver
+        self._condition = threading.Condition()
+        self._queue: deque[
+            tuple[
+                WebhookDeliveryRequest,
+                Callable[[WebhookDeliveryReceipt], None] | None,
+            ]
+        ] = deque()
+        self._generation = 0
+        self._closed = False
+        self._worker: threading.Thread | None = None
+
+    def submit(
+        self,
+        url: str,
+        payload: Mapping[str, object],
+        *,
+        callback: Callable[[WebhookDeliveryReceipt], None] | None = None,
+    ) -> WebhookReason | None:
+        safe_payload = sanitize_webhook_payload(payload)
+        try:
+            encode_webhook_payload(safe_payload)
+        except WebhookValidationError as exc:
+            return exc.reason
+        with self._condition:
+            if self._closed:
+                return WebhookReason.CLOSED
+            if len(self._queue) >= self._maximum_queue_depth:
+                return WebhookReason.QUEUE_FULL
+            self._generation += 1
+            request = WebhookDeliveryRequest(
+                self._generation,
+                str(url).strip(),
+                tuple(sorted(safe_payload.items())),
+            )
+            self._queue.append((request, callback))
+            if self._worker is None or not self._worker.is_alive():
+                self._worker = threading.Thread(
+                    target=self._run,
+                    name="SidePulseWebhookDelivery",
+                    daemon=True,
+                )
+                self._worker.start()
+            self._condition.notify()
+        return None
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            self._queue.clear()
+            self._condition.notify_all()
+
+    def _next(self):
+        with self._condition:
+            while not self._closed and not self._queue:
+                self._condition.wait()
+            if self._closed:
+                return None
+            return self._queue.popleft()
+
+    def _run(self) -> None:
+        while True:
+            queued = self._next()
+            if queued is None:
+                return
+            request, callback = queued
+            try:
+                endpoint = self._validator(request.url)
+                result = self._deliver(endpoint, dict(request.payload))
+            except WebhookValidationError as exc:
+                result = WebhookResult(exc.reason)
+            except Exception:
+                result = WebhookResult(WebhookReason.CONNECTION_FAILED)
+            if callback is not None:
+                try:
+                    callback(WebhookDeliveryReceipt(request, result))
+                except Exception:
+                    pass
