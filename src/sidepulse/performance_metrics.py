@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from collections import defaultdict, deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from typing import Callable
 
@@ -50,6 +50,7 @@ class MetricSnapshot:
     latest_ms: float
     main_thread_count: int
     error_count: int
+    outcomes: tuple[tuple[str, int], ...]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -61,6 +62,7 @@ class MetricSnapshot:
             "latest_ms": self.latest_ms,
             "main_thread_count": self.main_thread_count,
             "error_count": self.error_count,
+            "outcomes": dict(self.outcomes),
         }
 
 
@@ -155,6 +157,7 @@ class PerformanceRegistry:
         for name in sorted(copied):
             samples = copied[name]
             durations = [float(sample.duration_ms) for sample in samples]
+            outcomes = Counter(sample.outcome for sample in samples)
             metrics.append(
                 MetricSnapshot(
                     name=name,
@@ -164,7 +167,8 @@ class PerformanceRegistry:
                     maximum_ms=max(durations),
                     latest_ms=durations[-1],
                     main_thread_count=sum(sample.main_thread for sample in samples),
-                    error_count=sum(sample.outcome != "ok" for sample in samples),
+                    error_count=outcomes.get("error", 0),
+                    outcomes=tuple(sorted(outcomes.items())),
                 )
             )
         return PerformanceSnapshot(self._monotonic(), tuple(metrics))
