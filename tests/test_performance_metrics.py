@@ -21,6 +21,19 @@ def test_registry_reports_bounded_percentiles_and_error_counts() -> None:
     assert metric.latest_ms == 200
     assert metric.main_thread_count == 5
     assert metric.error_count == 1
+    assert dict(metric.outcomes) == {"error": 1, "ok": 4}
+
+
+def test_non_error_outcomes_do_not_become_false_failures() -> None:
+    registry = PerformanceRegistry()
+    registry.record("hardware", 1, outcome="unchanged")
+    registry.record("hardware", 2, outcome="changed")
+
+    metric = registry.snapshot().metric("hardware")
+
+    assert metric is not None
+    assert metric.error_count == 0
+    assert dict(metric.outcomes) == {"changed": 1, "unchanged": 1}
 
 
 def test_registry_bounds_metric_cardinality_by_recency() -> None:
