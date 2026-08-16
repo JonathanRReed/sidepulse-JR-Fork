@@ -153,19 +153,20 @@ LC_ALL=C "$VENV_DIR/bin/python" -m pip list --format=freeze \
 /usr/bin/xattr -cr "$APP_PATH"
 
 if [ -n "$APP_SIGN_IDENTITY" ]; then
-    /usr/bin/codesign --force --deep --options runtime --timestamp \
-        --entitlements "$ROOT_DIR/packaging/entitlements.plist" \
-        --sign "$APP_SIGN_IDENTITY" "$APP_PATH"
+    SIGN_IDENTITY="$APP_SIGN_IDENTITY"
 else
     echo "WARNING: no APP_SIGN_IDENTITY -- signing AD HOC." >&2
     echo "         An ad-hoc bundle has a different code identity, so macOS" >&2
     echo "         treats it as a DIFFERENT APP: Full Disk Access, Screen" >&2
     echo "         Recording and Notification grants will be lost, and" >&2
     echo "         Gatekeeper will reject it. Local testing only." >&2
-    /usr/bin/codesign --force --deep --sign - "$APP_PATH"
+    SIGN_IDENTITY="-"
 fi
 
-/usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+"$VENV_DIR/bin/python" "$ROOT_DIR/packaging/sign_macos_app.py" \
+    "$APP_PATH" \
+    --identity "$SIGN_IDENTITY" \
+    --entitlements "$ROOT_DIR/packaging/entitlements.plist"
 
 if [ -n "$APP_SIGN_IDENTITY" ]; then
     SIGNED_TEAM="$(/usr/bin/codesign -dv --verbose=4 "$APP_PATH" 2>&1 \
