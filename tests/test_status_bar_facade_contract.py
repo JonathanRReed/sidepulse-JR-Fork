@@ -1,4 +1,4 @@
-"""Contracts for the compatibility facade around the AppKit runtime."""
+"""Contracts for the compatibility facades around the AppKit runtime."""
 
 from __future__ import annotations
 
@@ -7,16 +7,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FACADE = ROOT / "src" / "sidepulse" / "status_bar.py"
+PRODUCTION_FACADE = ROOT / "src" / "sidepulse" / "_status_bar_production.py"
 
 
-def _tree() -> ast.Module:
-    return ast.parse(FACADE.read_text(encoding="utf-8"), filename=str(FACADE))
+def _tree(path: Path) -> ast.Module:
+    return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
 
 def test_direct_module_execution_delegates_to_runtime_main() -> None:
     guards = [
         node
-        for node in _tree().body
+        for node in _tree(FACADE).body
         if isinstance(node, ast.If)
         and isinstance(node.test, ast.Compare)
         and isinstance(node.test.left, ast.Name)
@@ -38,26 +39,39 @@ def test_direct_module_execution_delegates_to_runtime_main() -> None:
     ), "status-bar facade does not delegate direct execution to runtime main"
 
 
-def test_controller_override_is_a_real_subclass() -> None:
-    tree = _tree()
-    controller = next(
+def test_controller_overrides_are_real_subclasses() -> None:
+    production_tree = _tree(PRODUCTION_FACADE)
+    production_controller = next(
         node
-        for node in ast.walk(tree)
+        for node in ast.walk(production_tree)
         if isinstance(node, ast.ClassDef) and node.name == "JRStatusBarController"
     )
     method_names = {
         node.name
-        for node in controller.body
+        for node in production_controller.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-
     assert {
         "projected_rows_for_device",
         "projection_for_device",
     } <= method_names
 
+    final_tree = _tree(FACADE)
+    final_controller = next(
+        node
+        for node in ast.walk(final_tree)
+        if isinstance(node, ast.ClassDef)
+        and node.name == "JRFinalStatusBarController"
+    )
+    assert any(
+        isinstance(base, ast.Name)
+        and base.id == "_ProductionStatusBarController"
+        for base in final_controller.bases
+    )
+
     forbidden_assignments = [
         node
+        for tree in (production_tree, final_tree)
         for node in ast.walk(tree)
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
         and any(
@@ -75,7 +89,7 @@ def test_controller_override_is_a_real_subclass() -> None:
 def test_facade_forwards_assignment_and_deletion() -> None:
     class_definition = next(
         node
-        for node in _tree().body
+        for node in _tree(FACADE).body
         if isinstance(node, ast.ClassDef) and node.name == "_StatusBarFacade"
     )
     method_names = {
