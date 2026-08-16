@@ -49,6 +49,19 @@ def _source_modules() -> dict[str, Path]:
     return modules
 
 
+def _relative_imports(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    imported: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or node.level != 1:
+            continue
+        if node.module is not None:
+            imported.add(node.module.split(".", 1)[0])
+        else:
+            imported.update(alias.name.split(".", 1)[0] for alias in node.names)
+    return imported
+
+
 def test_source_tree_is_parseable() -> None:
     for path in sorted(SRC_ROOT.rglob("*.py")):
         ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -98,17 +111,21 @@ def test_console_script_targets_exist() -> None:
             for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
-        # status_bar is a facade whose callable is delegated to the retained
-        # runtime module; the target is verified by its explicit import.
         if module_name == "sidepulse.status_bar":
-            imported_runtime = any(
-                isinstance(node, ast.ImportFrom)
-                and node.level == 1
-                and node.module is None
-                and any(alias.name == "status_bar_legacy" for alias in node.names)
-                for node in tree.body
+            # The final facade delegates through _status_bar_production, which
+            # in turn owns the direct status_bar_legacy import. Validate the
+            # complete chain instead of requiring the historical implementation
+            # to be imported directly from the public entrypoint.
+            public_imports = _relative_imports(modules[module_name])
+            production_module = modules.get("sidepulse._status_bar_production")
+            assert production_module is not None
+            production_imports = _relative_imports(production_module)
+            assert "_status_bar_production" in public_imports, (
+                f"{script}: public status-bar facade is not delegated"
             )
-            assert imported_runtime, f"{script}: status-bar runtime is not delegated"
+            assert "status_bar_legacy" in production_imports, (
+                f"{script}: retained status-bar runtime is not delegated"
+            )
         else:
             assert attribute in functions, f"{script}: missing callable {target}"
 
