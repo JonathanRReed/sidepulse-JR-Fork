@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from functools import lru_cache
 
 from ._led_wasm_legacy import LedWasmUnavailableError, SdLedWasmController
+
+FIRMWARE_VALIDATION_CACHE_SIZE = 1024
 
 
 class FirmwareValidationError(ValueError):
@@ -40,13 +43,15 @@ def _controller(led_count: int) -> SdLedWasmController:
     return controller
 
 
+@lru_cache(maxsize=FIRMWARE_VALIDATION_CACHE_SIZE)
 def validate_firmware_program(
     program: str,
     *,
     led_count: int,
 ) -> FirmwareValidationResult:
+    count = 2 if int(led_count) == 2 else 8
     try:
-        controller = _controller(led_count)
+        controller = _controller(count)
         controller.reset(0)
         result = controller.parse(program, 0)
     except LedWasmUnavailableError as exc:
