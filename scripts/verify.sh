@@ -60,6 +60,13 @@ if [ "$PORTABLE" -eq 1 ]; then
         tests/test_device_projection.py \
         tests/test_packaging_contract.py \
         tests/test_status_bar_facade_contract.py \
+        tests/test_status_bar_production_boundary.py \
+        tests/test_architecture_ratchets.py \
+        tests/test_unwired_modules_ratchet.py \
+        tests/test_core_state.py \
+        tests/test_core_state_determinism.py \
+        tests/test_refresh_admission.py \
+        tests/test_background_services.py \
         tests/test_version_contract.py \
         tests/test_legacy_hook_entrypoints.py \
         tests/test_build_script_contract.py \
@@ -68,18 +75,23 @@ if [ "$PORTABLE" -eq 1 ]; then
         tests/test_install_user.py \
         tests/test_settings_schema_coverage.py \
         tests/test_settings_compatibility.py \
+        tests/test_settings_concurrency.py \
         tests/test_battery_runtime.py \
         tests/test_transcript_runtime.py \
+        tests/test_transcript_coalescing.py \
         tests/test_performance_metrics.py \
         tests/test_presentation_safety_compiler.py \
         tests/test_firmware_write_boundary.py \
+        tests/test_firmware_validation_cache.py \
         tests/test_release_gate_contract.py \
         tests/test_installer_safety_contract.py \
         tests/test_launch_agent_safety.py \
         tests/test_webhook_delivery.py \
+        tests/test_webhook_queue.py \
         tests/test_weather_network_bounds.py \
         tests/test_supply_chain_tools.py \
         tests/test_dependency_and_entitlements.py \
+        tests/test_inside_out_signing.py \
         -q
 elif [ "$(uname -s)" = "Darwin" ]; then
     "$PYTHON" -m pytest tests -q
