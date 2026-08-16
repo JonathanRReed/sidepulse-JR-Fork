@@ -38,18 +38,17 @@ done
 if [ "$BOOTSTRAP" -eq 1 ]; then
     "$ROOT_DIR/scripts/bootstrap-dev.sh"
 fi
-
 if [ ! -x "$PYTHON" ]; then
     echo "Missing development environment. Run ./scripts/bootstrap-dev.sh first." >&2
     exit 2
 fi
 
 cd "$ROOT_DIR"
-
 if [ "$FIX" -eq 1 ]; then
     "$PYTHON" -m ruff check --fix src tests packaging scripts
 fi
 
+"$PYTHON" -m pip check
 "$PYTHON" -m ruff check src tests packaging scripts
 "$PYTHON" -m compileall -q src tests packaging scripts
 "$PYTHON" scripts/validate_release_version.py
@@ -65,12 +64,18 @@ if [ "$PORTABLE" -eq 1 ]; then
         tests/test_repository_hygiene.py \
         tests/test_workflow_contract.py \
         tests/test_install_user.py \
+        tests/test_settings_schema_coverage.py \
+        tests/test_settings_compatibility.py \
+        tests/test_battery_runtime.py \
+        tests/test_presentation_safety_compiler.py \
+        tests/test_firmware_write_boundary.py \
+        tests/test_release_gate_contract.py \
         -q
 elif [ "$(uname -s)" = "Darwin" ]; then
     "$PYTHON" -m pytest tests -q
 else
     echo "Full SidePulse verification requires macOS and PyObjC." >&2
-    echo "Use --portable for the platform-neutral rescue gate." >&2
+    echo "Use --portable for the platform-neutral production gate." >&2
     exit 3
 fi
 
@@ -100,7 +105,8 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     done < <(git ls-files -z '*.pkg' '*.dmg')
 fi
 
-if [ "$(uname -s)" = "Darwin" ] && [ "${SIDEPULSE_VERIFY_MACOS_PACKAGE:-0}" = "1" ]; then
+if [ "$(uname -s)" = "Darwin" ] && \
+   [ "${SIDEPULSE_VERIFY_MACOS_PACKAGE:-0}" = "1" ]; then
     BUILD_PYTHON="$PYTHON" "$ROOT_DIR/packaging/build_macos_pkg.sh"
 fi
 
