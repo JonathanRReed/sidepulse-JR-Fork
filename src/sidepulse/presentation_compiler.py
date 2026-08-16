@@ -73,19 +73,29 @@ def _step_has_saturated_red(step) -> bool:
     )
 
 
-def _safe_timing(timing: Timing, *, saturated_red: bool) -> tuple[Timing, bool]:
+def _safe_timing(
+    timing: Timing,
+    *,
+    saturated_red: bool,
+    force_timed: bool,
+) -> tuple[Timing, bool]:
     minimum = (
-        MIN_SATURATED_RED_PHASE_MS if saturated_red else MIN_PRESENTATION_PHASE_MS
+        MIN_SATURATED_RED_PHASE_MS
+        if saturated_red
+        else MIN_PRESENTATION_PHASE_MS
     )
     duration = timing.duration_ms
     if duration is None:
-        duration = minimum
         if timing.easing == "pulse":
             duration = (
                 MIN_SATURATED_RED_CYCLE_MS
                 if saturated_red
                 else MIN_PRESENTATION_CYCLE_MS
             )
+        elif timing.easing is not None:
+            duration = max(minimum, timing.effective_duration_ms)
+        elif force_timed:
+            duration = minimum
     else:
         duration = max(minimum, duration)
         if timing.easing == "pulse":
@@ -106,8 +116,17 @@ def _safe_timing(timing: Timing, *, saturated_red: bool) -> tuple[Timing, bool]:
     return updated, updated != timing
 
 
-def _safe_segment(segment, *, saturated_red: bool):
-    timing, changed = _safe_timing(segment.timing, saturated_red=saturated_red)
+def _safe_segment(
+    segment,
+    *,
+    saturated_red: bool,
+    force_timed: bool,
+):
+    timing, changed = _safe_timing(
+        segment.timing,
+        saturated_red=saturated_red,
+        force_timed=force_timed,
+    )
     return replace(segment, timing=timing), changed
 
 
@@ -123,6 +142,8 @@ def _safe_animation(animation: Animation) -> tuple[Animation, tuple[str, ...]]:
         ),
         None,
     )
+    paint_step_count = sum(type(step) is PaintStep for step in animation.steps)
+    force_timed = repeat_index is not None or paint_step_count > 1
     for step in animation.steps:
         if type(step) is PaintStep:
             red = _step_has_saturated_red(step)
@@ -130,7 +151,11 @@ def _safe_animation(animation: Animation) -> tuple[Animation, tuple[str, ...]]:
             segments = []
             changed = False
             for segment in step.segments:
-                safe, segment_changed = _safe_segment(segment, saturated_red=red)
+                safe, segment_changed = _safe_segment(
+                    segment,
+                    saturated_red=red,
+                    force_timed=force_timed,
+                )
                 segments.append(safe)
                 changed = changed or segment_changed
             transformed_steps.append(replace(step, segments=tuple(segments)))
@@ -166,7 +191,7 @@ def _safe_animation(animation: Animation) -> tuple[Animation, tuple[str, ...]]:
                     for segment in step.segments:
                         timing = segment.timing
                         duration = (
-                            None
+                            timing.effective_duration_ms * factor
                             if timing.duration_ms is None
                             else timing.duration_ms * factor
                         )
