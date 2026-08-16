@@ -1,9 +1,9 @@
 """Stable facade for SidePulse's historical AppKit controller.
 
-The original controller grew into a single, very large module. It remains the
-runtime implementation while deterministic decisions are extracted into small,
-testable modules. This facade preserves the public ``sidepulse.status_bar``
-module contract, including test monkeypatches and source introspection.
+The original controller remains the compatibility runtime while production
+boundaries are extracted into small, testable modules. The facade preserves
+the public ``sidepulse.status_bar`` contract, including test monkeypatches and
+source introspection.
 """
 
 from __future__ import annotations
@@ -12,18 +12,19 @@ import sys
 from types import ModuleType
 
 from . import status_bar_legacy as _legacy
+from .battery_runtime import BatteryObservation, BatteryObservationService
 from .device_projection import light_rows_for_provider, projection_for_provider
 
+_LegacyStatusBarController = _legacy.StatusBarController
 
-# PyObjC registers Objective-C methods when a Python subclass is created. Do
-# not assign methods onto an existing Cocoa class after creation. The reload
-# guard reuses the registered subclass instead of attempting to define a second
-# Objective-C class with the same process-global name.
+
 if _legacy.StatusBarController.__name__ == "JRStatusBarController":
     JRStatusBarController = _legacy.StatusBarController
 else:
 
-    class JRStatusBarController(_legacy.StatusBarController):
+    class JRStatusBarController(_LegacyStatusBarController):
+        """Production boundary around the retained controller implementation."""
+
         def projected_rows_for_device(self, projection, device):
             provider_pin = self.settings.device_provider_pin(device.device_id)
             return light_rows_for_provider(projection, provider_pin)
@@ -31,6 +32,80 @@ else:
         def projection_for_device(self, projection, device):
             provider_pin = self.settings.device_provider_pin(device.device_id)
             return projection_for_provider(projection, provider_pin)
+
+        def _battery_service(self) -> BatteryObservationService:
+            service = getattr(self, "_production_battery_service", None)
+            if service is None:
+                service = BatteryObservationService()
+                self._production_battery_service = service
+            return service
+
+        def read_battery_snapshot(self):
+            """Return cached battery state and start a bounded probe if due."""
+            observation = self._battery_service().request(
+                full_charge_watts=self.settings.battery_full_charge_watts,
+                callback=self._battery_observation_ready,
+            )
+            self._production_battery_observation = observation
+            return observation.snapshot
+
+        def _battery_observation_ready(
+            self,
+            observation: BatteryObservation,
+        ) -> None:
+            try:
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "applyBatteryObservation:",
+                    observation,
+                    False,
+                )
+            except Exception:
+                return
+
+        @_legacy.objc.IBAction
+        def applyBatteryObservation_(self, observation) -> None:
+            if not isinstance(observation, BatteryObservation):
+                return
+            previous = getattr(self, "_production_battery_observation", None)
+            self._production_battery_observation = observation
+            if (
+                getattr(self, "_runtime_started", False)
+                and observation != previous
+            ):
+                self.refresh_(None)
+
+        def _capture_hardware_render_colors(self) -> None:
+            """Read AppKit-dependent preview state on the main thread only."""
+            try:
+                colors = _LegacyStatusBarController.agent_render_colors(self)
+            except Exception:
+                colors = self.settings.colors
+            self._frozen_hardware_render_colors = colors
+
+        def agent_render_colors(self):
+            """Worker-safe immutable render input, with no AppKit access."""
+            return getattr(
+                self,
+                "_frozen_hardware_render_colors",
+                self.settings.colors,
+            )
+
+        def sync_leds(self, *args, **kwargs):
+            self._capture_hardware_render_colors()
+            return _LegacyStatusBarController.sync_leds(self, *args, **kwargs)
+
+        def sync_leds_now(self, *args, **kwargs):
+            self._capture_hardware_render_colors()
+            return _LegacyStatusBarController.sync_leds_now(self, *args, **kwargs)
+
+        def applicationWillTerminate_(self, notification):
+            service = getattr(self, "_production_battery_service", None)
+            if service is not None:
+                service.close()
+            return _LegacyStatusBarController.applicationWillTerminate_(
+                self,
+                notification,
+            )
 
     _legacy.StatusBarController = JRStatusBarController
 
@@ -70,13 +145,8 @@ class _StatusBarFacade(ModuleType):
 __all__ = tuple(name for name in dir(_legacy) if not name.startswith("_"))
 _facade_module = sys.modules[__name__]
 _facade_module.__class__ = _StatusBarFacade
-# Existing wiring tests and diagnostic tooling inspect status_bar.__file__ to
-# verify that controller methods call their janitors and workers. Point source
-# introspection at the retained implementation, just as attribute access does.
 _facade_module.__file__ = _legacy.__file__
 
 
-# ``python -m sidepulse.status_bar`` executes this facade, not the retained
-# runtime module, so the entrypoint guard must live here.
 if __name__ == "__main__":
     raise SystemExit(_legacy.main())
