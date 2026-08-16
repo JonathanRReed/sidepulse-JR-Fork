@@ -33,9 +33,9 @@ The measurements must come from the signed candidate on the release Mac after a 
 
 ## Installer ownership
 
-The signed package installs the application payload and an owned `sidepulse` CLI link only. Package scripts do not install provider hooks, a user LaunchAgent, the privileged sleep helper, or the eject guard. Those are external mutable state and cannot be transactionally rolled back by Installer without risking pre-existing user setup.
+The signed package installs the application payload and an owned `sidepulse` CLI link only. Package scripts do not install provider hooks, a user LaunchAgent, the privileged sleep helper, the eject guard, T3 Code integration, or CodexBar integration. Those are external mutable state and cannot be transactionally rolled back by Installer without risking pre-existing user setup.
 
-The ordinary user completes those integrations from SidePulse’s first-run setup. The release gate exercises the explicit installed `status-bar start` command after package installation before it checks the LaunchAgent. This keeps package installation reversible while still testing the installed integration path.
+The ordinary user completes integrations from SidePulse’s first-run setup or explicit CLI commands. The release gate exercises the explicit installed `status-bar start` command after package installation before it checks the LaunchAgent. This keeps package installation reversible while still testing the installed integration path.
 
 ## Run the gate
 
@@ -48,7 +48,17 @@ export SIDEPULSE_RUN_INSTALLED_UPGRADE=1
 ./scripts/verify_macos_release.sh
 ```
 
-The gate runs the full test suite, package checks, clean-wheel install, performance-budget validation, Developer ID signing, notarization, stapling, Gatekeeper assessment, bundle closure inspection, reversible hardware writes, a real package installation, explicit installed LaunchAgent setup, settings preservation, and signing-team continuity.
+The gate runs the full test suite, package checks, clean-wheel install, performance-budget validation, Developer ID signing, notarization, stapling, Gatekeeper assessment, bundle closure inspection, reversible hardware writes, a real package installation, explicit installed LaunchAgent setup, settings preservation, signing-team continuity, and installed `sidepulse integrations status --json` smoke validation.
+
+Before authorizing the release gate, enable T3 Code or CodexBar only when the release Mac has representative local data. Run their bounded probes separately and preserve the output with the release evidence:
+
+```bash
+sidepulse integrations status --json
+sidepulse integrations probe t3code --json
+sidepulse integrations probe codexbar --json
+```
+
+An unavailable optional third-party installation is not a failure for the core package. A configured integration that is present but violates its required schema, process, freshness, or installed-command contract blocks the associated compatibility claim.
 
 ## Publish
 

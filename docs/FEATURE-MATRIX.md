@@ -26,8 +26,9 @@ This document is the status authority for product claims. A feature is **shipped
 | Closed-lid awake policy | Shipped | Off | Privileged-helper install/uninstall, process cleanup, and sleep/wake tests |
 | Signed `.pkg`, payload-only installation, explicit first-run setup, LaunchAgent, helper setup, uninstall, notarization, and stapling | Implemented, release-gated | N/A | `scripts/verify_macos_release.sh` |
 | Built-in timing diagnostics and typed refresh admission | Implemented in production hardening branch | On | Instruments trace and performance budgets |
-| CodexBar structured usage bridge | Planned production wave | Off | Protocol/version negotiation, source freshness, no credential duplication |
-| T3 Code thread, worktree, branch, provider, and pull-request compatibility | Planned production wave | Off | T3 protocol contract, identity preservation, stale-version fallback |
+| CodexBar dashboard-v1 usage, quota, account-display, cost, credit, and provider-health bridge | Implemented, release-gated | Off | Exact dashboard schema, bounded process/HTTP transport, redacted-default identity, no credential duplication, installed CLI smoke test |
+| T3 Code local thread, project, provider instance, model, branch, worktree, session-status, and actionable-request compatibility | Implemented, release-gated | Off | Query-only SQLite projection, required-column contract, identity preservation, stale-last-known-good behavior, installed CLI smoke test |
+| T3 Code pull-request metadata or mutation actions | Planned production wave | Off | A supported upstream projection or protocol, target identity, stale-version fallback, and mutation authorization |
 | Native SwiftUI/AppKit Glance and Command Center | Planned migration wave | Off | Parity, TCC continuity, accessibility, installed-upgrade, performance |
 | Animation Studio 2 layered composer and recipe system | Planned production wave | Off | Cross-surface compiler, accessibility previews, flash safety, migration |
 | Signed helper process and versioned local core protocol | Planned migration wave | Off | Authentication, framing, backpressure, crash recovery, version negotiation |
@@ -47,6 +48,8 @@ The production-hardening branch may be merged after its code review and portable
 ./scripts/verify_macos_release.sh
 ```
 
-The package installs only the signed application payload and an owned CLI link. It deliberately does not mutate provider hooks, LaunchAgents, privileged helpers, or eject-guard services from `postinstall`. Those integrations are applied through SidePulse’s reviewed first-run setup or explicitly by the authorized release gate.
+The package installs only the signed application payload and an owned CLI link. It deliberately does not mutate provider hooks, LaunchAgents, privileged helpers, eject-guard services, T3 Code state, or CodexBar credentials from `postinstall`. Those integrations are applied through SidePulse’s reviewed first-run setup or explicit CLI commands.
 
-That gate is intentionally separate from merge readiness because this environment cannot provide the owner’s SidePulse hardware, Developer ID identities, notarization profile, installed settings history, TCC database, or Instruments trace.
+T3 Code and CodexBar are opt-in. T3 is read-only and queries the documented local projection database. CodexBar remains the sole credential and provider-accounting owner; SidePulse reads its documented dashboard-v1 display snapshot through a bounded one-shot command or a supervised loopback-only child.
+
+That release gate is intentionally separate from merge readiness because ordinary review environments cannot provide the owner’s SidePulse hardware, Developer ID identities, notarization profile, installed settings history, TCC database, or Instruments trace.
