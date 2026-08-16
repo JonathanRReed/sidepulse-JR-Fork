@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import heapq
 import json
 import math
 from collections.abc import Mapping
@@ -111,6 +112,15 @@ def _bounded_text(value: str) -> object:
     }
 
 
+def _json_sort_key(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _bounded_smallest(values) -> list[object]:
+    """Select a deterministic prefix without materializing an unbounded sort."""
+    return heapq.nsmallest(MAX_COLLECTION_ITEMS, values, key=_json_sort_key)
+
+
 def _normalize(value: object, *, depth: int = 0) -> object:
     if depth > MAX_NORMALIZATION_DEPTH:
         return {"$depth": type(value).__name__}
@@ -133,24 +143,25 @@ def _normalize(value: object, *, depth: int = 0) -> object:
             "$bytes": len(value),
         }
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        fields = {
+            field.name: _normalize(getattr(value, field.name), depth=depth + 1)
+            for field in dataclasses.fields(value)
+            if field.metadata.get("core_state", True)
+        }
         return {
             "$type": f"{type(value).__module__}.{type(value).__qualname__}",
-            "fields": {
-                field.name: _normalize(getattr(value, field.name), depth=depth + 1)
-                for field in dataclasses.fields(value)
-                if field.repr
-            },
+            "fields": fields,
         }
     if isinstance(value, Mapping):
-        items = sorted(value.items(), key=lambda item: repr(item[0]))[:MAX_COLLECTION_ITEMS]
+        normalized_pairs = (
+            [
+                _normalize(key, depth=depth + 1),
+                _normalize(item, depth=depth + 1),
+            ]
+            for key, item in value.items()
+        )
         return {
-            "$mapping": [
-                [
-                    _normalize(key, depth=depth + 1),
-                    _normalize(item, depth=depth + 1),
-                ]
-                for key, item in items
-            ],
+            "$mapping": _bounded_smallest(normalized_pairs),
             "$length": len(value),
         }
     if isinstance(value, (tuple, list)):
@@ -162,20 +173,16 @@ def _normalize(value: object, *, depth: int = 0) -> object:
             "$length": len(value),
         }
     if isinstance(value, (set, frozenset)):
-        normalized = [
+        normalized = (
             _normalize(item, depth=depth + 1)
-            for item in list(value)[:MAX_COLLECTION_ITEMS]
-        ]
-        normalized.sort(
-            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":"))
+            for item in value
         )
-        return {"$set": normalized, "$length": len(value)}
-    return {
-        "$opaque_type": f"{type(value).__module__}.{type(value).__qualname__}",
-        "$repr_sha256": hashlib.sha256(
-            repr(value).encode("utf-8", errors="replace")
-        ).hexdigest(),
-    }
+        return {
+            "$set": _bounded_smallest(normalized),
+            "$length": len(value),
+        }
+    type_name = f"{type(value).__module__}.{type(value).__qualname__}"
+    return {"$opaque_type": type_name}
 
 
 def stable_digest(value: object) -> str:
