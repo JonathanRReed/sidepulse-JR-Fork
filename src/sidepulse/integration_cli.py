@@ -1,4 +1,4 @@
-"""Command-line configuration and diagnostics for optional integrations."""
+"""Command-line configuration and diagnostics for the T3 Code integration."""
 
 from __future__ import annotations
 
@@ -7,14 +7,8 @@ import json
 import sys
 from pathlib import Path
 
-from .codexbar_compat import CodexBarClient, CodexBarCompatibilityError
-from .integration_compatibility import (
-    load_integration_compatibility_manifest,
-)
+from .integration_compatibility import load_integration_compatibility_manifest
 from .integration_settings import (
-    CODEXBAR_CONNECTION_MODES,
-    CODEXBAR_IDENTITY_MODES,
-    INTEGRATION_NAMES,
     IntegrationSettingsError,
     IntegrationSettingsWriteRefusedError,
     default_integration_settings_path,
@@ -23,11 +17,13 @@ from .integration_settings import (
 )
 from .t3_compat import read_t3_snapshot
 
+INTEGRATION_NAMES = frozenset({"t3code"})
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sidepulse-integrations",
-        description="Configure and inspect SidePulse external integrations.",
+        description="Configure and inspect the SidePulse T3 Code integration.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -38,14 +34,14 @@ def build_parser() -> argparse.ArgumentParser:
     for command, enabled in (("enable", True), ("disable", False)):
         mutation = subparsers.add_parser(
             command,
-            help=f"{command.title()} one integration.",
+            help=f"{command.title()} T3 Code.",
         )
-        mutation.add_argument("integration", choices=sorted(INTEGRATION_NAMES))
+        mutation.add_argument("integration", choices=("t3code",))
         mutation.set_defaults(func=cmd_enabled, enabled=enabled)
 
     configure = subparsers.add_parser(
         "configure",
-        help="Set integration-specific options.",
+        help="Set T3 Code options.",
     )
     configure_subparsers = configure.add_subparsers(
         dest="integration",
@@ -58,19 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     t3code.add_argument("--clear-environment-id", action="store_true")
     t3code.set_defaults(func=cmd_configure_t3code)
 
-    codexbar = configure_subparsers.add_parser("codexbar")
-    codexbar.add_argument("--identity", choices=sorted(CODEXBAR_IDENTITY_MODES))
-    codexbar.add_argument(
-        "--connection-mode",
-        choices=sorted(CODEXBAR_CONNECTION_MODES),
-    )
-    codexbar.set_defaults(func=cmd_configure_codexbar)
-
     probe = subparsers.add_parser(
         "probe",
-        help="Run one bounded read-only compatibility probe.",
+        help="Run one bounded read-only T3 compatibility probe.",
     )
-    probe.add_argument("integration", choices=sorted(INTEGRATION_NAMES))
+    probe.add_argument("integration", choices=("t3code",))
     probe.add_argument("--json", action="store_true")
     probe.set_defaults(func=cmd_probe)
     return parser
@@ -79,8 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _status_document(loaded) -> dict[str, object]:
     settings = loaded.settings
     manifest = load_integration_compatibility_manifest()
-    t3_compatibility = manifest.entry("t3code")
-    codexbar_compatibility = manifest.entry("codexbar")
+    compatibility = manifest.entry("t3code")
     return {
         "settingsPath": str(default_integration_settings_path()),
         "readOnly": loaded.compatibility.read_only,
@@ -89,39 +76,15 @@ def _status_document(loaded) -> dict[str, object]:
             "baseDir": settings.t3code_base_dir,
             "environmentId": settings.t3code_environment_id,
             "minimumVersion": (
-                t3_compatibility.minimum_version
-                if t3_compatibility is not None
-                else None
+                compatibility.minimum_version if compatibility is not None else None
             ),
             "maximumTestedVersion": (
-                t3_compatibility.maximum_tested_version
-                if t3_compatibility is not None
+                compatibility.maximum_tested_version
+                if compatibility is not None
                 else None
             ),
             "connectionMode": (
-                t3_compatibility.connection_mode
-                if t3_compatibility is not None
-                else None
-            ),
-        },
-        "codexbar": {
-            "enabled": settings.codexbar_enabled,
-            "identity": settings.codexbar_identity,
-            "connectionMode": settings.codexbar_connection_mode,
-            "minimumVersion": (
-                codexbar_compatibility.minimum_version
-                if codexbar_compatibility is not None
-                else None
-            ),
-            "maximumTestedVersion": (
-                codexbar_compatibility.maximum_tested_version
-                if codexbar_compatibility is not None
-                else None
-            ),
-            "protocol": (
-                codexbar_compatibility.connection_mode
-                if codexbar_compatibility is not None
-                else None
+                compatibility.connection_mode if compatibility is not None else None
             ),
         },
     }
@@ -133,13 +96,12 @@ def _print_status(document: dict[str, object], *, machine: bool) -> None:
         return
     print(f"settings: {document['settingsPath']}")
     print(f"read-only: {'yes' if document['readOnly'] else 'no'}")
-    for name in ("t3code", "codexbar"):
-        row = document[name]
-        assert isinstance(row, dict)
-        print(f"{name}: {'enabled' if row['enabled'] else 'disabled'}")
-        for key, value in row.items():
-            if key != "enabled":
-                print(f"  {key}: {value if value is not None else 'auto'}")
+    row = document["t3code"]
+    assert isinstance(row, dict)
+    print(f"t3code: {'enabled' if row['enabled'] else 'disabled'}")
+    for key, value in row.items():
+        if key != "enabled":
+            print(f"  {key}: {value if value is not None else 'auto'}")
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -166,7 +128,7 @@ def cmd_enabled(args: argparse.Namespace) -> int:
     loaded = load_integration_settings()
     return _save_updated(
         loaded,
-        loaded.settings.with_enabled(args.integration, args.enabled),
+        loaded.settings.with_enabled("t3code", args.enabled),
     )
 
 
@@ -192,15 +154,6 @@ def cmd_configure_t3code(args: argparse.Namespace) -> int:
                 None if args.clear_environment_id else args.environment_id
             ),
         )
-    return _save_updated(loaded, settings)
-
-
-def cmd_configure_codexbar(args: argparse.Namespace) -> int:
-    loaded = load_integration_settings()
-    settings = loaded.settings.with_codexbar(
-        identity=args.identity,
-        connection_mode=args.connection_mode,
-    )
     return _save_updated(loaded, settings)
 
 
@@ -243,53 +196,6 @@ def _t3_probe_document(settings) -> dict[str, object]:
     }
 
 
-def _codexbar_probe_document(settings) -> dict[str, object]:
-    client = CodexBarClient(
-        identity=settings.codexbar_identity,
-        connection_mode=settings.codexbar_connection_mode,
-    )
-    try:
-        snapshot = client.fetch()
-    finally:
-        client.close()
-    constrained = snapshot.most_constrained
-    return {
-        "integration": "codexbar",
-        "available": True,
-        "connectionMode": snapshot.connection_mode,
-        "codexBarVersion": snapshot.codexbar_version,
-        "generatedAt": snapshot.generated_at.isoformat(),
-        "stale": snapshot.stale,
-        "providerCount": len(snapshot.providers),
-        "errorCount": snapshot.error_count,
-        "mostConstrained": (
-            {
-                "provider": constrained[0].provider_id,
-                "remainingPercent": constrained[1],
-            }
-            if constrained is not None
-            else None
-        ),
-        "providers": [
-            {
-                "id": row.provider_id,
-                "name": row.name,
-                "enabled": row.enabled,
-                "source": row.source,
-                "status": row.status_level,
-                "account": (
-                    row.identity.account_email if row.identity is not None else None
-                ),
-                "plan": row.identity.plan if row.identity is not None else None,
-                "remainingPercent": row.most_constrained_remaining_percent,
-                "creditsRemaining": row.credits_remaining,
-                "error": row.error_present,
-            }
-            for row in snapshot.providers
-        ],
-    }
-
-
 def _print_probe(document: dict[str, object], *, machine: bool) -> None:
     if machine:
         print(json.dumps(document, indent=2, sort_keys=True))
@@ -297,14 +203,9 @@ def _print_probe(document: dict[str, object], *, machine: bool) -> None:
     print(f"{document['integration']}: {'available' if document['available'] else 'unavailable'}")
     for key in (
         "reason",
-        "connectionMode",
-        "codexBarVersion",
         "threadCount",
         "activeCount",
         "needsUserCount",
-        "providerCount",
-        "errorCount",
-        "stale",
     ):
         if key in document and document[key] is not None:
             print(f"  {key}: {document[key]}")
@@ -313,17 +214,12 @@ def _print_probe(document: dict[str, object], *, machine: bool) -> None:
 def cmd_probe(args: argparse.Namespace) -> int:
     settings = load_integration_settings().settings
     try:
-        document = (
-            _t3_probe_document(settings)
-            if args.integration == "t3code"
-            else _codexbar_probe_document(settings)
-        )
-    except (CodexBarCompatibilityError, FileNotFoundError, OSError, ValueError) as exc:
-        reason = getattr(exc, "reason", type(exc).__name__)
+        document = _t3_probe_document(settings)
+    except (FileNotFoundError, OSError, ValueError) as exc:
         document = {
-            "integration": args.integration,
+            "integration": "t3code",
             "available": False,
-            "reason": reason,
+            "reason": type(exc).__name__,
         }
         _print_probe(document, machine=args.json)
         return 1
