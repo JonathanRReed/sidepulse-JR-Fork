@@ -288,12 +288,18 @@ else:
             except KeyError:
                 category = _settings_navigation.SETTINGS_CATEGORIES[0]
                 desired = category.default_page
-            self._pending_settings_page = (
+            requested_page = (
                 desired if category.contains(desired) else category.default_page
             )
+            self._pending_settings_page = requested_page
             self.current_settings_pane = category.key
             _BaseStatusBarController.show_settings_window(self)
-            show_category(self, category.key, self._pending_settings_page)
+            # The table-selection callback consumes `_pending_settings_page`.
+            # Keep the local value so opening Settings directly to Screen Bar,
+            # Capacity, or another child cannot snap back to the category's
+            # first page after the callback returns.
+            show_category(self, category.key, requested_page)
+            self._pending_settings_page = None
             self._settings_active_category = category.key
 
         # --- Native provider usage --------------------------------------
