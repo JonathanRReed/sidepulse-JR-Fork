@@ -113,9 +113,6 @@ def device_kind(product_name: str, mount_path: str = "") -> DeviceKind:
         return DeviceKind.PRO
     if "sidepulsedot" in combined:
         return DeviceKind.DOT
-    # Old hardware often mounted simply as /Volumes/SidePulse. Prefer Dot as
-    # the least-assumptive two-LED legacy model; inventory can correct it when
-    # an explicit product marker is available.
     if combined.endswith("sidepulse") or combined == "sidepulse":
         return DeviceKind.DOT
     return DeviceKind.UNKNOWN
@@ -139,17 +136,22 @@ def _digest(namespace: str, value: str) -> str:
     return hashlib.sha256(payload).hexdigest()[:24]
 
 
-def _valid_physical_mount(path: str) -> bool:
+def _valid_physical_mount(
+    path: str,
+    trusted_mount_root: Path = Path("/Volumes"),
+) -> bool:
     try:
-        candidate = Path(path).expanduser()
+        candidate = Path(path).expanduser().absolute()
+        root = Path(trusted_mount_root).expanduser().absolute()
     except (OSError, TypeError, ValueError):
         return False
-    parts = candidate.parts
-    return len(parts) >= 3 and parts[:2] == ("/", "Volumes")
+    return candidate != root and root in candidate.parents
 
 
 def derive_device_identity(
     facts: DeviceHardwareFacts,
+    *,
+    trusted_mount_root: Path = Path("/Volumes"),
 ) -> StableDeviceIdentity | None:
     if type(facts) is not DeviceHardwareFacts:
         raise TypeError("facts must be DeviceHardwareFacts")
@@ -163,7 +165,10 @@ def derive_device_identity(
             connected=facts.connected,
             evidence="virtual",
         )
-    if kind is DeviceKind.UNKNOWN or not _valid_physical_mount(facts.mount_path):
+    if kind is DeviceKind.UNKNOWN or not _valid_physical_mount(
+        facts.mount_path,
+        trusted_mount_root,
+    ):
         return None
 
     candidates = (
@@ -249,13 +254,8 @@ def migrate_remembered_devices(
             )
             continue
 
-        # Several devices of the same product kind: exact current mount path
-        # is attachment evidence for this migration only, never the persisted
-        # identity itself.
         for identity in sorted(identities, key=lambda item: item.key):
-            exact = [
-                row for row in remembered if row.path == identity.mount_path
-            ]
+            exact = [row for row in remembered if row.path == identity.mount_path]
             migrated.append(
                 RememberedDeviceRow(
                     device_id=identity.key,
@@ -269,8 +269,6 @@ def migrate_remembered_devices(
                 )
             )
 
-    # Retain at most one disconnected legacy row per product kind. This keeps
-    # a user's calibration available while eliminating remount ghosts.
     for kind, remembered in rows_by_kind.items():
         if kind in consumed_kinds or not remembered:
             continue
