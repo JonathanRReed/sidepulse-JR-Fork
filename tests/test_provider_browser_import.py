@@ -77,7 +77,7 @@ def test_leveldb_is_copied_before_reading_and_prefix_keys_are_bounded(tmp_path: 
             1,
             KeyState.Live,
             b"_https://app.devin.ai\x00\x01auth1_session",
-            b"\x01" + json.dumps({"token": "auth1_fixture_value"}).encode("latin-1"),
+            b"\x01" + json.dumps({"token": "auth1_fixture_value_long"}).encode("latin-1"),
         ),
         Record(
             2,
@@ -123,7 +123,7 @@ def test_import_stores_only_validated_session_and_returns_org(tmp_path: Path):
             1,
             KeyState.Live,
             b"_https://app.devin.ai\x00\x01auth1_session",
-            b"\x01" + json.dumps({"token": "auth1_fixture_value"}).encode("latin-1"),
+            b"\x01" + json.dumps({"token": "auth1_fixture_value_long"}).encode("latin-1"),
         ),
         Record(
             2,
@@ -147,8 +147,8 @@ def test_import_stores_only_validated_session_and_returns_org(tmp_path: Path):
 
     assert result.state is BrowserImportState.IMPORTED
     assert result.organization == "org_fixture"
-    assert credentials.values == {("devin", "token"): "auth1_fixture_value"}
-    assert "auth1_fixture_value" not in repr(result)
+    assert credentials.values == {("devin", "token"): "auth1_fixture_value_long"}
+    assert "auth1_fixture_value_long" not in repr(result)
 
 
 def test_import_refuses_symlinked_profile_store(tmp_path: Path):
