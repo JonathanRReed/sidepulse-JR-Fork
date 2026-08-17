@@ -1,4 +1,4 @@
-"""Contracts for the compatibility facades around the AppKit runtime."""
+"""Contracts for the single compatibility facade around the AppKit runtime."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def test_direct_module_execution_delegates_to_runtime_main() -> None:
     ), "status-bar facade does not delegate direct execution to runtime main"
 
 
-def test_controller_overrides_are_real_subclasses() -> None:
+def test_only_production_module_defines_a_controller_subclass() -> None:
     production_tree = _tree(PRODUCTION_FACADE)
     production_controller = next(
         node
@@ -56,22 +56,20 @@ def test_controller_overrides_are_real_subclasses() -> None:
         "projection_for_device",
     } <= method_names
 
-    final_tree = _tree(FACADE)
-    final_controller = next(
-        node
-        for node in ast.walk(final_tree)
+    public_classes = {
+        node.name
+        for node in ast.walk(_tree(FACADE))
         if isinstance(node, ast.ClassDef)
-        and node.name == "JRFinalStatusBarController"
-    )
-    assert any(
-        isinstance(base, ast.Name)
-        and base.id == "_ProductionStatusBarController"
-        for base in final_controller.bases
+    }
+    assert "JRFinalStatusBarController" not in public_classes
+    assert "JRStatusBarController" not in public_classes
+    assert "StatusBarController = JRStatusBarController" in FACADE.read_text(
+        encoding="utf-8"
     )
 
     forbidden_assignments = [
         node
-        for tree in (production_tree, final_tree)
+        for tree in (production_tree, _tree(FACADE))
         for node in ast.walk(tree)
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
         and any(

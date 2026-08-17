@@ -76,7 +76,7 @@ def _run_installed_smoke(app: Path) -> None:
     if not (
         isinstance(integration_status, dict)
         and isinstance(integration_status.get("t3code"), dict)
-        and isinstance(integration_status.get("codexbar"), dict)
+        and "codexbar" not in integration_status
     ):
         raise ValueError("installed integration status is malformed")
     launch_target = f"gui/{os.getuid()}/{EXPECTED_LAUNCH_AGENT_LABEL}"

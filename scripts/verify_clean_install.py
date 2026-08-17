@@ -60,11 +60,12 @@ assert (resources / "integration_compatibility.json").is_file()
 for module in (
     "sidepulse.cli",
     "sidepulse.cli_entry",
-    "sidepulse.codexbar_compat",
+    "sidepulse.hook_dedupe",
     "sidepulse.hook_entry",
     "sidepulse.integration_cli",
     "sidepulse.integration_compatibility",
     "sidepulse.integration_settings",
+    "sidepulse.runtime_truth",
     "sidepulse.status_bar_launch",
     "sidepulse.t3_compat",
     "agent_monitor.hook_entry",

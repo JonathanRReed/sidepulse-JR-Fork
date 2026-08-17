@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from . import audit
+from .hook_dedupe import HookEventDeduplicator
 from .ipc import ProviderRefreshHint, send_refresh_hint
 from .origin import annotate_payload_with_origin
 from .private_io import append_private_text, redact_event_payload
@@ -151,6 +152,11 @@ def write_normalized_hook_record(
     audit.compact_jsonl_file(log_path.expanduser())
 
 
+def hook_dedupe_path(log_path: Path) -> Path:
+    target = Path(log_path).expanduser()
+    return target.with_name(f"{target.name}.dedupe.json")
+
+
 def _refresh_hint_for_record(
     provider: str,
     record: NormalizedProviderRecord | InertProviderRecord,
@@ -181,9 +187,17 @@ def hook_log_main(provider: str, log_path: Path) -> int:
         record = _normalized_hook_record(actual_provider, line)
         if record is None:
             return 0
-        write_normalized_hook_record(actual_log_path, record)
         hint = _refresh_hint_for_record(actual_provider, record)
-        if hint is not None:
+        if hint is None:
+            write_normalized_hook_record(actual_log_path, record)
+        else:
+            deduplicator = HookEventDeduplicator(hook_dedupe_path(actual_log_path))
+            written = deduplicator.run_once(
+                hint.event_token.value,
+                lambda: write_normalized_hook_record(actual_log_path, record),
+            )
+            if not written:
+                return 0
             send_refresh_hint(
                 hint,
                 event_name=str(line.get("hook_event_name") or "") or None,
