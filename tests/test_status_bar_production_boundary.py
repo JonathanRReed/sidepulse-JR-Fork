@@ -72,12 +72,11 @@ def _stored_attributes(node: ast.AST) -> frozenset[str]:
     )
 
 
-def test_full_refresh_is_admitted_through_both_facade_layers() -> None:
-    public_calls = _call_names(_method(STATUS_BAR, "refresh_"))
+def test_full_refresh_is_admitted_through_the_single_controller_layer() -> None:
+    public_source = STATUS_BAR.read_text(encoding="utf-8")
     production_calls = _call_names(_method(PRODUCTION_STATUS_BAR, "refresh_"))
 
-    assert "self._request_t3_integration" in public_calls
-    assert "_ProductionStatusBarController.refresh_" in public_calls
+    assert "def refresh_(" not in public_source
     assert "self._observe_refresh_state" in production_calls
     assert "admit_refresh" in production_calls
     assert "_LegacyStatusBarController.refresh_" in production_calls
@@ -144,7 +143,6 @@ def test_refresh_boundary_has_no_direct_blocking_io_calls() -> None:
         "os.fsync",
         "sqlite3.connect",
     }
-    calls = set(_call_names(_method(STATUS_BAR, "refresh_")))
-    calls.update(_call_names(_method(PRODUCTION_STATUS_BAR, "refresh_")))
+    calls = set(_call_names(_method(PRODUCTION_STATUS_BAR, "refresh_")))
 
     assert not (calls & forbidden)
