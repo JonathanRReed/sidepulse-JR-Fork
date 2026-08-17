@@ -241,12 +241,10 @@ else:
 
         @_legacy.objc.IBAction
         def selectSettingsCategoryPage_(self, sender) -> None:
-            category_key = getattr(sender, "sidepulse_category_key", None)
             try:
-                category = _settings_navigation.category_for_key(category_key)
-                index = int(sender.selectedSegment())
-                page = category.pages[index]
-            except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+                category = _settings_navigation.SETTINGS_CATEGORIES[int(sender.tag())]
+                page = category.pages[int(sender.selectedSegment())]
+            except (AttributeError, IndexError, TypeError, ValueError):
                 return
             show_category(self, category.key, page.key)
             self._settings_active_category = category.key
