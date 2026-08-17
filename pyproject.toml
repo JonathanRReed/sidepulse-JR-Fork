@@ -35,6 +35,10 @@ dependencies = [
     "pyobjc-framework-WebKit==12.2.1; sys_platform == 'darwin'",
     # Calendar alerts ("glow before events start") use EventKit.
     "pyobjc-framework-EventKit==12.2.1; sys_platform == 'darwin'",
+    # Native provider secrets stay in macOS Keychain.
+    "keyring==25.7.0; sys_platform == 'darwin'",
+    # Read Chromium localStorage from an isolated copied LevelDB snapshot.
+    "rleveldb==1.0.0; sys_platform == 'darwin'",
     # Preserve comments and formatting while editing Hermes YAML config.
     "ruamel.yaml==0.19.1",
 ]
