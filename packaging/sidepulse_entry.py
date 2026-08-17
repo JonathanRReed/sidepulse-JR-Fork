@@ -3,7 +3,7 @@
 import sys
 
 from sidepulse.cli_entry import sidepulse_main
-from sidepulse.status_bar import main as status_bar_main
+from sidepulse.provider_usage_status_bar import main as status_bar_main
 
 
 if __name__ == "__main__":

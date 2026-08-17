@@ -1,0 +1,180 @@
+from __future__ import annotations
+
+import base64
+from pathlib import Path
+
+from sidepulse.provider_usage_platform import (
+    ProviderSourceState,
+    ProviderUsageSnapshot,
+    UsageLane,
+)
+from sidepulse.provider_usage_runtime import ProviderUsageState
+from sidepulse.provider_usage_sync import (
+    ProviderSyncPacket,
+    decode_signed_packet,
+    encode_signed_packet,
+)
+from sidepulse.provider_usage_sync_runtime import (
+    ProviderSyncRuntime,
+    build_local_sync_packet,
+)
+from sidepulse.provider_usage_sync_settings import (
+    ProviderSyncSettings,
+    ProviderSyncPeer,
+)
+from sidepulse.provider_usage_sync_transport import SftpFetchResult
+
+
+class Credentials:
+    def __init__(self, secret: bytes):
+        self.encoded = base64.b64encode(secret).decode("ascii")
+
+    def get(self, provider, account):
+        value = self.encoded if (provider, account) == ("sidepulse-sync", "pairing-macbook") else None
+        return type("Read", (), {"available": value is not None, "secret": value, "reason": None})()
+
+
+def usage_state():
+    lane = UsageLane(
+        provider_id="claude",
+        lane_id="weekly",
+        label="Weekly",
+        remaining_percent=25,
+        reset_at=3000,
+        scope="all",
+        model=None,
+        feature=None,
+        bindable=True,
+        source_id="claude-oauth",
+    )
+    snapshot = ProviderUsageSnapshot(
+        provider_id="claude",
+        account_label="account-fixture",
+        observed_at=1000,
+        state=ProviderSourceState.READY,
+        reason_code=None,
+        action_label=None,
+        lanes=(lane,),
+        input_tokens=100,
+        cached_input_tokens=25,
+        output_tokens=50,
+        model_count=2,
+        estimated_cost_usd=1.25,
+        cache_savings_usd=0.25,
+        credits_remaining=None,
+        incident=None,
+    )
+    return ProviderUsageState((snapshot,), 1000, 1100, False)
+
+
+def settings(tmp_path: Path):
+    known_hosts = tmp_path / "known_hosts"
+    identity = tmp_path / "id_ed25519"
+    known_hosts.write_text("fixture")
+    identity.write_text("fixture")
+    known_hosts.chmod(0o600)
+    identity.chmod(0o600)
+    return ProviderSyncSettings(
+        1,
+        True,
+        "mac-mini",
+        ("quota", "token_usage"),
+        (
+            ProviderSyncPeer(
+                "macbook",
+                "user@macbook.tailnet.example",
+                "~/.local/state/sidepulse/provider-sync/mac-mini.packet",
+                str(known_hosts),
+                str(identity),
+                "pairing-macbook",
+            ),
+        ),
+    )
+
+
+def test_local_packet_contains_quota_once_and_machine_local_usage():
+    packet = build_local_sync_packet(usage_state(), settings(Path("/tmp")), generated_at=1000)
+    assert packet.device_id == "mac-mini"
+    assert len(packet.quota_snapshots) == 1
+    assert len(packet.machine_usage) == 1
+    assert packet.machine_usage[0].input_tokens == 100
+
+
+def test_runtime_publishes_peer_specific_signed_packet_and_merges_remote(tmp_path: Path):
+    secret = b"x" * 32
+    remote_packet = ProviderSyncPacket(
+        1,
+        "macbook",
+        1100,
+        (),
+        (),
+        ("quota", "token_usage"),
+    )
+    published = {}
+
+    def publish(packet, target):
+        published[Path(target).name] = packet
+        return target
+
+    runtime = ProviderSyncRuntime(
+        settings_loader=lambda: settings(tmp_path),
+        credentials=Credentials(secret),
+        local_directory=tmp_path / "published",
+        fetcher=lambda peer: SftpFetchResult(
+            peer.peer_id,
+            True,
+            encode_signed_packet(remote_packet, secret),
+            None,
+        ),
+        publisher=publish,
+        clock=lambda: 1000,
+    )
+    result = runtime.refresh(usage_state())
+
+    assert result.enabled is True
+    assert result.health[0].reachable is True
+    assert result.remote_packets == (remote_packet,)
+    assert "macbook.packet" in published
+    decoded = decode_signed_packet(published["macbook.packet"], secret)
+    assert decoded.device_id == "mac-mini"
+    assert decoded.machine_usage[0].input_tokens == 100
+
+
+def test_missing_pairing_secret_is_actionable_and_does_not_fetch(tmp_path: Path):
+    class Missing:
+        def get(self, *_args):
+            return type("Read", (), {"available": False, "secret": None, "reason": "credential_not_found"})()
+
+    calls = []
+    runtime = ProviderSyncRuntime(
+        settings_loader=lambda: settings(tmp_path),
+        credentials=Missing(),
+        local_directory=tmp_path / "published",
+        fetcher=lambda peer: calls.append(peer) or None,
+        clock=lambda: 1000,
+    )
+    result = runtime.refresh(usage_state())
+    assert result.health[0].reason == "pairing_secret_missing"
+    assert calls == []
+
+
+def test_disabled_runtime_does_not_publish_or_fetch(tmp_path: Path):
+    configured = settings(tmp_path)
+    disabled = ProviderSyncSettings(
+        configured.schema_version,
+        False,
+        configured.device_id,
+        configured.categories,
+        configured.peers,
+    )
+    runtime = ProviderSyncRuntime(
+        settings_loader=lambda: disabled,
+        credentials=Credentials(b"x" * 32),
+        local_directory=tmp_path,
+        fetcher=lambda _peer: (_ for _ in ()).throw(AssertionError("fetched")),
+        publisher=lambda _packet, _target: (_ for _ in ()).throw(AssertionError("published")),
+        clock=lambda: 1000,
+    )
+    result = runtime.refresh(usage_state())
+    assert result.enabled is False
+    assert result.remote_packets == ()
