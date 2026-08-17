@@ -8,6 +8,7 @@ import pytest
 from sidepulse.integration_settings import (
     INTEGRATION_SETTINGS_SCHEMA_VERSION,
     IntegrationSettingsConcurrentWriteError,
+    IntegrationSettingsError,
     IntegrationSettingsWriteRefusedError,
     load_integration_settings,
     save_integration_settings,
@@ -28,11 +29,9 @@ def test_integration_settings_round_trip_preserves_unknown_fields(
         encoding="utf-8",
     )
     loaded = load_integration_settings(target)
-    updated = (
-        loaded.settings.with_enabled("t3code", True)
-        .with_t3code(base_dir="/tmp/t3", environment_id="local")
-        .with_enabled("codexbar", True)
-        .with_codexbar(identity="full", connection_mode="dashboard")
+    updated = loaded.settings.with_enabled("t3code", True).with_t3code(
+        base_dir="/tmp/t3",
+        environment_id="local",
     )
 
     save_integration_settings(updated, target, loaded=loaded)
@@ -42,9 +41,42 @@ def test_integration_settings_round_trip_preserves_unknown_fields(
     assert document["t3code_enabled"] is True
     assert document["t3code_base_dir"] == "/tmp/t3"
     assert document["t3code_environment_id"] == "local"
-    assert document["codexbar_enabled"] is True
-    assert document["codexbar_identity"] == "full"
-    assert document["codexbar_connection_mode"] == "dashboard"
+    assert not any(key.startswith("codexbar_") for key in document)
+
+
+def test_schema_one_codexbar_settings_migrate_out_on_next_save(tmp_path: Path) -> None:
+    target = tmp_path / "integrations.json"
+    target.write_text(
+        json.dumps(
+            {
+                "settings_schema_version": 1,
+                "t3code_enabled": True,
+                "codexbar_enabled": True,
+                "codexbar_identity": "full",
+                "codexbar_connection_mode": "dashboard",
+                "future_extension": "keep",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_integration_settings(target)
+    save_integration_settings(loaded.settings, target, loaded=loaded)
+    document = json.loads(target.read_text(encoding="utf-8"))
+
+    assert document["settings_schema_version"] == INTEGRATION_SETTINGS_SCHEMA_VERSION
+    assert document["t3code_enabled"] is True
+    assert document["future_extension"] == "keep"
+    assert not any(key.startswith("codexbar_") for key in document)
+
+
+def test_codexbar_cannot_be_reenabled_through_the_settings_model() -> None:
+    settings = load_integration_settings().settings
+
+    with pytest.raises(IntegrationSettingsError):
+        settings.with_enabled("codexbar", True)
+    assert not hasattr(settings, "codexbar_enabled")
+    assert not hasattr(settings, "with_codexbar")
 
 
 def test_future_integration_settings_are_read_only(tmp_path: Path) -> None:
@@ -75,7 +107,7 @@ def test_external_edit_after_load_is_not_overwritten(tmp_path: Path) -> None:
 
     with pytest.raises(IntegrationSettingsConcurrentWriteError):
         save_integration_settings(
-            loaded.settings.with_enabled("codexbar", True),
+            loaded.settings.with_enabled("t3code", True),
             target,
             loaded=loaded,
         )
@@ -108,7 +140,6 @@ def test_malformed_integration_settings_fail_closed_read_only(
 
     assert loaded.compatibility.read_only is True
     assert loaded.settings.t3code_enabled is False
-    assert loaded.settings.codexbar_enabled is False
     with pytest.raises(IntegrationSettingsWriteRefusedError):
         save_integration_settings(loaded.settings, target, loaded=loaded)
 
