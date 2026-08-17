@@ -1,29 +1,50 @@
-"""Repo root on sys.path so `examples.*` imports resolve no matter how
-pytest is invoked (`pytest tests/` from the venv script does not add the
-current directory the way `python -m pytest` does)."""
+"""Repository-wide test sandbox and import setup.
 
+The sandbox is established at collection time, before test modules import
+SidePulse and cache default paths. Tests must never write the developer's real
+settings, state, provider configuration, LaunchAgent domain, or mounted LEDs.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
-_ROOT = str(Path(__file__).resolve().parent.parent)
+_ROOT_PATH = Path(__file__).resolve().parent.parent
+_ROOT = str(_ROOT_PATH)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+# Module-level on purpose: fixtures run after test modules are imported, which
+# is too late for modules that cache HOME/XDG-derived defaults.
+_TEST_SANDBOX = Path(tempfile.mkdtemp(prefix="sidepulse-pytest-"))
+_TEST_HOME = _TEST_SANDBOX / "home"
+_TEST_CONFIG = _TEST_SANDBOX / "config"
+_TEST_STATE = _TEST_SANDBOX / "state"
+_TEST_CACHE = _TEST_SANDBOX / "cache"
+_TEST_VOLUMES = _TEST_SANDBOX / "Volumes"
+for _path in (_TEST_HOME, _TEST_CONFIG, _TEST_STATE, _TEST_CACHE, _TEST_VOLUMES):
+    _path.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+os.environ["HOME"] = str(_TEST_HOME)
+os.environ["XDG_CONFIG_HOME"] = str(_TEST_CONFIG)
+os.environ["XDG_STATE_HOME"] = str(_TEST_STATE)
+os.environ["XDG_CACHE_HOME"] = str(_TEST_CACHE)
+os.environ["SIDEPULSE_TESTING"] = "1"
+os.environ["SIDEPULSE_TEST_VOLUME_ROOT"] = str(_TEST_VOLUMES)
 
 _LIVE_VOLUME_ROOT = Path("/Volumes")
+_LIVE_LAUNCH_AGENT_ROOT = Path.home().expanduser() / "Library" / "LaunchAgents"
 
 
 @pytest.fixture(autouse=True)
 def isolate_live_settings_file(tmp_path, monkeypatch):
-    """Keep StatusBarController tests from writing the user's settings.json.
-
-    save_settings used to resolve the live path even when a test patched
-    sidepulse.settings.default_settings_path, because the facade called
-    _settings_legacy.default_settings_path directly. Isolate at the
-    source and at the facade so a missed patch cannot leak fixtures.
-    """
+    """Keep all settings facades on one per-test path."""
     isolated = tmp_path / "pytest-sidepulse-settings.json"
 
     def _isolated_path(home=None):
@@ -48,6 +69,32 @@ def _is_live_volume_path(path: object) -> bool:
         candidate = candidate.absolute()
         root = _LIVE_VOLUME_ROOT
     return candidate == root or root in candidate.parents
+
+
+@pytest.fixture(autouse=True)
+def block_live_launchd_mutations(monkeypatch):
+    """Refuse real launchctl mutations even when a test forgot to stub them."""
+    original_run = subprocess.run
+
+    def guarded_run(arguments, *args, **kwargs):
+        command = list(arguments) if not isinstance(arguments, (str, bytes)) else []
+        if command and Path(str(command[0])).name == "launchctl":
+            operation = str(command[1]) if len(command) > 1 else ""
+            if operation in {
+                "bootstrap",
+                "bootout",
+                "kickstart",
+                "enable",
+                "disable",
+                "remove",
+                "submit",
+            }:
+                raise AssertionError(
+                    f"test attempted live launchctl mutation: {operation}"
+                )
+        return original_run(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", guarded_run)
 
 
 @pytest.fixture(autouse=True)
