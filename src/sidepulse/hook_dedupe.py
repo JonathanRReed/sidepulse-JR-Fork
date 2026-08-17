@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import stat
+from collections.abc import Callable
 from pathlib import Path
 
 _STATE_VERSION = 1
@@ -91,15 +92,18 @@ class HookEventDeduplicator:
         os.ftruncate(descriptor, len(payload))
         os.fsync(descriptor)
 
-    def accept(self, event_token: str) -> bool:
+    def run_once(self, event_token: str, callback: Callable[[], object]) -> bool:
         if not self._valid_token(event_token):
             return False
+        if not callable(callback):
+            raise TypeError("callback must be callable")
         descriptor = self._open()
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             tokens = self._read_locked(descriptor)
             if event_token in tokens:
                 return False
+            callback()
             tokens.append(event_token)
             if len(tokens) > self.max_tokens:
                 tokens = tokens[-self.max_tokens :]
@@ -110,6 +114,9 @@ class HookEventDeduplicator:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(descriptor)
+
+    def accept(self, event_token: str) -> bool:
+        return self.run_once(event_token, lambda: None)
 
     def tokens(self) -> tuple[str, ...]:
         if not self.path.exists():
