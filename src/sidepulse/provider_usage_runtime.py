@@ -144,16 +144,30 @@ class ProviderUsageService:
         home: Path,
         collectors: dict[str, Collector] | None = None,
         clock: Callable[[], float] = time.time,
+        state_loader: Callable[[], ProviderUsageState] | None = None,
+        state_saver: Callable[[ProviderUsageState], object] | None = None,
     ) -> None:
         self._settings_loader = settings_loader
         self._credentials = credentials
         self._home = Path(home)
         self._collectors = dict(_default_collectors() if collectors is None else collectors)
         self._clock = clock
+        self._state_saver = state_saver
         self._lock = threading.RLock()
         self._closed = False
-        self._last_known_good: dict[str, ProviderUsageSnapshot] = {}
-        self._state = ProviderUsageState((), None, None, False)
+        loaded_state = (
+            state_loader()
+            if state_loader is not None
+            else ProviderUsageState((), None, None, False)
+        )
+        if type(loaded_state) is not ProviderUsageState or loaded_state.refreshing:
+            loaded_state = ProviderUsageState((), None, None, False)
+        self._last_known_good: dict[str, ProviderUsageSnapshot] = {
+            snapshot.provider_id: snapshot
+            for snapshot in loaded_state.snapshots
+            if snapshot.state in {ProviderSourceState.READY, ProviderSourceState.STALE}
+        }
+        self._state = loaded_state
         self._callbacks: list[Callable[[ProviderUsageState], None]] = []
         self._worker: threading.Thread | None = None
 
@@ -247,6 +261,11 @@ class ProviderUsageService:
         )
         with self._lock:
             self._state = state
+        if self._state_saver is not None:
+            try:
+                self._state_saver(state)
+            except Exception:
+                pass
         return state
 
     def refresh_now(
