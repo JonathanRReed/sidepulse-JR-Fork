@@ -16,6 +16,8 @@ from AppKit import (
 
 from . import settings_navigation as navigation
 
+_BRACKET_STYLE_CHOICES = ("auto", "spatial", "identity", "bracket")
+
 
 def install_settings_navigation(legacy, settings_window) -> None:
     """Make both halves of the extracted Settings implementation agree."""
@@ -28,6 +30,16 @@ def install_settings_navigation(legacy, settings_window) -> None:
     # globals when `_install` ran, so patch its copy as well.
     settings_window.DEFAULT_SETTINGS_PANE = navigation.SETTINGS_CATEGORIES[0].key
 
+    # The explicit geometry style is a fourth option, separate from color
+    # projection. Patch every module copy before settings are loaded so a saved
+    # `bracket` value survives validation and round-trips normally.
+    from . import _settings_legacy, settings
+
+    _settings_legacy.BRACKET_STYLE_CHOICES = _BRACKET_STYLE_CHOICES
+    settings.BRACKET_STYLE_CHOICES = _BRACKET_STYLE_CHOICES
+    settings_window.BRACKET_STYLE_CHOICES = _BRACKET_STYLE_CHOICES
+    legacy.BRACKET_STYLE_CHOICES = _BRACKET_STYLE_CHOICES
+
 
 def _ensure_storage(target) -> None:
     if not hasattr(target, "_settings_category_children"):
@@ -39,8 +51,6 @@ def _ensure_storage(target) -> None:
 
 
 def _native_usage_pane(target):
-    native_ui = target.__class__.__module__  # retained only to keep reprs terse
-    del native_ui
     from . import native_ui as ui
 
     stack = ui.make_fill_stack(spacing=ui.SPACE_L)
@@ -94,7 +104,7 @@ def refresh_native_usage_summary(target) -> None:
     field = getattr(target, "settings_fields", {}).get("native_usage_source_status")
     if field is None:
         return
-    state = getattr(target, "provider_usage_state", None)
+    state = getattr(target, "_sidepulse_provider_usage_state", None)
     try:
         from .provider_usage_menu import glance_summary
 
@@ -112,6 +122,20 @@ def _build_child(target, page_key: str):
     return settings_window._build_settings_pane(target, page_key)
 
 
+def _install_explicit_bracket_style(target) -> None:
+    popup = getattr(target, "settings_fields", {}).get("bracket_style_popup")
+    if popup is None:
+        return
+    for index in range(popup.numberOfItems()):
+        if popup.itemAtIndex_(index).representedObject() == "bracket":
+            return
+    popup.addItemWithTitle_("Rounded band with corner brackets")
+    item = popup.lastItem()
+    item.setRepresentedObject_("bracket")
+    if target.settings.screen_bar_bracket_style == "bracket":
+        popup.selectItem_(item)
+
+
 def _after_child_built(target, page_key: str) -> None:
     if page_key == "notifications":
         target.refresh_notification_authorization_controls()
@@ -124,6 +148,8 @@ def _after_child_built(target, page_key: str) -> None:
         target.reconcile_installed_agent_inventory()
     elif page_key == "capacity":
         target.refresh_capacity_settings_projection()
+    elif page_key == "colors_screen_bar":
+        _install_explicit_bracket_style(target)
     elif page_key == navigation.NATIVE_USAGE_PAGE:
         refresh_native_usage_summary(target)
 
@@ -151,7 +177,10 @@ def _build_category_container(target, category: navigation.SettingsCategory):
         selector.setTrackingMode_(NSSegmentSwitchTrackingSelectOne)
         for index, page in enumerate(category.pages):
             selector.setLabel_forSegment_(page.label, index)
-            selector.setWidth_forSegment_(max(92.0, min(150.0, 30.0 + len(page.label) * 7.0)), index)
+            selector.setWidth_forSegment_(
+                max(92.0, min(150.0, 30.0 + len(page.label) * 7.0)),
+                index,
+            )
         selector.setSelectedSegment_(0)
         selector.setTarget_(target)
         selector.setAction_("selectSettingsCategoryPage:")
