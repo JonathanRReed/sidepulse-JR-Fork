@@ -3,7 +3,7 @@ from __future__ import annotations
 from sidepulse import cli_entry
 
 
-def test_public_cli_routes_integration_commands_without_changing_legacy_args(
+def test_public_cli_routes_provider_and_integration_commands_without_changing_legacy_args(
     monkeypatch,
 ) -> None:
     calls = []
@@ -14,14 +14,21 @@ def test_public_cli_routes_integration_commands_without_changing_legacy_args(
     )
     monkeypatch.setattr(
         cli_entry,
+        "provider_main",
+        lambda args: calls.append(("providers", args)) or 19,
+    )
+    monkeypatch.setattr(
+        cli_entry,
         "_legacy_sidepulse_main",
         lambda args: calls.append(("legacy", args)) or 23,
     )
 
     assert cli_entry.sidepulse_main(["integrations", "status", "--json"]) == 17
+    assert cli_entry.sidepulse_main(["providers", "status", "--json"]) == 19
     assert cli_entry.sidepulse_main(["doctor", "--json"]) == 23
     assert calls == [
         ("integrations", ["status", "--json"]),
+        ("providers", ["status", "--json"]),
         ("legacy", ["doctor", "--json"]),
     ]
 
