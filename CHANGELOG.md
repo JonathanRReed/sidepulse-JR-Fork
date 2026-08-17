@@ -4,6 +4,15 @@ All notable changes to the JR fork are documented here.
 
 ## Unreleased
 
+### Runtime truth and safety
+
+- Added explicit states for not configured, reload required, awaiting first activity, idle, working, needs input, completed, failed, and stale hook sources.
+- Kept `SessionStart` as session presence rather than working activity, and added specific Grok guidance when hooks were installed after the current session began.
+- Added cross-process hook-event deduplication so repeated native events are written and published once.
+- Separated foreground, LaunchAgent, socket-owner, and conflict process states.
+- Established collection-time test isolation for HOME, XDG paths, launchd mutations, and real `/Volumes` writes.
+- Collapsed the public status-bar facade so only one PyObjC controller subclass remains.
+
 ### Production hardening
 
 - Moved routine battery collection, transcript discovery, provider probing, ledger publication, and webhook delivery behind bounded background services.
@@ -15,10 +24,9 @@ All notable changes to the JR fork are documented here.
 
 ### External compatibility
 
-- Added opt-in T3 Code compatibility through its query-only local SQLite projection. SidePulse preserves provider, provider instance, thread, project, model, branch, worktree, lifecycle, and actionable-request identity without reading credentials or mutating T3.
-- Added opt-in CodexBar dashboard-v1 compatibility for provider usage windows, account-display rows, costs, credits, health, and errors. CodexBar remains the sole credential and accounting owner.
-- Added supervised loopback CodexBar mode with an ephemeral environment token, strict process/HTTP/JSON bounds, redacted identity by default, and a one-shot dashboard fallback.
-- Added versioned integration settings, a packaged compatibility manifest tied to exact reviewed upstream commits, installed-artifact smoke checks, and `sidepulse integrations` configuration and probe commands.
+- T3 Code remains the only optional external agent integration. It reads a query-only local SQLite projection and does not mutate T3 or read its credentials.
+- Alcove remains the optional visual geometry integration for Screen Bar following.
+- Removed the accidental CodexBar client, process supervisor, dashboard protocol, commands, settings surface, compatibility entry, and package tests. CodexBar is now only an engineering reference for native SidePulse provider accounting.
 - Kept T3 pull-request metadata and mutation actions explicitly out of current claims because the reviewed local projection does not expose them.
 
 ## 0.2.2
