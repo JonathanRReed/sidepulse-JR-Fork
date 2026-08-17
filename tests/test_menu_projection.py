@@ -68,7 +68,8 @@ def test_warning_rows_are_bounded_and_actionable() -> None:
     plan = project_root_menu(inputs(warning_rows=tuple(str(i) for i in range(20))))
     warnings = [row for row in plan.rows if row.kind is MenuRowKind.WARNING]
     assert len(warnings) == 3
-    assert warnings[-1].title == "12 more issues…"
+    assert warnings[-1].title == "18 more issues…"
+    assert len(plan.rows) <= 15
 
 
 def test_quiet_row_reflects_current_state() -> None:
