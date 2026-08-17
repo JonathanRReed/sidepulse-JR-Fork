@@ -35,6 +35,9 @@ def test_screen_bar_installer_does_not_rebind_objective_c_classes() -> None:
     assert "objc.super" not in source
     assert "rounded_band_bounds" in source
     assert '== "bracket"' in source
+    assert "def _min_glow" in source
+    assert "finally:" in source
+    assert "outline_alpha" in source
 
 
 def test_settings_runtime_reuses_retained_pane_builders_without_a_controller() -> None:
@@ -43,4 +46,5 @@ def test_settings_runtime_reuses_retained_pane_builders_without_a_controller() -
     assert "settings_window._build_settings_pane(target, page_key)" in source
     assert "NATIVE_USAGE_PAGE" in source
     assert "Open Usage Center…" in source
+    assert "selector.setTag_" in source
     assert not _classes(source)
