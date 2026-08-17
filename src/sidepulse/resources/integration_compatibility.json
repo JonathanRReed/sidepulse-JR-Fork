@@ -2,15 +2,6 @@
   "schemaVersion": 1,
   "integrations": [
     {
-      "integration": "codexbar",
-      "minimumVersion": "0.37.2",
-      "maximumTestedVersion": "0.50.0",
-      "protocolFingerprint": "sha256:4a04b558bbf2872c49efed41f8ac34b1206d2a1b76b40ad79042312645c97688",
-      "sourceCommit": "355f8443a55c0f6c9511f9969656fde10d68340f",
-      "fixtureVersion": 1,
-      "connectionMode": "dashboard-v1"
-    },
-    {
       "integration": "t3code",
       "minimumVersion": "0.0.33",
       "maximumTestedVersion": "0.0.33",
