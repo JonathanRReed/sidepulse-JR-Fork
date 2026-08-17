@@ -1,4 +1,4 @@
-"""Versioned, explicit settings for optional external integrations."""
+"""Versioned, explicit settings for the T3 Code integration."""
 
 from __future__ import annotations
 
@@ -10,11 +10,16 @@ from pathlib import Path
 
 from .private_io import atomic_private_write, read_private_text
 
-INTEGRATION_SETTINGS_SCHEMA_VERSION = 1
+INTEGRATION_SETTINGS_SCHEMA_VERSION = 2
 INTEGRATION_SETTINGS_MAX_BYTES = 64 * 1024
-INTEGRATION_NAMES = frozenset({"t3code", "codexbar"})
-CODEXBAR_IDENTITY_MODES = frozenset({"redacted", "full"})
-CODEXBAR_CONNECTION_MODES = frozenset({"auto", "serve", "dashboard"})
+INTEGRATION_NAMES = frozenset({"t3code"})
+_RETIRED_CODEXBAR_KEYS = frozenset(
+    {
+        "codexbar_enabled",
+        "codexbar_identity",
+        "codexbar_connection_mode",
+    }
+)
 _UNSET = object()
 
 
@@ -49,25 +54,19 @@ class IntegrationSettings:
     t3code_enabled: bool = False
     t3code_base_dir: str | None = None
     t3code_environment_id: str | None = None
-    codexbar_enabled: bool = False
-    codexbar_identity: str = "redacted"
-    codexbar_connection_mode: str = "auto"
 
     def __post_init__(self) -> None:
         if not (
             type(self.t3code_enabled) is bool
             and _optional_bounded_text(self.t3code_base_dir, 4096)
             and _optional_bounded_text(self.t3code_environment_id, 256)
-            and type(self.codexbar_enabled) is bool
-            and self.codexbar_identity in CODEXBAR_IDENTITY_MODES
-            and self.codexbar_connection_mode in CODEXBAR_CONNECTION_MODES
         ):
             raise IntegrationSettingsError("invalid integration settings")
 
     def with_enabled(self, integration: str, enabled: bool) -> IntegrationSettings:
         if integration not in INTEGRATION_NAMES or type(enabled) is not bool:
             raise IntegrationSettingsError("invalid integration selection")
-        return replace(self, **{f"{integration}_enabled": enabled})
+        return replace(self, t3code_enabled=enabled)
 
     def with_t3code(
         self,
@@ -89,29 +88,12 @@ class IntegrationSettings:
             ),
         )
 
-    def with_codexbar(
-        self,
-        *,
-        identity: str | None = None,
-        connection_mode: str | None = None,
-    ) -> IntegrationSettings:
-        return replace(
-            self,
-            codexbar_identity=identity or self.codexbar_identity,
-            codexbar_connection_mode=(
-                connection_mode or self.codexbar_connection_mode
-            ),
-        )
-
     def to_dict(self) -> dict[str, object]:
         return {
             "settings_schema_version": INTEGRATION_SETTINGS_SCHEMA_VERSION,
             "t3code_enabled": self.t3code_enabled,
             "t3code_base_dir": self.t3code_base_dir,
             "t3code_environment_id": self.t3code_environment_id,
-            "codexbar_enabled": self.codexbar_enabled,
-            "codexbar_identity": self.codexbar_identity,
-            "codexbar_connection_mode": self.codexbar_connection_mode,
         }
 
 
@@ -185,16 +167,6 @@ def _optional_text(
     return value if _optional_bounded_text(value, maximum) else None
 
 
-def _choice(
-    document: dict[str, object],
-    key: str,
-    choices: frozenset[str],
-    default: str,
-) -> str:
-    value = document.get(key, default)
-    return value if type(value) is str and value in choices else default
-
-
 def _settings_from_document(document: dict[str, object]) -> IntegrationSettings:
     return IntegrationSettings(
         t3code_enabled=_bool(document, "t3code_enabled", False),
@@ -203,19 +175,6 @@ def _settings_from_document(document: dict[str, object]) -> IntegrationSettings:
             document,
             "t3code_environment_id",
             256,
-        ),
-        codexbar_enabled=_bool(document, "codexbar_enabled", False),
-        codexbar_identity=_choice(
-            document,
-            "codexbar_identity",
-            CODEXBAR_IDENTITY_MODES,
-            "redacted",
-        ),
-        codexbar_connection_mode=_choice(
-            document,
-            "codexbar_connection_mode",
-            CODEXBAR_CONNECTION_MODES,
-            "auto",
         ),
     )
 
@@ -295,15 +254,17 @@ def save_integration_settings(
         )
 
     encoded = settings.to_dict()
-    document = {key: value for key, value in current.items() if key not in encoded}
+    document = {
+        key: value
+        for key, value in current.items()
+        if key not in encoded and key not in _RETIRED_CODEXBAR_KEYS
+    }
     document.update(encoded)
     payload = json.dumps(document, indent=2, sort_keys=True, allow_nan=False) + "\n"
     return atomic_private_write(target, payload)
 
 
 __all__ = [
-    "CODEXBAR_CONNECTION_MODES",
-    "CODEXBAR_IDENTITY_MODES",
     "INTEGRATION_NAMES",
     "INTEGRATION_SETTINGS_SCHEMA_VERSION",
     "IntegrationSettings",
