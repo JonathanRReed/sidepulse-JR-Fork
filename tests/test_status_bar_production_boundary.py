@@ -76,7 +76,7 @@ def test_full_refresh_is_admitted_through_both_facade_layers() -> None:
     public_calls = _call_names(_method(STATUS_BAR, "refresh_"))
     production_calls = _call_names(_method(PRODUCTION_STATUS_BAR, "refresh_"))
 
-    assert "self._request_external_integrations" in public_calls
+    assert "self._request_t3_integration" in public_calls
     assert "_ProductionStatusBarController.refresh_" in public_calls
     assert "self._observe_refresh_state" in production_calls
     assert "admit_refresh" in production_calls
