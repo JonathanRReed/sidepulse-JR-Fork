@@ -23,6 +23,24 @@ All notable changes to the JR fork are documented here.
 - Wrapped provider capacity under one Usage row, removed the permanent Tip row, renamed the explanation panel to Diagnostics, and hide Setup after a healthy completed setup.
 - Added bounded actionable warning rows for disconnected or silent agent intake.
 
+### Native provider usage
+
+- Added first-party accounting for ChatGPT/Codex, Claude, Cursor, Devin, Grok, Antigravity, and optional OpenAI API organization usage.
+- Added actionable source-health states, explicit provider setup and refresh commands, dynamic model- and feature-scoped quota lanes, exact reset countdowns, and finite deduplicated reset celebrations.
+- Added token and model counts, credits, incidents, estimated pricing, cache-savings estimates, and cross-Mac totals.
+- Added provider-scoped browser consent and isolated browser-store import, with secrets stored in macOS Keychain.
+- Added encrypted, signed cross-Mac usage sync that freshness-selects account quotas and deduplicates machine-local usage events.
+- Wired native usage into Finder launch, packaged and source-checkout LaunchAgents, foreground development mode, the menu, and Usage Center.
+
+### Settings and Screen Bar
+
+- Consolidated the Settings sidebar into Overview, Agents & Providers, Usage, Devices & Screen Bar, Appearance & Motion, Notifications & Focus, and Advanced & Diagnostics.
+- Kept the tested retained panes as child pages rather than duplicating their controls or creating another controller layer.
+- Added a native Usage page with direct Usage Center and refresh actions.
+- Replaced the hairline/full-width Screen Bar treatments with a centered, rounded 6-point luminous band bounded to 180–420 points on wide surfaces.
+- Kept connected-but-silent visible as a dim outline, preserved production animation colors, and made Alcove corner brackets an explicit style instead of an automatic side effect.
+- Removed temporary repository write-probe documents and migrated retired CodexBar settings out of the integration document.
+
 ### Production hardening
 
 - Moved routine battery collection, transcript discovery, provider probing, ledger publication, and webhook delivery behind bounded background services.
