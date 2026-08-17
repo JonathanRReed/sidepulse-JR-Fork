@@ -70,7 +70,7 @@ dev = [
 sidepulse = "sidepulse.cli_entry:sidepulse_main"
 sidepulse-integrations = "sidepulse.integration_cli:main"
 agent-monitor = "sidepulse.cli:main"
-agent-status-bar = "sidepulse.status_bar:main"
+agent-status-bar = "sidepulse.provider_usage_status_bar:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
