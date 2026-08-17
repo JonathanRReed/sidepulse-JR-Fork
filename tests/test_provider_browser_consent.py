@@ -125,10 +125,10 @@ def test_chromium_local_storage_decoder_keeps_latest_live_record():
 def test_devin_session_extraction_is_bounded_and_known_key_only():
     token, organization = extract_devin_session(
         {
-            "auth1_session": json.dumps({"token": "auth1_fixture_value"}),
+            "auth1_session": json.dumps({"token": "auth1_fixture_value_long"}),
             "last-internal-org-for-external-org-v1-fixture": "org_fixture",
             "unrelated": json.dumps({"access_token": "should-not-be-used"}),
         }
     )
-    assert token == "auth1_fixture_value"
+    assert token == "auth1_fixture_value_long"
     assert organization == "org_fixture"
