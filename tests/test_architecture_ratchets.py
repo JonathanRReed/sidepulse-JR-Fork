@@ -39,6 +39,8 @@ PURE_PRODUCTION_MODULES = {
     "presentation_compiler.py",
     "refresh_admission.py",
     "runtime_truth.py",
+    "screen_bar_design.py",
+    "settings_navigation.py",
     "t3_compat.py",
     "transcript_runtime.py",
     "webhook_delivery.py",
@@ -84,6 +86,9 @@ def test_production_facades_do_not_grow_into_second_monoliths() -> None:
         SRC / "status_bar.py": 80_000,
         SRC / "collector.py": 20_000,
         SRC / "integration_settings.py": 12_000,
+        SRC / "provider_usage_status_bar.py": 40_000,
+        SRC / "screen_bar_runtime.py": 24_000,
+        SRC / "settings_category_runtime.py": 32_000,
     }
     oversized = {
         path.name: path.stat().st_size
