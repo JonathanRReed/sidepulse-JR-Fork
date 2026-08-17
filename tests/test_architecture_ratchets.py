@@ -12,7 +12,6 @@ SRC = ROOT / "src" / "sidepulse"
 LEGACY_SIZE_CEILINGS = {
     SRC / "status_bar_legacy.py": 782_668,
     SRC / "_collector_legacy.py": 117_707,
-    SRC / "_codexbar_compat_legacy.py": 31_000,
     SRC / "_integration_settings_legacy.py": 12_000,
     SRC / "settings_window.py": 220_568,
     ROOT / "tests" / "test_sidepulse.py": 1_065_785,
@@ -26,9 +25,9 @@ EXEMPT_SOURCE_MODULES = {
 
 PURE_PRODUCTION_MODULES = {
     "battery_runtime.py",
-    "codexbar_compat.py",
     "core_state.py",
     "firmware_validation.py",
+    "hook_dedupe.py",
     "integration_compatibility.py",
     "integration_settings.py",
     "intake_runtime.py",
@@ -36,6 +35,7 @@ PURE_PRODUCTION_MODULES = {
     "performance_metrics.py",
     "presentation_compiler.py",
     "refresh_admission.py",
+    "runtime_truth.py",
     "t3_compat.py",
     "transcript_runtime.py",
     "webhook_delivery.py",
@@ -80,7 +80,6 @@ def test_production_facades_do_not_grow_into_second_monoliths() -> None:
     ceilings = {
         SRC / "status_bar.py": 80_000,
         SRC / "collector.py": 20_000,
-        SRC / "codexbar_compat.py": 20_000,
         SRC / "integration_settings.py": 12_000,
     }
     oversized = {
