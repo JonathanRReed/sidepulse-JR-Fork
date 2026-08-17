@@ -23,12 +23,36 @@ _legacy = _production._legacy
 JRStatusBarController = _production.JRStatusBarController
 StatusBarController = JRStatusBarController
 
-_ORIGINAL_DEVICE_ID_FOR_ROOT = _legacy.device_id_for_root
-_ORIGINAL_PERSISTABLE_DEVICE_IDENTITY = _legacy.persistable_device_identity
-_ORIGINAL_BUILD_MENU = _legacy.build_menu
-_DEVICE_IDENTITIES = DeviceIdentityCache()
-_DEVICE_IDENTITIES.request_refresh()
-_LAST_DEVICE_REFRESH_REQUEST = 0.0
+# Keep immutable references on the retained runtime module. importlib.reload()
+# reuses this module object while the runtime already points at our wrappers;
+# without these sentinels a reload would wrap a wrapper and recurse.
+_ORIGINAL_DEVICE_ID_FOR_ROOT = getattr(
+    _legacy,
+    "_sidepulse_original_device_id_for_root",
+    _legacy.device_id_for_root,
+)
+_ORIGINAL_PERSISTABLE_DEVICE_IDENTITY = getattr(
+    _legacy,
+    "_sidepulse_original_persistable_device_identity",
+    _legacy.persistable_device_identity,
+)
+_ORIGINAL_BUILD_MENU = getattr(
+    _legacy, "_sidepulse_original_build_menu", _legacy.build_menu
+)
+_legacy._sidepulse_original_device_id_for_root = _ORIGINAL_DEVICE_ID_FOR_ROOT
+_legacy._sidepulse_original_persistable_device_identity = (
+    _ORIGINAL_PERSISTABLE_DEVICE_IDENTITY
+)
+_legacy._sidepulse_original_build_menu = _ORIGINAL_BUILD_MENU
+
+_DEVICE_IDENTITIES = getattr(_legacy, "_sidepulse_device_identity_cache", None)
+if type(_DEVICE_IDENTITIES) is not DeviceIdentityCache:
+    _DEVICE_IDENTITIES = DeviceIdentityCache()
+    _legacy._sidepulse_device_identity_cache = _DEVICE_IDENTITIES
+    _DEVICE_IDENTITIES.request_refresh()
+_LAST_DEVICE_REFRESH_REQUEST = float(
+    getattr(_legacy, "_sidepulse_last_device_refresh_request", 0.0) or 0.0
+)
 
 
 def _request_device_identity_refresh(now: float | None = None) -> None:
@@ -37,6 +61,7 @@ def _request_device_identity_refresh(now: float | None = None) -> None:
     if reference - _LAST_DEVICE_REFRESH_REQUEST < 15.0:
         return
     _LAST_DEVICE_REFRESH_REQUEST = reference
+    _legacy._sidepulse_last_device_refresh_request = reference
     _DEVICE_IDENTITIES.request_refresh()
 
 
@@ -277,7 +302,6 @@ def _compact_existing_menu(menu, snapshot, target):
         item.setTarget_(target)
         menu.insertItem_atIndex_(item, diagnostics_index + offset)
 
-    # Remove leading/trailing and repeated separators after compaction.
     previous_separator = True
     for item in list(_menu_items(menu)):
         try:
