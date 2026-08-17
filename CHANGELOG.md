@@ -13,6 +13,16 @@ All notable changes to the JR fork are documented here.
 - Established collection-time test isolation for HOME, XDG paths, launchd mutations, and real `/Volumes` writes.
 - Collapsed the public status-bar facade so only one PyObjC controller subclass remains.
 
+### Devices and menu
+
+- Replaced mount-path identity with a stable hardware key derived from a hashed serial, volume UUID, or disk identifier.
+- Added bounded background `diskutil` inventory so AppKit reads only cached device metadata.
+- Merge remounts, prune temporary and duplicate remembered devices, and preserve device-specific brightness, calibration, provider pins, and resting glow.
+- Normalized product labels so a SidePulse Dot can never become “SidePulse Dot Dot.”
+- Grouped physical devices, profiles, and timers under one compact Devices submenu.
+- Wrapped provider capacity under one Usage row, removed the permanent Tip row, renamed the explanation panel to Diagnostics, and hide Setup after a healthy completed setup.
+- Added bounded actionable warning rows for disconnected or silent agent intake.
+
 ### Production hardening
 
 - Moved routine battery collection, transcript discovery, provider probing, ledger publication, and webhook delivery behind bounded background services.
