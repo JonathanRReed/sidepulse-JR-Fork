@@ -6,9 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 STATUS_BAR = ROOT / "src" / "sidepulse" / "status_bar.py"
 BACKGROUND_MODULES = (
-    "_codexbar_compat_legacy.py",
     "_integration_settings_legacy.py",
-    "codexbar_compat.py",
     "integration_compatibility.py",
     "integration_settings.py",
     "t3_compat.py",
@@ -47,13 +45,13 @@ def _calls(node: ast.AST) -> tuple[str, ...]:
     return tuple(names)
 
 
-def test_integrations_load_once_at_launch_and_refresh_only_schedules_workers() -> None:
+def test_t3_configuration_loads_once_and_refresh_only_schedules_worker() -> None:
     launch = _calls(_method("applicationDidFinishLaunching_"))
     refresh = _calls(_method("refresh_"))
 
     assert "load_integration_settings" in launch
     assert "_ProductionStatusBarController.applicationDidFinishLaunching_" in launch
-    assert "self._request_external_integrations" in refresh
+    assert "self._request_t3_integration" in refresh
     assert "_ProductionStatusBarController.refresh_" in refresh
     assert "load_integration_settings" not in refresh
     assert "subprocess.run" not in refresh
@@ -68,12 +66,12 @@ def test_t3_results_reach_the_canonical_monitor() -> None:
     assert "self.schedule_event_refresh" in calls
 
 
-def test_codexbar_snapshot_participates_in_usage_refresh_fingerprints() -> None:
+def test_status_bar_has_no_codexbar_runtime_path() -> None:
     source = STATUS_BAR.read_text(encoding="utf-8")
 
-    assert 'getattr(self, "_sidepulse_codexbar_observation", None)' in source
-    assert "CodexBarSnapshotService" in source
-    assert "integration_diagnostics_text" in source
+    assert "CodexBar" not in source
+    assert "codexbar_compat" not in source
+    assert "_sidepulse_codexbar" not in source
 
 
 def test_integration_workers_are_appkit_free() -> None:
