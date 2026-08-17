@@ -6,6 +6,8 @@ import threading
 import time
 from pathlib import Path
 
+from . import settings_navigation as _settings_navigation
+from . import settings_window as _settings_window
 from . import status_bar as _host
 from .provider_credential_store import ProviderCredentialStore
 from .provider_usage_event_store import (
@@ -17,8 +19,20 @@ from .provider_usage_qol import detect_reset_events, threshold_crossings
 from .provider_usage_runtime import ProviderUsageService, ProviderUsageState
 from .provider_usage_settings import load_provider_usage_settings
 from .provider_usage_store import load_provider_usage_state, save_provider_usage_state
+from .screen_bar_runtime import install_screen_bar_runtime
+from .settings_category_runtime import (
+    ensure_category,
+    install_settings_navigation,
+    refresh_native_usage_summary,
+    requested_page_for_category,
+    select_page,
+    show_category,
+)
 
 _legacy = getattr(_host, "_legacy", _host)
+install_settings_navigation(_legacy, _settings_window)
+install_screen_bar_runtime()
+
 _BaseStatusBarController = _legacy.StatusBarController
 _original_build_menu = _legacy.build_menu
 
@@ -71,7 +85,7 @@ def _native_usage_menu_item(target):
     submenu.setAutoenablesItems_(False)
     if not projection.rows:
         submenu.addItem_(
-            _disabled_item("Run `sidepulse providers refresh` to collect usage")
+            _disabled_item("Open Usage Center to connect provider sources")
         )
     for row in projection.rows:
         provider_item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -119,13 +133,25 @@ def _native_usage_menu_item(target):
     return item
 
 
+def _remove_redundant_separators(menu) -> None:
+    index = menu.numberOfItems() - 1
+    while index >= 0:
+        item = menu.itemAtIndex_(index)
+        previous = menu.itemAtIndex_(index - 1) if index > 0 else None
+        if item.isSeparatorItem() and (
+            index == 0
+            or index == menu.numberOfItems() - 1
+            or (previous is not None and previous.isSeparatorItem())
+        ):
+            menu.removeItemAtIndex_(index)
+        index -= 1
+
+
 def build_menu(snapshot, state, target):
     menu = _original_build_menu(snapshot, state, target)
     _remove_legacy_usage_item(menu, target)
     native_item = _native_usage_menu_item(target)
     index = _menu_index(menu, "Devices")
-    if index < 0:
-        index = _menu_index(menu, "Profiles")
     if index < 0:
         index = min(4, menu.numberOfItems())
     menu.insertItem_atIndex_(native_item, index)
@@ -133,7 +159,14 @@ def build_menu(snapshot, state, target):
         next_item = menu.itemAtIndex_(index + 1)
         if not next_item.isSeparatorItem():
             menu.insertItem_atIndex_(_legacy.NSMenuItem.separatorItem(), index + 1)
+    _remove_redundant_separators(menu)
     return menu
+
+
+def _settings_category_at_row(row: int):
+    if 0 <= row < len(_settings_navigation.SETTINGS_CATEGORIES):
+        return _settings_navigation.SETTINGS_CATEGORIES[row]
+    return None
 
 
 if _BaseStatusBarController.__name__ == "JRProviderUsageStatusBarController":
@@ -141,7 +174,129 @@ if _BaseStatusBarController.__name__ == "JRProviderUsageStatusBarController":
 else:
 
     class JRProviderUsageStatusBarController(_BaseStatusBarController):
-        """Native usage accounting, compact menu, and finite reset cues."""
+        """Native usage accounting, consolidated Settings, and finite reset cues."""
+
+        @property
+        def provider_usage_state(self) -> ProviderUsageState:
+            return getattr(
+                self,
+                "_sidepulse_provider_usage_state",
+                ProviderUsageState((), None, None, False),
+            )
+
+        # --- Seven-category Settings navigation -------------------------
+
+        def numberOfRowsInTableView_(self, _table_view) -> int:
+            return len(_settings_navigation.SETTINGS_CATEGORIES)
+
+        def tableView_viewForTableColumn_row_(self, _table_view, _column, row):
+            category = _settings_category_at_row(int(row))
+            if category is None:
+                return None
+            return _legacy.native_ui.sidebar_cell_view(category.label, category.icon)
+
+        def tableView_shouldSelectRow_(self, _table_view, row) -> bool:
+            return _settings_category_at_row(int(row)) is not None
+
+        def tableView_isGroupRow_(self, _table_view, _row) -> bool:
+            return False
+
+        def ensure_settings_pane(self, key: str) -> None:
+            try:
+                category = _settings_navigation.category_for_key(key)
+            except KeyError:
+                return
+            requested = key if category.contains(key) else None
+            ensure_category(self, category.key, requested)
+
+        def ensure_all_settings_panes(self) -> None:
+            previous = getattr(self, "current_settings_pane", None)
+            for category in _settings_navigation.SETTINGS_CATEGORIES:
+                ensure_category(self, category.key, category.default_page)
+                for page in category.pages:
+                    select_page(self, category.key, page.key)
+            if previous:
+                try:
+                    category = _settings_navigation.category_for_key(previous)
+                except KeyError:
+                    category = _settings_navigation.SETTINGS_CATEGORIES[0]
+                show_category(self, category.key, previous)
+            self.refresh_settings_window()
+
+        def tableViewSelectionDidChange_(self, notification):
+            table = notification.object()
+            category = _settings_category_at_row(int(table.selectedRow()))
+            if category is None:
+                return
+            requested = requested_page_for_category(self, category)
+            self._settings_active_category = category.key
+            show_category(self, category.key, requested)
+            if self.settings_window is not None:
+                self.settings_window.setTitle_(f"SidePulse Settings: {category.label}")
+            self.reconcile_device_runtime()
+            self.reconcile_installed_agent_inventory()
+            if self.current_settings_pane == "color_studio":
+                self.refresh_colors_window()
+            self.refresh_settings_window()
+
+        @_legacy.objc.IBAction
+        def selectSettingsCategoryPage_(self, sender) -> None:
+            category_key = getattr(sender, "sidepulse_category_key", None)
+            try:
+                category = _settings_navigation.category_for_key(category_key)
+                index = int(sender.selectedSegment())
+                page = category.pages[index]
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+                return
+            show_category(self, category.key, page.key)
+            self._settings_active_category = category.key
+            if self.settings_window is not None:
+                self.settings_window.setTitle_(f"SidePulse Settings: {category.label}")
+            self.reconcile_device_runtime()
+            self.reconcile_installed_agent_inventory()
+            if page.key == "color_studio":
+                self.refresh_colors_window()
+            self.refresh_settings_window()
+
+        def select_settings_pane(self, pane_key: str) -> None:
+            try:
+                category = _settings_navigation.category_for_key(pane_key)
+            except KeyError:
+                return
+            requested = pane_key if category.contains(pane_key) else category.default_page
+            self._pending_settings_page = requested
+            if self.settings_sidebar_table is None:
+                self.current_settings_pane = requested
+                return
+            row = _settings_navigation.SETTINGS_CATEGORIES.index(category)
+            already_selected = int(self.settings_sidebar_table.selectedRow()) == row
+            self.settings_sidebar_table.selectRowIndexes_byExtendingSelection_(
+                _legacy.NSIndexSet.indexSetWithIndex_(row),
+                False,
+            )
+            if already_selected:
+                show_category(self, category.key, requested)
+                self._settings_active_category = category.key
+                if self.settings_window is not None:
+                    self.settings_window.setTitle_(f"SidePulse Settings: {category.label}")
+                self.refresh_settings_window()
+
+        def show_settings_window(self) -> None:
+            desired = getattr(self, "current_settings_pane", None) or "profile"
+            try:
+                category = _settings_navigation.category_for_key(desired)
+            except KeyError:
+                category = _settings_navigation.SETTINGS_CATEGORIES[0]
+                desired = category.default_page
+            self._pending_settings_page = (
+                desired if category.contains(desired) else category.default_page
+            )
+            self.current_settings_pane = category.key
+            _BaseStatusBarController.show_settings_window(self)
+            show_category(self, category.key, self._pending_settings_page)
+            self._settings_active_category = category.key
+
+        # --- Native provider usage --------------------------------------
 
         def _provider_usage_service(self) -> ProviderUsageService:
             service = getattr(self, "_sidepulse_provider_usage_service", None)
@@ -165,6 +320,7 @@ else:
                 force=force,
             )
             self._sidepulse_provider_usage_state = current
+            refresh_native_usage_summary(self)
 
         def _provider_usage_ready(self, state: ProviderUsageState) -> None:
             try:
@@ -226,6 +382,7 @@ else:
             controller = getattr(self, "_sidepulse_provider_usage_window", None)
             if controller is not None:
                 controller.refresh(state)
+            refresh_native_usage_summary(self)
             self._menu_signature = None
             if previous_state != state and getattr(self, "_runtime_started", False):
                 self.schedule_event_refresh()
@@ -235,6 +392,10 @@ else:
             self._request_provider_usage(force=True)
 
         @_legacy.objc.IBAction
+        def refreshNativeProviderUsage_(self, sender) -> None:
+            self.refreshProviderUsage_(sender)
+
+        @_legacy.objc.IBAction
         def openProviderUsageCenter_(self, _sender) -> None:
             from .provider_usage_window import ProviderUsageWindowController
 
@@ -242,13 +403,7 @@ else:
             if controller is None:
                 controller = ProviderUsageWindowController()
                 self._sidepulse_provider_usage_window = controller
-            controller.show(
-                getattr(
-                    self,
-                    "_sidepulse_provider_usage_state",
-                    ProviderUsageState((), None, None, False),
-                )
-            )
+            controller.show(self.provider_usage_state)
 
         @_legacy.objc.IBAction
         def performProviderUsageAction_(self, sender) -> None:
@@ -309,13 +464,8 @@ else:
 
         def why_panel_body(self) -> str:
             body = _BaseStatusBarController.why_panel_body(self)
-            state = getattr(
-                self,
-                "_sidepulse_provider_usage_state",
-                ProviderUsageState((), None, None, False),
-            )
             lines = ["Native provider usage"]
-            projection = project_usage_menu(state, now=time.time())
+            projection = project_usage_menu(self.provider_usage_state, now=time.time())
             lines.append(projection.title)
             for row in projection.rows:
                 lines.append(f"  {row.title}")
