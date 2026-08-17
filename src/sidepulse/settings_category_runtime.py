@@ -182,9 +182,9 @@ def _build_category_container(target, category: navigation.SettingsCategory):
                 index,
             )
         selector.setSelectedSegment_(0)
+        selector.setTag_(navigation.SETTINGS_CATEGORIES.index(category))
         selector.setTarget_(target)
         selector.setAction_("selectSettingsCategoryPage:")
-        selector.sidepulse_category_key = category.key
         header.addArrangedSubview_(selector)
 
     content = NSView.alloc().init()
