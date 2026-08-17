@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import plistlib
 import subprocess
+import threading
 from pathlib import Path
 
 from sidepulse.device_identity import DeviceKind
@@ -96,16 +97,23 @@ def test_identity_cache_returns_last_snapshot_without_blocking(tmp_path: Path) -
 
 def test_refresh_requests_are_latest_wins(tmp_path: Path) -> None:
     calls = 0
+    started = threading.Event()
+    release = threading.Event()
 
     def inventory():
         nonlocal calls
         calls += 1
+        if calls == 1:
+            started.set()
+            assert release.wait(2.0)
         return ()
 
     cache = DeviceIdentityCache(inventory=inventory)
     assert cache.request_refresh() is True
-    cache.request_refresh()
-    cache.request_refresh()
+    assert started.wait(1.0)
+    assert cache.request_refresh() is False
+    assert cache.request_refresh() is False
+    release.set()
     assert cache.wait(2.0) is True
-    assert calls <= 2
+    assert calls == 2
     cache.close()
