@@ -8,7 +8,7 @@ from sidepulse.provider_usage_platform import (
     ProviderUsageSnapshot,
     UsageLane,
 )
-from sidepulse.provider_usage_runtime import ProviderUsageService
+from sidepulse.provider_usage_runtime import ProviderUsageService, ProviderUsageState
 from sidepulse.provider_usage_settings import default_provider_usage_settings
 
 
@@ -179,3 +179,34 @@ def test_request_runs_off_caller_thread_and_coalesces(tmp_path):
     assert collector_threads[0] != threading.current_thread().name
     assert callbacks and callbacks[0].refreshing is False
     service.close()
+
+
+def test_service_restores_and_persists_last_known_good(tmp_path):
+    settings = default_provider_usage_settings()
+    initial = ProviderUsageState(
+        (snapshot("codex", remaining=17, observed=900),),
+        900,
+        960,
+        False,
+    )
+    saved = []
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={
+            "codex": lambda _pref, _home, observed, _credentials: snapshot(
+                "codex",
+                state=ProviderSourceState.UNAVAILABLE,
+                observed=observed,
+            )
+        },
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: 1000,
+        state_loader=lambda: initial,
+        state_saver=saved.append,
+    )
+    assert service.snapshot() == initial
+    refreshed = service.refresh_now(providers=("codex",), force=True)
+    assert refreshed.by_provider("codex").state is ProviderSourceState.STALE
+    assert refreshed.by_provider("codex").lanes[0].remaining_percent == 17
+    assert saved == [refreshed]
