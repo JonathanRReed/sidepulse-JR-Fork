@@ -15,6 +15,14 @@ def sidepulse_main(argv: list[str] | None = None) -> int:
         return integration_main(args[1:])
     if args[:1] == ["providers"]:
         return provider_main(args[1:])
+    # The source-checkout LaunchAgent and `sidepulse status-bar --foreground`
+    # both enter through this router. Load the native provider wrapper before
+    # starting AppKit so the menu, Usage Center, reset cues, and background
+    # accounting service are present in development as well as packaged runs.
+    if args[:1] == ["status-bar"] and "--foreground" in args:
+        from .provider_usage_status_bar import main as status_bar_main
+
+        return status_bar_main()
     return _legacy_sidepulse_main(args)
 
 
