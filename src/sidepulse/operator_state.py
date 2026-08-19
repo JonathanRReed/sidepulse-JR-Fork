@@ -46,6 +46,12 @@ MAX_CLOCK_DELTA_DIVERGENCE_SECONDS: Final = 5.0
 TIMING_UNCERTAINTY_LEASE_SECONDS: Final = 3_600.0
 TIMING_RECOVERY_CONFIRMATIONS: Final = 2
 MAX_CANONICAL_WORKS: Final = 1_000
+# A work whose newest event is older than a day is history, not state:
+# without an age bound the catalog accumulated every session ever seen,
+# and a days-old session with no Stop sat in the Agent Browser labeled
+# "active" forever. Only enforced while clock continuity is STABLE so an
+# uncertain wall clock can never mass-expire live work.
+CANONICAL_WORK_RETENTION_SECONDS: Final = 24 * 3_600.0
 MAX_CANONICAL_REQUESTS: Final = 1_000
 MAX_EVENTS_PER_REDUCTION: Final = 2_000
 MAX_REDUCER_DIAGNOSTICS: Final = 16
@@ -1548,6 +1554,23 @@ def reduce_operator_state(
         )
 
     _remove_parent_cycles(works, diagnostics)
+
+    if decision.continuity.status is ClockContinuityStatus.STABLE:
+        horizon = clock.wall_epoch - CANONICAL_WORK_RETENTION_SECONDS
+        expired = [
+            key
+            for key, work in works.items()
+            if work.watermark.occurred_at_epoch < horizon
+        ]
+        if expired:
+            diagnostics["canonical_work_retired"] = len(expired)
+            for key in expired:
+                del works[key]
+            requests = {
+                key: request
+                for key, request in requests.items()
+                if key.work_key in works
+            }
 
     sorted_work_keys = sorted(works, key=_work_sort_key)
     if len(sorted_work_keys) > MAX_CANONICAL_WORKS:

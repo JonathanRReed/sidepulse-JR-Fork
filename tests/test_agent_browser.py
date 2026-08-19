@@ -861,3 +861,49 @@ def test_projection_and_warm_query_p95_meet_pure_model_targets(
     query_p95 = quantiles(query_samples, n=20)[18]
     assert projection_p95 < 0.020
     assert query_p95 < 0.008
+
+
+def test_hour_dead_active_work_demotes_to_stale_recent() -> None:
+    """An "active" work whose newest event is over an hour old is a dead
+    session the provider never closed -- it must not present as live
+    ("Grok · active" with no grok process anywhere) nor count toward the
+    header's active total."""
+    root_key = _work_key("dead-active")
+    root = _work(root_key, rank=1, lifecycle=WorkLifecycle.ACTIVE)
+    state = _state((root,))
+    mailbox = _mailbox((root,))
+    preferences = _preference_projection(mailbox)
+    base_epoch = root.watermark.occurred_at_epoch
+
+    fresh_documents = build_agent_browser_documents(
+        state,
+        mailbox,
+        preferences,
+        LocalTriageState(()),
+        now_epoch=base_epoch + 60.0,
+    )
+    aged_documents = build_agent_browser_documents(
+        state,
+        mailbox,
+        preferences,
+        LocalTriageState(()),
+        now_epoch=base_epoch + 2 * 3_600.0,
+    )
+
+    assert fresh_documents[0].lifecycle_label == "active"
+    assert aged_documents[0].lifecycle_label == "stale"
+
+    fresh_projection = project_agent_browser(
+        fresh_documents,
+        AgentBrowserQuery(""),
+        generation=7,
+        selected_work_key=None,
+    )
+    aged_projection = project_agent_browser(
+        aged_documents,
+        AgentBrowserQuery(""),
+        generation=7,
+        selected_work_key=None,
+    )
+    assert fresh_projection.active_count == 1
+    assert aged_projection.active_count == 0

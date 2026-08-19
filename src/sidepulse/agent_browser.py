@@ -8,6 +8,7 @@ caller projects one exact selected family.
 
 from __future__ import annotations
 
+import time
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -36,6 +37,11 @@ from .provider_facts import (
 )
 
 MAX_AGENT_QUERY_SCALARS: Final = 200
+# An "active"/"waiting" work whose newest event is older than this is a
+# dead session the provider never closed (crashed turn, killed terminal)
+# -- presenting it as live ("Grok · active" with no grok anywhere) is a
+# lie. It demotes to the Recent shelf with a "stale" label instead.
+ACTIVE_AGE_STALE_SECONDS: Final = 3_600.0
 MAX_AGENT_BROWSER_DOCUMENTS: Final = 100
 MAX_AGENT_BROWSER_RESULTS: Final = 100
 MAX_AGENT_BROWSER_CATALOG: Final = 1_000
@@ -202,6 +208,8 @@ def build_agent_browser_documents(
     mailbox: AgentMailboxProjection,
     preference_projection: MailboxPreferenceProjection,
     local_triage: LocalTriageState,
+    *,
+    now_epoch: float | None = None,
 ) -> tuple[AgentBrowserDocument, ...]:
     """Build at most one global document for each retained primary family."""
     if type(state) is not CanonicalOperatorState:
@@ -213,6 +221,7 @@ def build_agent_browser_documents(
     if type(local_triage) is not LocalTriageState:
         raise ValueError("invalid local triage state")
 
+    now = time.time() if now_epoch is None else float(now_epoch)
     roots = {work.key: work for work in state.works if work.parent_key is None}
     children: dict[WorkKey, list[CanonicalWorkTruth]] = {key: [] for key in roots}
     for work in state.works:
@@ -256,7 +265,10 @@ def build_agent_browser_documents(
             )
         )
         actionable = _requests_are_actionable(family_requests)
-        shelf = visible_shelves.get(key) or _shelf_for(work.lifecycle, actionable)
+        aged = _age_stale(work, now)
+        shelf = (None if aged else visible_shelves.get(key)) or _shelf_for(
+            work.lifecycle, actionable, age_stale=aged
+        )
         preference = preferences.get(key)
         order_key = _family_order_key(
             key,
@@ -306,6 +318,7 @@ def build_agent_browser_documents(
                 mailbox_order=mailbox_order,
                 shelf=shelf,
                 worker_seeds=worker_seeds,
+                age_stale=_age_stale(work, now),
             )
         )
     catalog = tuple(primary_seeds)
@@ -480,12 +493,23 @@ def _family_order_key(
     )
 
 
+def _age_stale(work: CanonicalWorkTruth, now_epoch: float) -> bool:
+    return (
+        work.lifecycle in {WorkLifecycle.ACTIVE, WorkLifecycle.WAITING}
+        and now_epoch - work.watermark.occurred_at_epoch > ACTIVE_AGE_STALE_SECONDS
+    )
+
+
 def _shelf_for(
     lifecycle: WorkLifecycle,
     actionable: bool,
+    *,
+    age_stale: bool = False,
 ) -> MailboxSectionKind:
     if actionable:
         return MailboxSectionKind.NEEDS_YOU
+    if age_stale:
+        return MailboxSectionKind.RECENT
     if lifecycle in {WorkLifecycle.ACTIVE, WorkLifecycle.WAITING}:
         return MailboxSectionKind.IN_PROGRESS
     if lifecycle in {WorkLifecycle.COMPLETED, WorkLifecycle.FAILED}:
@@ -530,11 +554,18 @@ def _primary_seed_for_work(
     mailbox_order: int,
     shelf: MailboxSectionKind | None,
     worker_seeds: tuple[_WorkerSeed, ...],
+    age_stale: bool = False,
 ) -> _PrimarySeed:
     actionable = _requests_are_actionable(requests)
-    lifecycle_label = "needs you" if actionable else work.lifecycle.value
+    lifecycle_label = (
+        "needs you"
+        if actionable
+        else "stale"
+        if age_stale
+        else work.lifecycle.value
+    )
     acknowledged = any(request.key in acknowledged_request_keys for request in requests)
-    stale = work.source_freshness is SourceFreshness.STALE
+    stale = work.source_freshness is SourceFreshness.STALE or age_stale
     provider_label = _provider_label(work.key)
     state_values = [lifecycle_label]
     if pinned:
@@ -547,7 +578,7 @@ def _primary_seed_for_work(
         state_values.append("woke")
     if acknowledged:
         state_values.append("acknowledged")
-    if stale:
+    if stale and lifecycle_label != "stale":
         state_values.append("stale")
     if timing_uncertain:
         state_values.append("timing uncertain")

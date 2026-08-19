@@ -1261,3 +1261,35 @@ def test_declared_clock_and_output_bounds_are_exact() -> None:
     assert MAX_CANONICAL_WORKS == 1_000
     assert MAX_CANONICAL_REQUESTS == 1_000
     assert MAX_EVENTS_PER_REDUCTION == 2_000
+
+
+def test_day_old_work_is_retired_from_the_canonical_catalog() -> None:
+    """Without an age bound the catalog kept every session ever seen, and
+    a days-old work with no Stop sat in the Agent Browser as "active"
+    forever. A later batch from ANY source retires works whose newest
+    event is older than CANONICAL_WORK_RETENTION_SECONDS."""
+    from sidepulse.operator_state import CANONICAL_WORK_RETENTION_SECONDS
+
+    state, _batch_used, work_key, request_key = _initial_active_request()
+    assert any(work.key == work_key for work in state.works)
+
+    later_wall = 1_800_000_000.0 + CANONICAL_WORK_RETENTION_SECONDS + 3_600.0
+    other_source = _source("local:02")
+    other_work_key = _work_key(value="work:02", source=other_source)
+    other_watermark = _watermark(source=other_source, epoch=later_wall)
+    fresh_batch = _batch(
+        source=other_source,
+        watermark=other_watermark,
+        work_facts=(_work_fact(key=other_work_key, watermark=other_watermark),),
+    )
+
+    result = reduce_operator_state(
+        state,
+        fresh_batch,
+        clock=_clock(wall=later_wall, monotonic=100.0 + (later_wall - 1_800_000_000.0)),
+    )
+
+    surviving = {work.key for work in result.state.works}
+    assert other_work_key in surviving
+    assert work_key not in surviving
+    assert all(request.key != request_key for request in result.state.requests)
