@@ -1293,3 +1293,42 @@ def test_day_old_work_is_retired_from_the_canonical_catalog() -> None:
     assert other_work_key in surviving
     assert work_key not in surviving
     assert all(request.key != request_key for request in result.state.requests)
+
+
+def test_retention_fires_even_while_dead_sources_hold_timing_quarantine() -> None:
+    """Per-source timing quarantines linger forever for sources that never
+    send again, so global continuity can sit UNCERTAIN indefinitely after
+    a restart. Age retirement must not be held hostage by that -- only a
+    genuinely distrusted clock (discontinuity / future facts) blocks it."""
+    from sidepulse.operator_state import CANONICAL_WORK_RETENTION_SECONDS
+
+    state, _batch_used, work_key, _request_key = _initial_active_request()
+
+    # A clock jump quarantines every known source; the dead work's source
+    # never sends again, so its timing entry can only age out via lease.
+    jump_clock = _clock(wall=1_800_000_500.0, monotonic=90_000.0, boot="boot:02")
+    jump_source = _source("local:03")
+    jump_watermark = _watermark(source=jump_source, epoch=1_800_000_500.0)
+    jump_batch = _batch(source=jump_source, watermark=jump_watermark)
+    quarantined = reduce_operator_state(state, jump_batch, clock=jump_clock)
+    assert quarantined.state.clock_continuity.status is ClockContinuityStatus.UNCERTAIN
+
+    later_wall = 1_800_000_500.0 + CANONICAL_WORK_RETENTION_SECONDS + 3_600.0
+    later_clock = _clock(
+        wall=later_wall,
+        monotonic=90_000.0 + (later_wall - 1_800_000_500.0),
+        boot="boot:02",
+    )
+    later_watermark = _watermark(
+        "event:900", source=jump_source, epoch=later_wall
+    )
+    later_work_key = _work_key(value="work:03", source=jump_source)
+    later_batch = _batch(
+        source=jump_source,
+        watermark=later_watermark,
+        work_facts=(_work_fact(key=later_work_key, watermark=later_watermark),),
+    )
+    result = reduce_operator_state(quarantined.state, later_batch, clock=later_clock)
+
+    surviving = {work.key for work in result.state.works}
+    assert work_key not in surviving

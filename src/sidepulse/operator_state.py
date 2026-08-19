@@ -49,8 +49,9 @@ MAX_CANONICAL_WORKS: Final = 1_000
 # A work whose newest event is older than a day is history, not state:
 # without an age bound the catalog accumulated every session ever seen,
 # and a days-old session with no Stop sat in the Agent Browser labeled
-# "active" forever. Only enforced while clock continuity is STABLE so an
-# uncertain wall clock can never mass-expire live work.
+# "active" forever. Skipped while the reduction is clock-quarantined
+# (discontinuity or future-dated facts) so a distrusted wall clock can
+# never mass-expire live work.
 CANONICAL_WORK_RETENTION_SECONDS: Final = 24 * 3_600.0
 MAX_CANONICAL_REQUESTS: Final = 1_000
 MAX_EVENTS_PER_REDUCTION: Final = 2_000
@@ -1555,7 +1556,13 @@ def reduce_operator_state(
 
     _remove_parent_cycles(works, diagnostics)
 
-    if decision.continuity.status is ClockContinuityStatus.STABLE:
+    # Gated on "no clock quarantine" (no discontinuity, no future-dated
+    # facts) rather than global STABLE continuity: per-source timing
+    # quarantines linger for sources that never send again (a dead grok
+    # session's source has nobody left to confirm recovery), and a work
+    # that has been silent for a full day is retirable under any
+    # per-source lease -- only a distrusted wall clock forbids it.
+    if not decision.clock_quarantine:
         horizon = clock.wall_epoch - CANONICAL_WORK_RETENTION_SECONDS
         expired = [
             key
