@@ -10588,14 +10588,27 @@ class StatusBarController(NSObject):
 
     def set_device_brightness(self, device_id: str | None, brightness: float) -> None:
         value = normalize_brightness(brightness)
-        self._mutate_device_setting(
-            device_id,
-            lambda device: self.settings.with_device_brightness(
+
+        # Dragging the slider is explicit manual intent, so it also turns
+        # auto-brightness OFF -- otherwise the manual value silently loses
+        # to the screen-derived one and the slider "does nothing".
+        def mutate(device):
+            updated = self.settings.with_device_brightness(
                 str(device_id),
                 value,
                 name=device.name if device else None,
                 path=str(device.root) if device else None,
-            ),
+            )
+            return updated.with_device_auto_brightness(
+                str(device_id),
+                False,
+                name=device.name if device else None,
+                path=str(device.root) if device else None,
+            )
+
+        self._mutate_device_setting(
+            device_id,
+            mutate,
             lambda name: f"{name}: brightness {brightness_percent(value)}%.",
             "brightness",
         )
@@ -18295,6 +18308,13 @@ def recent_statuses(snapshot) -> list[AgentStatus]:
             if not status.is_subagent
             and bounded_age_seconds(snapshot.collected_at, status.updated_at)
             != float("inf")
+            # A session that never advanced past its start event is a CLI
+            # launch (completions, --version), not work -- listing it read
+            # as "grok is running" with no grok session anywhere.
+            and not (
+                status.mode == AgentMode.IDLE_READY
+                and status.event_name == "SessionStart"
+            )
         ]
     statuses.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
     return statuses[:12]

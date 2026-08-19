@@ -9752,6 +9752,25 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         self.assertEqual(controls["brightness_slider"].doubleValue(), 90.0)
         self.assertEqual(controls["brightness_label"].stringValue(), "35%")
 
+    def test_moving_the_brightness_slider_turns_auto_brightness_off(self) -> None:
+        """Manual slider intent must WIN: with auto-brightness left on, the
+        dragged value silently lost to the screen-derived one and the
+        slider read as "does nothing" on the real strip."""
+        self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
+        device_id = next(iter(self.controller.device_settings_controls))
+        self.controller.set_device_auto_brightness(device_id, True)
+        self.assertTrue(
+            self.controller.settings.auto_brightness_enabled_for_device(device_id)
+        )
+
+        self.controller.set_device_brightness(device_id, 120)
+
+        self.assertEqual(self.controller.settings.brightness_for_device(device_id), 120)
+        self.assertFalse(
+            self.controller.settings.auto_brightness_enabled_for_device(device_id)
+        )
+
     def test_settings_window_change_is_reflected_in_a_freshly_built_menu(self) -> None:
         self.controller.show_settings_window()
         self.controller.ensure_all_settings_panes()

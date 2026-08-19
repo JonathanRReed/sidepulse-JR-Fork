@@ -660,3 +660,33 @@ def test_failed_usage_read_does_not_cache_a_durable_empty_result() -> None:
         assert recovered.input_tokens == 7
         assert recovered.source_coverage["claude"].files_read == 1
         assert recovered.source_coverage["claude"].cache_hits == 0
+
+
+def test_bare_session_starts_never_reach_the_recent_fallback() -> None:
+    """A session that only ever emitted SessionStart is a CLI launch
+    (shell completions, --version), not work -- listing it in the
+    stale-only fallback read as "grok is running" with no session."""
+    from sidepulse.status_bar import recent_statuses
+
+    now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    bare_start = _status(
+        "codex:session:bare",
+        now - timedelta(minutes=5),
+        mode=AgentMode.IDLE_READY,
+        event_name="SessionStart",
+    )
+    real_work = _status(
+        "codex:session:real",
+        now - timedelta(minutes=50),
+        mode=AgentMode.WORKING,
+        event_name="PostToolUse",
+    )
+    snapshot = SimpleNamespace(
+        statuses=(),
+        stale_statuses=(bare_start, real_work),
+        collected_at=now,
+    )
+
+    rows = recent_statuses(snapshot)
+
+    assert [row.agent_id for row in rows] == ["codex:session:real"]

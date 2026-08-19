@@ -6,6 +6,7 @@ import plistlib
 import subprocess
 import threading
 from collections.abc import Callable
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 
 from .device_identity import (
@@ -80,6 +81,59 @@ def diskutil_facts(
     )
 
 
+STATUS_FILE_NAME = "STATUS.TXT"
+STATUS_MAX_BYTES = 16 * 1024
+
+# Firmware serial prefixes that name the product family outright. The
+# volume label is just "SIDEPULSE" on every device, so without this a Pro
+# strip classifies as a Dot (device_kind's bare-name fallback) and its
+# stable key -- and therefore its remembered brightness/calibration --
+# lands under the wrong identity.
+_SERIAL_PREFIX_PRODUCT = {
+    "SPP": "SidePulse Pro",
+    "SPD": "SidePulse Dot",
+}
+
+
+def hardware_status_serial(mount_path: Path) -> str | None:
+    """The device's own serial line from STATUS.TXT, or None.
+
+    STATUS.TXT is written by the firmware itself, so it is the one
+    self-identification that survives volume renames and reformats.
+    Bounded read; any I/O or parse trouble means "unknown", never an
+    exception into the inventory sweep.
+    """
+    try:
+        payload = (Path(mount_path) / STATUS_FILE_NAME).read_bytes()[:STATUS_MAX_BYTES]
+    except OSError:
+        return None
+    for raw_line in payload.decode("utf-8", errors="replace").splitlines():
+        parts = raw_line.split()
+        if len(parts) == 2 and parts[0] == "serial":
+            return _clean_string(parts[1])
+    return None
+
+
+def refine_facts_with_hardware_status(
+    facts: DeviceHardwareFacts,
+    mount_path: Path,
+) -> DeviceHardwareFacts:
+    """Fold the firmware's STATUS.TXT self-identification into diskutil facts.
+
+    The serial (e.g. SPP-000067) becomes the strongest identity evidence,
+    and its prefix corrects the product name so device_kind classifies a
+    Pro as a Pro even though the volume is labeled just "SIDEPULSE"."""
+    serial = hardware_status_serial(mount_path)
+    if serial is None:
+        return facts
+    product = _SERIAL_PREFIX_PRODUCT.get(serial[:3].upper())
+    return dataclass_replace(
+        facts,
+        serial_number=serial,
+        product_name=product or facts.product_name,
+    )
+
+
 def _sidepulse_candidate(path: Path) -> bool:
     normalized = "".join(character for character in path.name.lower() if character.isalnum())
     return normalized.startswith("sidepulse")
@@ -108,6 +162,7 @@ def inventory_mounts(
         facts = diskutil_facts(candidate, runner=runner)
         if facts is None:
             continue
+        facts = refine_facts_with_hardware_status(facts, candidate)
         identity = derive_device_identity(facts, trusted_mount_root=root)
         if identity is not None:
             identities[identity.key] = identity

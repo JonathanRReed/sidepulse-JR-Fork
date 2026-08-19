@@ -80,9 +80,16 @@ def persistable_device_identity(device_id: str, path: str) -> bool:
     """Reject path ghosts once stable inventory owns that physical device."""
     if device_id == _legacy.VIRTUAL_DEVICE_ID or path == _legacy.VIRTUAL_DEVICE_ID:
         return True
-    if isinstance(device_id, str) and device_id.startswith("sidepulse:"):
-        return True
     snapshot = _DEVICE_IDENTITIES.snapshot()
+    if isinstance(device_id, str) and device_id.startswith("sidepulse:"):
+        # A stable-keyed entry whose mount is now owned by a DIFFERENT
+        # stable key is a ghost of a re-keyed device (e.g. a Pro that
+        # was remembered as a Dot before STATUS.TXT serials corrected
+        # the classification) -- keep the live key, drop the ghost.
+        return not any(
+            identity.mount_path == path and identity.key != device_id
+            for identity in snapshot
+        )
     if not snapshot:
         return _ORIGINAL_PERSISTABLE_DEVICE_IDENTITY(device_id, path)
     if any(identity.mount_path == path for identity in snapshot):

@@ -87,28 +87,28 @@ CODEX_TRANSCRIPT_MAX_FILES = 12
 CODEX_TRANSCRIPT_MAX_LINES = 500
 CLAUDE_TRANSCRIPT_MAX_FILES = 24
 CLAUDE_TRANSCRIPT_MAX_LINES = 500
-# 45s: the rglob behind this walked 2,445 files on a real install, on the
-# main thread, at the top of every refresh. New transcript FILES appear
-# rarely; new LINES in known files are caught by per-file signatures.
+# 45s: the rglob walked 2,445 files on the main thread every refresh.
+# New FILES appear rarely; new LINES are caught by per-file signatures.
 TRANSCRIPT_FILE_LIST_CACHE_SECONDS = 45.0
 TRANSCRIPT_RECORDS_CACHE_MAX_ENTRIES = (
     CODEX_TRANSCRIPT_MAX_FILES + CLAUDE_TRANSCRIPT_MAX_FILES
 ) * 4
 TRANSCRIPT_FILE_LIST_CACHE_MAX_ENTRIES = 16
-# Keep at most a day of finished sessions: latest.json accumulated every
-# session ever seen (118 statuses / 367KB on a real install) and was
-# re-serialized on every hook event.
+# Keep a day of finished sessions: latest.json once accumulated every
+# session ever seen and was re-serialized on every hook event.
 STATUS_RETENTION_SECONDS = 24 * 3600.0
 LATEST_STATE_WRITE_INTERVAL_SECONDS = 1.0
-# Transcript-derived detail text is capped before it reaches any UI
-# surface (T3 caps at 160 and redacts -- long tool output in a menu row
-# or notification is noise at best and a leak at worst).
+# Transcript detail is capped before any UI surface (T3 caps at 160 --
+# long tool output in a menu row is noise at best, a leak at worst).
 DETAIL_TEXT_CAP = 160
 CLAUDE_TRANSCRIPT_MTIME_HEARTBEAT_SKEW_SECONDS = 30.0
 CODEX_SESSION_INDEX_MAX_LINES = 5000
 COMPLETED_VISIBLE_SECONDS = 20 * 60.0
 IDLE_VISIBLE_SECONDS = 0.0
 POST_TOOL_WORKING_VISIBLE_SECONDS = 2 * 60.0
+# A "working" agent whose hooks have been silent this long is a dead one
+# (crashed turn, killed terminal) -- demote instead of pulsing for an hour.
+WORKING_SILENCE_SECONDS = 10 * 60.0
 CODEX_USAGE_LIMIT_TERMINAL_CLASSIFICATIONS = frozenset({"usage_limit_exceeded"})
 LATEST_STATE_MAX_BYTES = 4 * 1_024 * 1_024
 MAX_PENDING_OPERATOR_EVENTS = 2_000
@@ -585,8 +585,7 @@ class AgentMonitor:
 
         visible = tuple(fresh)
         # The snapshot ALWAYS carries stale statuses; consumers decide
-        # visibility (the dropdown falls back to them when idle, the CLI
-        # gates them behind --all at render time).
+        # visibility (dropdown idle fallback, CLI --all).
         stale_visible = tuple(stale)
         aggregate = aggregate_status(visible, stale_visible)
 
@@ -2620,9 +2619,8 @@ def mode_for_event(record: HookEvent) -> AgentMode | None:
     if event in {"UserPromptSubmit", "PreCompact", "PostCompact", "SubagentStart"}:
         return AgentMode.WORKING
     if event == "SubagentStop":
-        # A finished sub-agent can't be answered -- their reports often
-        # END with question-shaped text, but there is nobody to ask, so
-        # mapping them to an ask left a phantom "Needs You" glowing.
+        # A finished sub-agent can't be answered -- mapping its often
+        # question-shaped report to an ask left a phantom "Needs You".
         return AgentMode.COMPLETED
     if event == "Stop":
         if _assistant_message_asks_question(raw.get("last_assistant_message")):
@@ -2754,9 +2752,8 @@ def aggregate_status(
 
     return AggregateStatus(
         mode=representative.mode,
-        # Main agents only. `sidepulse status` reported 38 here against 3
-        # real ones because every Task worker counted; a count is a count
-        # wherever it is printed.
+        # Main agents only: every Task worker once counted here
+        # (38 reported against 3 real ones).
         active_count=sum(
             1
             for status in statuses
@@ -2870,17 +2867,17 @@ def status_for_snapshot(
     *,
     post_tool_working_visible_seconds: float,
 ) -> AgentStatus:
-    if (
-        status.mode == AgentMode.WORKING
-        and status.event_name == "PostToolUse"
-        and post_tool_working_visible_seconds >= 0
-        and not is_recent(
-            now,
-            status.updated_at,
-            post_tool_working_visible_seconds,
-        )
-    ):
-        return _replace_mode(status, AgentMode.COMPLETED)
+    if status.mode == AgentMode.WORKING and post_tool_working_visible_seconds >= 0:
+        if status.event_name in ("PostToolUse", "PostToolUseFailure"):
+            window = post_tool_working_visible_seconds
+        elif is_recent(now, status.updated_at, 3600.0):
+            window = WORKING_SILENCE_SECONDS
+        else:
+            # Beyond the stale horizon keep the honest last-heard mode;
+            # demotion is only for fresh phantoms that would pulse on.
+            return status
+        if not is_recent(now, status.updated_at, window):
+            return _replace_mode(status, AgentMode.COMPLETED)
     return status
 
 
@@ -3248,8 +3245,7 @@ def _assistant_message_asks_question(message: object) -> bool:
     if not lines:
         return False
 
-    # Only the CLOSING lines: a question aimed at the user sits at the
-    # end of the turn. Scanning eight lines deep flagged summaries whose
+    # Only the CLOSING lines: scanning deeper flagged summaries whose
     # bullets merely started with "how"/"what" -- the phantom ask.
     for line in reversed(lines[-3:]):
         if _assistant_status_line(line):
