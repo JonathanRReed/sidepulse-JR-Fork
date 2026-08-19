@@ -62,7 +62,7 @@ def load_integration_compatibility_manifest() -> IntegrationCompatibilityManifes
             connection_mode=str(row.get("connectionMode") or ""),
         )
         if not (
-            entry.integration in {"t3code", "codexbar"}
+            entry.integration == "t3code"
             and entry.minimum_version
             and entry.maximum_tested_version
             and entry.protocol_fingerprint.startswith("sha256:")
@@ -74,7 +74,7 @@ def load_integration_compatibility_manifest() -> IntegrationCompatibilityManifes
         ):
             raise ValueError("invalid integration compatibility entry")
         entries.append(entry)
-    if len(entries) != 2 or len({entry.integration for entry in entries}) != 2:
+    if len(entries) != 1 or {entry.integration for entry in entries} != {"t3code"}:
         raise ValueError("incomplete integration compatibility manifest")
     return IntegrationCompatibilityManifest(
         schema_version=INTEGRATION_COMPATIBILITY_SCHEMA_VERSION,

@@ -327,6 +327,7 @@ class ScreenBarSampler:
         self._closed = False
         self._busy = False
         self._published_generation: int | None = None
+        self._batch_queue: list[tuple[int, Sequence[Sequence[int]]]] = []
         self._worker_ident: int | None = None
         self._worker = threading.Thread(
             target=self._run,
@@ -514,10 +515,53 @@ class ScreenBarSampler:
         result = controller.parse(program, int(parse_anchor * 1000.0))
         return bool(getattr(result, "ok", False))
 
+    _STEP_BATCH_FRAMES = 24
+
+    def _pixels_for(
+        self,
+        controller: _SamplerController,
+        sampled_at: float,
+        interval: float | None,
+    ) -> Sequence[Sequence[int]] | None:
+        """One frame, prefetching a batch when the engine supports it.
+
+        Per-frame JavaScriptCore calls were the app's hottest path while
+        the bar animates; a batch renders N future frames in one call and
+        the queue serves them as their timestamps come due. Any timing
+        mismatch (a stall, a new cadence) simply drops the queue."""
+        now_ms = int(sampled_at * 1000.0)
+        step_batch = getattr(controller, "step_batch", None)
+        if interval is None or not callable(step_batch):
+            return controller.step(now_ms)
+        interval_ms = max(1, int(round(interval * 1000.0)))
+        queue = self._batch_queue
+        if queue:
+            expected_ms, frame = queue[0]
+            if abs(expected_ms - now_ms) <= 1:
+                queue.pop(0)
+                return frame
+            self._batch_queue = queue = []
+        try:
+            frames = step_batch(now_ms, interval_ms, self._STEP_BATCH_FRAMES)
+        except Exception:
+            return controller.step(now_ms)
+        if not frames:
+            return controller.step(now_ms)
+        for offset, frame in enumerate(frames[1:], start=1):
+            queue.append((now_ms + offset * interval_ms, frame))
+        return frames[0]
+
     def _step(
-        self, controller: _SamplerController, generation: int, sampled_at: float
+        self,
+        controller: _SamplerController,
+        generation: int,
+        sampled_at: float,
+        *,
+        interval: float | None = None,
     ) -> ColorSample | None:
-        pixels = controller.step(int(sampled_at * 1000.0))
+        pixels = self._pixels_for(controller, sampled_at, interval)
+        if pixels is None:
+            return None
         if len(pixels) != self._led_count:
             return None
         colors: list[Color] = []
@@ -548,6 +592,7 @@ class ScreenBarSampler:
         interval: float,
     ) -> None:
         current = pair
+        self._batch_queue = []
         while not self._is_superseded():
             next_at = current.following.sampled_at + interval
             if command.motion is MotionClass.FINITE and (
@@ -557,7 +602,9 @@ class ScreenBarSampler:
                 return
             if not self._wait_sample_interval(next_at):
                 return
-            following = self._step(controller, command.generation, next_at)
+            following = self._step(
+                controller, command.generation, next_at, interval=interval
+            )
             if following is None or self._is_superseded():
                 return
             current = SamplePair(current.following, following)

@@ -19,8 +19,8 @@ from sidepulse.provider_usage_sync_runtime import (
     build_local_sync_packet,
 )
 from sidepulse.provider_usage_sync_settings import (
-    ProviderSyncSettings,
     ProviderSyncPeer,
+    ProviderSyncSettings,
 )
 from sidepulse.provider_usage_sync_transport import SftpFetchResult
 

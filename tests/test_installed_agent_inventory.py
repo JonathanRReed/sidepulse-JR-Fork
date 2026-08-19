@@ -26,7 +26,7 @@ def test_inventory_exposes_a_content_free_read_only_collection_boundary() -> Non
     assert InventoryRoot.__name__ == "InventoryRoot"
     assert InstalledAgentInventoryResult.__name__ == "InstalledAgentInventoryResult"
     assert callable(collect_installed_agent_inventory)
-    assert len(default_inventory_candidates()) == 17
+    assert len(default_inventory_candidates()) == 19
 
 
 def test_antigravity_cli_uses_the_official_agy_name_with_bounded_common_install_roots() -> None:
@@ -552,8 +552,8 @@ def test_inventory_result_is_worker_payload_safe_and_rejects_noninventory_comman
 
     result = execute_inventory_command(command)
 
-    assert result.candidate_count == 17
-    assert result.rejected_count == 17
+    assert result.candidate_count == 19
+    assert result.rejected_count == 19
     assert str(tmp_path) not in repr(result)
     invalid = RuntimeWorkCommand(
         RuntimeWorkerDomain.OS_POLL,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+from datetime import datetime
 from itertools import islice
 from types import MappingProxyType, ModuleType
 
@@ -13,6 +14,33 @@ from .models import AgentStatus
 MAX_EXTERNAL_STATUS_SOURCES = 16
 MAX_EXTERNAL_STATUSES_PER_SOURCE = 1_024
 MAX_EXTERNAL_STATUSES_TOTAL = 4_096
+_legacy_status_is_stale = _legacy.status_is_stale
+if not getattr(_legacy, "_sidepulse_collector_status_is_stale_patched", False):
+
+    def _sidepulse_status_is_stale(
+        status: AgentStatus,
+        now: datetime,
+        *,
+        stale_after_seconds: float,
+        tool_running_timeout_seconds: float,
+        completed_visible_seconds: float,
+        idle_visible_seconds: float,
+    ) -> bool:
+        # An integration that marks its own row stale (a last-known-good
+        # projection) stays stale no matter how fresh the timestamp is.
+        return status.stale or _legacy_status_is_stale(
+            status,
+            now,
+            stale_after_seconds=stale_after_seconds,
+            tool_running_timeout_seconds=tool_running_timeout_seconds,
+            completed_visible_seconds=completed_visible_seconds,
+            idle_visible_seconds=idle_visible_seconds,
+        )
+
+    _legacy.status_is_stale = _sidepulse_status_is_stale
+    _legacy._sidepulse_collector_status_is_stale_patched = True
+
+
 _EXTERNAL_SOURCE_ID = re.compile(r"[a-z][a-z0-9._-]{0,63}\Z")
 _LegacyLiveAgentMonitor = _legacy.LiveAgentMonitor
 

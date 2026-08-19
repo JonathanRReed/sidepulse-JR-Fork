@@ -12,12 +12,16 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 from . import _status_bar_production as _production
 from .device_identity import DeviceKind, device_kind, normalize_device_label
 from .device_inventory import DeviceIdentityCache
-from .menu_projection import MenuProjectionInputs, project_root_menu
+from .menu_projection import (
+    MenuProjectionInputs,
+    _glance_title,
+    project_root_menu,
+)
 
 _legacy = _production._legacy
 JRStatusBarController = _production.JRStatusBarController
@@ -326,6 +330,60 @@ def build_menu(snapshot, state, target):
     _request_device_identity_refresh()
     menu = _ORIGINAL_BUILD_MENU(snapshot, state, target)
     return _compact_existing_menu(menu, snapshot, target)
+
+
+_ORIGINAL_CANONICAL_ROOT_SNAPSHOT = getattr(
+    _legacy,
+    "_sidepulse_original_canonical_root_snapshot",
+    _legacy._canonical_agent_root_snapshot,
+)
+_legacy._sidepulse_original_canonical_root_snapshot = (
+    _ORIGINAL_CANONICAL_ROOT_SNAPSHOT
+)
+
+
+def _compact_canonical_root_snapshot(snapshot, target, *, menu=None):
+    """Keep open-menu patches in place under the compact root menu.
+
+    The installed root menu carries the compact glance title on the mailbox
+    summary row. The open-menu tracking path rebuilds fresh legacy items to
+    diff against, and their legacy summary title would read as a layout
+    change, downgrading every live patch (enabling an Open row while the
+    user is looking at it) into a deferred rebuild.
+    """
+    native = _ORIGINAL_CANONICAL_ROOT_SNAPSHOT(snapshot, target, menu=menu)
+    if native is None or menu is not None:
+        return native
+    states, items = native
+    summary = items.get("agent-mailbox:summary")
+    if summary is None:
+        return native
+    active, needs_you, ready = _mailbox_counts(target)
+    glance = _glance_title(
+        SimpleNamespace(
+            active_count=active,
+            needs_you_count=needs_you,
+            ready_count=ready,
+        )
+    )
+    summary.setTitle_(glance)
+    updated = tuple(
+        _legacy._native_item_state(
+            summary,
+            item_key=state.item_key,
+            parent_key=state.parent_key,
+            order=state.order,
+            submenu_key=state.submenu_key,
+            action_kind=state.action_kind,
+        )
+        if state.item_key == "agent-mailbox:summary"
+        else state
+        for state in states
+    )
+    return updated, items
+
+
+_legacy._canonical_agent_root_snapshot = _compact_canonical_root_snapshot
 
 
 _legacy.device_id_for_root = device_id_for_root

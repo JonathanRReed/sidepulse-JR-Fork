@@ -6,8 +6,8 @@ import math
 import threading
 import time
 from collections import Counter, deque
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 MAX_METRICS = 64
 MAX_SAMPLES_PER_METRIC = 512

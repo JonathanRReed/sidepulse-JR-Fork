@@ -111,10 +111,10 @@ __all__ = [
     "MAX_BAND_WIDTH",
     "MIN_BAND_WIDTH",
     "OUTLINE_ALPHA",
-    "ScreenBarSemantic",
-    "ScreenBarVisual",
     "VERTICAL_INSET",
     "WINDOW_WIDTH",
+    "ScreenBarSemantic",
+    "ScreenBarVisual",
     "rounded_band_bounds",
     "visual_for_semantic",
 ]

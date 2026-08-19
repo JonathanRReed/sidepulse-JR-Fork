@@ -97,6 +97,7 @@ _PRODUCT_PROVIDER_LABELS: Final = {
     "openclaw": "OpenClaw",
     "opencode": "OpenCode",
     "antigravity": "Antigravity",
+    "kiro": "Kiro",
 }
 _INERT_DIAGNOSTIC_IDS: Final = frozenset(
     {
@@ -539,6 +540,15 @@ _PROVIDER_EVENT_RULES: Final[dict[str, dict[str, _EventRule]]] = {
         "Stop": _STOP,
         "StopFailure": _STOP_FAILURE,
         "StopIncomplete": _STOP_INCOMPLETE,
+    },
+    # Kiro installs exactly the five lifecycle hooks its agent files
+    # support; there is no ask- or failure-shaped event to map.
+    "kiro": {
+        "SessionStart": _SESSION_START,
+        "UserPromptSubmit": _USER_PROMPT,
+        "PreToolUse": _PRE_TOOL,
+        "PostToolUse": _POST_TOOL,
+        "Stop": _STOP,
     },
 }
 

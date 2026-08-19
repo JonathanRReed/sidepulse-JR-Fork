@@ -363,6 +363,28 @@ _INSTALLED_SURFACE_REGISTRATIONS: Final = validate_installed_surface_registratio
             SurfaceDetectorKind.EXTENSION_IDENTIFIER,
             "github-copilot",
         ),
+        _registration(
+            "kiro",
+            "cli",
+            "Kiro CLI",
+            InstalledSurfaceKind.CLI,
+            SurfaceSupportLevel.LIFECYCLE,
+            ("live_agent_events",),
+            "kiro-hooks-v1",
+            SurfaceDetectorKind.PATH_MARKER,
+            "kiro-cli",
+        ),
+        _registration(
+            "kiro",
+            "sidepulse-agent",
+            "Kiro SidePulse agent",
+            InstalledSurfaceKind.LOCAL_HARNESS,
+            SurfaceSupportLevel.LIFECYCLE,
+            ("live_agent_events",),
+            "kiro-hooks-v1",
+            SurfaceDetectorKind.CONFIG_MARKER,
+            "kiro-hooks-v1",
+        ),
     )
 )
 

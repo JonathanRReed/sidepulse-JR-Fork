@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Callable
 
 from .provider_usage_runtime import ProviderUsageState
 from .provider_usage_sync_runtime import ProviderSyncRefresh, ProviderSyncRuntime

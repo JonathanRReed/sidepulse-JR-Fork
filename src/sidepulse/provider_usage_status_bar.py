@@ -65,6 +65,22 @@ def _remove_legacy_usage_item(menu, target) -> None:
         index = -1
     if index >= 0:
         menu.removeItemAtIndex_(index)
+    else:
+        # The compact facade may have grouped the legacy view under its own
+        # "Usage · …" parent row; removing only the nested item would leave
+        # a second, empty usage row behind. Remove the whole parent.
+        for parent_index in range(menu.numberOfItems()):
+            parent = menu.itemAtIndex_(parent_index)
+            submenu = parent.submenu()
+            if submenu is None:
+                continue
+            try:
+                nested = submenu.indexOfItem_(item)
+            except Exception:
+                nested = -1
+            if nested >= 0:
+                menu.removeItemAtIndex_(parent_index)
+                break
     target._usage_menu_item = None
     target._usage_menu_view = None
 
@@ -152,6 +168,19 @@ def build_menu(snapshot, state, target):
     _remove_legacy_usage_item(menu, target)
     native_item = _native_usage_menu_item(target)
     index = _menu_index(menu, "Devices")
+    if index < 0:
+        # The compact facade retitles the devices row ("Devices · N
+        # connected"); anchor on the prefix before falling back.
+        index = next(
+            (
+                position
+                for position in range(menu.numberOfItems())
+                if str(menu.itemAtIndex_(position).title() or "").startswith(
+                    "Devices"
+                )
+            ),
+            -1,
+        )
     if index < 0:
         index = min(4, menu.numberOfItems())
     menu.insertItem_atIndex_(native_item, index)

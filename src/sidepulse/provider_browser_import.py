@@ -7,10 +7,10 @@ import re
 import shutil
 import stat
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable
 
 from .provider_browser_consent import (
     BrowserConsentStore,

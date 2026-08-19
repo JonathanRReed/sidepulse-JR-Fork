@@ -145,8 +145,11 @@ class AttentionProjection:
         return (*self.visible_rows, *self.worker_rows)
 
 
+# Terminal, operator-facing failures only. A PostToolUseFailure is a tool
+# the agent continues past (a failed grep, a nonzero exit) -- routine
+# agentic work that must not fire the red failure blink; the same rule
+# already governs mode mapping in the collector.
 _FAILURE_EVENTS = {
-    "PostToolUseFailure",
     "StopFailure",
     "PermissionDenied",
 }
@@ -424,13 +427,7 @@ def _lifecycle_mode(status: AgentStatus, actionable: bool) -> LifecycleMode:
 
 
 def _is_failure_event(status: AgentStatus) -> bool:
-    return not status.stale and (
-        status.event_name in _FAILURE_EVENTS
-        or (
-            status.event_name == "PostToolUse"
-            and status.mode == AgentMode.BLOCKED_ERROR
-        )
-    )
+    return not status.stale and status.event_name in _FAILURE_EVENTS
 
 
 def _semantic_event_name(status: AgentStatus) -> str:

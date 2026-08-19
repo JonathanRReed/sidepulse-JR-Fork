@@ -40,7 +40,14 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "sidepulse"
 # accident: an entry here is a decision deferred, and the deferral is what
 # cost this project its blend modes, its log janitors and a 1,139-line
 # presentation layer.
-KNOWN_UNWIRED: dict[str, str] = {}
+KNOWN_UNWIRED: dict[str, str] = {
+    "runtime_truth": (
+        "Arrived with the runtime-truth stabilization wave as a pure "
+        "classification model plus its unit tests; consuming it means "
+        "changing the dropdown's state language for hook intake and "
+        "process ownership, which is an owner call, not a cleanup."
+    ),
+}
 
 # Legitimate separate entry points -- not imported by the app by design.
 ENTRY_POINTS = {"__init__", "__main__", "cli", "doctor", "hook", "hook_entry"}

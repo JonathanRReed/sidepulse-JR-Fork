@@ -8,9 +8,9 @@ import os
 import re
 import secrets
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 PAIRING_DOCUMENT_SCHEMA_VERSION = 1
 _PAIRING_SECRET_BYTES = 32
@@ -151,8 +151,8 @@ def import_pairing_document(target: Path, *, credentials) -> ImportedPairing:
 
 
 __all__ = [
-    "ImportedPairing",
     "PAIRING_DOCUMENT_SCHEMA_VERSION",
+    "ImportedPairing",
     "export_pairing_document",
     "import_pairing_document",
 ]

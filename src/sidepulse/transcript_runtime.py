@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import heapq
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Callable
 
 MAX_TRANSCRIPT_BATCH_RECORDS = 4_000
 MAX_TRANSCRIPT_SCAN_RECORDS = 100_000

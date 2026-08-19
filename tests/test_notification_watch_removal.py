@@ -40,10 +40,16 @@ def test_legacy_foreign_notification_preferences_migrate_inertly(tmp_path: Path)
 
     save_settings(settings, path)
     migrated = json.loads(path.read_text(encoding="utf-8"))
-    assert "notification_blinks_enabled" not in migrated
-    assert "notification_app_colors" not in migrated
-    assert "notification" not in migrated["signal_styles"]
     assert migrated["completion_notification_enabled"] is False
+    # signal_styles is a runtime-owned collection: the migrated-away
+    # notification entry must actually leave the file, not merely stay
+    # inert. Unknown top-level legacy keys still persist for downgrade
+    # safety but can never activate on reload.
+    assert "notification" not in migrated["signal_styles"]
+    reloaded = load_settings(path)
+    assert not hasattr(reloaded, "notification_blinks_enabled")
+    assert not hasattr(reloaded, "notification_app_colors")
+    assert "notification" not in reloaded.signal_styles
 
 
 def test_trusted_controller_has_no_foreign_notification_watcher_lifecycle(

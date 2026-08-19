@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 BROWSER_CONSENT_SCHEMA_VERSION = 1
 _PROVIDER = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")

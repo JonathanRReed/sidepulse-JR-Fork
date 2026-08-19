@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
 
 
 class DeviceKind(str, Enum):
@@ -130,9 +130,7 @@ def normalize_device_label(raw: str, kind: DeviceKind) -> str:
 
 
 def _digest(namespace: str, value: str) -> str:
-    payload = f"sidepulse-device-v1\0{namespace}\0{value.strip().lower()}".encode(
-        "utf-8"
-    )
+    payload = f"sidepulse-device-v1\0{namespace}\0{value.strip().lower()}".encode()
     return hashlib.sha256(payload).hexdigest()[:24]
 
 

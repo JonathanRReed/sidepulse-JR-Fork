@@ -219,6 +219,8 @@ _INVENTORY_CANDIDATES: Final = (
     _candidate("google", "gemini-desktop", SurfaceDetectorKind.BUNDLE_IDENTIFIER, "gemini-desktop", "applications", ("Gemini.app",), InventoryMarkerKind.DIRECTORY),
     _candidate("google", "gemini-code-assist-vscode", SurfaceDetectorKind.EXTENSION_IDENTIFIER, "gemini-code-assist-vscode", "vscode", ("google.geminicodeassist",), InventoryMarkerKind.DIRECTORY),
     _candidate("github", "copilot-ide", SurfaceDetectorKind.EXTENSION_IDENTIFIER, "github-copilot", "vscode", ("github.copilot",), InventoryMarkerKind.DIRECTORY),
+    _candidate("kiro", "cli", SurfaceDetectorKind.PATH_MARKER, "kiro-cli", "home", (".local", "bin", "kiro-cli"), InventoryMarkerKind.EXECUTABLE_LINK_OR_FILE, alternate_locations=(("homebrew", ("bin", "kiro-cli")), ("local_bin", ("bin", "kiro-cli")))),
+    _candidate("kiro", "sidepulse-agent", SurfaceDetectorKind.CONFIG_MARKER, "kiro-hooks-v1", "home", (".kiro", "agents", "sidepulse.json"), InventoryMarkerKind.REGULAR_FILE, configured=True),
 )
 
 

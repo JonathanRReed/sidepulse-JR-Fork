@@ -238,6 +238,7 @@ _FIRST_PARTY_ADAPTERS = {
     # with no local file to read, and it stays represented by the link-only
     # google-antigravity policy rather than by a quota adapter here.
     ProviderIdentifier("antigravity"): frozenset({AdapterIdentifier("hooks")}),
+    ProviderIdentifier("kiro"): frozenset({AdapterIdentifier("hooks")}),
 }
 
 _CAPACITY_CAPABILITY_IDENTIFIERS = frozenset(

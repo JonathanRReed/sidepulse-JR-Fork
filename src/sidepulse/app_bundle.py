@@ -192,6 +192,23 @@ import os
 import sys
 
 
+def _sidepulse_site_packages_boot():
+    # A plain PYTHONPATH entry does not process .pth files, and the venv
+    # installs sidepulse through an editable .pth. Re-add the packages
+    # directory as a real site dir so those redirects resolve inside the
+    # bundle interpreter. Inert everywhere else: the directory is already
+    # a site dir for any interpreter that belongs to the venv.
+    try:
+        import site
+
+        site.addsitedir({site_packages!r})
+    except Exception:
+        pass
+
+
+_sidepulse_site_packages_boot()
+
+
 def _sidepulse_plain_launch_boot():
     executable = sys.executable or ""
     if "SidePulse.app/Contents/MacOS/" not in executable:
@@ -271,7 +288,9 @@ def build_app_bundle(
 
     boot.mkdir(parents=True, exist_ok=True)
     shim_path = boot / "sitecustomize.py"
-    shim_source = _BOOT_SHIM.replace("{venv_python!r}", repr(str(venv_exe)))
+    shim_source = _BOOT_SHIM.replace(
+        "{venv_python!r}", repr(str(venv_exe))
+    ).replace("{site_packages!r}", repr(str(_site_packages(venv_root))))
     if not shim_path.exists() or shim_path.read_text() != shim_source:
         shim_path.write_text(shim_source)
 

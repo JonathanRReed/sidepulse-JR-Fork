@@ -11,9 +11,9 @@ import json
 import math
 import sqlite3
 import ssl
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -69,7 +69,7 @@ def _default_http_json(
     request = Request(url, data=payload, headers=request_headers, method=method)
     context = None
     if parsed.scheme == "https" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}:
-        context = ssl._create_unverified_context()  # noqa: SLF001 - loopback only.
+        context = ssl._create_unverified_context()
     try:
         with urlopen(request, timeout=timeout, context=context) as response:
             data = response.read(HTTP_MAX_BYTES + 1)

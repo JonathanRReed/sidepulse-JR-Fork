@@ -369,9 +369,9 @@ def merge_provider_sync(
 
 __all__ = [
     "MAX_SYNC_PACKET_BYTES",
+    "PROVIDER_SYNC_SCHEMA_VERSION",
     "MachineUsageObservation",
     "MergedProviderSync",
-    "PROVIDER_SYNC_SCHEMA_VERSION",
     "ProviderSyncPacket",
     "decode_signed_packet",
     "encode_signed_packet",

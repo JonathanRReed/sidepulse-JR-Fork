@@ -689,6 +689,7 @@ def _alcove_window_values(screen_x: float, screen_width: float):
             if str(entry.get("kCGWindowOwnerName", "")) != ALCOVE_OWNER_NAME:
                 continue
             window_number = int(entry.get("kCGWindowNumber", 0))
+            window_layer = int(entry.get("kCGWindowLayer", 0))
             bounds = entry.get("kCGWindowBounds") or {}
             window_x = float(bounds.get("X", 0.0))
             window_y = float(bounds.get("Y", 0.0))
@@ -710,13 +711,34 @@ def _alcove_window_values(screen_x: float, screen_width: float):
         if not (screen_x <= center_x <= screen_x + screen_width):
             continue
         candidates.append(
-            (window_y, -window_width, window_number, window_x, window_y, window_width)
+            (
+                window_y,
+                -window_width,
+                # Alcove stacks an empty backing window at the same bounds
+                # as the visible capsule; the capsule lives on the HIGHER
+                # window layer, and a bare window-number tiebreak selected
+                # the empty backing sheet — every capture then scanned as
+                # "image unusable" and the bar never followed the capsule.
+                -window_layer,
+                -window_number,
+                window_number,
+                window_x,
+                window_y,
+                window_width,
+            )
         )
     if not candidates:
         return None
-    _sort_y, _sort_width, window_number, window_x, window_y, window_width = min(
-        candidates
-    )
+    (
+        _sort_y,
+        _sort_width,
+        _sort_layer,
+        _sort_number,
+        window_number,
+        window_x,
+        window_y,
+        window_width,
+    ) = min(candidates)
     return window_number, window_x, window_y, window_width
 
 
@@ -1429,7 +1451,14 @@ class VirtualLedView(NSView):
         # display the window remains transparent and contains only LED color.
         # This shape always matches the *real* notch width -- wings (below)
         # only ever extend the LED glow past it, never the housing itself.
-        if self.has_notch and (rim := max(0.0, min(1.0, getattr(self, "min_glow", 0.25)))) > 0.0:
+        # While following Alcove, ALCOVE owns the shell: painting a second
+        # notch-deep slab under its capsule read as a clunky black square
+        # below the notch, so only the LED band renders there.
+        if (
+            self.has_notch
+            and self.alcove_silhouette is None
+            and (rim := max(0.0, min(1.0, getattr(self, "min_glow", 0.25)))) > 0.0
+        ):
             NSColor.colorWithCalibratedRed_green_blue_alpha_(
                 0.006, 0.007, 0.010, 0.93
             ).set()
@@ -1488,8 +1517,13 @@ class VirtualLedView(NSView):
         # Edge highlight/shadow: unclipped and full-width (as it always
         # was, before wings existed) -- with wings on, this reads as one
         # continuous strip rather than having a visible seam where the
-        # notch's own housing ends and the wing begins.
-        if self.has_notch and (rim := max(0.0, min(1.0, getattr(self, "min_glow", 0.25)))) > 0.0:
+        # notch's own housing ends and the wing begins. Skipped while
+        # following Alcove for the same reason as the housing above.
+        if (
+            self.has_notch
+            and self.alcove_silhouette is None
+            and (rim := max(0.0, min(1.0, getattr(self, "min_glow", 0.25)))) > 0.0
+        ):
             fill_rect_with_cg(
                 cg_context,
                 ((0.0, LED_BAND_HEIGHT - 0.55), (width, 0.55)),
@@ -1685,9 +1719,17 @@ class VirtualLedView(NSView):
         # intensity. With the wings' 0.55 floor here, the section under
         # the notch rendered hot while the wings faded, and the seam
         # between the two read as a rendering bug, not a design.
+        underline_base = (
+            max(0.0, height - observed_height - 1.0)
+            if self.alcove_silhouette is not None
+            else 0.0
+        )
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath.bezierPathWithRect_(
-            ((left_bound, 0.0), (right_bound - left_bound, LED_BAND_HEIGHT + 3.0))
+            (
+                (left_bound, underline_base),
+                (right_bound - left_bound, LED_BAND_HEIGHT + 3.0),
+            )
         ).addClip()
         self._fill_glow_row(
             cg_context, colors, led_width, notch_width, glow_height, height,
@@ -1777,9 +1819,21 @@ class VirtualLedView(NSView):
         # The light source is centered on its target LED and fades
         # through the neighboring LED width on both sides, for a
         # three-LED footprint. Geometry identical for every run.
-        bloom_y = LED_BAND_HEIGHT
+        #
+        # While following Alcove the capsule's bottom edge sits ABOVE the
+        # window's bottom (the window is notch-deep, the capsule is not),
+        # and a band anchored at the window bottom floated detached below
+        # the capsule -- the bulky look. The whole stack lifts so the band
+        # kisses the capsule's lower edge instead.
+        base_y = 0.0
+        if self.alcove_silhouette is not None and _height:
+            base_y = max(
+                0.0,
+                float(_height) - float(self.alcove_silhouette[2]) - 1.0,
+            )
+        bloom_y = base_y + LED_BAND_HEIGHT
         bloom_height = glow_height * 0.45
-        soft_y = LED_BAND_HEIGHT + bloom_height
+        soft_y = bloom_y + bloom_height
         soft_height = glow_height * 0.55
         for run in runs:
             if run is None:
@@ -1801,14 +1855,14 @@ class VirtualLedView(NSView):
             )
             fill_rect_with_cg(
                 cg_context,
-                ((run_x, 0.0), (run_width, LED_BAND_HEIGHT)),
+                ((run_x, base_y), (run_width, LED_BAND_HEIGHT)),
                 tone_mapped_led_color(
                     red, green, blue, alpha, boost=LED_CORE_BOOST, alpha_scale=0.92
                 ),
             )
             fill_rect_with_cg(
                 cg_context,
-                ((run_x, 0.0), (run_width, 1.15)),
+                ((run_x, base_y), (run_width, 1.15)),
                 tone_mapped_led_color(
                     red, green, blue, alpha, boost=LED_HOTLINE_BOOST, alpha_scale=0.72
                 ),

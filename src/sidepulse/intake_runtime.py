@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 INTAKE_REASON_UNAVAILABLE = "intake_probe_unavailable"
 MAX_INTAKE_CALLBACKS = 16

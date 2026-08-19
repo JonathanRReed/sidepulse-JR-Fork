@@ -439,18 +439,21 @@ DONE_CELEBRATION_STEP_MS = 45
 DONE_CELEBRATION_FLASH_MS = 70
 DONE_CELEBRATION_PAUSE_MS = 70
 DONE_CELEBRATION_BLOOM_MS = 280
+# The celebration is the completion signal; holding the strip lit afterwards
+# read as an agent still wanting something. The bloom now basks briefly at
+# the done colour and then fades out -- the ledger, not the periphery,
+# carries "ready for review".
+DONE_CELEBRATION_BASK_MS = 1400
+DONE_CELEBRATION_FADE_MS = 900
 
 
 def _done_celebration_program(done_color: str, led_count: int) -> str:
-    """A twinkle sweeps once across the strip, briefly flashes off, then
-    blooms smoothly up to the solid done_color and holds there forever --
-    there's no "repeat" line, so once played there's nothing left to do
-    and the device just keeps showing the final (solid) state, exactly
-    like the plain color it replaces. This is why it's safe to dedup
-    against (AgentLedController/BatteryLedController compare the fully
-    rendered program string) -- the string only changes on the actual
-    transition into Done, so the twinkle plays exactly once per
-    transition, never on every otherwise-unchanged re-render.
+    """A twinkle sweeps once across the strip, briefly flashes off, blooms
+    up to the done colour, basks for a moment, then fades to dark and rests
+    there -- no "repeat" line, so once played the device simply holds the
+    final (dark) state. Safe to dedup against (the controllers compare the
+    fully rendered program string), so the twinkle plays exactly once per
+    transition into Done, never on an unchanged re-render.
     """
     count = max(1, int(led_count))
     segments = [
@@ -463,6 +466,8 @@ def _done_celebration_program(done_color: str, led_count: int) -> str:
             "; ".join(segments),
             f"off {DONE_CELEBRATION_PAUSE_MS}ms none",
             f"{done_color} {DONE_CELEBRATION_BLOOM_MS}ms cosine",
+            f"{done_color} {DONE_CELEBRATION_BASK_MS}ms none",
+            f"off {DONE_CELEBRATION_FADE_MS}ms cosine",
         ]
     )
 
@@ -531,7 +536,9 @@ def program_for_display_state(
     if state == LedDisplayState.DONE:
         if done_celebrate:
             return apply_brightness(_done_celebration_program(done_color, led_count), brightness)
-        return apply_brightness(done_color, brightness)
+        # Without the flourish there is still no held light: completion is a
+        # finite cue, and a lit strip after it read as a phantom ask.
+        return "off"
     if state == LedDisplayState.FAILED:
         # Failure stays visible after its finite two-pulse cue without
         # becoming the persistent Ask animation. The existing configurable
@@ -951,6 +958,24 @@ def notification_blink_program(color: str, brightness: float = 255) -> str:
     )
 
 
+def _steady_state_variant(program: str) -> str:
+    """The program without its one-shot approach frame, for reasserts.
+
+    A reassert refreshes device state without any visual change intended,
+    but the firmware restarts a program from its first line -- and the
+    first paint line is a bright transition snapshot, so every reassert
+    flashed one LED like an ask. The repeating body carries its own phase
+    delays and is the steady state the device is already showing.
+    """
+    lines = program.splitlines()
+    body_start = 1 if lines and lines[0].startswith("brightness ") else 0
+    content = lines[body_start:]
+    if len(content) >= 3 and content[-1].strip().startswith("repeat"):
+        trimmed = lines[:body_start] + content[1:]
+        return "\n".join(trimmed)
+    return program
+
+
 def apply_brightness(program: str, brightness: float = 255) -> str:
     value = normalize_brightness(brightness)
     if value >= 255:
@@ -1249,9 +1274,13 @@ class AgentLedController:
             )
 
         self.last_attempt_monotonic = now
+        reassert = identity == self.last_program_identity and self.last_error is None
+        to_write = (
+            _steady_state_variant(program) if reassert else program
+        )
         try:
             written_target = write_led_program(
-                program,
+                to_write,
                 device_path=self.device_path,
                 file_name=self.file_name,
                 dry_run=self.dry_run,

@@ -111,7 +111,6 @@ from sidepulse.led_status import (
     display_state_for_mode,
     led_count_for_target,
     program_for_display_state,
-    strip_drive_code,
     write_mode_to_leds,
 )
 from sidepulse.lid_sleep import (
@@ -207,7 +206,6 @@ from sidepulse.settings import (
     DeviceDisplaySetting,
     default_config_dir,
     default_lid_animation,
-    default_settings_path,
     load_settings,
     save_settings,
 )
@@ -251,6 +249,7 @@ class AgentMonitorTests(unittest.TestCase):
                 "openclaw",
                 "opencode",
                 "antigravity",
+                "kiro",
             ),
         )
         self.assertEqual(provider_spec("devin").label, "Devin")
@@ -591,7 +590,14 @@ for (const event of [
   { type: \"session.created\", properties: { sessionID: \"token_sk_live_123\" } },
   { type: \"session.created\", properties: { sessionID: \"control\\nvalue\" } },
   { type: \"session.created\", properties: { sessionID: \"café\" } },
-]) {
+].map((event, index) =>
+  event.properties && event.properties.sequence !== undefined
+    ? { ...event, properties: { ...event.properties, sequence: index } }
+    : event,
+)) {
+  // Unique sequences per event: the cross-process hook deduplicator
+  // (tested in test_hook_dedupe) must not collapse the identical
+  // PostToolUse payloads this bounding test sends back to back.
   await plugin.event({ event });
   await new Promise((resolve) => setTimeout(resolve, 100));
 }
@@ -2530,8 +2536,14 @@ for (const event of [
         by_title = {item.title(): item for item in items if item.title()}
         titles = [item.title() for item in items if item.title()]
 
-        mailbox_title = next(title for title in titles if title.startswith("Agent Mailbox"))
-        self.assertLess(titles.index(mailbox_title), titles.index("Devices"))
+        mailbox_items = find_mailbox_item(menu)
+        self.assertEqual(len(mailbox_items), 1)
+        devices_title = next(
+            title for title in titles if title == "Devices" or title.startswith("Devices ·")
+        )
+        self.assertLess(
+            items.index(mailbox_items[0]), titles.index(devices_title)
+        )
         self.assertIn("Keep Awake With Lid Closed", by_title)
         # The policy choices live in a submenu now -- one dropdown row
         # for the whole concern, not four.
@@ -2577,12 +2589,10 @@ for (const event of [
         )
 
         menu = status_bar.build_menu(snapshot, status_bar.STATE_IDLE, target)
-        items = [menu.itemAtIndex_(index) for index in range(menu.numberOfItems())]
-        mailbox = next(item for item in items if item.title().startswith("Agent Mailbox"))
-        self.assertEqual(
-            mailbox.title(),
-            "Agent Mailbox · 0 active · 0 need you · 0 ready",
-        )
+        mailbox_items = find_mailbox_item(menu)
+        self.assertEqual(len(mailbox_items), 1)
+        mailbox = mailbox_items[0]
+        self.assertEqual(mailbox.title(), "No agents active")
         recent = next(
             mailbox.submenu().itemAtIndex_(index).submenu()
             for index in range(mailbox.submenu().numberOfItems())
@@ -3793,7 +3803,14 @@ for (const event of [
                 changed=True,
                 backup_path=None,
             )
-            for provider in ("cursor", "hermes", "openclaw", "opencode", "antigravity")
+            for provider in (
+                "cursor",
+                "hermes",
+                "openclaw",
+                "opencode",
+                "antigravity",
+                "kiro",
+            )
         )
         with (
             patch.object(
@@ -3825,6 +3842,7 @@ for (const event of [
                 "openclaw",
                 "opencode",
                 "antigravity",
+                "kiro",
             ],
         )
         guard.assert_called_once_with(scope="auto", dry_run=False)
@@ -3995,7 +4013,8 @@ for (const event of [
             program_for_display_state(LedDisplayState.IDLE),
             "off 160ms cosine\n#020204 6s pulse\nrepeat",
         )
-        self.assertEqual(program_for_display_state(LedDisplayState.DONE), "#00FF66")
+        # Done rests dark: the celebration flourish is the completion cue.
+        self.assertEqual(program_for_display_state(LedDisplayState.DONE), "off")
         self.assertIn("#FF3A00 1.6s pulse", program_for_display_state(LedDisplayState.ASK))
         self.assertEqual(
             program_for_display_state(LedDisplayState.WORKING, led_count=2).splitlines(),
@@ -4009,9 +4028,10 @@ for (const event of [
             len(program_for_display_state(LedDisplayState.WORKING, led_count=8).splitlines()),
             3,
         )
+        # Dark rest needs no brightness header at all.
         self.assertEqual(
             program_for_display_state(LedDisplayState.DONE, brightness=128),
-            "brightness 128\n#00FF66",
+            "off",
         )
 
     def test_write_mode_to_leds_uses_device_specific_program(self) -> None:
@@ -4044,14 +4064,9 @@ for (const event of [
 
             write_mode_to_leds(AgentMode.COMPLETED, device_path=device, brightness=64)
 
-            # brightness is decoded too: the firmware scales the DRIVE bytes,
-            # so on this surface it is a scale on light, and 64 of 255 encoded
-            # is 13 of 255 linear.
-            done = apply_strip_transfer_to_hex("#00FF66", (1.0, 1.0, 1.0))
-            self.assertEqual(
-                (device / "LEDS.LED").read_text(),
-                f"brightness {strip_drive_code(64)}\n{done}",
-            )
+            # Done rests dark: the completion flourish is the cue, and a
+            # held lit strip afterwards read as a phantom ask.
+            self.assertEqual((device / "LEDS.LED").read_text(), "off")
 
     def test_led_count_uses_product_name(self) -> None:
         self.assertEqual(led_count_for_target(Path("/Volumes/SidePulseDot/LEDS.LED")), 2)
@@ -4087,7 +4102,8 @@ for (const event of [
             self.assertFalse(second.changed)
             self.assertTrue(third.changed)
             ask = apply_strip_transfer_to_hex("#FF3A00", (1.0, 1.0, 1.0))
-            self.assertIn(f"{ask} 1.6s pulse", (device / "LEDS.LED").read_text())
+            # The safety compiler re-serializes durations in milliseconds.
+            self.assertIn(f"{ask} 1600ms pulse", (device / "LEDS.LED").read_text())
 
     def test_battery_parser_uses_adapter_watts_and_raw_capacity(self) -> None:
         payload = plistlib.dumps(
@@ -4506,19 +4522,24 @@ for (const event of [
 
     def test_settings_use_xdg_config_dir_and_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_home = Path(tmp) / "xdg-config"
+            # default_settings_path resolves symlinks (/var -> /private/var
+            # on macOS); anchor the expectation on the resolved root.
+            config_home = Path(tmp).resolve() / "xdg-config"
             settings_path = config_home / "sidepulse" / "agent-monitor" / "settings.json"
 
             with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(config_home)}):
+                # default_settings_path is pinned per-test by conftest for
+                # isolation; the XDG derivation is observable through
+                # default_config_dir, and the round trip runs against the
+                # explicit path.
                 self.assertEqual(default_config_dir(), settings_path.parent)
-                self.assertEqual(default_settings_path(), settings_path)
 
                 saved = AgentMonitorSettings(
                     codex_transcripts_enabled=False,
                     claude_transcripts_enabled=True,
                 )
-                self.assertEqual(save_settings(saved), settings_path)
-                self.assertEqual(load_settings(), saved)
+                self.assertEqual(save_settings(saved, settings_path), settings_path)
+                self.assertEqual(load_settings(settings_path), saved)
 
     def test_default_sources_respect_transcript_settings(self) -> None:
         settings = AgentMonitorSettings(
@@ -4711,6 +4732,15 @@ for (const event of [
             from sidepulse import status_bar
         except SystemExit as exc:
             self.skipTest(str(exc))
+
+        # The stable-identity inventory is process-global and can hold the
+        # REAL mounted device on a developer Mac; pin it empty so this
+        # exercises the path-identity policy deterministically.
+        snapshot_patch = patch.object(
+            status_bar._DEVICE_IDENTITIES, "snapshot", return_value=()
+        )
+        snapshot_patch.start()
+        self.addCleanup(snapshot_patch.stop)
 
         self.assertTrue(
             status_bar.persistable_device_identity(
@@ -7974,12 +8004,12 @@ class DoneCelebrationTests(unittest.TestCase):
         self.assertTrue(ColorSettings.defaults().done_celebration_enabled)
 
     def test_done_celebration_is_off_by_default_in_program_for_display_state(self) -> None:
-        # The underlying primitive defaults to today's exact plain solid
-        # color -- opting in is the caller's (colors.py's) job, not this
-        # function's default.
+        # Completion never leaves a held light: without the flourish the
+        # strip simply rests dark. The celebration is the signal; a lit
+        # strip afterwards read as a phantom ask.
         self.assertEqual(
             program_for_display_state(LedDisplayState.DONE, done_color="#00FF66"),
-            "#00FF66",
+            "off",
         )
 
     def test_done_celebration_plays_once_then_settles_with_no_repeat(self) -> None:
@@ -7987,7 +8017,9 @@ class DoneCelebrationTests(unittest.TestCase):
             LedDisplayState.DONE, done_color="#00FF66", led_count=8, done_celebrate=True
         )
         self.assertNotIn("repeat", program)
-        self.assertTrue(program.rstrip().endswith("#00FF66 280ms cosine"))
+        # Bloom, bask, then fade out -- the program's final state is dark.
+        self.assertIn("#00FF66 280ms cosine", program)
+        self.assertTrue(program.rstrip().endswith("off 900ms cosine"))
 
     def test_done_celebration_starts_with_an_eased_not_bare_transition(self) -> None:
         program = program_for_display_state(
@@ -8019,7 +8051,7 @@ class DoneCelebrationTests(unittest.TestCase):
         _, program_without = program_for_snapshot(statuses, led_count=8, colors=plain)
         self.assertNotIn("repeat", program_with)
         self.assertGreater(len(program_with.splitlines()), 1)
-        self.assertEqual(program_without.splitlines(), [colors_module.default_agent_color("codex")])
+        self.assertEqual(program_without.splitlines(), ["off"])
 
     def test_classic_blend_mode_aggregate_done_uses_settings_celebration_flag(self) -> None:
         settings = ColorSettings.defaults().with_blend_mode(BLEND_MODE_CLASSIC)
@@ -8672,6 +8704,29 @@ class FocusSyncTests(unittest.TestCase):
             self.assertTrue(focus_sync.is_focus_active())
 
 
+def find_mailbox_item(menu):
+    """Locate the mailbox summary row in the compact root menu.
+
+    The compact projection retitles the row to the glance text ("2 active
+    · 1 needs you"), so tests identify it structurally: it is the only
+    root row whose submenu carries the fixed mailbox shelves.
+    """
+    shelf_titles = {"Needs You", "In Progress", "Ready for Review", "Recent"}
+    matches = []
+    for index in range(menu.numberOfItems()):
+        item = menu.itemAtIndex_(index)
+        submenu = item.submenu()
+        if submenu is None:
+            continue
+        titles = {
+            str(submenu.itemAtIndex_(sub).title() or "")
+            for sub in range(submenu.numberOfItems())
+        }
+        if titles & shelf_titles:
+            matches.append(item)
+    return matches
+
+
 def isolate_controller(case, *, build_controller=True):
     """Shared harness for every test class that builds a StatusBarController.
 
@@ -9105,6 +9160,14 @@ class RememberConnectedDevicesRaceTests(unittest.TestCase):
         # (patched before construction, per the established rule) or it
         # writes real device entries and flips real flags on disk.
         isolate_controller(self)
+        # The stable-identity inventory is process-global; with the real
+        # device discovered, legacy path ids read as ghosts and the CAS
+        # under test never runs. Pin it empty.
+        snapshot_patch = patch.object(
+            self.status_bar._DEVICE_IDENTITIES, "snapshot", return_value=()
+        )
+        snapshot_patch.start()
+        self.addCleanup(snapshot_patch.stop)
 
     def _device(self, device_id="SidePulseDot"):
         return self.status_bar.StatusBarDevice(
@@ -10290,6 +10353,36 @@ class TranscriptFallbackTests(unittest.TestCase):
         fake = FakeTranscriptMonitor([record])
         self.controller.transcript_monitor = fake
         self.controller.transcript_watermark = None
+
+        # Transcript discovery runs off-main in production; a synchronous
+        # stand-in delivers the batch inline so ingestion is observable
+        # without pumping a run loop. The dedupe/watermark logic under test
+        # still runs in applyTranscriptFallbackBatch_.
+        from sidepulse.transcript_runtime import TranscriptFallbackBatch
+
+        controller = self.controller
+
+        class _SyncTranscriptService:
+            def __init__(self):
+                self._generation = 0
+
+            def request(self, monitor, *, known_signature, callback):
+                self._generation += 1
+                records = tuple(monitor.iter_records())
+                controller.applyTranscriptFallbackBatch_(
+                    TranscriptFallbackBatch(
+                        self._generation,
+                        id(monitor),
+                        object(),
+                        records,
+                    )
+                )
+                return self._generation
+
+            def close(self):
+                return None
+
+        self.controller._production_transcript_service = _SyncTranscriptService()
 
         self.controller.ingest_transcript_fallback()
         first_keys = set(self.controller.monitor.statuses_by_key)
@@ -12402,7 +12495,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         from sidepulse.capacity_types import SourceKey
         from sidepulse.refresh_policy import ProviderRefreshState, mark_refresh_started
 
-        run_loop_patch = patch.object(self.status_bar, "NSRunLoop", create=True)
+        run_loop_patch = patch.object(self.status_bar, "NSRunLoop")
         self.capacity_run_loop_type = run_loop_patch.start()
         self.addCleanup(run_loop_patch.stop)
         self.ProviderRefreshState = ProviderRefreshState
@@ -15036,13 +15129,15 @@ class FailureSignalProjectionContractTests(unittest.TestCase):
         )
 
     def _failure(self):
+        # Terminal failure: transient tool failures no longer arm the
+        # failure signal at all (see attention._FAILURE_EVENTS).
         return AgentStatus(
             provider="claude",
             agent_id="claude:agent:worker",
             display_name="Claude worker",
             mode=AgentMode.BLOCKED_ERROR,
             updated_at=datetime.now(timezone.utc),
-            event_name="PostToolUseFailure",
+            event_name="StopFailure",
             session_id="main",
         )
 
@@ -15483,15 +15578,32 @@ class OvertimePatinaWebhookTests(unittest.TestCase):
         self.assertIn("FFB340", program.upper().replace("#", "#"))
 
     def test_patina_slows_only_without_escalation(self) -> None:
+        # Production freezes render colors on the main thread before each
+        # hardware sync; the capture is where the patina is computed.
         base_speed = self.controller.settings.colors.cycle_speed_seconds
         self.controller.working_since = time.monotonic() - 3600.0
+        self.controller._capture_hardware_render_colors()
         slowed = self.controller.agent_render_colors().cycle_speed_seconds
         self.assertGreater(slowed, base_speed)
         fresh = time.monotonic() - 60.0
         self.controller.working_since = fresh
+        self.controller._capture_hardware_render_colors()
         self.assertEqual(
             self.controller.agent_render_colors().cycle_speed_seconds, base_speed
         )
+
+    def test_patina_is_quantized_so_motion_does_not_rewrite_the_device(self) -> None:
+        """A smoothly creeping patina factor changed the rendered program's
+        durations on every sync, defeating the phase-free write dedupe --
+        the device animation restarted (a visible blink) on every hook
+        event once a session had worked past the patina threshold."""
+        self.controller.working_since = time.monotonic() - 1000.0
+        self.controller._capture_hardware_render_colors()
+        first = self.controller.agent_render_colors().cycle_speed_seconds
+        self.controller.working_since = time.monotonic() - 1060.0
+        self.controller._capture_hardware_render_colors()
+        second = self.controller.agent_render_colors().cycle_speed_seconds
+        self.assertEqual(first, second)
 
     def test_webhook_latches_once_and_requires_url(self) -> None:
         with patch("threading.Thread") as thread:
@@ -15895,12 +16007,9 @@ class AgentMailboxMenuTests(unittest.TestCase):
             self.status_bar.STATE_WORKING,
             self.controller,
         )
-        mailbox = next(
-            menu.itemAtIndex_(index)
-            for index in range(menu.numberOfItems())
-            if menu.itemAtIndex_(index).title().startswith("Agent Mailbox")
-        )
-        return snapshot, menu, mailbox
+        mailbox_items = find_mailbox_item(menu)
+        assert len(mailbox_items) == 1, "expected exactly one mailbox row"
+        return snapshot, menu, mailbox_items[0]
 
     @staticmethod
     def _items(menu):
@@ -15935,10 +16044,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
 
         _snapshot, menu, mailbox = self._build(statuses)
 
-        self.assertEqual(
-            mailbox.title(),
-            "Agent Mailbox · 2 active · 1 need you · 2 ready",
-        )
+        self.assertEqual(mailbox.title(), "2 active · 1 needs you · 2 ready")
         self.assertEqual(
             [item.title() for item in self._items(mailbox.submenu())],
             ["Needs You", "In Progress", "Ready for Review", "Recent"],
@@ -15946,7 +16052,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
         top_titles = [item.title() for item in self._items(menu)]
         self.assertNotIn("Agents", top_titles)
         self.assertFalse(any(title.startswith("Needs You (") for title in top_titles))
-        self.assertEqual(sum(title.startswith("Agent Mailbox") for title in top_titles), 1)
+        self.assertEqual(len(find_mailbox_item(menu)), 1)
 
     def test_mailbox_retained_order_survives_activity_and_input_order_changes(self) -> None:
         now = datetime.now(timezone.utc)
@@ -16457,11 +16563,7 @@ class MenuQualityOfLifeTests(unittest.TestCase):
             self.status_bar.STATE_WORKING,
             self.controller,
         )
-        mailbox = next(
-            menu.itemAtIndex_(index)
-            for index in range(menu.numberOfItems())
-            if menu.itemAtIndex_(index).title().startswith("Agent Mailbox")
-        )
+        mailbox = find_mailbox_item(menu)[0]
         in_progress = next(
             mailbox.submenu().itemAtIndex_(index).submenu()
             for index in range(mailbox.submenu().numberOfItems())
@@ -16536,14 +16638,8 @@ class MenuQualityOfLifeTests(unittest.TestCase):
         menu = self.status_bar.build_menu(
             self._snapshot(statuses), self.status_bar.STATE_WORKING, self.controller
         )
-        mailbox = next(
-            menu.itemAtIndex_(index)
-            for index in range(menu.numberOfItems())
-            if menu.itemAtIndex_(index).title().startswith("Agent Mailbox")
-        )
-        self.assertEqual(
-            mailbox.title(), "Agent Mailbox · 3 active · 0 need you · 0 ready"
-        )
+        mailbox = find_mailbox_item(menu)[0]
+        self.assertEqual(mailbox.title(), "3 active")
         in_progress = next(
             mailbox.submenu().itemAtIndex_(index).submenu()
             for index in range(mailbox.submenu().numberOfItems())
@@ -16995,9 +17091,9 @@ class ResilienceHardeningTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             target = write_led_program(
-                "1:#FF0000; 500ms", device_path=Path(tmp), file_name="LEDS.LED"
+                "1:#FF0000 500ms", device_path=Path(tmp), file_name="LEDS.LED"
             )
-            self.assertEqual(target.read_text(encoding="utf-8"), "1:#FF0000; 500ms")
+            self.assertEqual(target.read_text(encoding="utf-8"), "1:#FF0000 500ms")
             leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "LEDS.LED"]
             self.assertEqual(leftovers, [])
 
@@ -17009,7 +17105,7 @@ class ResilienceHardeningTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             target = device_writer.write_led_program(
-                "1:#00FF00; 1s", device_path=Path(tmp), file_name="LEDS.LED"
+                "1:#00FF00 1s", device_path=Path(tmp), file_name="LEDS.LED"
             )
             with patch(
                 "sidepulse.device_writer.os.replace",
@@ -17017,9 +17113,9 @@ class ResilienceHardeningTests(unittest.TestCase):
             ):
                 with self.assertRaises(OSError):
                     device_writer.write_led_program(
-                        "1:#FF0000; 1s", device_path=Path(tmp), file_name="LEDS.LED"
+                        "1:#FF0000 1s", device_path=Path(tmp), file_name="LEDS.LED"
                     )
-            self.assertEqual(target.read_text(encoding="utf-8"), "1:#00FF00; 1s")
+            self.assertEqual(target.read_text(encoding="utf-8"), "1:#00FF00 1s")
             leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "LEDS.LED"]
             self.assertEqual(leftovers, [])
 
@@ -17033,21 +17129,21 @@ class ResilienceHardeningTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             device_writer.write_led_program(
-                "1:#00FF00; 1s", device_path=Path(tmp), file_name="LEDS.LED"
+                "1:#00FF00 1s", device_path=Path(tmp), file_name="LEDS.LED"
             )
             with patch(
                 "sidepulse.device_writer.os.replace",
                 side_effect=OSError(errno_module.ENOSPC, "No space left on device"),
             ):
                 target = device_writer.write_led_program(
-                    "1:#FF0000; 1s", device_path=Path(tmp), file_name="LEDS.LED"
+                    "1:#FF0000 1s", device_path=Path(tmp), file_name="LEDS.LED"
                 )
-            self.assertEqual(target.read_text(encoding="utf-8"), "1:#FF0000; 1s")
+            self.assertEqual(target.read_text(encoding="utf-8"), "1:#FF0000 1s")
             leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "LEDS.LED"]
             self.assertEqual(leftovers, [])
 
     #: A program the firmware itself accepts. The version of these tests
-    #: that predates the animation model used "1:#FF0000; 1s", which the
+    #: that predates the animation model used "1:#FF0000 1s", which the
     #: REAL sdled.wasm rejects as a syntax error -- so "the burn wrote
     #: nothing" proved nothing about the parser being gone. Anything that
     #: stops this one is the gate under test.
@@ -17973,14 +18069,16 @@ class MenuTeachingTests(unittest.TestCase):
             )
         )
 
-    def test_menu_carries_a_daily_tip(self) -> None:
+    def test_compact_menu_carries_no_tip_rows(self) -> None:
+        # The compact root menu deliberately drops the daily tip row; the
+        # tip engine itself stays covered by the tests below.
         menu = self._menu()
         tips = [
             menu.itemAtIndex_(index)
             for index in range(menu.numberOfItems())
             if menu.itemAtIndex_(index).title().startswith("Tip: ")
         ]
-        self.assertEqual(len(tips), 1)
+        self.assertEqual(len(tips), 0)
 
     def test_every_tip_pane_key_is_a_real_pane(self) -> None:
         from sidepulse import status_bar
@@ -20056,7 +20154,16 @@ class AppBundleTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("SidePulse.app/Contents/MacOS/SidePulse", result.stdout)
-            self.assertIn("site-packages", result.stdout)
+            # The bundle interpreter must resolve sidepulse exactly where
+            # the venv itself does (a symlinked package or an editable
+            # redirect both count -- what matters is the same resolution).
+            expected = sp.run(
+                [sys.executable, "-c", "import sidepulse; print(sidepulse.__file__)"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            ).stdout.strip()
+            self.assertEqual(result.stdout.strip().splitlines()[-1], expected)
 
 
 class _PresentationTimerDouble:
@@ -23100,7 +23207,7 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
         )
         titles = self._titles(menu)
 
-        self.assertTrue(titles[0].startswith("Agent Mailbox · 5 active · 5 need you"))
+        self.assertTrue(titles[0].startswith("5 active · 5 needs you"))
         self.assertEqual(sum(title.endswith("· needs you") for title in titles), 3)
         self.assertEqual(titles[4], "2 more...")
         self.assertTrue(menu.itemAtIndex_(4).isEnabled())
@@ -23366,13 +23473,17 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
         first = self.controller.agent_browser_controller
         self.assertTrue(self.controller.openAgentBrowser_(browser_item))
         self.assertIs(self.controller.agent_browser_controller, first)
+        # A stale generation no longer swallows the click: opening the
+        # browser degrades to the CURRENT view instead of doing nothing.
+        # Generation fencing remains on mutating browser actions.
         stale = SimpleNamespace(
             representedObject=lambda: dataclass_replace(
                 browser_item.representedObject(),
                 generation=snapshot.operator_state.generation + 1,
             )
         )
-        self.assertFalse(self.controller.openAgentBrowser_(stale))
+        self.assertTrue(self.controller.openAgentBrowser_(stale))
+        self.assertIs(self.controller.agent_browser_controller, first)
 
     def test_tracked_canonical_state_patches_same_native_item_in_place(self) -> None:
         snapshot = self._canonical_snapshot(1)

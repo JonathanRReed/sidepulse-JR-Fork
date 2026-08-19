@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
 
 from .provider_usage_platform import provider_descriptor, provider_descriptors
 
@@ -121,6 +121,37 @@ class ProviderUsageSettings:
             )
         return self._replace(
             replace(self.preference(provider_id), browser_sources=enabled)
+        )
+
+    def with_reset_celebrations(
+        self,
+        provider_id: str,
+        enabled: bool,
+    ) -> ProviderUsageSettings:
+        if type(enabled) is not bool:
+            raise ProviderUsageSettingsError("reset_celebrations must be a boolean")
+        return self._replace(
+            replace(self.preference(provider_id), reset_celebrations=enabled)
+        )
+
+    def with_threshold_remaining(
+        self,
+        provider_id: str,
+        threshold: float,
+    ) -> ProviderUsageSettings:
+        if (
+            isinstance(threshold, bool)
+            or not isinstance(threshold, (int, float))
+            or not 0.0 <= float(threshold) <= 100.0
+        ):
+            raise ProviderUsageSettingsError(
+                "threshold_remaining must be between 0 and 100"
+            )
+        return self._replace(
+            replace(
+                self.preference(provider_id),
+                threshold_remaining=float(threshold),
+            )
         )
 
     def with_option(
@@ -307,8 +338,8 @@ def save_provider_usage_settings(
 
 
 __all__ = [
-    "LoadedProviderUsageSettings",
     "PROVIDER_USAGE_SETTINGS_SCHEMA_VERSION",
+    "LoadedProviderUsageSettings",
     "ProviderPreference",
     "ProviderUsageSettings",
     "ProviderUsageSettingsError",

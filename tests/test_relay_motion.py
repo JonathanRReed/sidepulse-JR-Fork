@@ -394,7 +394,7 @@ def test_physical_relay_does_not_rewrite_when_only_canonical_phase_advances(
         writes.append(program)
         return Path("/Volumes/SIDEPULSE/LEDS.LED")
 
-    monkeypatch.setattr("sidepulse.led_status.write_led_program", write)
+    monkeypatch.setattr("sidepulse._led_status_legacy.write_led_program", write)
     controller = AgentLedController()
     first = controller.sync_program(
         early.dsl,

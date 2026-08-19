@@ -22,6 +22,23 @@ class SdLedWasmController(RawSdLedWasmController):
             led_count=self.led_count,
             fallback=self._last_safe_program,
         )
+        if not compiled.accepted:
+            # Surface the firmware's own verdict for the refused text so
+            # validation callers (the editor, parity tests) see the real
+            # error, then park the renderer on the last safe program.
+            result = super().parse(str(text), now_ms)
+            super().parse(self._last_safe_program, now_ms)
+            if result.ok:
+                # The safety compiler refused something the firmware would
+                # accept: never display it, and never report success for it.
+                return type(result)(
+                    ok=False,
+                    error=result.error,
+                    error_name="unsafe-presentation",
+                    line=0,
+                    column=0,
+                )
+            return result
         program = compiled.program
         result = super().parse(program, now_ms)
         if result.ok:

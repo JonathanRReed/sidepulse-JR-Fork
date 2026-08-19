@@ -53,6 +53,7 @@ def _result() -> DiagnosticResult:
             _finding(DiagnosticCheck.TIMER_REGISTRY_BOUNDS, DiagnosticCode.BOUNDED, 22, 64),
             _finding(DiagnosticCheck.MOUNTED_DEVICE_HEALTH, DiagnosticCode.DISCONNECTED, 0, 16),
             _finding(DiagnosticCheck.ALCOVE_FOLLOW_STATE, DiagnosticCode.NOT_PERMITTED, 0, 1),
+            _finding(DiagnosticCheck.EVENT_INTAKE_FRESHNESS, DiagnosticCode.HEALTHY, 1, 1),
         ),
         last_failure_class=SanitizedFailureClass.NONE,
     )
@@ -62,7 +63,7 @@ def test_manifest_and_result_are_frozen_exact_and_bounded() -> None:
     assert isinstance(DIAGNOSTIC_MANIFEST, DiagnosticManifest)
     # Adding a check changes the exported document's shape, so the version
     # moves with it -- a v1 reader must not silently miss a whole row.
-    assert DIAGNOSTIC_MANIFEST.version == DOCTOR_VERSION == 2
+    assert DIAGNOSTIC_MANIFEST.version == DOCTOR_VERSION == 3
     assert tuple(field.check for field in DIAGNOSTIC_MANIFEST.fields) == tuple(DiagnosticCheck)
     assert tuple(field.name for field in fields(DiagnosticResult)) == (
         "manifest_version",

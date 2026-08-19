@@ -6,8 +6,8 @@ from __future__ import annotations
 import argparse
 import plistlib
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
 REQUIRED_ENTITLEMENTS = {
     "com.apple.security.automation.apple-events": True,

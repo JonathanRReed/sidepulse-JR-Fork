@@ -538,11 +538,14 @@ class IntakeMenuTests(unittest.TestCase):
         )
 
     def test_the_dropdown_offers_the_why_panel(self) -> None:
+        # The compact menu carries the panel under "Diagnostics…"; the
+        # window itself still bears decision_trace.PANEL_TITLE.
         menu = self._build_menu()
         item = next(
             menu.itemAtIndex_(index)
             for index in range(menu.numberOfItems())
-            if menu.itemAtIndex_(index).title() == decision_trace.MENU_ITEM_TITLE
+            if menu.itemAtIndex_(index).title()
+            in ("Diagnostics…", decision_trace.MENU_ITEM_TITLE)
         )
         self.assertEqual(item.action(), "openWhyPanel:")
 
@@ -816,7 +819,25 @@ class IntakeRefreshTests(unittest.TestCase):
         self.status_bar, self.controller, self.button = isolated_controller(self)
 
     def test_the_filesystem_probe_is_cached_but_delivery_is_not(self) -> None:
+        # The probe runs off-main in production; a synchronous stand-in
+        # delivers its result inline so the caching contract is observable.
         probes = (probe("claude", "Claude", wire=NOW - 60.0),)
+        from sidepulse.intake_runtime import IntakeProbeResult
+
+        controller = self.controller
+        status_bar = self.status_bar
+
+        class _SyncIntakeService:
+            def request(self, _callback):
+                controller.applyIntakeProbeResult_(
+                    IntakeProbeResult(1, tuple(status_bar.probe_providers()))
+                )
+                return 1
+
+            def close(self):
+                return None
+
+        controller._production_intake_service = _SyncIntakeService()
         with patch.object(
             self.status_bar, "probe_providers", return_value=probes
         ) as probe_providers:

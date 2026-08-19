@@ -6,8 +6,8 @@ import json
 import math
 import time
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from . import _weather_watch_legacy as _legacy
 

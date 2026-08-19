@@ -76,8 +76,8 @@ def snapshot_with(*statuses: AgentStatus) -> MonitorSnapshot:
     )
 
 
-def test_terminal_tool_failure_is_visible_but_not_actionable() -> None:
-    failed = status(event_name="PostToolUseFailure", mode=AgentMode.BLOCKED_ERROR)
+def test_terminal_failure_is_visible_but_not_actionable() -> None:
+    failed = status(event_name="StopFailure", mode=AgentMode.BLOCKED_ERROR)
 
     projection = project_attention(snapshot_with(failed), AgentMonitorSettings())
 
@@ -85,6 +85,17 @@ def test_terminal_tool_failure_is_visible_but_not_actionable() -> None:
     assert projection.transient_signals[0].kind is SignalKind.FAILURE
     assert projection.transient_signals[0].repetitions == 2
     assert projection.transient_signals[0].source_agent_id == failed.agent_id
+
+
+def test_transient_tool_failure_never_fires_the_failure_signal() -> None:
+    # A failed tool the agent continues past is routine agentic work; the
+    # red failure blink is reserved for terminal failures the operator
+    # must resolve (StopFailure, PermissionDenied).
+    failed = status(event_name="PostToolUseFailure", mode=AgentMode.WORKING)
+
+    projection = project_attention(snapshot_with(failed), AgentMonitorSettings())
+
+    assert projection.transient_signals == ()
 
 
 def test_main_permission_request_is_persistent_attention() -> None:
@@ -124,7 +135,7 @@ def test_consumed_failure_event_does_not_repeat_transient_signal() -> None:
 
 
 def test_duplicate_failure_records_collapse_to_one_signal() -> None:
-    failed = status(event_name="PostToolUseFailure", mode=AgentMode.BLOCKED_ERROR)
+    failed = status(event_name="StopFailure", mode=AgentMode.BLOCKED_ERROR)
 
     projection = project_attention(
         snapshot_with(failed, failed),

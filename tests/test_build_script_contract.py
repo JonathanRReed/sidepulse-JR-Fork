@@ -17,10 +17,16 @@ def test_package_builder_fails_fast_and_never_defaults_to_apple_python_39() -> N
 
 def test_package_builder_verifies_delivered_signature_identity() -> None:
     text = BUILD_SCRIPT.read_text(encoding="utf-8")
+    signer = (ROOT / "packaging" / "sign_macos_app.py").read_text(
+        encoding="utf-8"
+    )
 
     assert "TeamIdentifier" in text
-    assert "codesign --verify --deep --strict" in text
     assert "verify_macos_app.py" in text
+    # The strict deep verification now lives in the signer the script runs.
+    assert "packaging/sign_macos_app.py" in text
+    for flag in ('"--verify"', '"--deep"', '"--strict"'):
+        assert flag in signer
 
 
 def test_clean_install_verifies_t3_integration_artifacts_and_commands() -> None:

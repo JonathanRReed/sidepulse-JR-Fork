@@ -402,6 +402,57 @@ class RemotePeerWiringTests(unittest.TestCase):
         self.assertEqual(len(opened), 1)
 
 
+class _SynchronousLedgerPublisher:
+    """Deterministic stand-in for the off-main production publisher.
+
+    The production path hands publication to a worker thread and applies the
+    result on the main run loop; under test there is no run loop to pump, so
+    the publish and its result delivery both happen inline. The wiring being
+    proven -- the off-by-default gate, the change/heartbeat debounce, the
+    signature bookkeeping -- all still runs in the controller.
+    """
+
+    def __init__(self, controller) -> None:
+        self._controller = controller
+        self._generation = 0
+        self.publishes = 0
+
+    def request(self, *, statuses, generated_at, settings, signature, callback):
+        from sidepulse.ledger_runtime import (
+            LedgerPublishRequest,
+            LedgerPublishResult,
+        )
+        from sidepulse.remote_peers import publish_local_ledger
+
+        self._generation += 1
+        request = LedgerPublishRequest(
+            self._generation,
+            tuple(statuses),
+            generated_at,
+            settings,
+            signature,
+        )
+        try:
+            path = publish_local_ledger(
+                statuses,
+                generated_at=generated_at,
+                settings=settings,
+            )
+            result = LedgerPublishResult(request, path)
+        except Exception:
+            result = LedgerPublishResult(
+                request,
+                None,
+                "remote_ledger_publish_failed",
+            )
+        self.publishes += 1
+        self._controller.applyLedgerPublishResult_(result)
+        return request.generation
+
+    def close(self) -> None:
+        return None
+
+
 class RemotePublishWiringTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_controller(self)
@@ -415,6 +466,8 @@ class RemotePublishWiringTests(unittest.TestCase):
             patcher = patch(target, return_value=self.ledger_path)
             patcher.start()
             self.addCleanup(patcher.stop)
+        self.publisher = _SynchronousLedgerPublisher(self.controller)
+        self.controller._production_ledger_publisher = self.publisher
 
     def _enable_publishing(self, **changes):
         from dataclasses import replace
@@ -505,26 +558,31 @@ class RemotePublishWiringTests(unittest.TestCase):
         self.assertEqual(second["rows"][0]["message"], "May I delete prod?")
 
     def test_an_unchanged_desk_republishes_only_on_the_heartbeat(self) -> None:
-        """Bounded both ways: no write per tick, no silence past staleness."""
+        """Bounded both ways: no write per tick, no silence past staleness.
+
+        The production path returns the latest published path even when a
+        call is debounced, so "did this call write" is asserted against the
+        publisher itself rather than the return value.
+        """
         self._enable_publishing()
         rows = (status("codex:session:here"),)
-        self.assertIsNotNone(self.controller.publish_local_ledger_now(rows))
-        self.assertIsNone(self.controller.publish_local_ledger_now(rows))
+        self.controller.publish_local_ledger_now(rows)
+        self.assertEqual(self.publisher.publishes, 1)
+        self.controller.publish_local_ledger_now(rows)
+        self.assertEqual(self.publisher.publishes, 1)
         # A change always publishes...
-        self.assertIsNotNone(
-            self.controller.publish_local_ledger_now(
-                (status("codex:session:here", mode=AgentMode.WORKING),)
-            )
+        self.controller.publish_local_ledger_now(
+            (status("codex:session:here", mode=AgentMode.WORKING),)
         )
+        self.assertEqual(self.publisher.publishes, 2)
         # ...and so does the heartbeat, so a quiet desk never looks dead.
         self.controller._published_ledger_at -= (
             self.status_bar.REMOTE_PUBLISH_HEARTBEAT_SECONDS + 1.0
         )
-        self.assertIsNotNone(
-            self.controller.publish_local_ledger_now(
-                (status("codex:session:here", mode=AgentMode.WORKING),)
-            )
+        self.controller.publish_local_ledger_now(
+            (status("codex:session:here", mode=AgentMode.WORKING),)
         )
+        self.assertEqual(self.publisher.publishes, 3)
 
     def test_turning_publishing_off_removes_the_file(self) -> None:
         """A frozen ledger left on disk would be a lie a peer keeps reading."""

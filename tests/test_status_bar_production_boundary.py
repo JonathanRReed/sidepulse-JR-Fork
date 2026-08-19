@@ -112,8 +112,15 @@ def test_escalation_urgency_calls_the_stage_reader() -> None:
 
 
 def test_hook_bursts_are_coalesced_for_at_most_fifty_milliseconds() -> None:
+    # The dispatch site lives in the retained legacy controller; the
+    # coalescing override lives in the production layer. The contract spans
+    # all three files.
     text = "\n".join(
-        path.read_text(encoding="utf-8") for path in STATUS_BAR_FILES
+        path.read_text(encoding="utf-8")
+        for path in (
+            *STATUS_BAR_FILES,
+            ROOT / "src" / "sidepulse" / "status_bar_legacy.py",
+        )
     )
 
     assert "EVENT_COALESCE_SECONDS = 0.05" in text

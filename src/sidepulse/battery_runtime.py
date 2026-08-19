@@ -9,8 +9,8 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from .battery import BatterySnapshot, read_battery_snapshot
 

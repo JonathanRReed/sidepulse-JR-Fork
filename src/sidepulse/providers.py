@@ -197,6 +197,29 @@ ANTIGRAVITY_CANONICAL_EVENTS = {
     "Stop": "Stop",
 }
 
+# Kiro CLI scopes hooks to agent configuration files; SidePulse owns one
+# dedicated agent file (~/.kiro/agents/sidepulse.json) and never edits an
+# unmanaged one. Kiro's native event names are camelCase (agentSpawn,
+# userPromptSubmit, preToolUse, postToolUse, stop) and normalize through
+# canonical_event_name; only agentSpawn needs an explicit alias.
+KIRO_EVENTS = (
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+)
+KIRO_NATIVE_EVENT_NAMES = {
+    "SessionStart": "agentSpawn",
+    "UserPromptSubmit": "userPromptSubmit",
+    "PreToolUse": "preToolUse",
+    "PostToolUse": "postToolUse",
+    "Stop": "stop",
+}
+KIRO_MANAGED_DESCRIPTION = (
+    "Kiro agent with SidePulse lifecycle monitoring enabled."
+)
+
 ANTIGRAVITY_HOOK_NAME = "sidepulse-status"
 ANTIGRAVITY_ENVELOPE_KEY = "antigravity"
 
@@ -938,6 +961,54 @@ def detect_opencode_plugin(home: Path | None = None) -> ProviderConfig:
     )
 
 
+def default_kiro_agent_config_path(home: Path | None = None) -> Path:
+    base = home or Path.home()
+    return base / ".kiro" / "agents" / "sidepulse.json"
+
+
+def detect_kiro_config(home: Path | None = None) -> ProviderConfig:
+    config_path = default_kiro_agent_config_path(home)
+    if not config_path.exists():
+        return ProviderConfig("kiro", config_path, False, False, (), ())
+    try:
+        data = json.loads(config_path.read_text())
+    except Exception:
+        return ProviderConfig("kiro", config_path, True, False, (), ())
+    hooks = data.get("hooks") if isinstance(data, dict) else {}
+    events: list[str] = []
+    paths: list[Path] = []
+    if isinstance(hooks, dict):
+        for event_name, entries in hooks.items():
+            canonical = canonical_event_name(event_name)
+            if canonical not in KIRO_EVENTS or not isinstance(entries, list):
+                continue
+            event_paths: list[Path] = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                command = entry.get("command")
+                if isinstance(command, str) and is_sidepulse_hook_command(
+                    command, "kiro"
+                ):
+                    event_paths.extend(extract_log_paths_from_command(command))
+            if event_paths:
+                events.append(canonical)
+                paths.extend(event_paths)
+    enabled = (
+        isinstance(data, dict)
+        and data.get("description") == KIRO_MANAGED_DESCRIPTION
+        and bool(events)
+    )
+    return ProviderConfig(
+        "kiro",
+        config_path,
+        True,
+        enabled,
+        tuple(sorted(set(events))),
+        _dedupe_paths(paths),
+    )
+
+
 PROVIDER_SPECS = (
     ProviderSpec("codex", "Codex", CODEX_EVENTS, "codex-toml", default_codex_config_path, detect_codex_config),
     ProviderSpec("claude", "Claude", CLAUDE_EVENTS, "claude-json", default_claude_config_path, detect_claude_config),
@@ -958,6 +1029,14 @@ PROVIDER_SPECS = (
         "antigravity-json",
         default_antigravity_config_path,
         detect_antigravity_config,
+    ),
+    ProviderSpec(
+        "kiro",
+        "Kiro",
+        KIRO_EVENTS,
+        "kiro-json",
+        default_kiro_agent_config_path,
+        detect_kiro_config,
     ),
 )
 PROVIDER_REGISTRY = {spec.provider: spec for spec in PROVIDER_SPECS}
@@ -1138,6 +1217,21 @@ _PROVIDER_SOURCE_REGISTRATIONS = (
     # request lane look supported and permanently empty.
     ProviderSourceRegistration(
         ProviderIdentifier("antigravity"),
+        AdapterIdentifier("hooks"),
+        SourceInstanceIdentifier("global"),
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        (
+            (
+                CapabilityIdentifier("live_agent_events"),
+                (SchemaVersion(1, 0), SchemaVersion(1, 1)),
+            ),
+        ),
+    ),
+    # live_agent_events only: Kiro's hook set carries no ask-shaped event
+    # (no PermissionRequest), so actionable_requests would be a lane that
+    # looks supported and stays permanently empty.
+    ProviderSourceRegistration(
+        ProviderIdentifier("kiro"),
         AdapterIdentifier("hooks"),
         SourceInstanceIdentifier("global"),
         ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
@@ -1350,6 +1444,8 @@ def canonical_event_name(value: Any) -> str | None:
             "pre_compact": "PreCompact",
             "post_compact": "PostCompact",
             "post_compaction": "PostCompact",
+            # Kiro natives (camelCase normalizes to snake_case first).
+            "agent_spawn": "SessionStart",
             "stop_failure": "StopFailure",
             # Cursor natives (camelCase normalizes to snake_case first).
             "before_shell_execution": "PreToolUse",

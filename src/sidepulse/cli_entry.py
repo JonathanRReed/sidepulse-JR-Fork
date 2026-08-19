@@ -6,7 +6,7 @@ import sys
 
 from .cli import sidepulse_main as _legacy_sidepulse_main
 from .integration_cli import main as integration_main
-from .provider_usage_cli import main as provider_main
+from .provider_usage_cli_router import main as provider_main
 
 
 def sidepulse_main(argv: list[str] | None = None) -> int:

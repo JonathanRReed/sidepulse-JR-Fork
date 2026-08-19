@@ -114,6 +114,7 @@ _PROVIDER_LABELS: Final = {
     "hermes": "Hermes",
     "openclaw": "OpenClaw",
     "opencode": "OpenCode",
+    "kiro": "Kiro",
 }
 _ACTION_TOKEN = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}\Z")

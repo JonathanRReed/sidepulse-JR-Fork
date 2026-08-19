@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import base64
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from .provider_usage_platform import ProviderSourceState
 from .provider_usage_runtime import ProviderUsageState

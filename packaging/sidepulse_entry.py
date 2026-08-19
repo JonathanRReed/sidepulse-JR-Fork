@@ -5,7 +5,6 @@ import sys
 from sidepulse.cli_entry import sidepulse_main
 from sidepulse.provider_usage_status_bar import main as status_bar_main
 
-
 if __name__ == "__main__":
     # Finder launches the app without arguments. The same executable is exposed
     # as /usr/local/bin/sidepulse by the installer for command-line use.

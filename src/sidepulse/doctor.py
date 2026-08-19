@@ -42,7 +42,7 @@ DOCTOR_DOCUMENT: Final = "sidepulse-doctor"
 # 2: adds alcove_follow_state. The document gained a row, so anything
 # holding a v1 export is reading a different shape -- version it rather
 # than let a consumer silently miss a check that is now reported.
-DOCTOR_VERSION: Final = 2
+DOCTOR_VERSION: Final = 3
 MAX_DOCTOR_EXPORT_BYTES: Final = 64 * 1024
 PUBLIC_COLLECTION_ERROR_MESSAGE: Final = "Diagnostics could not be collected."
 
@@ -58,6 +58,7 @@ class DiagnosticCheck(str, Enum):
     TIMER_REGISTRY_BOUNDS = "timer_registry_bounds"
     MOUNTED_DEVICE_HEALTH = "mounted_device_health"
     ALCOVE_FOLLOW_STATE = "alcove_follow_state"
+    EVENT_INTAKE_FRESHNESS = "event_intake_freshness"
 
 
 class DiagnosticCode(str, Enum):
@@ -241,6 +242,20 @@ DIAGNOSTIC_MANIFEST: Final = DiagnosticManifest(
                 DiagnosticCode.UNAVAILABLE,
             ),
             1,
+        ),
+        # The event-refresh latch once jammed silently: every provider hint
+        # was dropped and the menu only moved on turn boundaries, with no
+        # surface saying so. This line compares each active provider's log
+        # watermark against the app's persisted intake watermark, and
+        # reports the hook-send breaker when it is tripped.
+        DiagnosticFieldManifest(
+            DiagnosticCheck.EVENT_INTAKE_FRESHNESS,
+            (
+                DiagnosticCode.HEALTHY,
+                DiagnosticCode.PARTIAL,
+                DiagnosticCode.UNAVAILABLE,
+            ),
+            16,
         ),
     ),
 )
@@ -577,6 +592,85 @@ def _alcove_follow_state_probe() -> DiagnosticFinding:
     )
 
 
+_INTAKE_FRESHNESS_LAG_SECONDS: Final = 120.0
+_INTAKE_FRESHNESS_LOOKBACK_SECONDS: Final = 3600.0
+
+
+def _event_intake_freshness_probe() -> DiagnosticFinding:
+    maximum = _FIELD_BY_CHECK[DiagnosticCheck.EVENT_INTAKE_FRESHNESS].max_count
+    state_dir = default_state_dir()
+    now = time.time()
+    try:
+        latest = json.loads((state_dir / "latest.json").read_text())
+        watermarks = {}
+        for entry in latest.get("source_watermarks", ()):
+            if not isinstance(entry, dict):
+                continue
+            source = entry.get("source_key")
+            occurred = entry.get("occurred_at_epoch")
+            if isinstance(source, dict) and isinstance(occurred, (int, float)):
+                provider = str(source.get("provider_id") or "")
+                watermarks[provider] = max(
+                    watermarks.get(provider, 0.0), float(occurred)
+                )
+    except Exception:
+        return _finding(
+            DiagnosticCheck.EVENT_INTAKE_FRESHNESS,
+            DiagnosticCode.UNAVAILABLE,
+            0,
+            1,
+        )
+    active = 0
+    fresh = 0
+    for provider in HOOK_PROVIDERS:
+        log_path = state_dir / f"{provider}.jsonl"
+        try:
+            if not log_path.exists() or log_path.stat().st_size == 0:
+                continue
+            newest = 0.0
+            with log_path.open("rb") as handle:
+                handle.seek(max(0, log_path.stat().st_size - 16 * 1024))
+                for raw in handle.read().splitlines()[-40:]:
+                    try:
+                        row = json.loads(raw)
+                    except Exception:
+                        continue
+                    occurred = row.get("occurred_at_epoch")
+                    if isinstance(occurred, (int, float)):
+                        newest = max(newest, float(occurred))
+        except OSError:
+            continue
+        if newest <= 0.0 or now - newest > _INTAKE_FRESHNESS_LOOKBACK_SECONDS:
+            continue
+        active += 1
+        if newest - watermarks.get(provider, 0.0) <= _INTAKE_FRESHNESS_LAG_SECONDS:
+            fresh += 1
+    breaker_tripped = False
+    try:
+        breaker = json.loads((state_dir / "hook-send-breaker.json").read_text())
+        breaker_tripped = int(breaker.get("failures", 0)) >= 3
+    except Exception:
+        breaker_tripped = False
+    active = min(active, maximum)
+    fresh = min(fresh, active)
+    if active == 0:
+        code = DiagnosticCode.HEALTHY
+        active = 1
+        fresh = 1
+    elif fresh == active and not breaker_tripped:
+        code = DiagnosticCode.HEALTHY
+    else:
+        code = DiagnosticCode.PARTIAL
+        if breaker_tripped and fresh == active:
+            fresh = max(0, fresh - 1)
+    return _finding(
+        DiagnosticCheck.EVENT_INTAKE_FRESHNESS,
+        code,
+        fresh,
+        active,
+    )
+
+
 def _default_probes() -> tuple[DiagnosticProbe, ...]:
     return (
         DiagnosticProbe(DiagnosticCheck.PACKAGE_IMPORT_ROOT, _package_import_root_probe),
@@ -589,6 +683,9 @@ def _default_probes() -> tuple[DiagnosticProbe, ...]:
         DiagnosticProbe(DiagnosticCheck.TIMER_REGISTRY_BOUNDS, _timer_registry_bounds_probe),
         DiagnosticProbe(DiagnosticCheck.MOUNTED_DEVICE_HEALTH, _mounted_device_health_probe),
         DiagnosticProbe(DiagnosticCheck.ALCOVE_FOLLOW_STATE, _alcove_follow_state_probe),
+        DiagnosticProbe(
+            DiagnosticCheck.EVENT_INTAKE_FRESHNESS, _event_intake_freshness_probe
+        ),
     )
 
 

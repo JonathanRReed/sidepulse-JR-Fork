@@ -163,7 +163,7 @@ def test_registry_capabilities_are_enumerated_without_collapsing_provider_rows()
     plan = plan_menu_open_refresh(states, now=1_000.0, low_power=False)
 
     assert plan.invocations == tuple(row.source_key for row in rows)
-    assert len(plan.invocations) == len(rows) == 18
+    assert len(plan.invocations) == len(rows) == 19
 
 
 def test_same_provider_different_sources_remain_independently_due() -> None:

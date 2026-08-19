@@ -71,7 +71,7 @@ def test_registering_a_tenth_provider_moves_nobody(monkeypatch) -> None:
         spec.provider: default_agent_color(spec.provider)
         for spec in colors_module.PROVIDER_SPECS
     }
-    assert len(before) == 9
+    assert len(before) == 10
 
     newcomer = replace(colors_module.PROVIDER_SPECS[0], provider="newcomer")
     specs = (
@@ -224,8 +224,17 @@ def test_both_surfaces_route_a_crowd_the_same_way() -> None:
 
     from sidepulse.status_bar import StatusBarController
 
-    hardware = inspect.getsource(StatusBarController._sync_hardware_device)
-    screen_bar = inspect.getsource(StatusBarController.sync_virtual_status_device)
+    def _combined_source(name: str) -> str:
+        # The production facade wraps these methods; the routing lives in
+        # whichever layer of the controller stack defines the behaviour.
+        return "\n".join(
+            inspect.getsource(vars(base)[name])
+            for base in StatusBarController.__mro__
+            if name in vars(base)
+        )
+
+    hardware = _combined_source("_sync_hardware_device")
+    screen_bar = _combined_source("sync_virtual_status_device")
 
     assert "should_render_multi_agent" in hardware
     assert "should_render_multi_agent" in screen_bar

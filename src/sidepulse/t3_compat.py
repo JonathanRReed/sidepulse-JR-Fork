@@ -14,10 +14,10 @@ import re
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
 from urllib.parse import quote
 
 from .models import AgentMode, AgentStatus, parse_datetime

@@ -63,6 +63,7 @@ class SdLedWasmController:
 
         self._parse = self.context.objectForKeyedSubscript_("sdledParse")
         self._step = self.context.objectForKeyedSubscript_("sdledStep")
+        self._step_batch = self.context.objectForKeyedSubscript_("sdledStepBatch")
         self._reset = self.context.objectForKeyedSubscript_("sdledReset")
 
     def reset(self, now_ms: int) -> None:
@@ -89,6 +90,34 @@ class SdLedWasmController:
                 int(data[index + 2]),
             )
             for index in range(0, len(data), 3)
+        ]
+
+    def step_batch(
+        self,
+        start_ms: int,
+        interval_ms: int,
+        frames: int,
+    ) -> list[list[tuple[int, int, int]]]:
+        """Render `frames` consecutive frames in ONE JavaScriptCore call.
+
+        The per-frame PyObjC round-trip is the hottest path in the app
+        while the Screen Bar animates; batching amortizes it without any
+        assumption about the program's periodicity."""
+        value = self._step_batch.callWithArguments_(
+            [self.led_count, int(start_ms), int(interval_ms), int(frames)]
+        )
+        data = json.loads(value.toString())
+        stride = self.led_count * 3
+        return [
+            [
+                (
+                    int(data[base + index]),
+                    int(data[base + index + 1]),
+                    int(data[base + index + 2]),
+                )
+                for index in range(0, stride, 3)
+            ]
+            for base in range(0, len(data), stride)
         ]
 
 
@@ -215,6 +244,22 @@ def _javascript_controller(wasm_base64: str) -> str:
     var pixels = [];
     for (var i = 0; i < output.length; i += 1) {{
       pixels.push(output[i]);
+    }}
+    return JSON.stringify(pixels);
+  }};
+
+  global.sdledStepBatch = function (ledCount, startMs, intervalMs, frames) {{
+    var count = ensureInitialized(ledCount, startMs);
+    var total = Math.max(1, Math.floor(frames));
+    var interval = Math.max(1, Math.floor(intervalMs));
+    var start = Math.floor(startMs);
+    var pixels = [];
+    for (var frame = 0; frame < total; frame += 1) {{
+      exports.sdled_step(count, start + frame * interval);
+      var output = new Uint8Array(memory.buffer, outputPtr, count * 3);
+      for (var i = 0; i < output.length; i += 1) {{
+        pixels.push(output[i]);
+      }}
     }}
     return JSON.stringify(pixels);
   }};

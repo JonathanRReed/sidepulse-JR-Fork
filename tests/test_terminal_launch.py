@@ -63,7 +63,7 @@ def test_reviewed_terminal_matrix_routes_exact_hosts_and_product_fallback(
     terminal = resolve_terminal_launch(TERMINAL_BUNDLE_IDENTIFIER)
     iterm = resolve_terminal_launch(ITERM_BUNDLE_IDENTIFIER)
     with patch(
-        "sidepulse.status_bar_launch.resolve_ghostty_executable",
+        "sidepulse._status_bar_launch_legacy.resolve_ghostty_executable",
         return_value=ghostty,
     ):
         ghostty_plan = resolve_terminal_launch(GHOSTTY_BUNDLE_IDENTIFIER)
@@ -105,7 +105,7 @@ def test_terminal_launch_arguments_are_literal_absolute_and_do_not_use_shell_sea
         command,
     )
     with patch(
-        "sidepulse.status_bar_launch.resolve_ghostty_executable",
+        "sidepulse._status_bar_launch_legacy.resolve_ghostty_executable",
         return_value=ghostty,
     ):
         ghostty_arguments = terminal_launch_arguments(
@@ -188,14 +188,14 @@ def test_ghostty_resolution_checks_only_reviewed_absolute_application_paths(
 
     with (
         patch(
-            "sidepulse.status_bar_launch.GHOSTTY_APPLICATION_PATHS",
+            "sidepulse._status_bar_launch_legacy.GHOSTTY_APPLICATION_PATHS",
             (bundle,),
         ),
         patch(
-            "sidepulse.status_bar_launch.subprocess.run",
+            "sidepulse._status_bar_launch_legacy.subprocess.run",
             side_effect=_valid_codesign,
         ),
-        patch("sidepulse.status_bar_launch.Path.home", side_effect=AssertionError),
+        patch("sidepulse._status_bar_launch_legacy.Path.home", side_effect=AssertionError),
     ):
         plan = resolve_terminal_launch(GHOSTTY_BUNDLE_IDENTIFIER)
 
@@ -205,7 +205,7 @@ def test_ghostty_resolution_checks_only_reviewed_absolute_application_paths(
 
 def test_unavailable_ghostty_uses_terminal_with_specific_product_copy() -> None:
     with patch(
-        "sidepulse.status_bar_launch.GHOSTTY_APPLICATION_PATHS",
+        "sidepulse._status_bar_launch_legacy.GHOSTTY_APPLICATION_PATHS",
         (Path("/Applications/DefinitelyMissingGhostty.app"),),
     ):
         plan = resolve_terminal_launch(GHOSTTY_BUNDLE_IDENTIFIER)
@@ -282,11 +282,11 @@ def test_status_bar_executes_each_reviewed_plan_and_logs_only_real_fallback(
         patch.object(status_bar.subprocess, "Popen", side_effect=popen),
         patch.object(status_bar, "log_status_bar") as log,
         patch(
-            "sidepulse.status_bar_launch.GHOSTTY_APPLICATION_PATHS",
+            "sidepulse._status_bar_launch_legacy.GHOSTTY_APPLICATION_PATHS",
             (bundle,),
         ),
         patch(
-            "sidepulse.status_bar_launch.subprocess.run",
+            "sidepulse._status_bar_launch_legacy.subprocess.run",
             side_effect=_valid_codesign,
         ),
     ):

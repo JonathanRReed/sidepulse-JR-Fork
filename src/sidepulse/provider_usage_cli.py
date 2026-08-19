@@ -6,11 +6,11 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import TextIO
 
 from .provider_browser_consent import (
-    BrowserConsentStore,
     default_browser_consent_path,
     load_browser_consents,
     save_browser_consents,

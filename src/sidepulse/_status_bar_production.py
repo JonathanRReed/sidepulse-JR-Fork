@@ -194,14 +194,28 @@ else:
             probed_at = float(getattr(self, "_intake_probed_at", 0.0) or 0.0)
             if force or probes is None or now - probed_at > 30.0:
                 self._intake_service().request(self._intake_probe_ready)
+                # A synchronously delivered result (tests, warm caches) is
+                # usable immediately; a real off-main probe lands later.
+                probes = getattr(self, "_intake_probes", None)
             if not probes:
                 self.current_intake_report = None
                 return None
-            self._intake_probed_at = now
-            return _LegacyStatusBarController.refresh_intake_report(
-                self,
-                force=False,
-            )
+            # Only a completed probe may renew the freshness stamp; renewing
+            # it here would let cached recomputation starve the real probe.
+            # The delivery half is recomputed directly so a stale cache never
+            # triggers the legacy path's synchronous main-thread probe.
+            try:
+                report = _legacy.build_intake_report(
+                    probes,
+                    accepted_by_provider=_legacy.accepted_epochs_by_provider(
+                        getattr(self, "current_operator_state", None)
+                    ),
+                    now_epoch=time.time(),
+                )
+            except Exception:
+                return self.current_intake_report
+            self.current_intake_report = report
+            return report
 
         def _intake_probe_ready(self, result: IntakeProbeResult) -> None:
             try:
@@ -395,10 +409,19 @@ else:
                     getattr(self, "current_usage_view", None),
                 ),
             }
+            stage_reader = getattr(self, "current_escalation_stage", 0)
+            try:
+                escalation_stage = (
+                    stage_reader()
+                    if callable(stage_reader)
+                    else int(stage_reader or 0)
+                )
+            except (TypeError, ValueError):
+                escalation_stage = 0
             urgent = bool(
                 getattr(attention, "requests", ())
                 or getattr(attention, "failures", ())
-                or getattr(self, "current_escalation_stage", 0)
+                or escalation_stage > 0
             )
             return self._core_state_store().observe(
                 values,
@@ -420,6 +443,10 @@ else:
 
         @_legacy.objc.IBAction
         def refresh_(self, sender):
+            # Any completed refresh satisfies pending event wake-ups, no
+            # matter which path invoked it; without this, a dropped
+            # refreshFromEvent: dispatch left the pending flag latched.
+            self.event_refresh_pending = False
             if getattr(self, "_production_refresh_active", False):
                 self._production_refresh_pending = True
                 self._performance().record(

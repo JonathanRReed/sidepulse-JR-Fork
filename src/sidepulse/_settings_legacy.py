@@ -223,6 +223,11 @@ class AgentMonitorSettings:
     # the lid into sleep and losing the agent's work. See
     # keep_awake.KeepAwakeController.should_hold_for_mode.
     closed_lid_grace_minutes: float = DEFAULT_CLOSED_LID_GRACE_MINUTES
+    # On battery, holding caffeinate -dimsu drains the machine for work the
+    # user may not be watching. Default keeps the historical behavior (hold
+    # everywhere); turning it off releases the hold whenever the Mac reports
+    # it is unplugged. An unknown power state never disables the hold.
+    keep_awake_on_battery: bool = True
     lid_closed_animation: LedAnimationSetting = field(
         default_factory=lambda: default_lid_animation(LID_ANIMATION_CLOSED)
     )
@@ -752,6 +757,9 @@ class AgentMonitorSettings:
     def with_closed_lid_grace_minutes(self, minutes: float) -> AgentMonitorSettings:
         return replace(self, closed_lid_grace_minutes=normalize_closed_lid_grace_minutes(minutes))
 
+    def with_keep_awake_on_battery(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, keep_awake_on_battery=bool(enabled))
+
     def with_lid_animation(
         self,
         kind: str,
@@ -1273,6 +1281,7 @@ class AgentMonitorSettings:
             "closed_lid_awake_policy": self.closed_lid_awake_policy,
             "closed_lid_system_override_enabled": self.closed_lid_system_override_enabled,
             "closed_lid_grace_minutes": self.closed_lid_grace_minutes,
+            "keep_awake_on_battery": self.keep_awake_on_battery,
             "lid_closed_animation": self.lid_closed_animation.to_dict(),
             "lid_closed_active_animation": self.lid_closed_active_animation.to_dict(),
             "lid_open_active_animation": self.lid_open_active_animation.to_dict(),
@@ -1531,6 +1540,9 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         closed_lid_system_override_enabled=_bool_setting(
             data.get("closed_lid_system_override_enabled"),
             False,
+        ),
+        keep_awake_on_battery=_bool_setting(
+            data.get("keep_awake_on_battery"), True
         ),
         closed_lid_grace_minutes=normalize_closed_lid_grace_minutes(
             data.get("closed_lid_grace_minutes"), default=DEFAULT_CLOSED_LID_GRACE_MINUTES

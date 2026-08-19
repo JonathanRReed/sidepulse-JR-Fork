@@ -11,8 +11,8 @@ import pytest
 
 from sidepulse import device_writer
 
-PROGRAM_A = "1:#00FF00; 1s"
-PROGRAM_B = "1:#FF0000; 1s"
+PROGRAM_A = "1:#00FF00 1s"
+PROGRAM_B = "1:#FF0000 1s"
 
 
 def _capture_write_error(
@@ -232,7 +232,7 @@ def test_leaf_replacement_before_normal_publish_is_refused(
     target = device_writer.write_led_program(PROGRAM_A, device_path=tmp_path)
     outside = tmp_path / "outside-sentinel.txt"
     outside.write_text("external sentinel", encoding="utf-8")
-    real_publish = device_writer._publish_scratch
+    real_publish = device_writer._legacy._publish_scratch
     replaced = False
 
     def replacing_publish(*args, **kwargs):
@@ -244,7 +244,7 @@ def test_leaf_replacement_before_normal_publish_is_refused(
 
     with (
         patch.object(
-            device_writer,
+            device_writer._legacy,
             "_publish_scratch",
             side_effect=replacing_publish,
         ),
@@ -267,7 +267,7 @@ def test_parent_replacement_before_normal_publish_is_refused(
     outside.mkdir()
     outside_target = outside / target.name
     outside_target.write_text("external sentinel", encoding="utf-8")
-    real_publish = device_writer._publish_scratch
+    real_publish = device_writer._legacy._publish_scratch
     replaced = False
 
     def replacing_publish(*args, **kwargs):
@@ -279,7 +279,7 @@ def test_parent_replacement_before_normal_publish_is_refused(
 
     with (
         patch.object(
-            device_writer,
+            device_writer._legacy,
             "_publish_scratch",
             side_effect=replacing_publish,
         ),
@@ -467,7 +467,7 @@ def test_rejected_opened_scratch_is_removed_without_touching_target(
 
     with (
         patch.object(
-            device_writer,
+            device_writer._legacy,
             "_require_regular_leaf",
             side_effect=reject_scratch,
         ),

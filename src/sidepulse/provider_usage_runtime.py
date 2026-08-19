@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
 
 from .provider_usage_platform import (
     ProviderSourceState,

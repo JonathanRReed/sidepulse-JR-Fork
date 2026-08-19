@@ -49,6 +49,8 @@ def test_literal_registry_has_one_deterministic_row_per_supported_surface() -> N
         ("google", "gemini-desktop", "Gemini Desktop", "desktop", "inventory"),
         ("google", "gemini-code-assist-vscode", "Gemini Code Assist for VS Code", "ide_extension", "inventory"),
         ("github", "copilot-ide", "GitHub Copilot", "ide_extension", "inventory"),
+        ("kiro", "cli", "Kiro CLI", "cli", "lifecycle"),
+        ("kiro", "sidepulse-agent", "Kiro SidePulse agent", "local_harness", "lifecycle"),
     )
 
 

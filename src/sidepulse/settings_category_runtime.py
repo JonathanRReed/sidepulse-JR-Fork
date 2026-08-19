@@ -58,7 +58,7 @@ def _native_usage_pane(target):
     summary = ui.make_wrapping_label(
         "SidePulse collects quota, reset, token, model, credit, incident, and "
         "estimated-cost facts directly. Sources that need permission say so "
-        "and offer the next action instead of showing ‘no reading’.",
+        "and offer the next action instead of showing “no reading”.",
         secondary=True,
         size=12.0,
         max_width=560.0,

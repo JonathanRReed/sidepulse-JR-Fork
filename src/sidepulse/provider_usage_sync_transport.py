@@ -7,9 +7,9 @@ import secrets
 import stat
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from .provider_usage_sync import MAX_SYNC_PACKET_BYTES
 from .provider_usage_sync_settings import ProviderSyncPeer

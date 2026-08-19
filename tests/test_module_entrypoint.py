@@ -63,7 +63,7 @@ class ModuleEntrypointTests(unittest.TestCase):
         # v2 added alcove_follow_state: Alcove following used to have no
         # observable state at all, so a denied Screen Recording permission
         # was indistinguishable from a working feature with nothing to do.
-        self.assertEqual(payload["version"], 2)
+        self.assertEqual(payload["version"], 3)
         self.assertEqual(
             tuple(finding["check"] for finding in payload["findings"]),
             (
@@ -77,6 +77,7 @@ class ModuleEntrypointTests(unittest.TestCase):
                 "timer_registry_bounds",
                 "mounted_device_health",
                 "alcove_follow_state",
+                "event_intake_freshness",
             ),
         )
         self.assertNotIn(str(Path(temp_dir)), result.stdout)

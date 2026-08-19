@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable
 
 from .provider_usage_parsers import parse_claude_usage, parse_codex_usage
 from .provider_usage_platform import ProviderSourceState, ProviderUsageSnapshot
@@ -82,7 +82,7 @@ def _default_provider_local_scan(
     )
     cache = Path(home) / ".local" / "state" / "sidepulse" / "provider-usage-cache.json"
     try:
-        result, totals = usage_stats._scan_provider_usage_with_totals(  # noqa: SLF001
+        result, totals = usage_stats._scan_provider_usage_with_totals(
             source,
             root,
             cache,

@@ -66,13 +66,25 @@ class KeepAwakeController:
         the very next tick instead of needing a restart."""
         self.grace_seconds = max(0.0, float(seconds))
 
-    def update(self, mode: AgentMode, *, now: float | None = None) -> bool:
+    def update(
+        self,
+        mode: AgentMode,
+        *,
+        now: float | None = None,
+        on_battery: bool | None = None,
+        hold_on_battery: bool = True,
+    ) -> bool:
         current = time.monotonic() if now is None else now
         should_hold = self.should_hold_for_mode(mode, current)
         self.holding_requested = should_hold
         self.last_mode = mode
 
-        if not self.enabled or not should_hold:
+        # Only a POSITIVE battery reading may suppress the hold: an
+        # unknown power state must never silently release keep-awake and
+        # let a lid-closed agent sleep mid-task.
+        battery_blocked = on_battery is True and not hold_on_battery
+
+        if not self.enabled or not should_hold or battery_blocked:
             self.release()
             return False
 

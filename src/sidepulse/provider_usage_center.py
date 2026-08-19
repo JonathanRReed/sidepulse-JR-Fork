@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from .provider_usage_platform import ProviderSourceState, provider_descriptor
 from .provider_usage_qol import format_reset_countdown, usage_totals
 from .provider_usage_runtime import ProviderUsageState
+from .provider_usage_sync import MergedProviderSync
+from .provider_usage_sync_projection import apply_merged_sync_to_state
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +57,9 @@ def project_usage_center(
     state: ProviderUsageState,
     *,
     now: float,
+    merged_sync: MergedProviderSync | None = None,
 ) -> UsageCenterProjection:
+    state = apply_merged_sync_to_state(state, merged_sync)
     sections = []
     for snapshot in state.snapshots:
         lanes = []
@@ -107,19 +111,36 @@ def project_usage_center(
                 snapshot.incident,
             )
         )
-    totals = usage_totals(state.snapshots)
     aggregate = []
-    token_total = (
-        totals.input_tokens
-        + totals.cached_input_tokens
-        + totals.output_tokens
-    )
-    if token_total:
-        aggregate.append(f"{token_total:,} tokens across this Mac")
-    if totals.estimated_cost_usd is not None:
-        aggregate.append(f"Estimated cost ${totals.estimated_cost_usd:.2f}")
-    if totals.cache_savings_usd is not None:
-        aggregate.append(f"Cache savings ${totals.cache_savings_usd:.2f}")
+    if merged_sync is not None:
+        token_total = (
+            merged_sync.total_input_tokens
+            + merged_sync.total_cached_input_tokens
+            + merged_sync.total_output_tokens
+        )
+        if token_total:
+            aggregate.append(f"{token_total:,} tokens across synced Macs")
+        if merged_sync.total_estimated_cost_usd is not None:
+            aggregate.append(
+                f"Estimated cost ${merged_sync.total_estimated_cost_usd:.2f}"
+            )
+        if merged_sync.total_cache_savings_usd is not None:
+            aggregate.append(
+                f"Cache savings ${merged_sync.total_cache_savings_usd:.2f}"
+            )
+    else:
+        totals = usage_totals(state.snapshots)
+        token_total = (
+            totals.input_tokens
+            + totals.cached_input_tokens
+            + totals.output_tokens
+        )
+        if token_total:
+            aggregate.append(f"{token_total:,} tokens across this Mac")
+        if totals.estimated_cost_usd is not None:
+            aggregate.append(f"Estimated cost ${totals.estimated_cost_usd:.2f}")
+        if totals.cache_savings_usd is not None:
+            aggregate.append(f"Cache savings ${totals.cache_savings_usd:.2f}")
     subtitle = (
         "Refreshing provider usage…"
         if state.refreshing

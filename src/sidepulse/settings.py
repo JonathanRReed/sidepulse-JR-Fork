@@ -208,7 +208,41 @@ def _forget_document(target: Path) -> None:
         _SOURCE_DIGEST_BY_PATH.pop(target, None)
 
 
-def _merge_unknown_fields(source: object, encoded: object, *, key: str = "") -> object:
+# Entry-keyed collections the runtime serializes COMPLETELY: their entries
+# are user data (a provider's animation, a session's colour, a profile),
+# not schema fields, so a key absent from the encoded document is a
+# DELETION the user made -- resurrecting it from the source document made
+# removing any entry impossible ("Automatic" never stuck). Unknown-field
+# preservation continues everywhere else.
+_OWNED_COLLECTION_PATHS = frozenset(
+    {
+        "colors.mode_colors",
+        "colors.agent_colors",
+        "colors.session_colors",
+        "colors.fade_floor",
+        "colors.fade_ceiling",
+        "colors.mode_animation",
+        "colors.provider_animation",
+        "colors.speed_overrides",
+        "signal_styles",
+        "calibration_profiles",
+        "focus_profile_rules",
+        "focus_signal_policy",
+        "focus_dim_rules",
+        "session_open_preferences",
+    }
+)
+
+
+def _merge_unknown_fields(
+    source: object,
+    encoded: object,
+    *,
+    key: str = "",
+    path: str = "",
+) -> object:
+    if path in _OWNED_COLLECTION_PATHS:
+        return encoded
     if isinstance(source, dict) and isinstance(encoded, dict):
         merged = {
             source_key: source_value
@@ -220,6 +254,7 @@ def _merge_unknown_fields(source: object, encoded: object, *, key: str = "") -> 
                 source.get(encoded_key),
                 encoded_value,
                 key=encoded_key,
+                path=f"{path}.{encoded_key}" if path else encoded_key,
             )
         return merged
     if key == "devices" and isinstance(source, list) and isinstance(encoded, list):

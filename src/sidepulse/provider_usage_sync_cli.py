@@ -7,8 +7,9 @@ import base64
 import json
 import secrets
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import TextIO
 
 from .provider_credential_store import ProviderCredentialStore
 from .provider_usage_pairing import export_pairing_document, import_pairing_document

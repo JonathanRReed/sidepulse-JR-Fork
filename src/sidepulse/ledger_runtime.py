@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 LEDGER_PUBLISH_REASON_FAILED = "remote_ledger_publish_failed"
 

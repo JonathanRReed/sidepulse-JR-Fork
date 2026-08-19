@@ -84,7 +84,6 @@ if [ "$PORTABLE" -eq 1 ]; then
         tests/test_integration_cli_entrypoint.py \
         tests/test_collector_external_statuses.py \
         tests/test_t3_compat.py \
-        tests/test_codexbar_compat.py \
         tests/test_battery_runtime.py \
         tests/test_transcript_runtime.py \
         tests/test_transcript_coalescing.py \

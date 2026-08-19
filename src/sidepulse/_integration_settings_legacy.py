@@ -71,8 +71,8 @@ class IntegrationSettings:
     def with_t3code(
         self,
         *,
-        base_dir: str | None | object = _UNSET,
-        environment_id: str | None | object = _UNSET,
+        base_dir: str | object | None = _UNSET,
+        environment_id: str | object | None = _UNSET,
     ) -> IntegrationSettings:
         return replace(
             self,

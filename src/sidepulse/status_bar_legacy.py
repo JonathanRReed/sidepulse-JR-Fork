@@ -7407,6 +7407,12 @@ class StatusBarController(NSObject):
             worked = time.monotonic() - self.working_since
             if worked > 900.0:
                 factor = 1.0 + min(0.8, (worked - 900.0) / 2700.0 * 0.8)
+                # Quantized: a smoothly creeping factor changed the rendered
+                # program's durations on every sync, which defeated the
+                # phase-free write dedupe and restarted the device animation
+                # (a visible blink) on every hook event. 0.05 steps are
+                # imperceptible and hold the program stable for minutes.
+                factor = round(factor / 0.05) * 0.05
                 colors = colors.with_cycle_speed(colors.cycle_speed_seconds * factor)
         return colors
 
@@ -8129,11 +8135,18 @@ class StatusBarController(NSObject):
         if self.event_refresh_pending:
             return
         self.event_refresh_pending = True
-        self.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "refreshFromEvent:",
-            None,
-            False,
-        )
+        try:
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "refreshFromEvent:",
+                None,
+                False,
+            )
+        except Exception:
+            # A failed dispatch must not latch the gate shut: with the flag
+            # stuck True every later provider event is silently dropped, and
+            # the menu only moves when something else (a turn boundary)
+            # refreshes directly -- "grok doesn't update until claude acts".
+            self.event_refresh_pending = False
 
     @objc.IBAction
     def refreshFromEvent_(self, _sender):
@@ -8244,7 +8257,10 @@ class StatusBarController(NSObject):
     def openAgentBrowser_(self, sender) -> bool:
         payload = sender.representedObject() if sender is not None else None
         if type(payload) is not AgentBrowserOpenPayload:
-            return False
+            # The row may carry no payload (the compact root's Agents row,
+            # or any hand-built caller): opening the browser must never
+            # depend on what the menu happened to hold. Unscoped view.
+            payload = AgentBrowserOpenPayload(0, None, None)
         snapshot = getattr(self, "last_snapshot", None)
         if snapshot is None:
             return False
@@ -8254,7 +8270,16 @@ class StatusBarController(NSObject):
             shelf=payload.shelf,
             family_key=payload.family_key,
         )
-        if projection is None or projection.generation != payload.generation:
+        if projection is None and (
+            payload.shelf is not None or payload.family_key is not None
+        ):
+            # A stale menu's scope may no longer resolve; the click still
+            # opens the browser, just unscoped. Generation fencing remains
+            # on MUTATING actions (performAgentBrowserPayload_), where a
+            # stale menu really must not act.
+            payload = AgentBrowserOpenPayload(0, None, None)
+            projection = _canonical_agent_browser_projection(snapshot, self)
+        if projection is None:
             return False
         controller = getattr(self, "agent_browser_controller", None)
         if controller is None:
@@ -14678,7 +14703,20 @@ class StatusBarController(NSObject):
         # the grace period in Settings takes effect on the very next poll
         # instead of needing a restart.
         self.keep_awake.set_grace_seconds(self.settings.closed_lid_grace_minutes * 60.0)
-        self.keep_awake.update(mode)
+        battery = getattr(self, "_production_battery_observation", None)
+        battery_snapshot = getattr(battery, "snapshot", None)
+        on_battery = (
+            None
+            if battery_snapshot is None or not battery_snapshot.battery_present
+            else not battery_snapshot.is_plugged
+        )
+        self.keep_awake.update(
+            mode,
+            on_battery=on_battery,
+            hold_on_battery=getattr(
+                self.settings, "keep_awake_on_battery", True
+            ),
+        )
         is_running = self.keep_awake.process_running()
         if was_running != is_running:
             log_status_bar(f"keep_awake={'active' if is_running else 'released'}")

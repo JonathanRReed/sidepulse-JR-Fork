@@ -501,6 +501,10 @@ PROVIDER_BRAND_COLORS: dict[str, str] = {
     # What separates this one is LIGHTNESS, which survives dichromacy when
     # hue does not. See test_provider_colour_dichromacy.py.
     "antigravity": "#ABE17E",
+    # Kiro brand purple collapses onto Codex blue under deuteranopia, and
+    # warm tones crowd Hermes orange in hue. This mulberry clears every
+    # provider and state seed by dE >= 22 and every hue gap by > 20 deg.
+    "kiro": "#4B1E3C",
 }
 
 
@@ -1684,7 +1688,15 @@ def _motion_segments(
     tail = f" {delay_ms}ms" if delay_ms else ""
 
     if motion == MOTION_STEADY:
-        held = f"{led_index}:{peak} {settle_ms}ms cosine"
+        # A done agent's steadiness is REST, not a held peak: the completion
+        # sweep already celebrated, and a bright LED that nobody needs to
+        # answer reads as a phantom ask for its whole 20-minute window.
+        resting = (
+            _floor_for_state(color, state, settings)
+            if state is LedDisplayState.DONE
+            else peak
+        )
+        held = f"{led_index}:{resting} {settle_ms}ms cosine"
         return held, held
 
     if motion == MOTION_BLINK:

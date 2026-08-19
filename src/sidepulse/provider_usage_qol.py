@@ -49,7 +49,7 @@ def _lane_map(snapshot: ProviderUsageSnapshot) -> dict[str, UsageLane]:
 
 
 def _event_id(provider_id: str, lane_id: str, old_reset_at: float) -> str:
-    material = f"{provider_id}\0{lane_id}\0{old_reset_at:.6f}".encode("utf-8")
+    material = f"{provider_id}\0{lane_id}\0{old_reset_at:.6f}".encode()
     digest = hashlib.sha256(material).hexdigest()[:24]
     return f"{provider_id}:{lane_id}:{digest}"
 

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
 
 PROVIDER_SYNC_SETTINGS_SCHEMA_VERSION = 1
 _ALLOWED_CATEGORIES = ("quota", "token_usage", "agent_activity")
@@ -276,8 +276,8 @@ def save_provider_sync_settings(
 
 
 __all__ = [
-    "LoadedProviderSyncSettings",
     "PROVIDER_SYNC_SETTINGS_SCHEMA_VERSION",
+    "LoadedProviderSyncSettings",
     "ProviderSyncPeer",
     "ProviderSyncSettings",
     "ProviderSyncSettingsError",

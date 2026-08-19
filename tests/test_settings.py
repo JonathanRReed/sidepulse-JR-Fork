@@ -16,6 +16,7 @@ from sidepulse.capacity_calibration import (
 from sidepulse.capacity_types import ForecastReleaseState, QuotaHorizon
 from sidepulse.settings import (
     CLAUDE_PLAN_LIMITS_CONSENT_VERSION,
+    CURRENT_SETTINGS_SCHEMA_VERSION,
     LED_DISPLAY_AGENT,
     LED_DISPLAY_QUOTA_RUNWAY,
     AgentMonitorSettings,
@@ -336,11 +337,16 @@ def test_settings_migration_disables_legacy_quota_authority_and_runway(
 
     save_settings(restored, target)
     migrated = json.loads(target.read_text())
-    assert migrated["settings_schema_version"] == 1
+    assert migrated["settings_schema_version"] == CURRENT_SETTINGS_SCHEMA_VERSION
     assert migrated["claude_plan_limits_enabled"] is False
     assert migrated["claude_plan_limits_consent_version"] == 0
-    assert "quota_alerts_enabled" not in migrated
-    assert "quota_alert_thresholds" not in migrated
+    # Lossless persistence keeps unconsumed legacy keys on disk so a
+    # downgrade loses nothing; what matters is that a reload can never
+    # turn them back into active authority.
+    reloaded = load_settings(target)
+    assert reloaded.quota_alerts_enabled is False
+    assert reloaded.quota_alert_thresholds == (90.0, 95.0)
+    assert reloaded.led_display == LED_DISPLAY_AGENT
     assert migrated["led_display"] == LED_DISPLAY_AGENT
     assert migrated["devices"][0]["led_display"] == LED_DISPLAY_AGENT
     assert migrated["webhook_events"] == ["completion"]
@@ -472,3 +478,25 @@ def test_a_stamp_from_another_consent_generation_is_not_consent(
             )
         )
         assert load_settings(target).claude_plan_limits_enabled is False, stamp
+
+
+def test_removing_a_provider_animation_actually_persists(tmp_path: Path) -> None:
+    """Runtime-owned collections must honour deletions: the lossless merge
+    used to resurrect removed entries from the remembered source document,
+    so switching a provider's animation back to Automatic never stuck."""
+    from sidepulse.colors import PROVIDER_ANIMATION_AUTO
+
+    path = tmp_path / "settings.json"
+    first = AgentMonitorSettings()
+    first = first.with_colors(first.colors.with_agent_animation("claude", "blink"))
+    save_settings(first, path)
+    assert load_settings(path).colors.provider_animation == {"claude": "blink"}
+
+    loaded = load_settings(path)
+    cleared = loaded.with_colors(
+        loaded.colors.with_agent_animation("claude", PROVIDER_ANIMATION_AUTO)
+    )
+    save_settings(cleared, path)
+
+    assert load_settings(path).colors.provider_animation == {}
+    assert json.loads(path.read_text())["colors"]["provider_animation"] == {}

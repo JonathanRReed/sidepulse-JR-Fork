@@ -1374,6 +1374,7 @@ _PRODUCT_PROVIDER_LABELS = {
     "hermes": "Hermes",
     "openclaw": "OpenClaw",
     "opencode": "OpenCode",
+    "kiro": "Kiro",
 }
 
 
@@ -2593,9 +2594,12 @@ def mode_for_event(record: HookEvent) -> AgentMode | None:
     if explicit_mode is not None:
         return explicit_mode
 
-    if event in {"PostToolUseFailure", "PermissionDenied", "StopFailure"}:
+    if event in {"PermissionDenied", "StopFailure"}:
         return AgentMode.BLOCKED_ERROR
-    if event in {"PermissionRequest"}:
+    if event == "PostToolUseFailure":
+        # A tool failure the agent moved past.
+        return AgentMode.WORKING
+    if event == "PermissionRequest":
         return AgentMode.WAITING_FOR_INPUT
     if event == "Notification":
         notification_type = str(raw.get("notification_type", "")).strip().lower()
@@ -2609,11 +2613,9 @@ def mode_for_event(record: HookEvent) -> AgentMode | None:
         if notification_text_indicates_input_needed(text):
             return AgentMode.WAITING_FOR_INPUT
         return AgentMode.WORKING
-    if event in {"PreToolUse"}:
+    if event == "PreToolUse":
         return AgentMode.TOOL_RUNNING
-    if event in {"PostToolUse"}:
-        if _tool_response_looks_failed(raw.get("tool_response")):
-            return AgentMode.BLOCKED_ERROR
+    if event == "PostToolUse":
         return AgentMode.WORKING
     if event in {"UserPromptSubmit", "PreCompact", "PostCompact", "SubagentStart"}:
         return AgentMode.WORKING
@@ -2626,7 +2628,7 @@ def mode_for_event(record: HookEvent) -> AgentMode | None:
         if _assistant_message_asks_question(raw.get("last_assistant_message")):
             return AgentMode.WAITING_FOR_INPUT
         return AgentMode.COMPLETED
-    if event in {"SessionEnd"}:
+    if event == "SessionEnd":
         return AgentMode.COMPLETED
     if event == "SessionStart":
         return AgentMode.IDLE_READY

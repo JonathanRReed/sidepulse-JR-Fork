@@ -85,7 +85,11 @@ def _safe_timing(
         else MIN_PRESENTATION_PHASE_MS
     )
     duration = timing.duration_ms
-    if duration is None:
+    if duration is None and force_timed:
+        # Only a repeating program needs concrete durations: an untimed
+        # step inside a loop is a zero-length spin the loop-cadence pass
+        # cannot scale. Outside a loop the firmware's own defaults apply
+        # and the author's bytes pass through unchanged.
         if timing.easing == "pulse":
             duration = (
                 MIN_SATURATED_RED_CYCLE_MS
@@ -94,20 +98,15 @@ def _safe_timing(
             )
         elif timing.easing is not None:
             duration = max(minimum, timing.effective_duration_ms)
-        elif force_timed:
+        else:
             duration = minimum
-    else:
-        duration = max(minimum, duration)
-        if timing.easing == "pulse":
-            duration = max(
-                MIN_SATURATED_RED_CYCLE_MS
-                if saturated_red
-                else MIN_PRESENTATION_CYCLE_MS,
-                duration,
-            )
+    # Explicit durations are the author's phase design. Sustained flash rate
+    # is owned by the loop-cadence pass below: a short pulse inside a
+    # slow-enough loop is one brief flash per cycle, not a flicker hazard.
+    # A delay is a phase offset and can never raise the flash rate; clamping
+    # delays collapses deliberately staggered LEDs onto the same phase and
+    # makes the surface flash MORE in unison, so it is never done.
     delay = timing.delay_ms
-    if delay is not None:
-        delay = max(minimum, delay)
     if (duration is not None and duration > MAX_TIME_MS) or (
         delay is not None and delay > MAX_TIME_MS
     ):
@@ -142,8 +141,7 @@ def _safe_animation(animation: Animation) -> tuple[Animation, tuple[str, ...]]:
         ),
         None,
     )
-    paint_step_count = sum(type(step) is PaintStep for step in animation.steps)
-    force_timed = repeat_index is not None or paint_step_count > 1
+    force_timed = repeat_index is not None
     for step in animation.steps:
         if type(step) is PaintStep:
             red = _step_has_saturated_red(step)

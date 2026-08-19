@@ -709,22 +709,25 @@ def test_development_wrapper_codesign_uses_trusted_absolute_path(tmp_path: Path)
 
 
 def test_package_builder_removes_candidate_metadata_before_codesign() -> None:
+    # Signing moved into packaging/sign_macos_app.py (inside-out plan); the
+    # builder must still sanitize Finder metadata before handing over.
     source = (REPO_ROOT / "packaging" / "build_macos_pkg.sh").read_text()
     sanitize = source.index('/usr/bin/xattr -cr "$APP_PATH"')
-    signed = source.index('/usr/bin/codesign --force --deep')
+    signed = source.index("packaging/sign_macos_app.py")
 
     assert sanitize < signed
 
 
 def test_package_builder_strictly_verifies_ad_hoc_signatures() -> None:
-    source = (REPO_ROOT / "packaging" / "build_macos_pkg.sh").read_text()
-    ad_hoc = source.index('/usr/bin/codesign --force --deep --sign - "$APP_PATH"')
-    signing_branch_end = source.index("\nfi", ad_hoc)
-    strict_verify = source.index(
-        '/usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_PATH"'
-    )
+    # The signer performs its own strict deep verification after signing,
+    # for Developer ID and ad-hoc identities alike.
+    source = (REPO_ROOT / "packaging" / "sign_macos_app.py").read_text()
+    signed = source.index('"--sign"')
+    strict_verify = source.index('"--strict"', signed)
 
-    assert strict_verify > signing_branch_end
+    assert strict_verify > signed
+    assert '"--verify"' in source
+    assert '"--deep"' in source
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -742,7 +745,14 @@ def test_package_builder_uses_isolated_roots_identity_and_pre_pkg_verifier(tmp_p
     shutil.copy2(REPO_ROOT / "packaging" / "sidepulse_entry.py", packaging_dir)
     shutil.copy2(REPO_ROOT / "packaging" / "verify_macos_app.py", packaging_dir)
     shutil.copy2(REPO_ROOT / "packaging" / "scripts" / "postinstall", scripts_dir)
+    shutil.copy2(REPO_ROOT / "packaging" / "sign_macos_app.py", packaging_dir)
     shutil.copy2(REPO_ROOT / "pyproject.toml", project)
+    requirements_dir = project / "requirements"
+    requirements_dir.mkdir()
+    shutil.copy2(
+        REPO_ROOT / "requirements" / "release-constraints.txt",
+        requirements_dir,
+    )
 
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
@@ -796,6 +806,8 @@ EOF
         build_python,
         """#!/bin/sh
 set -eu
+# Answer the builder's interpreter version probe as a supported Python.
+if [ "$1" = "-c" ]; then exit 0; fi
 if [ "$1" != "-m" ] || [ "$2" != "venv" ]; then exit 90; fi
 /bin/mkdir -p "$3/bin"
 /bin/cp "$PACKAGE_TEST_PYTHON_TEMPLATE" "$3/bin/python"
@@ -837,5 +849,7 @@ if [ "$1" != "-m" ] || [ "$2" != "venv" ]; then exit 90; fi
     )
     entitlements = plistlib.loads((packaging_dir / "entitlements.plist").read_bytes())
     assert entitlements["com.apple.security.automation.apple-events"] is True
-    assert event_log.read_text().splitlines() == ["verify"]
+    # Three script-file invocations run before pkgbuild now: the signer,
+    # the pre-pkg bundle verifier, and the entitlements verifier.
+    assert event_log.read_text().splitlines() == ["verify", "verify", "verify"]
     assert list(output_root.glob("SidePulse-*.pkg"))

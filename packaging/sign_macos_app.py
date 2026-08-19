@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import stat
 import subprocess
 from collections.abc import Callable, Sequence
@@ -102,7 +101,9 @@ def build_sign_plan(
         if path.suffix.casefold() in SIGNABLE_FILE_SUFFIXES or executable:
             if detector(path):
                 nested_code.append(path)
-    depth_key = lambda path: (-len(path.relative_to(root).parts), str(path))
+    def depth_key(path: Path) -> tuple[int, str]:
+        return (-len(path.relative_to(root).parts), str(path))
+
     return SignPlan(
         root,
         tuple(sorted(set(nested_code), key=depth_key)),

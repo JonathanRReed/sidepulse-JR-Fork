@@ -46,12 +46,16 @@ from .providers import (
     DEVIN_EVENTS,
     GROK_EVENTS,
     HERMES_EVENTS,
+    KIRO_EVENTS,
+    KIRO_MANAGED_DESCRIPTION,
+    KIRO_NATIVE_EVENT_NAMES,
     OPENCLAW_HOOK_NAME,
     default_antigravity_config_path,
     default_cursor_config_path,
     default_devin_config_path,
     default_grok_hook_config_path,
     default_hermes_config_path,
+    default_kiro_agent_config_path,
     default_openclaw_config_path,
     default_opencode_plugin_path,
     detect_log_path,
@@ -1315,6 +1319,96 @@ def install_grok_hooks(
     return InstallResult("grok", config, target_log, changed, backup, dry_run)
 
 
+def install_kiro_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+    python_executable: str | None = None,
+) -> InstallResult:
+    """Publish SidePulse's dedicated Kiro agent file, and only that file.
+
+    Kiro scopes hooks to agent configuration files rather than one global
+    hooks document, so SidePulse owns ``~/.kiro/agents/sidepulse.json``
+    outright -- launched with ``kiro-cli --agent sidepulse``. An existing
+    file is overwritten only when it carries the managed description.
+    """
+    config = config_path or default_kiro_agent_config_path()
+    target_log = (log_path or detect_log_path("kiro")).expanduser()
+    # Validate the leaf BEFORE reading it, exactly as every other JSON
+    # installer does: reads and writes both go through the reviewed leaf,
+    # so a symlinked agent file is refused rather than followed.
+    config_leaf = _validated_optional_config(config, dry_run=dry_run)
+    original = _decode_config(config_leaf)
+    if original:
+        try:
+            current = json.loads(original)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"refusing to overwrite invalid Kiro agent config: {config}"
+            ) from exc
+        if (
+            not isinstance(current, dict)
+            or current.get("description") != KIRO_MANAGED_DESCRIPTION
+        ):
+            raise ValueError(
+                f"refusing to overwrite unmanaged Kiro agent config: {config}"
+            )
+    command = hook_command("kiro", target_log, python_executable)
+    hooks: dict[str, list[dict[str, object]]] = {}
+    for event in KIRO_EVENTS:
+        entry: dict[str, object] = {"command": command, "timeout_ms": 5000}
+        if event in {"PreToolUse", "PostToolUse"}:
+            entry["matcher"] = "*"
+        hooks[KIRO_NATIVE_EVENT_NAMES[event]] = [entry]
+    new_text = (
+        json.dumps(
+            {
+                "name": "sidepulse",
+                "description": KIRO_MANAGED_DESCRIPTION,
+                "tools": ["*"],
+                "hooks": hooks,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    changed = new_text != original
+    backup = None
+    if changed and not dry_run:
+        backup = _transactional_provider_publish(
+            config_leaf=config_leaf,
+            target_log=target_log,
+            writes={config: new_text},
+            backup_config=bool(original),
+        )
+    return InstallResult("kiro", config, target_log, changed, backup, dry_run)
+
+
+def uninstall_kiro_hooks(
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+) -> InstallResult:
+    config = config_path or default_kiro_agent_config_path()
+    target_log = (log_path or detect_log_path("kiro")).expanduser()
+    original = config.read_text() if config.exists() else ""
+    managed = False
+    if original:
+        try:
+            managed = (
+                json.loads(original).get("description")
+                == KIRO_MANAGED_DESCRIPTION
+            )
+        except Exception:
+            managed = False
+    changed = managed
+    backup = None
+    if changed and not dry_run:
+        backup = backup_file(config)
+        config.unlink(missing_ok=True)
+    return InstallResult("kiro", config, target_log, changed, backup, dry_run)
+
+
 def install_devin_hooks(
     log_path: Path | None = None,
     config_path: Path | None = None,
@@ -2200,6 +2294,7 @@ INSTALLERS = {
     "openclaw": install_openclaw_hooks,
     "opencode": install_opencode_plugin,
     "antigravity": install_antigravity_hooks,
+    "kiro": install_kiro_hooks,
 }
 
 UNINSTALLERS = {
@@ -2212,6 +2307,7 @@ UNINSTALLERS = {
     "openclaw": uninstall_openclaw_hooks,
     "opencode": uninstall_opencode_plugin,
     "antigravity": uninstall_antigravity_hooks,
+    "kiro": uninstall_kiro_hooks,
 }
 
 

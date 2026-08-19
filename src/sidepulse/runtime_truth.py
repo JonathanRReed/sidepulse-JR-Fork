@@ -123,6 +123,7 @@ def _provider_label(provider: str) -> str:
         "cursor": "Cursor",
         "devin": "Devin",
         "antigravity": "Antigravity",
+        "kiro": "Kiro",
     }
     return labels.get(provider, provider.replace("_", " ").title())
 
