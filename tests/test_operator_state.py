@@ -1332,3 +1332,51 @@ def test_retention_fires_even_while_dead_sources_hold_timing_quarantine() -> Non
 
     surviving = {work.key for work in result.state.works}
     assert work_key not in surviving
+
+
+def test_quiescent_source_quarantines_expire_by_lease_on_any_reduction() -> None:
+    """A restart quarantines every known source, but a dead session's
+    source never sends again -- its timing entry used to hold global
+    clock continuity at UNCERTAIN forever. A full quiet lease now clears
+    quiescent entries on any other source's reduction, letting
+    continuity recover to STABLE."""
+    from sidepulse.operator_state import TIMING_UNCERTAINTY_LEASE_SECONDS
+
+    state, _batch_used, _work_key_used, _request_key = _initial_active_request()
+
+    # The clock jump (fresh boot id) quarantines the dead work's source
+    # and the live source alike.
+    live_source = _source("local:09")
+    jump_clock = _clock(wall=1_800_000_500.0, monotonic=50.0, boot="boot:02")
+    jump_batch = _batch(
+        source=live_source,
+        watermark=_watermark(source=live_source, epoch=1_800_000_500.0),
+    )
+    quarantined = reduce_operator_state(state, jump_batch, clock=jump_clock)
+    assert quarantined.state.clock_continuity.status is ClockContinuityStatus.UNCERTAIN
+
+    # After a full quiet lease, two fresh direct batches from the LIVE
+    # source alone must recover continuity -- the dead source never
+    # sends again and must not be able to veto recovery.
+    base_wall = 1_800_000_500.0 + TIMING_UNCERTAINTY_LEASE_SECONDS + 60.0
+    current = quarantined.state
+    for offset in (0.0, 30.0):
+        wall = base_wall + offset
+        batch = _batch(
+            source=live_source,
+            watermark=_watermark(
+                f"event:recover:{offset}", source=live_source, epoch=wall
+            ),
+        )
+        result = reduce_operator_state(
+            current,
+            batch,
+            clock=_clock(
+                wall=wall,
+                monotonic=50.0 + (wall - 1_800_000_500.0),
+                boot="boot:02",
+            ),
+        )
+        current = result.state
+
+    assert current.clock_continuity.status is ClockContinuityStatus.STABLE

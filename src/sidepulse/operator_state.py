@@ -898,6 +898,22 @@ def _determine_continuity(
             clock_quarantine=True,
         )
 
+    # Quiescent sources age out by lease on ANY reduction: the lease used
+    # to be checked only when the quarantined source itself sent a batch,
+    # so a source that never sends again (a dead session's) held its entry
+    # -- and global clock continuity -- hostage forever after a restart.
+    expired_quiescent = [
+        source
+        for source, entry in source_timing.items()
+        if source != batch.source_key and _timing_lease_expired(entry, clock)
+    ]
+    if expired_quiescent:
+        for source in expired_quiescent:
+            del source_timing[source]
+        diagnostics["timing_quarantine_lease_expired_quiescent"] = len(
+            expired_quiescent
+        )
+
     source_entry = source_timing.get(batch.source_key)
     if source_entry is None:
         if _restored(batch) or _source_loss(batch):
