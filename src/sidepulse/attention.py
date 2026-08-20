@@ -8,6 +8,7 @@ from .collector import MonitorSnapshot
 from .freshness import bounded_age_seconds
 from .models import AgentMode, AgentStatus
 from .operator_state import (
+    COMPLETED_RECENT_SECONDS,
     CanonicalOperatorEvent,
     CanonicalOperatorState,
     RequestPhase,
@@ -191,7 +192,10 @@ def project_attention(
         for status in snapshot.statuses
         if bounded_age_seconds(collected_at, status.updated_at) != float("inf")
     )
-    rows = tuple(_project_row(status, settings) for status in plausible_statuses)
+    rows = tuple(
+        _project_row(status, settings, now=collected_at)
+        for status in plausible_statuses
+    )
     actionable = tuple(
         sorted(
             (row for row in rows if row.actionable),
@@ -413,13 +417,15 @@ def _light_driver_candidates(
 def _project_row(
     status: AgentStatus,
     settings: AgentMonitorSettings,
+    *,
+    now: datetime | None = None,
 ) -> ProjectedAgentRow:
     actionable = actionable_request(status, settings)
     return ProjectedAgentRow(
         agent_id=status.agent_id,
         provider=status.provider,
         display_name=status.display_name,
-        lifecycle_mode=_lifecycle_mode(status, actionable),
+        lifecycle_mode=_lifecycle_mode(status, actionable, now=now),
         actionable=actionable,
         is_subagent=status.is_subagent,
         updated_at=status.updated_at,
@@ -429,7 +435,12 @@ def _project_row(
     )
 
 
-def _lifecycle_mode(status: AgentStatus, actionable: bool) -> LifecycleMode:
+def _lifecycle_mode(
+    status: AgentStatus,
+    actionable: bool,
+    *,
+    now: datetime | None = None,
+) -> LifecycleMode:
     if actionable:
         return LifecycleMode.WAITING
     if status.mode in {
@@ -441,6 +452,16 @@ def _lifecycle_mode(status: AgentStatus, actionable: bool) -> LifecycleMode:
     if status.mode == AgentMode.BLOCKED_ERROR:
         return LifecycleMode.FAILED_VISIBLE
     if status.mode == AgentMode.COMPLETED:
+        # Done is a MOMENT (this is the LIVE path -- the canonical
+        # variant below has the same rule): past the recent window the
+        # row settles to the idle whisper instead of holding the done
+        # green until collector staleness or the presence horizon.
+        if (
+            now is not None
+            and (now - status.updated_at).total_seconds()
+            > COMPLETED_RECENT_SECONDS
+        ):
+            return LifecycleMode.IDLE
         return LifecycleMode.COMPLETED_RECENTLY
     if status.mode in {AgentMode.IDLE_READY, AgentMode.ENDED_UNCONFIRMED}:
         # Ended-unconfirmed is a whisper, never a signal: the session is

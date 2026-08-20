@@ -91,7 +91,7 @@ Built, tested, and correct:
   sight) *and* `quota_resets`. The duplicate was deleted; only the genuinely
   missing pieces were kept, next to the detector that already existed.
 
-**Not shipped, on purpose.** Four independent switches each made Claude
+**Superseded 2026-08-20:** Claude usage now ships -- the OAuth parser reads the endpoint's own `utilization` field and Claude lanes render meters (see CHANGELOG 0.3.0). The 2026-08-14 rationale below is kept for history. **Original: Not shipped, on purpose.** Four independent switches each made Claude
 limits unreachable, and flipping them is not the same as finishing the job:
 
 1. `fetch_windows()` unconditionally raised — **fixed**.

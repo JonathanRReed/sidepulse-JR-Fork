@@ -112,6 +112,7 @@ def _native_usage_pane(target):
             max_width=560.0,
         )
     )
+    element_boxes = []
     for flag, label in (
         ("show_meters", "Meter per limit lane"),
         ("show_totals", "Token and model totals"),
@@ -123,6 +124,7 @@ def _native_usage_pane(target):
         box.setIdentifier_(flag)
         box.setState_(1 if getattr(usage_settings.menu_display, flag) else 0)
         display_inner.addArrangedSubview_(box)
+        element_boxes.append(box)
     stack.addArrangedSubview_(display_outer)
 
     providers_outer, providers_inner = ui.make_card("Providers in the Menu")
@@ -135,6 +137,7 @@ def _native_usage_pane(target):
             max_width=560.0,
         )
     )
+    provider_boxes = []
     for preference in usage_settings.providers:
         box = ui.make_checkbox(
             provider_descriptor(preference.provider_id).label,
@@ -144,7 +147,14 @@ def _native_usage_pane(target):
         box.setIdentifier_(preference.provider_id)
         box.setState_(1 if preference.menu_visible else 0)
         providers_inner.addArrangedSubview_(box)
+        provider_boxes.append(box)
     stack.addArrangedSubview_(providers_outer)
+
+    # The pane is cached across reopens; the settings file is also
+    # written by the CLI and the failure-revert path. Keeping the box
+    # references lets refresh_native_usage_summary re-sync states from
+    # disk instead of the pane fossilizing its build-time reading.
+    target._sidepulse_usage_menu_boxes = (tuple(element_boxes), tuple(provider_boxes))
 
     return ui.wrap_in_scroll_pane(stack), {
         "native_usage_summary": summary,
@@ -164,6 +174,32 @@ def refresh_native_usage_summary(target) -> None:
     except Exception:
         text = "Provider source status is temporarily unavailable."
     field.setStringValue_(text)
+    _sync_usage_menu_checkboxes(target)
+
+
+def _sync_usage_menu_checkboxes(target) -> None:
+    """Re-read the settings file into the cached pane's checkboxes."""
+    boxes = getattr(target, "_sidepulse_usage_menu_boxes", None)
+    if not boxes:
+        return
+    try:
+        from .provider_usage_settings import load_provider_usage_settings
+
+        settings = load_provider_usage_settings().settings
+        element_boxes, provider_boxes = boxes
+        for box in element_boxes:
+            flag = str(box.identifier() or "")
+            box.setState_(1 if getattr(settings.menu_display, flag, True) else 0)
+        visible = {
+            preference.provider_id: preference.menu_visible
+            for preference in settings.providers
+        }
+        for box in provider_boxes:
+            box.setState_(
+                1 if visible.get(str(box.identifier() or ""), True) else 0
+            )
+    except Exception:
+        return
 
 
 def _build_child(target, page_key: str):

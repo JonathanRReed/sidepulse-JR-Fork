@@ -1,11 +1,18 @@
 # SidePulse feature and readiness matrix
 
-Updated: 2026-08-16
+Updated: 2026-08-20
 
 This document is the status authority for product claims. A feature is **shipped** only when it is reachable from the installed application and covered at its source-to-effect seam. A feature is **release-verified** only after the signed macOS release gate has passed for that exact commit.
 
 | Capability | Implementation status | Default | Release evidence required |
 | --- | --- | --- | --- |
+| Claude subscription usage via Claude Code OAuth (5-hour / weekly / model-scoped lanes) | Shipped (0.3.0; parser reads the endpoint's `utilization` field) | On once connected | Local gate |
+| Usage lane meters, pace verdicts, and reset countdowns in the menu and Usage Center | Shipped (0.3.0) | On | Local gate |
+| Usage menu curation (per-element switches, per-provider visibility) | Shipped (0.3.0) | All on | Local gate |
+| Tightest-limit percent beside the menu-bar icon, active-provider aware, pace-colored | Shipped (0.3.0) | On | Local gate |
+| Contained classic Screen Bar (paints only inside the measured notch silhouette) | Shipped (0.3.0) | On | Local gate |
+| Keep-awake holds only while agents work + one grace window; caffeinate -ims | Shipped (0.3.0) | On | Local gate |
+| Screen Bar quota ember (left tip brightens below provider threshold) | Shipped (0.3.0) | Off (gauges switch) | Local gate |
 | Claude, Codex, Devin, Grok, Cursor, Hermes, OpenClaw, OpenCode, and Antigravity lifecycle intake | Shipped | Provider-specific setup | Hook preservation, event-to-canonical tests, installed hook smoke test |
 | Canonical operator state, requests, workers, acknowledgements, freshness, and precedence | Shipped | On | Reducer, restoration, clock-continuity, and source-authority tests |
 | Menu-bar status and session navigation | Shipped | On | AppKit suite, navigation allowlist, menu latency P95 |

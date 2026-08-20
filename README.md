@@ -103,8 +103,8 @@ wearing your colors.
   silent), and a **quota sunrise** sweep the moment a limit window
   resets.
 - Engineering: no SD-card I/O, subprocess forks, or sqlite on the main
-  thread; a 30fps change-gated Screen Bar with 15Hz WASM sampling;
-  6,200+ tests in the verification gate; corrupt settings are preserved for recovery,
+  thread; a change-gated Screen Bar (60fps active, 30fps resting breathe) with 60Hz-capped WASM sampling;
+  6,000+ checks in the verification gate; corrupt settings are preserved for recovery,
   never silently reset. Architecture notes live in
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), the build ledger in
   [`docs/FORK-ROADMAP.md`](docs/FORK-ROADMAP.md).
@@ -540,7 +540,10 @@ bottom edge, or the corresponding top-center position on a display without a
 notch. Each virtual LED blends across a three-LED footprint: centered on the
 target LED, fading one LED width left and right. It shares the physical
 device's status animations, display-mode selection, and per-device brightness
-control. The Screen Bar evaluates the same `LEDS.LED` programs with the
+control. In classic mode everything the bar paints stays inside the measured notch
+silhouette -- opaque housing, glow feathered to black before the corner
+fillets -- and while an agent asks, a hover-reveal announcer pill names the
+session (click jumps to it). The Screen Bar evaluates the same `LEDS.LED` programs with the
 firmware/websim `sdled.wasm` engine, then AppKit only draws the returned RGB
 frames.
 
@@ -560,7 +563,7 @@ prevention policy:
 | Choice | Behavior |
 | --- | --- |
 | Never | Do not use the closed-lid sleep override. |
-| When Agents Work | Keep the Mac awake while agents are Working / Tool Running / Progressing, plus the existing five-minute Ask / Done / Error grace period. |
+| When Agents Work | Keep the Mac awake while agents are Working / Tool Running / Progressing, plus one five-minute grace window armed when work stops (rest-to-rest mode changes never re-arm it). |
 | Always | Keep the closed-lid sleep override active while the status-bar app is running. |
 
 The status-bar app still keeps the SidePulse Pro/SidePulse Dot volume active by touching

@@ -110,7 +110,7 @@ def test_lane_lines_render_codebar_style_meters():
         ProviderUsageState((snapshot("claude", "5-hour", 74),), 1000, 1100, False),
         now=1000,
     ).rows[0]
-    assert row.lane_lines == ("▰▰▰▰▰▰▱▱  5-hour · 74% left · resets in 33m",)
+    assert row.lane_lines == ("▰▰▰▰▰▰▱▱  5-hour · 74% left · resets in 33m · surplus",)
 
 
 def test_lane_meter_never_shows_empty_while_something_remains():
@@ -152,7 +152,7 @@ def test_display_flags_curate_meters_totals_cost_and_detail_lanes():
             show_meters=False, show_totals=False, show_cost=False
         ),
     ).rows[0]
-    assert quiet.lane_lines == ("5-hour · 74% left · resets in 33m",)
+    assert quiet.lane_lines == ("5-hour · 74% left · resets in 33m · surplus",)
     assert quiet.usage_detail is None
 
     no_cost = project_usage_menu(
@@ -193,8 +193,8 @@ def test_lanes_past_their_threshold_are_flagged_for_alert_rendering():
     assert by_provider["codex"].alert_lane_indexes == ()
 
 
-def test_menu_bar_suffix_is_the_tightest_visible_number_or_nothing():
-    from sidepulse.provider_usage_menu import menu_bar_quota_suffix
+def test_menu_bar_glance_prefers_running_providers_then_tightest():
+    from sidepulse.provider_usage_menu import menu_bar_quota_glance
 
     state = ProviderUsageState(
         (snapshot("claude", "5-hour", 36), snapshot("codex", "Weekly", 71)),
@@ -202,12 +202,32 @@ def test_menu_bar_suffix_is_the_tightest_visible_number_or_nothing():
         1100,
         False,
     )
-    assert menu_bar_quota_suffix(state) == "36%"
+    # Nobody running: the tightest visible provider speaks.
+    assert menu_bar_quota_glance(state, now=1000).text == "36%"
     assert (
-        menu_bar_quota_suffix(state, hidden_providers=frozenset({"claude"}))
+        menu_bar_quota_glance(
+            state, hidden_providers=frozenset({"claude"}), now=1000
+        ).text
         == "71%"
     )
-    # No numbers anywhere -> no suffix, never "unknown%".
+    # Codex is the one RUNNING: its runway owns the glance even though
+    # Claude is tighter overall.
+    assert (
+        menu_bar_quota_glance(
+            state, active_providers=frozenset({"codex"}), now=1000
+        ).text
+        == "71%"
+    )
+    # Both running: the lowest among the active ones wins.
+    assert (
+        menu_bar_quota_glance(
+            state,
+            active_providers=frozenset({"codex", "claude"}),
+            now=1000,
+        ).text
+        == "36%"
+    )
+    # No numbers anywhere -> no glance, never "unknown%".
     empty = ProviderUsageState(
         (
             snapshot(
@@ -222,4 +242,46 @@ def test_menu_bar_suffix_is_the_tightest_visible_number_or_nothing():
         1100,
         False,
     )
-    assert menu_bar_quota_suffix(empty) is None
+    assert menu_bar_quota_glance(empty, now=1000) is None
+
+
+def test_pace_verdicts_cover_fast_surplus_on_pace_and_critical():
+    from sidepulse.usage_pace import lane_pace, pace_phrase
+
+    hour = 3600.0
+    # Halfway through a 5-hour window (2.5h elapsed, 2.5h to reset).
+    def pace(remaining):
+        return lane_pace(
+            remaining_percent=remaining,
+            reset_at=1_000_000.0 + 2.5 * hour,
+            lane_id="five-hour",
+            now=1_000_000.0,
+        )
+
+    assert pace(55.0).verdict == "on_pace"  # used 45% at 50% elapsed
+    assert pace(90.0).verdict == "surplus"  # used 10% at 50% elapsed
+    # Used 60% at 50% elapsed: fast (ratio 1.2 < 1.25 is on_pace, so use 65)
+    fast = pace(30.0)  # used 70% -> runs dry before reset
+    assert fast.verdict == "critical"
+    assert "runs out in ~" in pace_phrase(fast, now=1_000_000.0)
+    assert pace(0.2).verdict == "out"
+    # Unknown window duration -> no reading, never a guess.
+    assert (
+        lane_pace(
+            remaining_percent=50.0,
+            reset_at=1_000_000.0 + hour,
+            lane_id="mystery-lane",
+            now=1_000_000.0,
+        )
+        is None
+    )
+
+
+def test_lane_lines_carry_the_pace_tag():
+    # snapshot() builds a weekly lane resetting at t=3000; at now=1000
+    # the window is ~100% elapsed with 64% used -- ratio ~0.64, on pace.
+    row = project_usage_menu(
+        ProviderUsageState((snapshot("claude", "Weekly", 36),), 1000, 1100, False),
+        now=1000,
+    ).rows[0]
+    assert row.lane_lines[0].endswith("· on pace")

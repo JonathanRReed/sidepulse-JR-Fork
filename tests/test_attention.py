@@ -301,3 +301,40 @@ def test_canonical_attention_uses_request_truth_and_semantic_failure_edges() -> 
     assert row.request_key == request_key
     assert projection.click_target_agent_id is None
     assert projection.transient_signals[0].event_key == failure_key
+
+
+def test_completed_settles_to_idle_on_the_live_projection_path() -> None:
+    # 2026-08-20 final-sweep audit finding #1: the first version of the
+    # 120s completed-decay lived only in the canonical projection, which
+    # has zero non-test callers -- the app projects through
+    # project_attention/_lifecycle_mode, and the done green still held
+    # for 20-60 minutes. This pins the LIVE path, judged against the
+    # snapshot's own collected_at (a clock that actually advances).
+    from datetime import timedelta
+
+    from sidepulse.operator_state import COMPLETED_RECENT_SECONDS
+
+    finished_at = datetime(2026, 8, 12, 12, 0, 0, tzinfo=timezone.utc)
+    done = status(
+        event_name="Stop",
+        mode=AgentMode.COMPLETED,
+        updated_at=finished_at,
+    )
+
+    fresh = replace(
+        snapshot_with(done),
+        collected_at=finished_at
+        + timedelta(seconds=COMPLETED_RECENT_SECONDS - 30.0),
+    )
+    fresh_row = project_attention(fresh, AgentMonitorSettings()).visible_rows[0]
+    assert fresh_row.lifecycle_mode is LifecycleMode.COMPLETED_RECENTLY
+
+    stale = replace(
+        snapshot_with(done),
+        collected_at=finished_at
+        + timedelta(seconds=COMPLETED_RECENT_SECONDS + 60.0),
+    )
+    stale_row = project_attention(stale, AgentMonitorSettings()).visible_rows[0]
+    assert stale_row.lifecycle_mode is LifecycleMode.IDLE, (
+        "done is a moment on the LIVE path too"
+    )

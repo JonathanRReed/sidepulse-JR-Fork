@@ -13,6 +13,7 @@ from .provider_usage_platform import (
 from .provider_usage_qol import format_lane_meter, format_reset_countdown
 from .provider_usage_runtime import ProviderUsageState
 from .provider_usage_settings import MenuUsageDisplay
+from .usage_pace import PACE_CRITICAL, PACE_OUT, lane_pace, pace_phrase
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,15 +52,26 @@ def _lane_lines(
         if lane.remaining_percent is None:
             lines.append(f"{lane.label} · {countdown}")
             continue
-        if threshold is not None and lane.remaining_percent <= threshold:
+        pace = lane_pace(
+            remaining_percent=lane.remaining_percent,
+            reset_at=lane.reset_at,
+            lane_id=lane.lane_id,
+            now=now,
+        )
+        if (threshold is not None and lane.remaining_percent <= threshold) or (
+            pace is not None and pace.verdict in {PACE_CRITICAL, PACE_OUT}
+        ):
             alerts.append(index)
         meter = (
             f"{format_lane_meter(lane.remaining_percent)}  "
             if display.show_meters
             else ""
         )
+        phrase = pace_phrase(pace, now=now)
+        pace_tag = f" · {phrase}" if phrase else ""
         lines.append(
-            f"{meter}{lane.label} · {lane.remaining_percent:.0f}% left · {countdown}"
+            f"{meter}{lane.label} · {lane.remaining_percent:.0f}% left"
+            f" · {countdown}{pace_tag}"
         )
     return tuple(lines), tuple(alerts)
 
@@ -199,15 +211,60 @@ def project_usage_menu(
     )
 
 
-def menu_bar_quota_suffix(
+@dataclass(frozen=True, slots=True)
+class QuotaGlance:
+    text: str
+    #: A pace verdict from usage_pace (PACE_*), or None when the shown
+    #: lane has no pace reading. Renderers color fast/critical/out.
+    verdict: str | None
+
+
+def _display_lane(snapshot: ProviderUsageSnapshot, *, now: float):
+    """The lane worth showing for one provider: a lane that runs dry
+    before its reset beats everything (earliest exhaustion first);
+    otherwise the most constrained bindable lane."""
+    critical = []
+    for lane in snapshot.lanes:
+        if not lane.bindable or lane.remaining_percent is None:
+            continue
+        pace = lane_pace(
+            remaining_percent=lane.remaining_percent,
+            reset_at=lane.reset_at,
+            lane_id=lane.lane_id,
+            now=now,
+        )
+        if pace is not None and pace.verdict in {PACE_CRITICAL, PACE_OUT}:
+            critical.append((pace.exhaustion_epoch or now, lane, pace))
+    if critical:
+        _, lane, pace = min(critical, key=lambda item: item[0])
+        return lane, pace
+    lane = most_constrained_lane(snapshot)
+    if lane is None or lane.remaining_percent is None:
+        return None, None
+    return lane, lane_pace(
+        remaining_percent=lane.remaining_percent,
+        reset_at=lane.reset_at,
+        lane_id=lane.lane_id,
+        now=now,
+    )
+
+
+def menu_bar_quota_glance(
     state: ProviderUsageState,
     *,
     hidden_providers: frozenset[str] = frozenset(),
-) -> str | None:
-    """The tightest trustworthy visible percentage, for the status item
-    itself (Codex Bar parity). None when nothing has a number -- the
-    title must never say "unknown%"."""
-    tightest = None
+    active_providers: frozenset[str] = frozenset(),
+    now: float,
+) -> QuotaGlance | None:
+    """What rides next to the menu-bar icon.
+
+    The providers RUNNING right now own the glance: while an agent
+    works, the number that matters is that provider's own runway, on
+    whichever window is most at risk (a lane projected to run dry
+    before its reset outranks a merely-low one). With several active,
+    the lowest wins. With none active, the tightest visible provider
+    speaks. None when nothing has a number -- never "unknown%"."""
+    candidates = []
     for snapshot in state.snapshots:
         if snapshot.provider_id in hidden_providers:
             continue
@@ -216,16 +273,35 @@ def menu_bar_quota_suffix(
             ProviderSourceState.STALE,
         }:
             continue
-        lane = most_constrained_lane(snapshot)
-        if lane is not None and lane.remaining_percent is not None:
-            if tightest is None or lane.remaining_percent < tightest:
-                tightest = lane.remaining_percent
-    return None if tightest is None else f"{tightest:.0f}%"
+        lane, pace = _display_lane(snapshot, now=now)
+        if lane is None:
+            continue
+        candidates.append((snapshot.provider_id, lane, pace))
+    if not candidates:
+        return None
+    active = [item for item in candidates if item[0] in active_providers]
+    pool = active or candidates
+    urgent = [
+        item
+        for item in pool
+        if item[2] is not None and item[2].verdict in {PACE_CRITICAL, PACE_OUT}
+    ]
+    if urgent:
+        _, lane, pace = min(
+            urgent, key=lambda item: item[2].exhaustion_epoch or now
+        )
+    else:
+        _, lane, pace = min(pool, key=lambda item: item[1].remaining_percent)
+    return QuotaGlance(
+        f"{lane.remaining_percent:.0f}%",
+        pace.verdict if pace is not None else None,
+    )
 
 
 __all__ = [
     "ProviderUsageMenuProjection",
     "ProviderUsageMenuRow",
-    "menu_bar_quota_suffix",
+    "QuotaGlance",
+    "menu_bar_quota_glance",
     "project_usage_menu",
 ]

@@ -2036,6 +2036,7 @@ def iter_codex_transcript_file(path: Path) -> Iterable[HookEvent]:
 
     cwd = None
     turn_id = None
+    previous_stamp = _transcript_mtime_fallback(path)
     for line in read_recent_lines(path, CODEX_TRANSCRIPT_MAX_LINES):
         try:
             row = json.loads(line)
@@ -2044,7 +2045,8 @@ def iter_codex_transcript_file(path: Path) -> Iterable[HookEvent]:
         if not isinstance(row, dict):
             continue
 
-        timestamp = parse_transcript_timestamp(row)
+        timestamp = parse_transcript_timestamp(row, fallback=previous_stamp)
+        previous_stamp = timestamp
         row_type = row.get("type")
         payload = row.get("payload")
         if not isinstance(payload, dict):
@@ -2076,10 +2078,29 @@ def codex_session_id_from_path(path: Path) -> str | None:
     return match.group(1) if match else None
 
 
-def parse_transcript_timestamp(row: dict[str, Any]) -> datetime:
+def parse_transcript_timestamp(
+    row: dict[str, Any],
+    *,
+    fallback: datetime | None = None,
+) -> datetime:
+    """A row's own stamp, else the caller's fallback -- NEVER "now".
+
+    Replay re-stamped unparseable rows with rebuild time on every
+    rebuild, so the CLI's stale accounting could never age them out
+    (audit fix-next #1). Callers thread the previous row's stamp (seeded
+    from the file's mtime) so a bad row inherits its neighborhood's
+    time instead of the present.
+    """
     from .models import parse_datetime
 
-    return parse_datetime(row.get("timestamp"))
+    return parse_datetime(row.get("timestamp"), fallback)
+
+
+def _transcript_mtime_fallback(path: Path) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    except OSError:
+        return None
 
 
 def codex_transcript_event(
@@ -2239,6 +2260,7 @@ def iter_claude_transcript_file(path: Path) -> Iterable[HookEvent]:
     last_event_name = None
     last_cwd = None
     emitted_event = False
+    previous_stamp = _transcript_mtime_fallback(path)
     for line in read_recent_lines(path, CLAUDE_TRANSCRIPT_MAX_LINES):
         try:
             row = json.loads(line)
@@ -2248,10 +2270,12 @@ def iter_claude_transcript_file(path: Path) -> Iterable[HookEvent]:
             continue
 
         last_cwd = _string_or_none(row.get("cwd")) or last_cwd
+        timestamp = parse_transcript_timestamp(row, fallback=previous_stamp)
+        previous_stamp = timestamp
         event = claude_transcript_event(
             row,
             session_id=session_id,
-            timestamp=parse_transcript_timestamp(row),
+            timestamp=timestamp,
             path=path,
         )
         if event is not None:

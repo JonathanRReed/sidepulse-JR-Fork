@@ -1682,8 +1682,14 @@ class VirtualLedView(NSView):
         # the curve -- a bright hook curling up at each end, and every
         # measured inset step above it highlighted as a staircase. Easing
         # the light down to housing-black before the corners keeps the
-        # corners reading as clean black rounding.
-        feather = min(14.0, notch_width / 8.0)
+        # corners reading as clean black rounding. NOTCH DISPLAYS ONLY:
+        # a notchless strip has no black housing behind it, so a black
+        # feather composited dark smudges onto the menu bar there.
+        feather = (
+            min(14.0, notch_width / 8.0)
+            if self.has_notch and self.alcove_silhouette is None
+            else 0.0
+        )
         if feather > 1.0:
             steps = 7
             segment = feather / steps
@@ -1724,7 +1730,12 @@ class VirtualLedView(NSView):
         # Standing gauges live INSIDE the housing now: 4pt tips tucked
         # just past the corner fillets, over black -- peripheral vision
         # still gets its own pixels without anything on the wallpaper.
-        self._draw_standing_gauges(cg_context, height, edge_inset=wing_offset + 6.0)
+        # Housing displays only: a notchless strip has no black behind
+        # the tips, so they'd float on pure LED color.
+        if self.has_notch and self.alcove_silhouette is None:
+            self._draw_standing_gauges(
+                cg_context, height, edge_inset=wing_offset + 6.0
+            )
         NSGraphicsContext.restoreGraphicsState()
 
     def _bracket_colors(self, colors):

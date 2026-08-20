@@ -1889,8 +1889,12 @@ def _device_display_settings(value: object, default_display: str) -> tuple[Devic
                 blue_gain=normalize_channel_gain(item.get("blue_gain")),
                 blend_mode=_device_blend_mode_setting(item.get("blend_mode")),
                 provider_pin=(
+                    # The setter accepts every registered provider; a
+                    # loader that only kept claude/codex silently erased
+                    # a Cursor or Grok pin on relaunch (audit: the
+                    # SP-AUD-003 silent-settings-loss class).
                     item.get("provider_pin")
-                    if item.get("provider_pin") in ("claude", "codex")
+                    if item.get("provider_pin") in PROVIDER_REGISTRY
                     else None
                 ),
                 signal_policy=(

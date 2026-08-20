@@ -6985,12 +6985,19 @@ class StatusBarController(NSObject):
             + ", ".join(status.agent_id[:60] for status in batch.statuses)
         )
         ordered_ids = sorted(current_modes)
+        # Brand-anchored like the mailbox dots and the strip (audit V3):
+        # the celebration flashes each finished session in its product's
+        # own hue, shaded per session, never the hashed palette.
         identity = (
-            colors_module.identity_colors_for_agents(
-                ordered_ids,
-                groups=colors_module.identity_groups_for_statuses(
-                    tuple(statuses_by_id.values()), self.settings.colors
-                ),
+            colors_module.provider_identity_colors_for_agents(
+                [
+                    (
+                        agent_id,
+                        getattr(statuses_by_id.get(agent_id), "provider", ""),
+                    )
+                    for agent_id in ordered_ids
+                ],
+                colors=self.settings.colors,
             )
             if len(ordered_ids) > 1
             else {}
@@ -11660,8 +11667,10 @@ class StatusBarController(NSObject):
         self.virtual_status_device.set_follow_alcove(
             self.settings.screen_bar_follow_alcove
         )
-        # The right tip may retain the independent completion gauge. Capacity
-        # stays empty while release authority is withheld.
+        # Left tip: the quota ember, brightening as the tightest visible
+        # lane sinks below its provider's threshold (the usage-aware
+        # subclass answers; this base has no usage and answers 0.0).
+        # Right tip: the independent unseen-completion gauge.
         if self.settings.screen_bar_gauges_enabled:
             snapshot = getattr(self, "last_snapshot", None)
             right_on = (
@@ -11669,7 +11678,9 @@ class StatusBarController(NSObject):
                 if snapshot is not None
                 else False
             )
-            self.virtual_status_device.set_standing_gauges(0.0, right_on)
+            self.virtual_status_device.set_standing_gauges(
+                self.screen_bar_quota_ember_level(), right_on
+            )
         else:
             self.virtual_status_device.set_standing_gauges(0.0, False)
         # Click-to-answer: while an ask is live, the glowing bar itself
@@ -14148,6 +14159,13 @@ class StatusBarController(NSObject):
             )
         return "off"
 
+    def screen_bar_quota_ember_level(self) -> float:
+        """How brightly the Screen Bar's left tip burns, 0..1 -- how far
+        the tightest visible lane has sunk below its provider's
+        threshold. This base collects no usage; the provider-usage
+        subclass overrides with the real reading."""
+        return 0.0
+
     def screen_bar_click_status(self):
         """The session a Screen Bar click should open: the OLDEST
         unanswered hard ask (the same episode ordering escalation
@@ -15573,12 +15591,22 @@ def build_agent_mailbox_menu_item(snapshot, target) -> NSMenuItem:
     identity: dict[str, str] = {}
     if len(display_sources) > 1:
         menu_colors = getattr(getattr(target, "settings", None), "colors", None)
-        identity = colors_module.identity_colors_for_agents(
-            [status.agent_id for status in display_sources],
-            groups=colors_module.identity_groups_for_statuses(
-                display_sources, menu_colors
-            ),
-        )
+        # Brand-anchored, like the LED/Screen Bar paths (audit V3): the
+        # dropdown's dots were the last surface still hashing agent ids
+        # into the abstract palette -- "it's purple for some reason when
+        # Claude's running", in the menu the owner looks at most.
+        if menu_colors is not None:
+            identity = colors_module.provider_identity_colors_for_agents(
+                [(status.agent_id, status.provider) for status in display_sources],
+                colors=menu_colors,
+            )
+        else:
+            identity = colors_module.identity_colors_for_agents(
+                [status.agent_id for status in display_sources],
+                groups=colors_module.identity_groups_for_statuses(
+                    display_sources, menu_colors
+                ),
+            )
 
     summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         (

@@ -35,6 +35,8 @@ one real cycle (`colors ↔ led_status ↔ _led_status_legacy`).
 | Per-device projection | `device_projection.py`, `attention.py` | Canonical main/worker split, provider pin filtering, provider-local worker representative, lifecycle priority |
 | Event ingestion | `ipc.py`, `hook.py`, `hook_entry.py`, `collector.py` | Hook events over a Unix socket, transcript fallback scanning, status collection, warm-start state |
 | Compatibility entrypoints | `agent_monitor/`, `sidepulse_cli/` | Delegation for old installed hook module names; fail-open when arguments are missing |
+| Latest-state clock codec | `latest_state_timing.py` | Per-source clock timing in the v2 snapshot, healing for pre-field documents |
+| Usage pace | `usage_pace.py` | Burn-rate verdicts (surplus / on pace / fast / runs-out-before-reset) for rate-limit lanes |
 | Canonical operator semantics | `operator_state.py`, `provider_facts.py`, `attention.py`, `mailbox.py` | Work identity, requests, transitions, parent/worker relationships, actionable attention |
 | Signals and presentation | `signals.py`, `signal_coordinator.py`, `presentation_policy.py`, `presentation_scheduler.py` | Semantic precedence, finite cues, continuous state, interruption policy, schedule decisions |
 | Rendering | `led_status.py`, `colors.py`, `animation.py`, `render_policy.py` | LED programs, colors, transfer functions, motion, frame cadence, brightness, calibration |

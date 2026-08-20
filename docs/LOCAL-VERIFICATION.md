@@ -66,4 +66,4 @@ After the rescue branch is merged into `main`:
 ./scripts/publish_release.sh
 ```
 
-The release script refuses dirty or non-main trees, verifies version `0.2.2`, builds and checks Python distributions, builds the signed/notarized macOS package, creates SHA-256 checksums, tags the commit, and publishes the files to a GitHub Release. It does not publish the upstream-owned `sidepulse` project name to PyPI.
+The release script refuses dirty or non-main trees, verifies version `0.3.0`, builds and checks Python distributions, builds the signed/notarized macOS package, creates SHA-256 checksums, tags the commit, and publishes the files to a GitHub Release. It does not publish the upstream-owned `sidepulse` project name to PyPI.

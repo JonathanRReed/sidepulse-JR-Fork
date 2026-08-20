@@ -61,6 +61,13 @@ reporting meaning)
 
 ## Execution waves
 
+> **Status 2026-08-20:** The announcer pill shipped (hover names the
+> asking session; click jumps to it — the answer-in-place half remains).
+> Since this plan: contained classic Screen Bar, Claude usage with lane
+> meters + pace verdicts, menu curation, menu-bar percent, keep-awake
+> single-grace, COMPLETED 120s decay, quota ember. Current status
+> authority: docs/FEATURE-MATRIX.md and CHANGELOG 0.3.0.
+>
 > **Status 2026-08-18:** Wave 1 items 1-2 SHIPPED (batched JSC stepping
 > with parity + engine-call-count tests; doctor `event_intake_freshness`
 > watchdog, manifest v3). Item 3 (signed release) needs the owner's

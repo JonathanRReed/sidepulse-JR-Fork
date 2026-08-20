@@ -14,7 +14,7 @@ from .provider_usage_event_store import (
     load_seen_reset_events,
     save_seen_reset_events,
 )
-from .provider_usage_menu import menu_bar_quota_suffix, project_usage_menu
+from .provider_usage_menu import menu_bar_quota_glance, project_usage_menu
 from .provider_usage_qol import detect_reset_events, threshold_crossings
 from .provider_usage_runtime import ProviderUsageService, ProviderUsageState
 from .provider_usage_settings import load_provider_usage_settings
@@ -139,9 +139,20 @@ def _native_usage_menu_item(target):
     submenu = _legacy.NSMenu.alloc().init()
     submenu.setAutoenablesItems_(False)
     if not projection.rows:
-        submenu.addItem_(
-            _disabled_item("Open Usage Center to connect provider sources")
-        )
+        # An empty submenu has two very different causes: nothing is
+        # connected, or everything is curated out. Diagnosing the wrong
+        # one ("connect sources" when sources ARE collecting) sends the
+        # user to the wrong fix.
+        if state.snapshots and hidden:
+            submenu.addItem_(
+                _disabled_item(
+                    "All providers hidden — choose some in Settings → Usage"
+                )
+            )
+        else:
+            submenu.addItem_(
+                _disabled_item("Open Usage Center to connect provider sources")
+            )
     for row in projection.rows:
         provider_item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             row.title,
@@ -487,6 +498,9 @@ else:
                 save_provider_usage_settings(updated, loaded=loaded)
             except Exception as exc:
                 _legacy.log_status_bar(f"usage menu display: {exc}")
+                # The checkbox flipped BEFORE the action fired; a failed
+                # save must flip it back or the pane lies forever.
+                sender.setState_(0 if bool(sender.state()) else 1)
                 return
             self._menu_signature = None
             self._sidepulse_usage_menu_settings_cache = None
@@ -504,6 +518,7 @@ else:
                 save_provider_usage_settings(updated, loaded=loaded)
             except Exception as exc:
                 _legacy.log_status_bar(f"usage menu providers: {exc}")
+                sender.setState_(0 if bool(sender.state()) else 1)
                 return
             self._menu_signature = None
             self._sidepulse_usage_menu_settings_cache = None
@@ -531,12 +546,90 @@ else:
             _BaseStatusBarController.set_status(
                 self, state, ask_count=ask_count, done_badge=done_badge
             )
+            self._append_quota_guarded()
+
+        def _apply_status_accessibility_text(self, glance, finite_cues) -> None:
+            # This base call rewrites the button title BARE, and it also
+            # fires outside set_status on every finite-cue advance --
+            # which wiped the quota percent for seconds at a time exactly
+            # while cues were animating. Re-append after every rewrite
+            # (the substring dedup makes it idempotent).
+            _BaseStatusBarController._apply_status_accessibility_text(
+                self, glance, finite_cues
+            )
+            self._append_quota_guarded()
+
+        def _append_quota_guarded(self) -> None:
             try:
                 self._append_quota_to_status_title()
-            except Exception:
+            except Exception as exc:
                 # The status title is agent truth first; a quota suffix
-                # failure must never take the tick down with it.
-                pass
+                # failure must never take the tick down with it -- but a
+                # PERSISTENT failure must not be silent either.
+                if not getattr(self, "_quota_suffix_error_logged", False):
+                    self._quota_suffix_error_logged = True
+                    try:
+                        _legacy.log_status_bar(f"menu-bar quota suffix: {exc}")
+                    except Exception:
+                        pass
+
+        def screen_bar_quota_ember_level(self) -> float:
+            """The base's 0.0 answered with the real reading: how far
+            the tightest visible lane has sunk below its provider's
+            threshold, 0 at-threshold to 1 fully out."""
+            try:
+                from .provider_usage_platform import (
+                    ProviderSourceState,
+                    most_constrained_lane,
+                )
+
+                settings = self._usage_menu_settings()
+                if settings is None:
+                    return 0.0
+                hidden = settings.hidden_menu_providers()
+                thresholds = {
+                    preference.provider_id: preference.threshold_remaining
+                    for preference in settings.providers
+                }
+                worst = 0.0
+                for snapshot in self.provider_usage_state.snapshots:
+                    if snapshot.provider_id in hidden:
+                        continue
+                    if snapshot.state not in {
+                        ProviderSourceState.READY,
+                        ProviderSourceState.STALE,
+                    }:
+                        continue
+                    lane = most_constrained_lane(snapshot)
+                    if lane is None or lane.remaining_percent is None:
+                        continue
+                    threshold = thresholds.get(snapshot.provider_id, 20.0)
+                    if threshold <= 0.0:
+                        continue
+                    if lane.remaining_percent <= threshold:
+                        worst = max(
+                            worst, 1.0 - lane.remaining_percent / threshold
+                        )
+                return max(0.0, min(1.0, worst))
+            except Exception:
+                return 0.0
+
+        def _active_usage_providers(self) -> frozenset[str]:
+            """Providers with a MAIN session actually working right now --
+            they own the menu-bar glance while they run."""
+            snapshot = getattr(self, "last_snapshot", None)
+            if snapshot is None:
+                return frozenset()
+            busy = {
+                _legacy.AgentMode.WORKING,
+                _legacy.AgentMode.TOOL_RUNNING,
+                _legacy.AgentMode.LONG_TASK_PROGRESS,
+            }
+            return frozenset(
+                status.provider
+                for status in snapshot.statuses
+                if not status.is_subagent and status.mode in busy
+            )
 
         def _append_quota_to_status_title(self) -> None:
             settings = self._usage_menu_settings()
@@ -546,18 +639,53 @@ else:
             button = item.button() if item is not None else None
             if button is None:
                 return
-            suffix = menu_bar_quota_suffix(
+            glance = menu_bar_quota_glance(
                 self.provider_usage_state,
                 hidden_providers=settings.hidden_menu_providers(),
+                active_providers=self._active_usage_providers(),
+                now=time.time(),
             )
-            if not suffix:
+            if glance is None:
                 return
             title = str(button.title() or "")
-            if suffix in title:
+            if glance.text in title:
                 return
-            button.setTitle_(
-                f"{title} · {suffix}" if title.strip() else f" {suffix}"
-            )
+            prefix = f"{title} · " if title.strip() else " "
+            full = f"{prefix}{glance.text}"
+            button.setTitle_(full)
+            # At-a-glance pace: the percent turns amber when this lane is
+            # being spent too fast and red when it will run dry before
+            # (or already ran out at) its reset. Colorless means fine.
+            color_name = {
+                "fast": "systemOrangeColor",
+                "critical": "systemRedColor",
+                "out": "systemRedColor",
+            }.get(glance.verdict or "")
+            if color_name is None:
+                return
+            try:
+                from AppKit import (
+                    NSColor,
+                    NSFontAttributeName,
+                    NSForegroundColorAttributeName,
+                    NSMutableAttributedString,
+                )
+
+                styled = NSMutableAttributedString.alloc().initWithString_attributes_(
+                    full,
+                    {
+                        NSForegroundColorAttributeName: NSColor.labelColor(),
+                        NSFontAttributeName: button.font(),
+                    },
+                )
+                styled.addAttribute_value_range_(
+                    NSForegroundColorAttributeName,
+                    getattr(NSColor, color_name)(),
+                    (len(prefix), len(glance.text)),
+                )
+                button.setAttributedTitle_(styled)
+            except Exception:
+                pass
 
         @_legacy.objc.IBAction
         def openProviderUsageCenter_(self, _sender) -> None:
