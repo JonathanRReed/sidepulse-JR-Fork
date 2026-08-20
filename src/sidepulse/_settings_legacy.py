@@ -224,7 +224,7 @@ class AgentMonitorSettings:
     # the lid into sleep and losing the agent's work. See
     # keep_awake.KeepAwakeController.should_hold_for_mode.
     closed_lid_grace_minutes: float = DEFAULT_CLOSED_LID_GRACE_MINUTES
-    # On battery, holding caffeinate -dimsu drains the machine for work the
+    # On battery, holding caffeinate -ims drains the machine for work the
     # user may not be watching. Default keeps the historical behavior (hold
     # everywhere); turning it off releases the hold whenever the Mac reports
     # it is unplugged. An unknown power state never disables the hold.

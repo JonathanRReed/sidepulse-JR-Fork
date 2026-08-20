@@ -4286,19 +4286,25 @@ for (const event of [
         self.assertTrue(controller.update(AgentMode.IDLE_READY, now=200))
         self.assertTrue(controller.process_running())
 
-        # Completed -> Idle Ready is a real mode change (a momentary "looks
-        # idle" blip between tool calls, say), so it re-arms a fresh grace
-        # window from t=200 -- still held at t=411 (200+300=500), where it
-        # would have incorrectly released under the old behavior that only
-        # re-armed for the three explicitly-tracked "looks done" modes.
-        self.assertTrue(controller.update(AgentMode.IDLE_READY, now=411))
+        # ONE grace window per stretch of work, armed when work STOPPED
+        # (t=110, expires 410). Rest-to-rest changes ride out that same
+        # window -- the old re-arm-on-every-change behavior meant an
+        # overnight idle/completed flap re-armed five minutes forever and
+        # the machine never slept again (live incident, 2026-08-20).
+        self.assertTrue(controller.update(AgentMode.COMPLETED, now=409))
         self.assertTrue(controller.process_running())
-
-        # No further mode changes -- the window from the last change (500)
-        # eventually does expire.
-        self.assertFalse(controller.update(AgentMode.IDLE_READY, now=501))
+        self.assertFalse(controller.update(AgentMode.IDLE_READY, now=411))
         self.assertFalse(controller.process_running())
         self.assertTrue(processes[0].terminated)
+
+        # More rest-mode flapping after expiry must NOT resurrect the hold...
+        self.assertFalse(controller.update(AgentMode.COMPLETED, now=500))
+        self.assertFalse(controller.process_running())
+
+        # ...but real work always does, and earns a fresh window after.
+        self.assertTrue(controller.update(AgentMode.WORKING, now=600))
+        self.assertTrue(controller.update(AgentMode.COMPLETED, now=610))
+        self.assertTrue(controller.process_running())
 
     def test_keep_awake_grants_grace_on_a_bare_idle_blip_never_seeing_a_terminal_mode(self) -> None:
         # Regression guard for the reported bug: a momentary "looks idle"

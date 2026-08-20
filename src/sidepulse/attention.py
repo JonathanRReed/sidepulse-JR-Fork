@@ -14,6 +14,7 @@ from .operator_state import (
     SemanticEventKey,
     TransitionKind,
     active_work_went_silent,
+    completed_work_no_longer_recent,
 )
 from .provider_facts import NextActor, RequestKey, WorkKey, WorkLifecycle
 from .settings import AgentMonitorSettings
@@ -295,6 +296,16 @@ def project_attention_from_operator_state(
         # the idle whisper; the next real event resurrects it.
         if lifecycle is LifecycleMode.ACTIVE and active_work_went_silent(
             work, state.last_clock.wall_epoch if state.last_clock else None
+        ):
+            lifecycle = LifecycleMode.IDLE
+        # COMPLETED is a moment: after the recent window the row settles
+        # back to the idle whisper instead of holding the done green (and
+        # the COMPLETED aggregate) until the presence horizon drops it.
+        if (
+            lifecycle is LifecycleMode.COMPLETED_RECENTLY
+            and completed_work_no_longer_recent(
+                work, state.last_clock.wall_epoch if state.last_clock else None
+            )
         ):
             lifecycle = LifecycleMode.IDLE
         source_status = AgentStatus(

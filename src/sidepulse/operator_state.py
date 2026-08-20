@@ -67,6 +67,22 @@ def active_work_went_silent(work, now_epoch: float | None) -> bool:
         and now_epoch is not None
         and now_epoch - work.watermark.occurred_at_epoch > ACTIVE_SILENCE_SECONDS
     )
+
+
+# COMPLETED is a moment, not a state: "recently" has a clock in it.
+# Without this line a finished session showed the done green (and the
+# COMPLETED aggregate) until the presence horizon dropped the row -- up
+# to an HOUR of "it's done!" for something the owner saw finish.
+COMPLETED_RECENT_SECONDS: Final = 120.0
+
+
+def completed_work_no_longer_recent(work, now_epoch: float | None) -> bool:
+    """True when a COMPLETED work finished past the recent window."""
+    return (
+        work.lifecycle is WorkLifecycle.COMPLETED
+        and now_epoch is not None
+        and now_epoch - work.watermark.occurred_at_epoch > COMPLETED_RECENT_SECONDS
+    )
 TIMING_RECOVERY_CONFIRMATIONS: Final = 2
 MAX_CANONICAL_WORKS: Final = 1_000
 # A work whose newest event is older than a day is history, not state:

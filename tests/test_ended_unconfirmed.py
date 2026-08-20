@@ -181,3 +181,104 @@ def test_a_silent_active_work_claims_active_nowhere() -> None:
     )
     assert not in_progress.rows
     assert active_work_went_silent(state.works[0], state.last_clock.wall_epoch)
+
+
+def test_completed_settles_to_idle_after_the_recent_window() -> None:
+    """'The completed state doesn't go away after two minutes' -- a
+    COMPLETED work held the done green (and the COMPLETED aggregate,
+    which also fed the keep-awake grace) until the presence horizon
+    dropped the row, up to an hour later. COMPLETED is a moment: past
+    COMPLETED_RECENT_SECONDS the row settles to the idle whisper."""
+    from sidepulse._settings_legacy import AgentMonitorSettings
+    from sidepulse.attention import (
+        LifecycleMode,
+        project_attention_from_operator_state,
+    )
+    from sidepulse.capacity_types import SourceKey
+    from sidepulse.operator_state import (
+        COMPLETED_RECENT_SECONDS,
+        BootIdentifier,
+        ClockSample,
+        completed_work_no_longer_recent,
+        empty_operator_state,
+        reduce_operator_state,
+    )
+    from sidepulse.provider_facts import (
+        EventToken,
+        NextActor,
+        ObservationAuthority,
+        ProviderFactBatch,
+        ProviderWatermark,
+        ProviderWorkFact,
+        SourceFreshness,
+        SourceHealth,
+        WatermarkBasis,
+        WorkIdentifier,
+        WorkKey,
+        WorkLifecycle,
+    )
+
+    source = SourceKey("claude", "hooks", "global", "live_agent_events")
+    watermark = ProviderWatermark(
+        source_key=source,
+        basis=WatermarkBasis.PROVIDER_EVENT_ID,
+        occurred_at_epoch=1_800_000_000.0,
+        event_token=EventToken("tok"),
+        sequence=None,
+        tie_break_rank=10,
+    )
+
+    def state_after(seconds: float):
+        batch = ProviderFactBatch(
+            source_key=source,
+            observation_authority=ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+            source_health=SourceHealth.HEALTHY,
+            source_freshness=SourceFreshness.FRESH,
+            observed_at_epoch=1_800_000_000.0,
+            watermark=watermark,
+            work_facts=(
+                ProviderWorkFact(
+                    key=WorkKey(source, WorkIdentifier("session:done")),
+                    lifecycle=WorkLifecycle.COMPLETED,
+                    watermark=watermark,
+                    safe_label="Claude session:done",
+                    parent_key=None,
+                    next_actor=NextActor.USER,
+                ),
+            ),
+            request_facts=(),
+            diagnostics=(),
+        )
+        return reduce_operator_state(
+            empty_operator_state(),
+            batch,
+            clock=ClockSample(
+                1_800_000_000.0 + seconds,
+                100.0 + seconds,
+                BootIdentifier("boot:01"),
+            ),
+        ).state
+
+    # Inside the window: the celebration is honest.
+    fresh = state_after(COMPLETED_RECENT_SECONDS - 30.0)
+    fresh_rows = project_attention_from_operator_state(
+        fresh, (), AgentMonitorSettings()
+    ).visible_rows
+    assert any(
+        row.lifecycle_mode is LifecycleMode.COMPLETED_RECENTLY
+        for row in fresh_rows
+    )
+
+    # Past it: the raw truth stays COMPLETED, the display settles.
+    stale = state_after(COMPLETED_RECENT_SECONDS + 60.0)
+    assert stale.works[0].lifecycle is WorkLifecycle.COMPLETED  # raw truth kept
+    stale_rows = project_attention_from_operator_state(
+        stale, (), AgentMonitorSettings()
+    ).visible_rows
+    assert all(
+        row.lifecycle_mode is not LifecycleMode.COMPLETED_RECENTLY
+        for row in stale_rows
+    ), "done is a moment, not a state"
+    assert completed_work_no_longer_recent(
+        stale.works[0], stale.last_clock.wall_epoch
+    )

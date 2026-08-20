@@ -14,7 +14,16 @@ AWAKE_GRACE_SECONDS = 300.0
 SD_STATUS_READ_SECONDS = 60.0
 KEEPALIVE_FILE_NAME = "keepalive"
 STATUS_FILE_NAME = KEEPALIVE_FILE_NAME
-CAFFEINATE_COMMAND = ("/usr/bin/caffeinate", "-dimsu")
+# -i idle sleep, -m disk sleep, -s system sleep (AC): the machine stays
+# up for the AGENTS. No -d and no -u -- the display may sleep and the
+# hold must never count as user activity; -dimsu kept the SCREEN awake
+# all night for a background monitor.
+CAFFEINATE_COMMAND = ("/usr/bin/caffeinate", "-ims")
+
+#: The modes that hold the machine awake in their own right.
+WORK_MODES = frozenset(
+    {AgentMode.WORKING, AgentMode.TOOL_RUNNING, AgentMode.LONG_TASK_PROGRESS}
+)
 
 
 class KeepAwakeController:
@@ -92,26 +101,23 @@ class KeepAwakeController:
         return self.process_running()
 
     def should_hold_for_mode(self, mode: AgentMode, now: float) -> bool:
-        if mode in {
-            AgentMode.WORKING,
-            AgentMode.TOOL_RUNNING,
-            AgentMode.LONG_TASK_PROGRESS,
-        }:
+        if mode in WORK_MODES:
             self.grace_until_monotonic = None
             return True
 
-        # Anything else -- Completed, Waiting for Input, Blocked/Error,
-        # Idle, or Unknown -- starts (or continues) the same grace window
-        # instead of releasing immediately. This used to only apply to the
-        # three explicitly-tracked "looks done" modes; a momentary "looks
-        # idle" blip that never reports one of those (e.g. a brief gap
-        # between tool calls that the collector reports as a bare
-        # IDLE_READY fallback rather than an explicit Completed) got zero
-        # grace at all, immediately releasing the lid-closed hold -- which
-        # is exactly the "it thinks the agent is done when it's just
-        # running a command" symptom this fixes.
-        if self.last_mode != mode or self.grace_until_monotonic is None:
-            self.grace_until_monotonic = now + self.grace_seconds
+        # One grace window per stretch of work, started the moment work
+        # STOPS -- so a momentary idle blip between tool calls (or a
+        # bare IDLE_READY fallback where an explicit Completed never
+        # arrives) still gets the full window. The window is NOT
+        # refreshed by transitions among rest modes: overnight the
+        # display flapped idle-completed-idle as sessions aged out, each
+        # flap re-armed a five-minute hold, and the machine never slept
+        # again. Rest-to-rest changes now ride out the original window.
+        if self.grace_until_monotonic is None:
+            if self.last_mode is None or self.last_mode in WORK_MODES:
+                self.grace_until_monotonic = now + self.grace_seconds
+            else:
+                return False
         return now < self.grace_until_monotonic
 
     def ensure_awake(self) -> None:
