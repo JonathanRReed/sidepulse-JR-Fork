@@ -895,6 +895,13 @@ def test_reposition_submits_plain_alcove_request_and_applies_validated_center(
     device._alcove_observer_factory = lambda _buffer: observer
     monkeypatch.setattr(virtual_device, "NSScreen", ScreenClass)
     monkeypatch.setattr(virtual_device, "is_alcove_running", lambda: True)
+    # Deterministic screen values: the real resolver reads WindowServer
+    # state, which vanishes on locked/headless sessions (hosted CI).
+    monkeypatch.setattr(
+        virtual_device,
+        "_screen_capture_values",
+        lambda _screen: ("1:0.000:0.000:1512.000:982.000", 1, 0.0, 0.0, 1512.0, 982.0, 2.0),
+    )
     monkeypatch.setattr(virtual_device, "measured_notch_silhouette", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         virtual_device,

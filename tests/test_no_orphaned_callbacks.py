@@ -72,6 +72,9 @@ def test_every_selector_shaped_callback_is_referenced() -> None:
             continue
         selector = method[:-1] + ":" if method.endswith("_") else None
         references = blob.count(f".{method}(") + blob.count(f"self.{method}")
+        # Declarative tables (PRESENTATION_TIMER_BINDINGS) reference
+        # callbacks by quoted name; that is a reference too.
+        references += blob.count(f'"{method}"') + blob.count(f"'{method}'")
         if selector is not None:
             references += blob.count(f'"{selector}"') + blob.count(f"'{selector}'")
         if references == 0:
@@ -82,3 +85,15 @@ def test_every_selector_shaped_callback_is_referenced() -> None:
         "Cocoa callback to FRAMEWORK_CALLBACKS with a reason):\n  "
         + "\n  ".join(orphans)
     )
+
+
+def test_every_timer_binding_names_a_real_callback() -> None:
+    """The declarative half of the same invariant: every entry in
+    PRESENTATION_TIMER_BINDINGS must name a method the controller
+    actually defines -- a renamed callback must fail HERE, not as a
+    silent getattr surprise at launch."""
+    text = (SRC / "status_bar_legacy.py").read_text()
+    names = re.findall(r'\(RuntimeFeature\.\w+, "(\w+)"\)', text)
+    assert len(names) >= 17
+    for name in names:
+        assert re.search(rf"^    def {re.escape(name)}\(self", text, re.M), name

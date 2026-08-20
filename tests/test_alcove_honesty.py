@@ -457,6 +457,15 @@ def _alcove_device(monkeypatch, *, granted, alcove_running=True, window=(99, 444
     device.wraps_menu_bar = True
     device.follow_alcove_width = True
     monkeypatch.setattr(virtual_device, "NSScreen", _ScreenClass)
+    # Deterministic screen values: the real resolver reads WindowServer
+    # state, which vanishes on locked/headless sessions -- these five
+    # tests failed on hosted CI (and after an overnight lock) for that
+    # reason alone.
+    monkeypatch.setattr(
+        virtual_device,
+        "_screen_capture_values",
+        lambda _screen: ("1:0.000:0.000", 1, 0.0, 0.0, 1512.0, 982.0, 2.0),
+    )
     monkeypatch.setattr(virtual_device, "is_alcove_running", lambda: alcove_running)
     monkeypatch.setattr(
         virtual_device, "measured_notch_silhouette", lambda *_a, **_k: None
