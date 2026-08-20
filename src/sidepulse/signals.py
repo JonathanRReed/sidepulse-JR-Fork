@@ -163,6 +163,11 @@ ESCALATION_TIER_LIGHT = "light"
 ESCALATION_TIER_MENU_BAR = "menu_bar"
 ESCALATION_TIER_CHIME = "chime"
 ESCALATION_TIER_TAKEOVER = "takeover"
+# Tiers are a ceiling: every tier at or above menu_bar includes the
+# stage-2 re-announcement flash on the status surfaces.
+ESCALATION_TIERS_WITH_MENU_BAR = frozenset(
+    {ESCALATION_TIER_MENU_BAR, ESCALATION_TIER_CHIME, ESCALATION_TIER_TAKEOVER}
+)
 ESCALATION_TIERS = (
     ESCALATION_TIER_LIGHT,
     ESCALATION_TIER_MENU_BAR,
@@ -308,6 +313,14 @@ INTERRUPT_FAILURE = "failure"
 INTERRUPT_ESCALATION = "escalation"
 INTERRUPT_TIMEBOX = "timebox"
 
+# RATIFIED 2026-08-19: a critical arrival announces itself with exactly
+# this many finite taps, then holds a STEADY unmissable anchor until
+# dealt with. "Until dealt with" is carried by the standing anchor plus
+# the escalation ladder -- never by perpetual blinking, which is the
+# phantom-ask fatigue this product exists to avoid. Every renderer must
+# consume THIS constant rather than hard-coding its own count.
+ATTENTION_ARRIVAL_TAPS = 2
+
 # The one table that says which rung a signal sits on. A kind with no
 # entry here is REFUSED: a signal added later that forgets to declare
 # itself does not get to blink at someone during a meeting by default.
@@ -407,8 +420,11 @@ class InterruptGrant:
     reason: str
 
     @property
-    def blinks_until_dealt_with(self) -> bool:
-        return self.allowed and self.repetitions is None
+    def stands_until_dealt_with(self) -> bool:
+        """The ratified critical shape: finite arrival taps, then a
+        steady anchor that holds (hold_seconds=None) until resolved --
+        never perpetual blinking."""
+        return self.allowed and self.hold_seconds is None
 
     @property
     def hertz(self) -> float:
@@ -469,14 +485,17 @@ def grant_interrupt(
         return refuse(INTERRUPT_REFUSED_UNDECLARED)
 
     if signal_class == INTERRUPT_CRITICAL:
-        # Blocked and critical blink until dealt with, and go through a
-        # Focus. Only an explicit per-Focus "Silent" reaches them, and
-        # only to hush the SOUND -- never to hide the light.
+        # Critical goes THROUGH a Focus. Its light language is the
+        # ratified arrival-taps-then-steady-anchor (see
+        # ATTENTION_ARRIVAL_TAPS); hold_seconds=None means the anchor
+        # stands until dealt with. Only an explicit per-Focus "Silent"
+        # reaches a critical grant, and only to hush the SOUND -- never
+        # to hide the light.
         return InterruptGrant(
             kind=kind,
             interrupt_class=INTERRUPT_CRITICAL,
             allowed=True,
-            repetitions=None,
+            repetitions=ATTENTION_ARRIVAL_TAPS,
             cycle_seconds=cycle,
             hold_seconds=None,
             audible=permitted.focus_policy != FOCUS_POLICY_SILENT,

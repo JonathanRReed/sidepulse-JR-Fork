@@ -13,8 +13,14 @@ from AppKit import (
     NSColor,
     NSColorSpace,
     NSCursor,
+    NSFont,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
     NSGradient,
     NSGraphicsContext,
+    NSLineBreakByTruncatingTail,
+    NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName,
     NSScreen,
     NSView,
     NSWindow,
@@ -25,7 +31,7 @@ from AppKit import (
     NSWorkspaceScreensDidSleepNotification,
     NSWorkspaceScreensDidWakeNotification,
 )
-from Foundation import NSObject, NSRunLoop, NSRunLoopCommonModes
+from Foundation import NSObject, NSRunLoop, NSRunLoopCommonModes, NSString
 from Quartz import CGContextFillRect, CGContextSetRGBFillColor
 
 from .accessibility_display import AccessibilityDisplayPreferences
@@ -170,6 +176,32 @@ WING_MIN_USABLE = 24.0
 # The linked-hardware phase handshake only fires on programs that have
 # been showing at least this long -- see reanchor_program.
 REANCHOR_STEADY_SECONDS = 5.0
+
+# --- The announcer pill ---------------------------------------------------
+# The three-surfaces law gives the Screen Bar the ANNOUNCER job: it
+# carries WORDS -- the session name and the actual question. The notch
+# body's pixels are hardware-occluded (they sit behind the physical
+# camera housing), so the words live in a small pill just below the
+# notch, shown only while an actionable ask is live. Clicking it jumps
+# to the asking session, same as clicking the bar.
+ANNOUNCER_NAME_CAP = 40
+ANNOUNCER_QUESTION_CAP = 80
+ANNOUNCER_PILL_HEIGHT = 22.0
+ANNOUNCER_PILL_MAX_WIDTH = 460.0
+ANNOUNCER_PILL_PADDING = 14.0
+
+
+def announcer_text_for_attention(projection) -> str | None:
+    """One bounded line: session name plus the actual question."""
+    rows = getattr(projection, "actionable_attention", ()) if projection else ()
+    if not rows:
+        return None
+    row = rows[0]
+    name = " ".join(str(getattr(row, "display_name", "") or "").split())
+    name = name[:ANNOUNCER_NAME_CAP] or str(getattr(row, "provider", "agent")).title()
+    message = getattr(getattr(row, "source_status", None), "message", None) or ""
+    question = " ".join(str(message).split())[:ANNOUNCER_QUESTION_CAP]
+    return f"{name} — {question}" if question else f"{name} needs you"
 # A wing that's just a flat horizontal strip fading sideways reads as a
 # line trailing off into nothing, not as light that's actually reaching
 # and wrapping the menu bar's own corner. A soft vertical riser at each
@@ -632,8 +664,12 @@ class AlcovePresenceProbe:
     nothing cached to be right with.
     """
 
-    def __init__(self, *, probe=is_alcove_running, ttl_seconds: float = 3.0) -> None:
-        self._probe = probe
+    def __init__(self, *, probe=None, ttl_seconds: float = 3.0) -> None:
+        # Late-bound on purpose: `probe=is_alcove_running` captured the
+        # function at CLASS DEFINITION, so tests patching the module
+        # function patched nothing -- five "alcove honesty" tests
+        # silently depended on the real Alcove app being open.
+        self._probe = probe if probe is not None else (lambda: is_alcove_running())
         self._ttl_seconds = max(0.0, float(ttl_seconds))
         self._value: bool | None = None
         self._sampled_at = 0.0
@@ -2164,6 +2200,144 @@ class VirtualLedView(NSView):
         NSGraphicsContext.restoreGraphicsState()
 
 
+class _AnnouncerPillView(NSView):
+    def initWithFrame_(self, frame):
+        self = objc.super(_AnnouncerPillView, self).initWithFrame_(frame)
+        if self is not None:
+            self.text = ""
+            self.click_handler_source = None
+        return self
+
+    def isFlipped(self):
+        return False
+
+    def drawRect_(self, _rect):
+        bounds = self.bounds()
+        radius = bounds.size.height / 2.0
+        pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            ((0.5, 0.5), (bounds.size.width - 1.0, bounds.size.height - 1.0)),
+            radius,
+            radius,
+        )
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(0.02, 0.02, 0.03, 0.86).set()
+        pill.fill()
+        NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.14).set()
+        pill.setLineWidth_(1.0)
+        pill.stroke()
+        text = str(self.text or "")
+        if not text:
+            return
+        paragraph = NSMutableParagraphStyle.alloc().init()
+        paragraph.setLineBreakMode_(NSLineBreakByTruncatingTail)
+        attributes = {
+            NSFontAttributeName: NSFont.systemFontOfSize_(11.0),
+            NSForegroundColorAttributeName: NSColor.colorWithCalibratedWhite_alpha_(
+                1.0, 0.92
+            ),
+            NSParagraphStyleAttributeName: paragraph,
+        }
+        inset = ANNOUNCER_PILL_PADDING
+        NSString.stringWithString_(text).drawInRect_withAttributes_(
+            (
+                (inset, (bounds.size.height - 14.0) / 2.0),
+                (max(0.0, bounds.size.width - 2.0 * inset), 15.0),
+            ),
+            attributes,
+        )
+
+    def mouseDown_(self, _event):
+        source = self.click_handler_source
+        handler = source() if callable(source) else None
+        if callable(handler):
+            try:
+                handler()
+            except Exception:
+                pass
+
+
+class AnnouncerPill:
+    """The words window under the notch. One line, ask-gated, clickable."""
+
+    def __init__(self) -> None:
+        self.window = None
+        self.view = None
+        self.text: str | None = None
+
+    def _ensure_window(self):
+        if self.window is not None:
+            return
+        window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            ((0, 0), (200.0, ANNOUNCER_PILL_HEIGHT)),
+            NSWindowStyleMaskBorderless,
+            NSBackingStoreBuffered,
+            False,
+        )
+        window.setOpaque_(False)
+        window.setBackgroundColor_(NSColor.clearColor())
+        window.setHasShadow_(False)
+        window.setLevel_(STATUS_WINDOW_LEVEL)
+        window.setCollectionBehavior_(
+            NSWindowCollectionBehaviorCanJoinAllSpaces
+            | NSWindowCollectionBehaviorFullScreenAuxiliary
+        )
+        view = _AnnouncerPillView.alloc().initWithFrame_(
+            ((0, 0), (200.0, ANNOUNCER_PILL_HEIGHT))
+        )
+        window.setContentView_(view)
+        self.window = window
+        self.view = view
+
+    def hide(self) -> None:
+        self.text = None
+        if self.window is not None:
+            self.window.orderOut_(None)
+
+    def update(
+        self,
+        *,
+        text: str | None,
+        center_x: float,
+        top_y: float,
+        click_handler_source=None,
+    ) -> None:
+        if not text:
+            self.hide()
+            return
+        self._ensure_window()
+        if self.view is not None:
+            changed = text != self.text
+            self.view.text = text
+            self.view.click_handler_source = click_handler_source
+            if changed:
+                self.view.setNeedsDisplay_(True)
+        self.text = text
+        attributes = {NSFontAttributeName: NSFont.systemFontOfSize_(11.0)}
+        measured = NSString.stringWithString_(text).sizeWithAttributes_(
+            attributes
+        )
+        width = min(
+            ANNOUNCER_PILL_MAX_WIDTH,
+            max(120.0, measured.width + 2.0 * ANNOUNCER_PILL_PADDING),
+        )
+        frame = (
+            (center_x - width / 2.0, top_y - ANNOUNCER_PILL_HEIGHT),
+            (width, ANNOUNCER_PILL_HEIGHT),
+        )
+        self.window.setFrame_display_(frame, True)
+        if self.view is not None:
+            self.view.setFrame_(((0, 0), frame[1]))
+        # Words are worth a click: the pill itself jumps to the session.
+        self.window.setIgnoresMouseEvents_(click_handler_source is None)
+        if not self.window.isVisible():
+            self.window.orderFrontRegardless()
+
+    def close(self) -> None:
+        if self.window is not None:
+            self.window.orderOut_(None)
+            self.window = None
+            self.view = None
+
+
 class VirtualStatusDevice(NSObject):
     def init(self):
         self = objc.super(VirtualStatusDevice, self).init()
@@ -2171,6 +2345,8 @@ class VirtualStatusDevice(NSObject):
             self.window = None
             self.view = None
             self.timer = None
+            self._announcer_pill = None
+            self._announcer_text = None
             self.display_link = None
             # The rate the installed link was registered for; None when there
             # is no link. Compared against schedule.driver_fps so a panel that
@@ -2860,6 +3036,44 @@ class VirtualStatusDevice(NSObject):
         if handler is not previous and self._is_surface_visible():
             self._promote_animation()
 
+    def set_announcer_text(self, text: str | None) -> None:
+        """The announcer's words: session name + the actual question,
+        shown in the pill below the notch while an ask is live."""
+        value = str(text) if text else None
+        if value == self._announcer_text:
+            return
+        self._announcer_text = value
+        self._sync_announcer()
+
+    def _sync_announcer(self) -> None:
+        pill = self._announcer_pill
+        text = self._announcer_text
+        show = (
+            text is not None
+            and not self._terminating
+            and self._enabled
+            and not self._display_asleep
+            and self.window is not None
+            and self.window.isVisible()
+            # While Alcove runs, the space below the notch is Alcove's;
+            # the dropdown ledger still carries the words there.
+            and not getattr(self, "_alcove_relevant", False)
+            and not getattr(self, "_compact_active", False)
+        )
+        if not show:
+            if pill is not None:
+                pill.hide()
+            return
+        if pill is None:
+            pill = self._announcer_pill = AnnouncerPill()
+        frame = self.window.frame()
+        pill.update(
+            text=text,
+            center_x=frame.origin.x + frame.size.width / 2.0,
+            top_y=frame.origin.y - 2.0,
+            click_handler_source=lambda: getattr(self.view, "click_handler", None),
+        )
+
     def set_min_glow(self, fraction: float) -> None:
         if self.view is not None:
             self.view.setMinGlow_(fraction)
@@ -2922,6 +3136,8 @@ class VirtualStatusDevice(NSObject):
         self._invalidate_frame_driver()
         self._stop_sampler()
         self._stop_alcove_observer()
+        if self._announcer_pill is not None:
+            self._announcer_pill.hide()
         if self.window is not None:
             self.window.orderOut_(None)
         self._remove_power_observers()
@@ -2941,6 +3157,12 @@ class VirtualStatusDevice(NSObject):
         self._stop_sampler()
         self._stop_alcove_observer()
         self._remove_power_observers()
+        if self._announcer_pill is not None:
+            try:
+                self._announcer_pill.close()
+            except Exception:
+                pass
+            self._announcer_pill = None
         try:
             if self.window is not None:
                 self.window.orderOut_(None)
@@ -3418,6 +3640,7 @@ class VirtualStatusDevice(NSObject):
                 )
             self.view.setHasNotch_(screen_has_notch(screen))
             self.view.setCompactMode_(compact)
+            self._compact_active = compact
             self.view.setWingsOnlyMode_(wings_only)
             set_alcove_silhouette = getattr(self.view, "setAlcoveSilhouette_", None)
             if callable(set_alcove_silhouette):
@@ -3443,6 +3666,7 @@ class VirtualStatusDevice(NSObject):
                 # Only meaningful when the body's width IS the measured
                 # width; a manual gap or a slot fallback draws parametric.
                 set_notch_insets(measured_notch_insets)
+        self._sync_announcer()
         self._publish_presentation_schedule()
 
     def _build_window(self):

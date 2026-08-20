@@ -560,6 +560,7 @@ from .virtual_device import (
     VIRTUAL_DEVICE_NAME,
     VirtualLedView,
     VirtualStatusDevice,
+    announcer_text_for_attention,
     monotonic_ms,
     slot_width_for_screen,
     virtual_display_state_for_projection,
@@ -1251,6 +1252,36 @@ STATE_DONE = StatusBarState("Done", "checkmark.circle", 3)
 STATE_ASK = StatusBarState("Ask", "questionmark.circle", 1)
 STATE_FAILED = StatusBarState("Failed", "exclamationmark.triangle", 2)
 STATUS_BAR_DEVICE_PRIORITY = ("sidepulsepro", "sidepulsedot")
+# A completion within this window of YOUR OWN prompt to that session is
+# attended -- you are at its terminal watching it -- and never earns a
+# celebration sweep (the T3 "unseen completions" rule).
+ATTENDED_COMPLETION_QUIET_SECONDS = 120.0
+
+# The ONE table pairing every presentation timer with its callback, BY
+# NAME. The old inline dict of bound methods was uncheckable: a timer
+# migration could orphan a method (animateColorsPreviewTick_ froze every
+# Settings thumbnail that way) and nothing could enumerate the pairs.
+PRESENTATION_TIMER_BINDINGS: tuple = (
+    (RuntimeFeature.PRESENTATION_FRAME_FALLBACK, "_presentation_frame_fallback_fired"),
+    (RuntimeFeature.PRESENTATION_STATIC_DEADLINE, "_presentation_static_deadline_fired"),
+    (RuntimeFeature.ALCOVE_OBSERVATION, "_presentation_alcove_observation_fired"),
+    (RuntimeFeature.POINTER_PEEK, "_presentation_pointer_peek_fired"),
+    (RuntimeFeature.LID_OBSERVATION, "_lid_observation_timer_fired"),
+    (RuntimeFeature.DEVICE_INVENTORY, "_device_inventory_timer_fired"),
+    (RuntimeFeature.DISPLAY_ENVIRONMENT, "_display_environment_timer_fired"),
+    (RuntimeFeature.CALENDAR_OBSERVATION, "_calendar_observation_timer_fired"),
+    (RuntimeFeature.REMINDERS_OBSERVATION, "_reminders_observation_timer_fired"),
+    (RuntimeFeature.WEATHER_OBSERVATION, "_weather_observation_timer_fired"),
+    (RuntimeFeature.SETTINGS_SIGNAL_PREVIEW, "_settings_signal_preview_fired"),
+    (RuntimeFeature.SETTINGS_COLOR_PREVIEW, "_settings_color_preview_fired"),
+    (RuntimeFeature.SETUP_DEMO, "_setup_demo_fired"),
+    (RuntimeFeature.SETTINGS_MESSAGE_DEADLINE, "_settings_message_deadline_fired"),
+    (RuntimeFeature.TEST_SIGNAL_DEADLINE, "_finite_ui_deadline_fired"),
+    (RuntimeFeature.TIMEBOX_DEADLINE, "_timebox_deadline_fired"),
+    (RuntimeFeature.ESCALATION_DEADLINE, "_escalation_deadline_fired"),
+)
+
+
 # Every current device mounts as "SidePulse" (identity comes from the
 # firmware serial in STATUS.TXT, not the volume name); the Pro/Dot names
 # survive for owners who renamed their volumes to tell devices apart.
@@ -2409,6 +2440,21 @@ class StatusBarController(NSObject):
             row = projection.actionable_attention[0]
             if row.request_key is not None:
                 actionable_episode_key = f"attention:{row.request_key.request_id.value}"
+                # Stage 2 IS the promised menu-bar flash: an ask ignored
+                # into escalation RE-ANNOUNCES itself -- the stage-keyed
+                # episode replays the finite arrival taps on the status
+                # surfaces, once, inside the budget. The default tier's
+                # headline effect finally exists.
+                stage_reader = getattr(self, "current_escalation_stage", None)
+                stage = stage_reader() if callable(stage_reader) else 0
+                tier = getattr(
+                    getattr(self, "settings", None), "escalation_tier", None
+                )
+                if (
+                    stage >= 2
+                    and tier in signals_module.ESCALATION_TIERS_WITH_MENU_BAR
+                ):
+                    actionable_episode_key += ":stage2"
         failure = next(
             (event for event in operator_events if event.kind is TransitionKind.FAILED),
             None,
@@ -4481,6 +4527,23 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def setClosedLidAwakePolicy_(self, sender):
         self.set_closed_lid_awake_policy(sender.representedObject())
+
+    @objc.IBAction
+    def setGlobalBrightness_(self, sender):
+        """The master dial, one click from the dropdown: scales BOTH the
+        strip and the Screen Bar ("last night it was really bright")."""
+        try:
+            value = float(sender.representedObject())
+        except (TypeError, ValueError):
+            return
+        try:
+            self.settings = self.settings.with_global_brightness_scale(value)
+            save_settings(self.settings)
+        except Exception as exc:
+            self.set_settings_message(f"Could not save brightness: {exc}")
+            self.settings = load_settings()
+            return
+        self.refresh_(None)
 
     @objc.IBAction
     def setClosedLidAwakePolicyFromPopup_(self, sender):
@@ -6869,6 +6932,20 @@ class StatusBarController(NSObject):
         current_modes = {
             agent_id: status.mode for agent_id, status in statuses_by_id.items()
         }
+        # Attended-session tracking (the T3 "unseen completions" idea):
+        # a prompt you JUST typed means you are at that session's
+        # terminal watching it -- its turn finishing is not news worth a
+        # celebration sweep at you.
+        attended = getattr(self, "_attended_prompt_monotonic", None)
+        if attended is None:
+            attended = self._attended_prompt_monotonic = {}
+        prompt_now = time.monotonic()
+        for agent_id, status in statuses_by_id.items():
+            if status.event_name == "UserPromptSubmit":
+                attended[agent_id] = prompt_now
+        if len(attended) > 64:
+            for stale_id in sorted(attended, key=attended.get)[: len(attended) - 64]:
+                del attended[stale_id]
         self.last_agent_modes = current_modes
         observed_at = datetime.now(timezone.utc)
         batch = detect_completion_batch(
@@ -6967,7 +7044,23 @@ class StatusBarController(NSObject):
         hold = self.interrupt_hold_seconds(signals_module.SIGNAL_COMPLETION)
         if hold is None:
             return
-        visual_status = batch.statuses[0]
+        # Attended completions do not celebrate: you prompted this
+        # session seconds ago, you are watching it finish. Only a
+        # completion arriving AFTER you stepped away (no prompt within
+        # the quiet window) earns the sweep.
+        sweep_now = time.monotonic()
+        unattended = [
+            status
+            for status in batch.statuses
+            if sweep_now
+            - getattr(self, "_attended_prompt_monotonic", {}).get(
+                status.agent_id, float("-inf")
+            )
+            > ATTENDED_COMPLETION_QUIET_SECONDS
+        ]
+        if not unattended:
+            return
+        visual_status = unattended[0]
         self.completion_sweep_color = completion_color(visual_status)
         self.completion_sweep_until = time.monotonic() + hold
         # The Exhale: when the LAST working session just finished and
@@ -10940,7 +11033,10 @@ class StatusBarController(NSObject):
             if self.current_escalation_stage() >= 1
             else 1.0
         )
-        return normalize_brightness(max(device.brightness * boost, 1))
+        # The master dial is the OWNER's explicit hand, not ambient
+        # dimming -- signals cut through idle/Focus dims but honor it.
+        scale = float(self.settings.global_brightness_scale)
+        return normalize_brightness(max(device.brightness * scale * boost, 1))
 
     def effective_brightness_for_device(self, device: StatusBarDevice) -> int:
         """The brightness to actually use for this write right now: the
@@ -10967,7 +11063,13 @@ class StatusBarController(NSObject):
             if self.current_escalation_stage() >= 1
             else 1.0
         )
-        scaled = base * self.idle_dim_scale_factor() * self.focus_sync_scale_factor() * boost
+        scaled = (
+            base
+            * self.idle_dim_scale_factor()
+            * self.focus_sync_scale_factor()
+            * float(self.settings.global_brightness_scale)
+            * boost
+        )
         if boost > 1.0:
             # An escalation ramp must survive the darkest stack: with
             # idle-dim AND Focus both at their floors, multiplication
@@ -11587,6 +11689,11 @@ class StatusBarController(NSObject):
             )
         else:
             self.virtual_status_device.set_click_handler(None)
+        # The announcer's WORDS: session name + the actual question, in
+        # the pill under the notch, only while an ask is live.
+        set_announcer = getattr(self.virtual_status_device, "set_announcer_text", None)
+        if callable(set_announcer):
+            set_announcer(announcer_text_for_attention(projection))
         device = next(
             (
                 item for item in self.status_bar_devices(remember=False)
@@ -11749,6 +11856,11 @@ class StatusBarController(NSObject):
             if override:
                 colors_for_render = colors_for_render.with_blend_mode(override)
             presentation = None
+            # The Screen Bar honors ITS provider pin exactly like a
+            # physical device: the multi-agent render used to receive the
+            # raw fleet projection, so pinning the bar visibly did nothing.
+            if projection is not None:
+                projection = self.projection_for_device(projection, device)
             # Same routing as the hardware path, in the same order. This
             # branch used to test ``resolved_glance is not None`` FIRST,
             # and resolve_presentation_glance never returns None -- so the
@@ -11995,51 +12107,8 @@ class StatusBarController(NSObject):
         )
         return AppKitTimerRegistry(
             {
-                RuntimeFeature.PRESENTATION_FRAME_FALLBACK: (
-                    self._presentation_frame_fallback_fired
-                ),
-                RuntimeFeature.PRESENTATION_STATIC_DEADLINE: (
-                    self._presentation_static_deadline_fired
-                ),
-                RuntimeFeature.ALCOVE_OBSERVATION: (
-                    self._presentation_alcove_observation_fired
-                ),
-                RuntimeFeature.POINTER_PEEK: self._presentation_pointer_peek_fired,
-                RuntimeFeature.LID_OBSERVATION: (
-                    self._lid_observation_timer_fired
-                ),
-                RuntimeFeature.DEVICE_INVENTORY: (
-                    self._device_inventory_timer_fired
-                ),
-                RuntimeFeature.DISPLAY_ENVIRONMENT: (
-                    self._display_environment_timer_fired
-                ),
-                RuntimeFeature.CALENDAR_OBSERVATION: (
-                    self._calendar_observation_timer_fired
-                ),
-                RuntimeFeature.REMINDERS_OBSERVATION: (
-                    self._reminders_observation_timer_fired
-                ),
-                RuntimeFeature.WEATHER_OBSERVATION: (
-                    self._weather_observation_timer_fired
-                ),
-                RuntimeFeature.SETTINGS_SIGNAL_PREVIEW: (
-                    self._settings_signal_preview_fired
-                ),
-                RuntimeFeature.SETTINGS_COLOR_PREVIEW: (
-                    self._settings_color_preview_fired
-                ),
-                RuntimeFeature.SETUP_DEMO: self._setup_demo_fired,
-                RuntimeFeature.SETTINGS_MESSAGE_DEADLINE: (
-                    self._settings_message_deadline_fired
-                ),
-                RuntimeFeature.TEST_SIGNAL_DEADLINE: (
-                    self._finite_ui_deadline_fired
-                ),
-                RuntimeFeature.TIMEBOX_DEADLINE: self._timebox_deadline_fired,
-                RuntimeFeature.ESCALATION_DEADLINE: (
-                    self._escalation_deadline_fired
-                ),
+                feature: getattr(self, name)
+                for feature, name in PRESENTATION_TIMER_BINDINGS
             },
             **options,
         )
@@ -16375,6 +16444,16 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         menu.addItem_(virtual_toggle)
 
     menu.addItem_(NSMenuItem.separatorItem())
+    brightness_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Brightness", None, ""
+    )
+    brightness_menu = NSMenu.alloc().init()
+    for preset_label, preset_value in BRIGHTNESS_PRESET_CHOICES:
+        brightness_menu.addItem_(
+            build_brightness_preset_item(preset_label, preset_value, target)
+        )
+    brightness_item.setSubmenu_(brightness_menu)
+    menu.addItem_(brightness_item)
     keep_awake_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         "Keep Awake With Lid Closed", None, ""
     )
@@ -16484,6 +16563,29 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
 
 
 _AppKitStatusBarController = StatusBarController
+
+
+# The master brightness dial's one-click presets (see
+# setGlobalBrightness_): both surfaces, composing with every other dim.
+BRIGHTNESS_PRESET_CHOICES: tuple[tuple[str, float], ...] = (
+    ("Dim", 0.15),
+    ("Half", 0.5),
+    ("Full", 1.0),
+)
+
+
+def build_brightness_preset_item(
+    label: str, value: float, target: StatusBarController
+) -> NSMenuItem:
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        label, "setGlobalBrightness:", ""
+    )
+    item.setTarget_(target)
+    item.setRepresentedObject_(value)
+    item.setState_(
+        1 if abs(target.settings.global_brightness_scale - value) < 0.01 else 0
+    )
+    return item
 
 
 def build_closed_lid_awake_policy_item(policy: str, target: StatusBarController) -> NSMenuItem:

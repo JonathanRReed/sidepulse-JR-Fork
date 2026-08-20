@@ -1252,11 +1252,10 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         target,
         "toggleScreenBarGauges:",
         help_text=(
-            "The outermost sliver of each wing becomes a standing "
-            "micro-gauge: left holds a faint amber ember as your worst "
-            "quota window fills past 50%, right glows green while "
-            "finished sessions wait unseen -- and goes out the moment "
-            "you open the menu. Survives every animation."
+            "The outermost sliver of the right wing becomes a standing "
+            "micro-gauge: it glows green while finished sessions wait "
+            "unseen, and goes out the moment you open the menu. "
+            "Survives every animation."
         ),
     )
     glow_inner.addArrangedSubview_(gauges_row)

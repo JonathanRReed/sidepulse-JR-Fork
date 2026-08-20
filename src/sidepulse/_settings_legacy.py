@@ -15,6 +15,7 @@ from .capacity_calibration import (
 )
 from .colors import ColorSettings
 from .led_status import DEFAULT_CHANNEL_GAIN, normalize_channel_gain
+from .providers import PROVIDER_REGISTRY
 from .signals import (
     DEFAULT_ALERT_BURST,
     DEFAULT_QUOTA_THRESHOLDS,
@@ -391,6 +392,10 @@ class AgentMonitorSettings:
     # Named Studio programs -- a shelf of looks.
     studio_library: tuple[tuple[str, str], ...] = ()
     night_warmth_enabled: bool = False
+    # One master dial over EVERY surface's brightness -- strip and
+    # Screen Bar alike -- reachable from the dropdown. Composes with
+    # per-device brightness, auto-brightness, idle and Focus dimming.
+    global_brightness_scale: float = 1.0
     focus_signal_policy: dict[str, str] = field(default_factory=dict)
     # A macOS notification banner when a main session finishes. New
     # installations remain off until the user opts in and explicitly
@@ -843,6 +848,14 @@ class AgentMonitorSettings:
             mapping[str(preset_key)] = (on_clean, off_clean)
         return replace(self, timebox_shortcuts=mapping)
 
+    def with_global_brightness_scale(self, value: float) -> AgentMonitorSettings:
+        """The master dial. Clamped 0.05..1.0 -- dim is never "off in
+        disguise"; turning surfaces off is a different, explicit act."""
+        return replace(
+            self,
+            global_brightness_scale=max(0.05, min(1.0, float(value))),
+        )
+
     def with_focus_signal_policy(self, identifier: str, policy: str) -> AgentMonitorSettings:
         if policy not in FOCUS_SIGNAL_POLICIES:
             raise ValueError(f"unknown focus signal policy: {policy}")
@@ -1041,7 +1054,9 @@ class AgentMonitorSettings:
         self, device_id: str, provider: str | None
     ) -> AgentMonitorSettings:
         """provider=None restores the aggregate view."""
-        if provider is not None and provider not in ("claude", "codex"):
+        if provider is not None and provider not in PROVIDER_REGISTRY:
+            # Every REGISTERED provider is pinnable -- the old
+            # claude/codex whitelist predates the other eight.
             raise ValueError(f"Unknown provider pin: {provider}")
         devices = tuple(
             replace(device, provider_pin=provider)
@@ -1365,6 +1380,7 @@ class AgentMonitorSettings:
             "escalation_webhook_url": self.escalation_webhook_url,
             "studio_library": [list(item) for item in self.studio_library],
             "night_warmth_enabled": self.night_warmth_enabled,
+            "global_brightness_scale": self.global_brightness_scale,
             "focus_signal_policy": dict(self.focus_signal_policy),
             "completion_notification_enabled": self.completion_notification_enabled,
             "notification_policy_version": 1,
@@ -1700,6 +1716,9 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         codex_percent_enabled=_bool_setting(data.get("codex_percent_enabled"), True),
         escalation_webhook_url=str(data.get("escalation_webhook_url") or "").strip(),
         night_warmth_enabled=_bool_setting(data.get("night_warmth_enabled"), False),
+        global_brightness_scale=max(
+            0.05, _fraction_setting(data.get("global_brightness_scale"), 1.0)
+        ),
         focus_signal_policy=(
             {
                 str(key): str(value)

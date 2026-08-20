@@ -815,10 +815,13 @@ for (const event of [
             codex = base / "codex.jsonl"
             claude = base / "claude.jsonl"
 
+            # Recent stamps: silent working-shaped rows past their window
+            # now display "Ended (unconfirmed)" instead of lingering, so a
+            # two-month-old PreToolUse no longer counts as a live row.
             codex.write_text(
                 json.dumps(
                     {
-                        "logged_at": "2026-06-20T06:00:00Z",
+                        "logged_at": _recent_state_iso(),
                         "event": {
                             "hook_event_name": "PreToolUse",
                             "session_id": "codex-session",
@@ -831,7 +834,7 @@ for (const event of [
             claude.write_text(
                 json.dumps(
                     {
-                        "logged_at": "2026-06-20T06:00:01Z",
+                        "logged_at": _recent_state_iso(),
                         "hook_event_name": "Notification",
                         "session_id": "claude-session",
                         "notification_type": "idle_prompt",
@@ -5581,7 +5584,10 @@ for (const event of [
             idle_visible_seconds=0,
         )
 
-        self.assertEqual(snapshot.aggregate.mode, AgentMode.COMPLETED)
+        # Ended (unconfirmed), not Completed: the provider never confirmed
+        # an ending, and the false COMPLETED transition fired celebrations
+        # for crashed turns.
+        self.assertEqual(snapshot.aggregate.mode, AgentMode.ENDED_UNCONFIRMED)
         self.assertEqual(snapshot.aggregate.active_count, 0)
         self.assertEqual(snapshot.statuses[0].event_name, "PostToolUse")
 
@@ -15951,6 +15957,11 @@ class CompletionThroughSnapshotTests(unittest.TestCase):
             "claude:session:hero",
             [s.agent_id for s in snapshot.statuses],
         )
+        # The owner stepped away: an ATTENDED completion (prompt typed
+        # seconds ago) deliberately never sweeps -- see the test below.
+        self.controller._attended_prompt_monotonic = {
+            "claude:session:hero": time.monotonic() - 300.0
+        }
         self.controller.refresh_(None)
         self.assertGreater(
             getattr(self.controller, "completion_sweep_until", 0.0),
@@ -15959,6 +15970,21 @@ class CompletionThroughSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(len(self.posted), 1)
         self.assertEqual(self.posted[0].agent_id, "claude:session:hero")
+
+    def test_an_attended_completion_never_sweeps(self) -> None:
+        """You typed the prompt seconds ago; you are watching that
+        terminal. Its turn finishing is not news -- celebrating every
+        turn of a live conversation reads as the bar flashing at you
+        (the T3 unseen-completions rule)."""
+        self._ingest("hero", "UserPromptSubmit", prompt="quick question")
+        self.controller.refresh_(None)
+        self._ingest("hero", "Stop", last_assistant_message="Answered.")
+        self.controller.refresh_(None)
+        self.assertLessEqual(
+            getattr(self.controller, "completion_sweep_until", 0.0),
+            time.monotonic(),
+            "an attended completion must pass unswept",
+        )
 
     def test_closing_a_terminal_never_celebrates_or_badges(self) -> None:
         """SessionEnd is the user's own act: no sweep, no banner, no

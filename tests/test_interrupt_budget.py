@@ -78,7 +78,10 @@ def test_a_focus_never_holds_a_critical_signal(kind: str) -> None:
     grant = signals.grant_interrupt(kind, budget=_focus())
     assert grant.allowed
     assert grant.reason == signals.INTERRUPT_GRANTED
-    assert grant.blinks_until_dealt_with
+    # Ratified 2026-08-19: finite arrival taps + a steady anchor that
+    # STANDS until dealt with -- not perpetual blinking.
+    assert grant.stands_until_dealt_with
+    assert grant.repetitions == signals.ATTENTION_ARRIVAL_TAPS
     assert grant.hold_seconds is None
 
 
