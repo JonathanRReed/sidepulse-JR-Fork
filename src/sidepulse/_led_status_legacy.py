@@ -48,7 +48,11 @@ IDLE_DIM = "#020204"
 # nagging light; one long 3.6s breath reads as patient.
 LOW_BATTERY_RED = "#E01010"
 LOW_BATTERY_BREATH_MS = 3600
-LED_REASSERT_SECONDS = 60.0
+# 240, not 60: every reassert physically rewrites LEDS.LED and the
+# firmware restarts its loop from line 1 -- a visible mid-breath hitch.
+# Remounts are caught by device discovery immediately anyway; this
+# timer is only the backstop for a firmware that lost its file quietly.
+LED_REASSERT_SECONDS = 240.0
 DEVICE_LED_COUNTS = {
     "sidepulsedot": 2,
     "sidepulsepro": 8,
@@ -609,9 +613,15 @@ def failure_signal_program(
 
 
 def rolling_program(color: str, *, led_count: int = 8, floor: float = 0.0) -> str:
+    """The Working relay: a breath travelling down the strip.
+
+    Retuned 2026-08-20 from 760ms/95ms ("skittish, almost glitchy") to a
+    slow travelling swell -- these lights are meant to read as small art
+    pieces breathing beside the work, not as activity spinners.
+    """
     count = max(2, min(8, int(led_count)))
-    delay_ms = 260 if count == 2 else 95
-    duration_ms = 760
+    delay_ms = 480 if count == 2 else 170
+    duration_ms = 1400
     settle_ms = settle_duration_ms(duration_ms)
     reset_line = f"{_pulse_floor_color(color, floor)} {settle_ms}ms cosine"
     segments: list[str] = []

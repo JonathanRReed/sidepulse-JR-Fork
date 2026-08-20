@@ -380,7 +380,9 @@ IDLE_ROLL_MIN_AGENTS = 3
 # state's own fixed animation cadence. cycle_speed_seconds on ColorSettings
 # is the global default; SPEED_OVERRIDE_MODES lists which blend modes can
 # each have their own independent speed instead of following the global one.
-DEFAULT_CYCLE_SPEED_SECONDS = 1.6
+# 2.2, not 1.6: the default breath deepened in the 2026-08-20 motion
+# polish -- ambient light should sit BELOW conversation pace.
+DEFAULT_CYCLE_SPEED_SECONDS = 2.2
 MIN_CYCLE_SPEED_SECONDS = 0.3
 MAX_CYCLE_SPEED_SECONDS = 10.0
 SPEED_OVERRIDE_MODES: tuple[str, ...] = (BLEND_MODE_ROUND_ROBIN, BLEND_MODE_CYCLE)

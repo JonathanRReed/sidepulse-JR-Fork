@@ -996,14 +996,14 @@ def virtual_led_colors(
         dim = 2.0 / 255.0
         return [(dim * scale * amount, dim * scale * amount, 2 * dim * scale * amount, amount)] * LED_COUNT
 
-    # Mirrors rolling_program(): 760 ms pulses staggered by 95 ms.
-    cycle = 0.76 + 0.095 * (LED_COUNT - 1)
+    # Mirrors rolling_program(): 1400 ms pulses staggered by 170 ms.
+    cycle = 1.4 + 0.17 * (LED_COUNT - 1)
     colors = []
     for index in range(LED_COUNT):
-        local = (elapsed % cycle) - index * 0.095
+        local = (elapsed % cycle) - index * 0.17
         amount = 0.0
-        if 0.0 <= local <= 0.76:
-            amount = math.sin(math.pi * local / 0.76) ** 2
+        if 0.0 <= local <= 1.4:
+            amount = math.sin(math.pi * local / 1.4) ** 2
         colors.append((0.0, 0.898 * scale * amount, scale * amount, amount))
     return colors
 

@@ -448,10 +448,19 @@ else:
             self.openProviderUsageCenter_(sender)
 
         def _connect_claude_usage(self) -> None:
+            """Connect, or say EXACTLY why not.
+
+            Every failure used to fall through to 'open the Usage Center'
+            -- which read as "it just opens a page and doesn't actually
+            connect anything." The live failure on this Mac was real and
+            reportable: Claude Code's Keychain entry existed but held an
+            EMPTY accessToken (signed out / cleared by an update)."""
+            message = "Claude usage connected."
             try:
                 from .claude_quota import credential_from_keychain_payload
                 from .credentials import (
                     CLAUDE_CODE_KEYCHAIN,
+                    CredentialOutcome,
                     KeychainConsentLedger,
                     read_keychain_secret,
                 )
@@ -464,22 +473,43 @@ else:
                         default_state_dir() / "keychain-consent.json"
                     ),
                 )
-                credential = (
-                    credential_from_keychain_payload(result.secret)
-                    if result.ok
-                    else None
-                )
-                if credential is None:
-                    self.openProviderUsageCenter_(None)
-                    return
-                ProviderCredentialStore().set(
-                    "claude",
-                    "oauth-token",
-                    credential.access_token,
-                )
-                self._request_provider_usage(force=True)
+                if not result.ok:
+                    message = {
+                        CredentialOutcome.DENIED: (
+                            "Keychain access was declined -- click Connect "
+                            "again and choose Allow."
+                        ),
+                        CredentialOutcome.COOLING_DOWN: (
+                            "Keychain access was declined recently -- try "
+                            "again in a few minutes."
+                        ),
+                    }.get(
+                        result.outcome,
+                        "Claude Code's sign-in was not found in the Keychain.",
+                    )
+                else:
+                    credential = credential_from_keychain_payload(result.secret)
+                    if credential is None:
+                        message = (
+                            "Claude Code's stored sign-in is EMPTY -- run "
+                            "`claude` in a terminal and log in, then click "
+                            "Connect Claude usage again."
+                        )
+                    else:
+                        ProviderCredentialStore().set(
+                            "claude",
+                            "oauth-token",
+                            credential.access_token,
+                        )
+                        self._request_provider_usage(force=True)
+            except Exception as exc:
+                message = f"Could not read the Claude Code sign-in: {exc}"
+            try:
+                self.set_settings_message(message)
+                _legacy.log_status_bar(f"claude usage connect: {message}")
             except Exception:
-                self.openProviderUsageCenter_(None)
+                pass
+            self.openProviderUsageCenter_(None)
 
         def applicationDidFinishLaunching_(self, notification):
             result = _BaseStatusBarController.applicationDidFinishLaunching_(

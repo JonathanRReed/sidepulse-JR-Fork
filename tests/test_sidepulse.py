@@ -4029,8 +4029,8 @@ for (const event of [
         self.assertEqual(
             program_for_display_state(LedDisplayState.WORKING, led_count=2).splitlines(),
             [
-                "off 91ms cosine",
-                "0:#00E5FF 760ms pulse 0ms; 1:#00E5FF 760ms pulse 260ms",
+                "off 160ms cosine",
+                "0:#00E5FF 1400ms pulse 0ms; 1:#00E5FF 1400ms pulse 480ms",
                 "repeat",
             ],
         )
@@ -4059,8 +4059,8 @@ for (const event of [
             cyan = apply_strip_transfer_to_hex("#00E5FF", (1.0, 1.0, 1.0))
             self.assertEqual(
                 (device / "LEDS.LED").read_text(),
-                "off 91ms cosine\n"
-                f"0:{cyan} 760ms pulse 0ms; 1:{cyan} 760ms pulse 260ms\n"
+                "off 160ms cosine\n"
+                f"0:{cyan} 1400ms pulse 0ms; 1:{cyan} 1400ms pulse 480ms\n"
                 "repeat",
             )
 
@@ -4091,11 +4091,11 @@ for (const event of [
 
             lines = (device / "LEDS.LED").read_text().splitlines()
             self.assertEqual(len(lines), 3)
-            self.assertEqual(lines[0], "off 91ms cosine")
+            self.assertEqual(lines[0], "off 160ms cosine")
             cyan = apply_strip_transfer_to_hex("#00E5FF", (1.0, 1.0, 1.0))
-            self.assertIn(f"0:{cyan} 760ms pulse 0ms", lines[1])
-            self.assertIn(f"5:{cyan} 760ms pulse 475ms", lines[1])
-            self.assertIn(f"7:{cyan} 760ms pulse 665ms", lines[1])
+            self.assertIn(f"0:{cyan} 1400ms pulse 0ms", lines[1])
+            self.assertIn(f"5:{cyan} 1400ms pulse 850ms", lines[1])
+            self.assertIn(f"7:{cyan} 1400ms pulse 1190ms", lines[1])
             self.assertEqual(lines[-1], "repeat")
 
     def test_agent_led_controller_skips_unchanged_state(self) -> None:
@@ -7834,9 +7834,11 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         )
         _, program = program_for_snapshot(statuses, led_count=4, colors=settings)
         pulse_line = program.splitlines()[1]
-        # Hand-derived: the configured 1.6-second full traversal divided
-        # across four LEDs is one 400ms turn per LED.
-        duration_ms = 400
+        # Hand-derived: the default full traversal divided across four
+        # LEDs is one turn per LED (2.2s default -> 550ms turns).
+        from sidepulse.colors import DEFAULT_CYCLE_SPEED_SECONDS
+
+        duration_ms = int(DEFAULT_CYCLE_SPEED_SECONDS * 1000 / 4)
         delays = []
         for segment in pulse_line.split("; "):
             # "<index>:<color> <duration>ms pulse <delay>ms"
