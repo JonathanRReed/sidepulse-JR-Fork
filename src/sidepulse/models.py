@@ -23,6 +23,12 @@ class AgentMode(str, Enum):
     LONG_TASK_PROGRESS = "long_task_progress"
     BLOCKED_ERROR = "blocked_error"
     COMPLETED = "completed"
+    # A working-shaped session whose hooks went silent past its window:
+    # the provider never confirmed an ending (no Stop/SessionEnd), so
+    # claiming "Completed" was a lie of kind -- a crashed turn is not a
+    # success, and the false transition even fired celebrations. This is
+    # the honest displayed word for "probably over, nobody said so."
+    ENDED_UNCONFIRMED = "ended_unconfirmed"
     UNKNOWN = "unknown"
 
 
@@ -34,6 +40,7 @@ MODE_PRIORITY: dict[AgentMode, int] = {
     AgentMode.WORKING: 5,
     AgentMode.COMPLETED: 6,
     AgentMode.IDLE_READY: 7,
+    AgentMode.ENDED_UNCONFIRMED: 8,
     AgentMode.UNKNOWN: 99,
 }
 
@@ -46,6 +53,7 @@ MODE_LABELS: dict[AgentMode, str] = {
     AgentMode.LONG_TASK_PROGRESS: "Long Task Progress",
     AgentMode.BLOCKED_ERROR: "Blocked / Error",
     AgentMode.COMPLETED: "Completed",
+    AgentMode.ENDED_UNCONFIRMED: "Ended (unconfirmed)",
     AgentMode.UNKNOWN: "Unknown",
 }
 

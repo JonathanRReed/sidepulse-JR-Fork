@@ -169,7 +169,7 @@ def test_working_after_tool_failure_demotes_like_post_tool() -> None:
     effective = status_for_snapshot(
         status, now, post_tool_working_visible_seconds=2 * 60.0
     )
-    assert effective.mode is AgentMode.COMPLETED
+    assert effective.mode is AgentMode.ENDED_UNCONFIRMED
 
 
 def test_hook_silent_working_demotes_after_silence_window() -> None:
@@ -186,7 +186,7 @@ def test_hook_silent_working_demotes_after_silence_window() -> None:
     effective = status_for_snapshot(
         status, now, post_tool_working_visible_seconds=2 * 60.0
     )
-    assert effective.mode is AgentMode.COMPLETED
+    assert effective.mode is AgentMode.ENDED_UNCONFIRMED
 
 
 def test_recent_working_stays_working() -> None:

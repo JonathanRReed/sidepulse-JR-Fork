@@ -421,7 +421,10 @@ def _lifecycle_mode(status: AgentStatus, actionable: bool) -> LifecycleMode:
         return LifecycleMode.FAILED_VISIBLE
     if status.mode == AgentMode.COMPLETED:
         return LifecycleMode.COMPLETED_RECENTLY
-    if status.mode == AgentMode.IDLE_READY:
+    if status.mode in {AgentMode.IDLE_READY, AgentMode.ENDED_UNCONFIRMED}:
+        # Ended-unconfirmed is a whisper, never a signal: the session is
+        # probably over and nobody said so -- no light language for that
+        # beyond the idle floor.
         return LifecycleMode.IDLE
     return LifecycleMode.UNKNOWN
 

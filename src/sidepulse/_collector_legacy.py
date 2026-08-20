@@ -2861,17 +2861,15 @@ def status_for_snapshot(
     *,
     post_tool_working_visible_seconds: float,
 ) -> AgentStatus:
-    if status.mode == AgentMode.WORKING and post_tool_working_visible_seconds >= 0:
+    working_shaped = status.mode in (AgentMode.WORKING, AgentMode.TOOL_RUNNING)
+    if working_shaped and post_tool_working_visible_seconds >= 0:
         if status.event_name in ("PostToolUse", "PostToolUseFailure"):
             window = post_tool_working_visible_seconds
-        elif is_recent(now, status.updated_at, 3600.0):
-            window = WORKING_SILENCE_SECONDS
         else:
-            # Beyond the stale horizon keep the honest last-heard mode;
-            # demotion is only for fresh phantoms that would pulse on.
-            return status
+            window = WORKING_SILENCE_SECONDS
         if not is_recent(now, status.updated_at, window):
-            return _replace_mode(status, AgentMode.COMPLETED)
+            # the provider never confirmed an ending
+            return _replace_mode(status, AgentMode.ENDED_UNCONFIRMED)
     return status
 
 
@@ -2915,7 +2913,11 @@ def agent_status_from_dict(data: object) -> AgentStatus | None:
 
 
 def status_counts_active(status: AgentStatus) -> bool:
-    return status.mode not in {AgentMode.COMPLETED, AgentMode.IDLE_READY}
+    return status.mode not in {
+        AgentMode.COMPLETED,
+        AgentMode.IDLE_READY,
+        AgentMode.ENDED_UNCONFIRMED,
+    }
 
 
 def track_pending_permissions(

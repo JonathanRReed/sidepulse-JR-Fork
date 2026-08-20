@@ -8,6 +8,7 @@ import stat
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1375,6 +1376,19 @@ def parse_log_line(provider: str, line: str) -> HookEvent | None:
     else:
         raw = obj
         logged_at = raw.get("logged_at") or raw.get("timestamp")
+    if not logged_at:
+        # Normalized hook records carry occurred_at_epoch and nothing
+        # else. Ignoring it re-stamped every REPLAYED event with parse
+        # time, so a replay-built monitor could never age anything out --
+        # yesterday's sessions read as seconds old on every refresh.
+        epoch = obj.get("occurred_at_epoch")
+        if epoch is None and isinstance(raw, dict):
+            epoch = raw.get("occurred_at_epoch")
+        if isinstance(epoch, (int, float)) and not isinstance(epoch, bool):
+            try:
+                logged_at = datetime.fromtimestamp(float(epoch), timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                logged_at = None
     provider = infer_provider_from_payload(provider, raw)
 
     event_name = canonical_event_name(
