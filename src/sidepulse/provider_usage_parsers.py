@@ -36,7 +36,11 @@ def _reset_epoch(value: object) -> float | None:
 def _used_percent(value: object) -> float | None:
     if not isinstance(value, dict):
         return None
-    for key in ("used_percent", "usedPercent", "usagePercent", "percentUsed"):
+    # "utilization" is what claude_quota.windows_from_payload emits (the
+    # OAuth endpoint's own name for used-percent). parse_claude_usage
+    # read only "used_percent" for months: every lane's remaining was
+    # None and the menu row degraded to "Claude · ready" with no numbers.
+    for key in ("used_percent", "usedPercent", "usagePercent", "percentUsed", "utilization"):
         number = _number(value.get(key))
         if number is not None:
             return max(0.0, min(100.0, number))
@@ -170,7 +174,7 @@ def parse_claude_usage(
             label = "Weekly"
         else:
             lane_id = "-".join(part for part in normalized.split() if part)[:128]
-        used = _number(entry.get("used_percent"))
+        used = _used_percent(entry)
         lanes.append(
             normalize_dynamic_lane(
                 provider_id="claude",

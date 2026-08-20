@@ -10,7 +10,7 @@ from .provider_usage_platform import (
     most_constrained_lane,
     provider_descriptor,
 )
-from .provider_usage_qol import format_reset_countdown
+from .provider_usage_qol import format_lane_meter, format_reset_countdown
 from .provider_usage_runtime import ProviderUsageState
 
 
@@ -22,6 +22,24 @@ class ProviderUsageMenuRow:
     usage_detail: str | None
     action_label: str | None
     stale: bool
+    #: One meter line per rate-limit lane ("▰▰▰▰▰▰▱▱  5-hour · 74% left ·
+    #: resets in 2h 10m") -- the codebar/t3code-style at-a-glance limits.
+    #: Renderers show these INSTEAD of `detail` when non-empty.
+    lane_lines: tuple[str, ...] = ()
+
+
+def _lane_lines(snapshot: ProviderUsageSnapshot, *, now: float) -> tuple[str, ...]:
+    lines = []
+    for lane in snapshot.lanes[:6]:
+        countdown = format_reset_countdown(lane.reset_at, now=now)
+        if lane.remaining_percent is None:
+            lines.append(f"{lane.label} · {countdown}")
+        else:
+            lines.append(
+                f"{format_lane_meter(lane.remaining_percent)}"
+                f"  {lane.label} · {lane.remaining_percent:.0f}% left · {countdown}"
+            )
+    return tuple(lines)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +103,7 @@ def _row(snapshot: ProviderUsageSnapshot, *, now: float) -> ProviderUsageMenuRow
         " · ".join(usage_parts) if usage_parts else None,
         snapshot.action_label,
         snapshot.state is ProviderSourceState.STALE,
+        _lane_lines(snapshot, now=now),
     )
 
 

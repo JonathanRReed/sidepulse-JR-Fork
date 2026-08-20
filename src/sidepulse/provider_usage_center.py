@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .provider_usage_platform import ProviderSourceState, provider_descriptor
-from .provider_usage_qol import format_reset_countdown, usage_totals
+from .provider_usage_qol import format_lane_meter, format_reset_countdown, usage_totals
 from .provider_usage_runtime import ProviderUsageState
 from .provider_usage_sync import MergedProviderSync
 from .provider_usage_sync_projection import apply_merged_sync_to_state
@@ -74,9 +74,14 @@ def project_usage_center(
                 subtitle_parts.append("detail only")
             if snapshot.state is ProviderSourceState.STALE:
                 subtitle_parts.append("stale")
+            meter = (
+                ""
+                if lane.remaining_percent is None
+                else f"{format_lane_meter(lane.remaining_percent)}  "
+            )
             lanes.append(
                 UsageCenterLane(
-                    f"{lane.label} · {remaining}",
+                    f"{meter}{lane.label} · {remaining}",
                     " · ".join(subtitle_parts),
                 )
             )

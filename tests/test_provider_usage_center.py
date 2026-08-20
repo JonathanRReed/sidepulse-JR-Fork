@@ -47,7 +47,7 @@ def test_usage_center_projects_dynamic_lanes_and_quality_of_life_fields():
     section = center.sections[0]
     assert section.title == "Claude"
     assert section.account == "person@example.invalid"
-    assert section.lanes[0].title == "Fable Weekly · 22% left"
+    assert section.lanes[0].title == "▰▰▱▱▱▱▱▱  Fable Weekly · 22% left"
     assert section.lanes[0].subtitle == "resets in 1h 0m · detail only"
     assert section.metrics == (
         "1,750 tokens",

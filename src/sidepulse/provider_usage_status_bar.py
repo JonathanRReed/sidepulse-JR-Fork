@@ -111,9 +111,15 @@ def _native_usage_menu_item(target):
         )
         provider_menu = _legacy.NSMenu.alloc().init()
         provider_menu.setAutoenablesItems_(False)
-        if row.detail:
+        lane_lines = getattr(row, "lane_lines", ())
+        if lane_lines:
+            for line in lane_lines:
+                provider_menu.addItem_(_disabled_item(line))
+        elif row.detail:
             provider_menu.addItem_(_disabled_item(row.detail))
         if row.usage_detail:
+            if lane_lines or row.detail:
+                provider_menu.addItem_(_legacy.NSMenuItem.separatorItem())
             provider_menu.addItem_(_disabled_item(row.usage_detail))
         if row.action_label:
             provider_menu.addItem_(_legacy.NSMenuItem.separatorItem())

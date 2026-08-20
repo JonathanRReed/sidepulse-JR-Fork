@@ -103,3 +103,39 @@ def test_refreshing_state_has_stable_title():
     state = ProviderUsageState((), None, None, True)
     projection = project_usage_menu(state, now=1000)
     assert projection.title == "Usage · refreshing…"
+
+
+def test_lane_lines_render_codebar_style_meters():
+    row = project_usage_menu(
+        ProviderUsageState((snapshot("claude", "5-hour", 74),), 1000, 1100, False),
+        now=1000,
+    ).rows[0]
+    assert row.lane_lines == ("▰▰▰▰▰▰▱▱  5-hour · 74% left · resets in 33m",)
+
+
+def test_lane_meter_never_shows_empty_while_something_remains():
+    from sidepulse.provider_usage_qol import format_lane_meter as _lane_meter
+
+    assert _lane_meter(100.0) == "▰▰▰▰▰▰▰▰"
+    assert _lane_meter(50.0) == "▰▰▰▰▱▱▱▱"
+    assert _lane_meter(2.0) == "▰▱▱▱▱▱▱▱"  # almost-out still shows one cell
+    assert _lane_meter(0.0) == "▱▱▱▱▱▱▱▱"
+
+
+def test_lane_without_percent_still_lists_its_reset():
+    # The 2026-08-20 live failure shape: the OAuth fetch succeeded and
+    # lanes existed with real reset times, but every remaining_percent
+    # was None (parse_claude_usage read "used_percent" while
+    # claude_quota emits "utilization") -- the menu said only "ready".
+    # Even in that degraded shape the lanes must say SOMETHING.
+    row = project_usage_menu(
+        ProviderUsageState(
+            (snapshot("claude", "Weekly", None, state=ProviderSourceState.READY),),
+            1000,
+            1100,
+            False,
+        ),
+        now=1000,
+    ).rows[0]
+    assert row.lane_lines == ()  # snapshot() builds no lanes when remaining is None
+    assert row.title == "Claude · ready"

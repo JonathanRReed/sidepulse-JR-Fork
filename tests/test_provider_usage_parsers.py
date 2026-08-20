@@ -201,3 +201,24 @@ def test_openai_usage_aggregates_tokens_models_requests_and_cost() -> None:
     assert snapshot.output_tokens == 60
     assert snapshot.model_count == 2
     assert snapshot.estimated_cost_usd == 2.75
+
+
+def test_claude_reads_the_utilization_key_claude_quota_actually_emits() -> None:
+    # 2026-08-20 live failure: claude_quota.windows_from_payload emits
+    # each window as {"label", "utilization", "resets_at", ...} (the
+    # OAuth endpoint's own name), but parse_claude_usage read only
+    # "used_percent" -- every lane's remaining_percent was None, and the
+    # menu showed "Claude · ready" with no numbers despite a fully
+    # successful fetch.
+    snapshot = parse_claude_usage(
+        windows=[
+            {"label": "5-hour", "utilization": 26.0, "resets_at": 2000,
+             "window_minutes": 300},
+            {"label": "weekly", "utilization": 11.5, "resets_at": 3000,
+             "window_minutes": 10080},
+        ],
+        observed_at=1000,
+    )
+    by_label = {lane.label: lane for lane in snapshot.lanes}
+    assert by_label["5-hour"].remaining_percent == 74.0
+    assert by_label["Weekly"].remaining_percent == 88.5
