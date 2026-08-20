@@ -1952,9 +1952,10 @@ for (const event of [
         view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (400.0, 37.0)))
         view.setNotchWidth_(220.0)
         view.setState_brightness_(virtual_device.LedDisplayState.WORKING, 255)
-        # Must not raise with a real, wider-than-notch bounds and wing
-        # geometry in play -- exercises both the notch-clipped pass and the
-        # two wing passes in drawRect_.
+        # Must not raise with a real, wider-than-notch bounds -- classic
+        # mode paints contained inside the notch silhouette (glow, corner
+        # feather, rim, gauges all under the body clip) while the window
+        # itself stays wider.
         view.drawRect_(((0, 0), (400.0, 37.0)))
         view.setCompactMode_(True)
         view._draw_compact_accent()
@@ -2021,16 +2022,13 @@ for (const event of [
         self.assertTrue(all(c == view.fixed_colors[0] for c in view.fixed_colors))
 
     def test_wing_risers_are_symmetric_and_render_without_raising(self) -> None:
-        # "Extend glow along the menu bar" should read as a bracket
-        # ("|____|") hugging both corners, not a horizontal line that
-        # only visibly terminates on one side. glow_color_for_column's
-        # own symmetry (both edge samples equal, by construction, for a
-        # uniform-color state) feeds identical left/right risers; this
-        # also exercises drawRect_'s actual riser-drawing pass end to end
-        # (regression guard for it clipping the left one off entirely,
-        # see test_screen_bar_preview_is_centered_using_show_settings_
-        # windows_real_call_order for the unrelated bug that produced the
-        # same visible symptom in the Settings preview specifically).
+        # Wing risers are the Alcove bracket's language now (classic mode
+        # paints contained inside the notch), but the bracket ("|____|")
+        # must still hug both corners rather than visibly terminate on
+        # one side: glow_color_for_column's own symmetry (both edge
+        # samples equal, by construction, for a uniform-color state)
+        # feeds identical left/right risers. The drawRect_ call below
+        # exercises the contained classic path end to end.
         try:
             from sidepulse import virtual_device
         except (ImportError, SystemExit) as exc:
@@ -2049,8 +2047,8 @@ for (const event of [
         view.setHasNotch_(True)
         view.setNotchWidth_(notch_width)
         view.setState_brightness_(virtual_device.LedDisplayState.DONE, 255)
-        # Must not raise -- exercises the wing-riser pass (only reached
-        # when wing_offset > 0) on top of the existing notch/wing passes.
+        # Must not raise -- exercises the contained classic path with a
+        # wider-than-notch window (wing_offset > 0 centers the body).
         view.drawRect_(view.bounds())
 
     def test_auto_wing_backs_off_when_the_gap_is_wider_than_the_notch(self) -> None:

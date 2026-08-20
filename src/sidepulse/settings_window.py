@@ -1439,7 +1439,14 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
 
 
 SCREEN_BAR_WING_MESSAGES: Final[dict[ScreenBarWingState, str]] = {
-    ScreenBarWingState.EXTENDED: "Reaching along the menu bar on both sides.",
+    # Classic mode paints contained inside the notch (2026-08-20: wing
+    # glow on the menu bar's own background read as gray slabs that
+    # visibly did not match the notch); wings act while following
+    # Alcove, where the bracket wraps the capsule.
+    ScreenBarWingState.EXTENDED: (
+        "Ready — the bar wraps Alcove's capsule when following is on; "
+        "over the bare notch it stays inside the black."
+    ),
     ScreenBarWingState.NO_SAFE_AREA: (
         "This display has no notch, so there is no menu-bar room beside "
         "one to glow into. The bar keeps its own size here."

@@ -27,3 +27,12 @@ def test_usage_window_is_a_thin_appkit_projection_host():
         "read_bytes(",
     ):
         assert forbidden not in source
+
+
+def test_usage_window_survives_its_own_close_button():
+    # A code-created NSWindow defaults to released-when-closed; this
+    # window is cached and refreshed forever, so closing it once made
+    # every later Connect click a dead-object SIGTRAP (2026-08-20, three
+    # crash reports in one morning).
+    source = MODULE.read_text(encoding="utf-8")
+    assert "setReleasedWhenClosed_(False)" in source

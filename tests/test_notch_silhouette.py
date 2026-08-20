@@ -103,3 +103,57 @@ def test_the_measured_body_never_pokes_past_the_real_corner_curve() -> None:
 def test_no_insets_falls_back_to_the_parametric_shape() -> None:
     path = notch_bar_path_from_insets(((0.0, 0.0), (186.0, 37.0)), ())
     assert path.containsPoint_((93.0, 18.0))
+
+
+def test_classic_draw_is_contained_and_feathers_to_black_at_the_corners() -> None:
+    # 2026-08-20, from live pixels: the glow band ran at full brightness
+    # into the bottom-corner fillets where the body clip sliced it along
+    # the curve -- a bright hook curling up at each end -- and the wing
+    # passes painted gray glow and riser columns on the menu bar's own
+    # background beyond the notch. Classic mode now feathers the light to
+    # housing-black before the corners and paints nothing outside the
+    # body silhouette.
+    import AppKit
+
+    from sidepulse import virtual_device as vd
+
+    wing = 30.0
+    notch = 220.0
+    view = vd.VirtualLedView.alloc().initWithFrame_(
+        ((0, 0), (notch + 2.0 * wing, 37.0))
+    )
+    view.setHasNotch_(True)
+    view.setNotchWidth_(notch)
+    view.setPreviewWhiteBrightness_(255)
+
+    size = (notch + 2.0 * wing, 37.0)
+    image = AppKit.NSImage.alloc().initWithSize_(size)
+    image.lockFocus()
+    view.drawRect_(view.bounds())
+    rep = AppKit.NSBitmapImageRep.alloc().initWithFocusedViewRect_(
+        ((0, 0), size)
+    )
+    image.unlockFocus()
+
+    def luma(x_pt: float, y_px: int) -> float:
+        scale = rep.pixelsWide() / size[0]
+        color = rep.colorAtX_y_(int(x_pt * scale), y_px)
+        return (
+            color.redComponent() + color.greenComponent() + color.blueComponent()
+        )
+
+    band_y = rep.pixelsHigh() - 3  # inside the LED band (rep y=0 is top)
+    center = luma(wing + notch / 2.0, band_y)
+    assert center > 1.0, f"the band itself must be lit (center luma {center})"
+    # Deep into the body the band still runs at full strength...
+    assert luma(wing + 20.0, band_y) > 1.0
+    assert luma(wing + notch - 20.0, band_y) > 1.0
+    # ...but the outermost sliver has eased down to housing-black, so the
+    # corner fillets read as clean black rounding, not a bright hook.
+    assert luma(wing + 1.0, band_y) < 0.2
+    assert luma(wing + notch - 1.0, band_y) < 0.2
+    # And the wings paint NOTHING: the window region beyond the body is
+    # fully transparent (premultiplied black) all the way to the edge.
+    for x_pt in (2.0, wing / 2.0, wing - 2.0):
+        assert luma(x_pt, band_y) == 0.0
+        assert luma(size[0] - x_pt, band_y) == 0.0

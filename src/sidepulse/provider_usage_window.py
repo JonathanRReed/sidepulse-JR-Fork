@@ -38,6 +38,12 @@ class ProviderUsageWindowController:
             False,
         )
         self.window.setTitle_("SidePulse Usage Center")
+        # A code-created NSWindow is released-when-closed by default;
+        # this controller is cached on the status-bar controller and
+        # refresh() runs on every usage update, so the first close made
+        # every later click (and background refresh) touch a dead
+        # window -- hard SIGTRAP, no Python exception to catch.
+        self.window.setReleasedWhenClosed_(False)
         self.window.setMinSize_((560.0, 420.0))
         self.window.center()
 

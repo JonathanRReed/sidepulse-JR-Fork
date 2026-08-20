@@ -1631,7 +1631,6 @@ class VirtualLedView(NSView):
             return
 
         colors = self._colors_for_draw_cached()
-        width = self.bounds().size.width
         height = self.bounds().size.height
         notch_width, wing_offset = self._notch_geometry()
         insets = getattr(self, "notch_insets", None)
@@ -1644,95 +1643,89 @@ class VirtualLedView(NSView):
         led_width = notch_width / LED_COUNT
         glow_height = min(LED_GLOW_HEIGHT, max(0.0, height - LED_BAND_HEIGHT))
 
+        # Classic mode is CONTAINED: the notch is the canvas and nothing
+        # paints outside its measured silhouette. Glow strips on the menu
+        # bar's own background and riser columns beyond the notch edges
+        # (the old wing passes) read as gray slabs against the wallpaper
+        # -- visibly "not the notch." Wings remain the language of the
+        # Alcove bracket (_draw_wings_only), where painting around the
+        # capsule is the entire point.
+        rim = max(0.0, min(1.0, getattr(self, "min_glow", 0.25)))
+
         # A MacBook gets the black camera-housing continuation. On a notchless
         # display the window remains transparent and contains only LED color.
-        # This shape always matches the *real* notch width -- wings (below)
-        # only ever extend the LED glow past it, never the housing itself.
+        # OPAQUE black: at the old 0.93 alpha the menu bar's wallpaper tint
+        # bled through the band, so the housing read as a gray-purple
+        # capsule hanging under a true-black notch.
         # While following Alcove, ALCOVE owns the shell: painting a second
         # notch-deep slab under its capsule read as a clunky black square
         # below the notch, so only the LED band renders there.
-        if (
-            self.has_notch
-            and self.alcove_silhouette is None
-            and (rim := max(0.0, min(1.0, getattr(self, "min_glow", 0.25)))) > 0.0
-        ):
+        if self.has_notch and self.alcove_silhouette is None and rim > 0.0:
             NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                0.006, 0.007, 0.010, 0.93
+                0.006, 0.007, 0.010, 1.0
             ).set()
             body.fill()
 
         cg_context = current_cg_context()
 
-        # Pass 1: the notch's own LED row, clipped to the housing's rounded
-        # silhouette -- unchanged from before wings existed.
+        # The LED row, the corner feather, and the rim all render inside
+        # the housing's clip so none of them can escape the silhouette.
         NSGraphicsContext.saveGraphicsState()
         body.addClip()
         self._fill_glow_row(
             cg_context, colors, led_width, notch_width, glow_height, height,
             x_start=wing_offset, x_end=wing_offset + notch_width, wing_offset=wing_offset,
         )
-        NSGraphicsContext.restoreGraphicsState()
 
-        # Pass 2: the wings, if any -- a plain (unrounded) clip since
-        # there's no housing shape to match out here; glow_color_for_column
-        # eases the edge LED's own color across the wing's full assigned
-        # width (see its docstring), reaching the far edge rather than
-        # fading out early, so the hard clip edge is never actually
-        # visible by the time it's reached.
-        if wing_offset > 0.0:
-            for x_start, x_end in ((0.0, wing_offset), (wing_offset + notch_width, width)):
-                NSGraphicsContext.saveGraphicsState()
-                NSBezierPath.bezierPathWithRect_(((x_start, 0.0), (x_end - x_start, height))).addClip()
-                self._fill_glow_row(
-                    cg_context, colors, led_width, notch_width, glow_height, height,
-                    x_start=x_start, x_end=x_end, wing_offset=wing_offset,
+        # Corner feather: the glow band used to run at full brightness
+        # into the bottom-corner fillets, where the clip sliced it along
+        # the curve -- a bright hook curling up at each end, and every
+        # measured inset step above it highlighted as a staircase. Easing
+        # the light down to housing-black before the corners keeps the
+        # corners reading as clean black rounding.
+        feather = min(14.0, notch_width / 8.0)
+        if feather > 1.0:
+            steps = 7
+            segment = feather / steps
+            for index in range(steps):
+                t = 1.0 - (index + 0.5) / steps
+                shade = (0.0, 0.0, 0.0, t * t * (3.0 - 2.0 * t))
+                fill_rect_with_cg(
+                    cg_context,
+                    ((wing_offset + index * segment, 0.0), (segment + 0.5, height)),
+                    shade,
                 )
-                NSGraphicsContext.restoreGraphicsState()
+                fill_rect_with_cg(
+                    cg_context,
+                    (
+                        (wing_offset + notch_width - (index + 1) * segment, 0.0),
+                        (segment + 0.5, height),
+                    ),
+                    shade,
+                )
 
-            # Pass 3: a vertical riser at each wing's own outer edge -- see
-            # WING_RISER_WIDTH's comment. Identity blend, not the edge
-            # LED: a riser that pulses whenever LED 0/7 pulses reads as a
-            # blinking corner, not a bookend (same rule as wings-only).
-            riser_color = self._bar_identity_color(colors)
-            breath = self._riser_breath()
-            riser_color = (*riser_color[:3], riser_color[3] * breath)
-            self._draw_wing_riser(
-                cg_context, riser_color, 0.0, min(WING_RISER_WIDTH, wing_offset), height,
-                outer_on_left=True,
-            )
-            self._draw_wing_riser(
-                cg_context,
-                riser_color,
-                max(width - WING_RISER_WIDTH, wing_offset + notch_width),
-                width,
-                height,
-                outer_on_left=False,
-            )
-
-        # Edge highlight/shadow: unclipped and full-width (as it always
-        # was, before wings existed) -- with wings on, this reads as one
-        # continuous strip rather than having a visible seam where the
-        # notch's own housing ends and the wing begins. Skipped while
-        # following Alcove for the same reason as the housing above.
-        if (
-            self.has_notch
-            and self.alcove_silhouette is None
-            and (rim := max(0.0, min(1.0, getattr(self, "min_glow", 0.25)))) > 0.0
-        ):
+        # Edge highlight/shadow: body-width and clipped -- the old
+        # full-window version drew a faint seam straight across the menu
+        # bar, and its white bottom line escaped the fillets as part of
+        # the corner hooks. Skipped while following Alcove for the same
+        # reason as the housing above.
+        if self.has_notch and self.alcove_silhouette is None and rim > 0.0:
             fill_rect_with_cg(
                 cg_context,
-                ((0.0, LED_BAND_HEIGHT - 0.55), (width, 0.55)),
+                ((wing_offset, LED_BAND_HEIGHT - 0.55), (notch_width, 0.55)),
                 (0.0, 0.0, 0.0, 0.18 * rim),
             )
             fill_rect_with_cg(
                 cg_context,
-                ((0.0, 0.0), (width, 0.45)),
+                ((wing_offset, 0.0), (notch_width, 0.45)),
                 (1.0, 1.0, 1.0, 0.055 * rim),
             )
-        # Only meaningful with wings: the tips must sit OUTSIDE the
-        # housing, or the gauge would paint over the notch body.
-        if wing_offset > 0.0:
-            self._draw_standing_gauges(cg_context, height)
+
+        # Standing gauges live INSIDE the housing now: 4pt tips tucked
+        # just past the corner fillets, over black -- peripheral vision
+        # still gets its own pixels without anything on the wallpaper.
+        self._draw_standing_gauges(cg_context, height, edge_inset=wing_offset + 6.0)
+        NSGraphicsContext.restoreGraphicsState()
 
     def _bracket_colors(self, colors):
         """The colors the Alcove bracket paints. "spatial" mirrors the
