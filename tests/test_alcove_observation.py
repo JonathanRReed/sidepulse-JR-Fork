@@ -10,7 +10,6 @@ import pytest
 
 from sidepulse.alcove_observation import (
     ALCOVE_HOLD_SECONDS,
-    ALCOVE_NARROW_AFTER_SECONDS,
     AlcoveCaptureRequest,
     AlcoveObservation,
     AlcoveObservationBuffer,
@@ -153,7 +152,11 @@ def test_rapid_same_window_replacement_rejects_old_or_pre_request_capture() -> N
     )
 
 
-def test_reducer_widens_immediately_and_requires_three_seconds_to_narrow() -> None:
+def test_reducer_tracks_both_directions_and_never_holds_a_too_wide_bracket() -> None:
+    """A bracket narrower than the capsule hides inside Alcove's black; a
+    bracket WIDER than it is a glowing sliver on the wallpaper. Narrowing
+    therefore adopts immediately -- the old 3-second damping was 3 seconds
+    of visible overhang on every capsule collapse."""
     request = _request()
     reducer = AlcoveObservationReducer()
 
@@ -162,17 +165,14 @@ def test_reducer_widens_immediately_and_requires_three_seconds_to_narrow() -> No
     assert reducer.apply(_observation(width=340.0, captured_at=101.0), request, now=101.1)
     assert reducer.current(now=101.1).width == 340.0
 
+    # Collapse: the very next valid measurement wins.
     assert reducer.apply(_observation(width=210.0, captured_at=102.0), request, now=102.1)
-    assert reducer.current(now=102.1).width == 340.0
-    assert reducer.apply(
-        _observation(width=211.0, captured_at=104.9), request, now=105.0
-    )
-    assert reducer.current(now=105.0).width == 340.0
-    assert reducer.apply(
-        _observation(width=210.5, captured_at=105.1), request, now=105.2
-    )
-    assert reducer.current(now=105.2).width == 210.0
-    assert ALCOVE_NARROW_AFTER_SECONDS == 3.0
+    assert reducer.current(now=102.1).width == 210.0
+    # Sub-point jitter in either direction is ignored.
+    assert reducer.apply(_observation(width=210.4, captured_at=103.0), request, now=103.1)
+    assert reducer.current(now=103.1).width == 210.0
+    assert reducer.apply(_observation(width=209.7, captured_at=104.0), request, now=104.1)
+    assert reducer.current(now=104.1).width == 210.0
 
 
 def test_reducer_holds_last_good_for_eight_seconds_then_uses_hardware_fallback() -> None:

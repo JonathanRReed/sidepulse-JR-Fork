@@ -11,7 +11,6 @@ from typing import Final
 ALCOVE_ALPHA_THRESHOLD = 0.08
 ALCOVE_CONFIDENCE_MINIMUM = 0.75
 ALCOVE_MAX_AGE_SECONDS = 2.0
-ALCOVE_NARROW_AFTER_SECONDS = 3.0
 ALCOVE_HOLD_SECONDS = 8.0
 ALCOVE_MAX_WIDTH = 520.0
 ALCOVE_MAX_BAND_FACTOR = 1.8
@@ -455,8 +454,6 @@ class AlcoveObservationReducer:
     def __init__(self) -> None:
         self._adopted: AlcoveObservation | None = None
         self._last_good_at: float | None = None
-        self._narrow_candidate: AlcoveObservation | None = None
-        self._narrow_since: float | None = None
 
     def apply(
         self,
@@ -469,28 +466,15 @@ class AlcoveObservationReducer:
             return False
         self._last_good_at = float(now)
         adopted = self._adopted
-        if adopted is None or observation.width > adopted.width + 0.5:
+        # Asymmetry is the law here, and it points the OTHER way from the
+        # old 3-second narrow damping: a bracket narrower than the capsule
+        # paints INSIDE Alcove's black and is invisible; a bracket wider
+        # than the capsule paints a glowing sliver on the wallpaper --
+        # the "corners past the capsule" seen on every collapse. So a
+        # narrower measurement is adopted IMMEDIATELY; only sub-point
+        # jitter is ignored either way.
+        if adopted is None or abs(observation.width - adopted.width) > 0.5:
             self._adopted = observation
-            self._narrow_candidate = None
-            self._narrow_since = None
-            return True
-        if observation.width < adopted.width - 4.0:
-            candidate = self._narrow_candidate
-            if (
-                candidate is None
-                or self._narrow_since is None
-                or abs(observation.width - candidate.width) > 4.0
-            ):
-                self._narrow_candidate = observation
-                self._narrow_since = float(now)
-                return True
-            if float(now) - self._narrow_since >= ALCOVE_NARROW_AFTER_SECONDS:
-                self._adopted = candidate
-                self._narrow_candidate = None
-                self._narrow_since = None
-            return True
-        self._narrow_candidate = None
-        self._narrow_since = None
         return True
 
     def current(self, *, now: float) -> AlcoveObservation | None:
@@ -501,16 +485,12 @@ class AlcoveObservationReducer:
             or float(now) - self._last_good_at > ALCOVE_HOLD_SECONDS
         ):
             self._adopted = None
-            self._narrow_candidate = None
-            self._narrow_since = None
             return None
         return self._adopted
 
     def reset(self) -> None:
         self._adopted = None
         self._last_good_at = None
-        self._narrow_candidate = None
-        self._narrow_since = None
 
 
 class AlcoveObservationBuffer:

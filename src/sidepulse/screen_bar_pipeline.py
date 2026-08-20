@@ -548,7 +548,12 @@ class ScreenBarSampler:
         if not frames:
             return controller.step(now_ms)
         for offset, frame in enumerate(frames[1:], start=1):
-            queue.append((now_ms + offset * interval_ms, frame))
+            # Expected stamps must use the same float arithmetic the
+            # motion loop uses (sampled_at + k*interval). Stepping by the
+            # rounded interval_ms instead drifts ~1/3ms per frame at
+            # 30/60fps, blowing the +/-1ms gate a few frames in and
+            # discarding most of every batch the engine rendered.
+            queue.append((int((sampled_at + offset * interval) * 1000.0), frame))
         return frames[0]
 
     def _step(

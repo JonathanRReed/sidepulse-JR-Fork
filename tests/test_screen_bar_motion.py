@@ -895,7 +895,7 @@ def test_reposition_submits_plain_alcove_request_and_applies_validated_center(
     device._alcove_observer_factory = lambda _buffer: observer
     monkeypatch.setattr(virtual_device, "NSScreen", ScreenClass)
     monkeypatch.setattr(virtual_device, "is_alcove_running", lambda: True)
-    monkeypatch.setattr(virtual_device, "measured_notch_bounds", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(virtual_device, "measured_notch_silhouette", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         virtual_device,
         "_alcove_window_values",
@@ -1575,3 +1575,69 @@ def test_alcove_bracket_corner_radius_stays_inside_the_bracket(
 ) -> None:
     """Catches rounded corners extending beyond a narrow Alcove bracket."""
     assert alcove_bracket_corner_radius(width, height) == expected
+
+
+def test_reanchor_program_snaps_phase_to_the_hardware_write_moment() -> None:
+    """Linked means SYNCED: the strip restarts its cycle when the firmware
+    picks up a changed LEDS.LED; the bar snaps its clock to that moment so
+    the same pulse loops together on both surfaces instead of a few
+    hundred milliseconds apart."""
+    from sidepulse import virtual_device
+    from sidepulse.screen_bar_pipeline import SamplerCommand
+
+    device = virtual_device.VirtualStatusDevice.alloc().init()
+
+    class _View:
+        def __init__(self) -> None:
+            self.recorded: list[tuple[str, float]] = []
+
+        def setPresentationProgram_startedAt_(self, program, anchor) -> None:
+            self.recorded.append((program, anchor))
+
+    class _Sampler:
+        def __init__(self) -> None:
+            self.commands: list[object] = []
+
+        def reconcile(self, command) -> None:
+            self.commands.append(command)
+
+    device.view = _View()
+    sampler = _Sampler()
+    device._sampler = sampler
+    command = SamplerCommand(
+        generation=int(device._presentation_generation),
+        program="#00FF00 1600ms pulse\nrepeat",
+        parse_anchor=100.0,
+        static_fallback_program="off",
+        sample_interval=1.0 / 60.0,
+        motion=MotionClass.CONTINUOUS,
+        next_visual_change_at=None,
+    )
+    device._sampler_command = command
+
+    # Sub-50ms nudges are noise, not a handshake.
+    assert device.reanchor_program(100.02) is False
+    # The real handshake: phase snaps and the sampler gets a fresh command.
+    assert device.reanchor_program(100.4) is True
+    assert device._sampler_command.parse_anchor == 100.4
+    assert device._sampler_command.program == command.program
+    assert sampler.commands and sampler.commands[-1].parse_anchor == 100.4
+    assert device.view.recorded[-1] == (command.program, 100.4)
+
+    # A program that JUST changed must not be snapped again -- that is
+    # the double restart that read as flashing during rapid state flips.
+    device._program_applied_at = time.monotonic()
+    assert device.reanchor_program(300.0) is False
+    device._program_applied_at = float("-inf")
+
+    # A static program has no phase to snap.
+    device._sampler_command = SamplerCommand(
+        generation=device._sampler_command.generation,
+        program="off",
+        parse_anchor=100.4,
+        static_fallback_program="off",
+        sample_interval=1.0 / 60.0,
+        motion=MotionClass.STATIC,
+        next_visual_change_at=None,
+    )
+    assert device.reanchor_program(200.0) is False

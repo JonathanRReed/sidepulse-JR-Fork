@@ -163,11 +163,13 @@ WING_AUTO_LENGTH = 14.0
 # constant" failure the comment above warns about -- only in reverse.
 from .alcove_observation import (  # noqa: E402, F401
     ALCOVE_HOLD_SECONDS,
-    ALCOVE_NARROW_AFTER_SECONDS,
     ALCOVE_OWNER_NAME,
 )
 WING_SAFETY_MARGIN = 28.0
 WING_MIN_USABLE = 24.0
+# The linked-hardware phase handshake only fires on programs that have
+# been showing at least this long -- see reanchor_program.
+REANCHOR_STEADY_SECONDS = 5.0
 # A wing that's just a flat horizontal strip fading sideways reads as a
 # line trailing off into nothing, not as light that's actually reaching
 # and wrapping the menu bar's own corner. A soft vertical riser at each
@@ -246,7 +248,7 @@ def virtual_display_state_for_projection(projection, active_signal=None) -> LedD
     return display_state_for_projection(projection, active_signal)
 
 
-def measured_notch_bounds(screen, below_window_number: int = 0):
+def measured_notch_bounds(screen, below_window_number: int = 0, max_width: float | None = None):
     """The hardware notch's EXACT horizontal bounds, measured from the
     screen's own pixels: the notch is the only pure-black (0, 0, 0) run
     in the menu bar's top rows (the menu bar itself never composites to
@@ -259,62 +261,143 @@ def measured_notch_bounds(screen, below_window_number: int = 0):
     measurement. Returns (x, width) in points, or None (no notch, or
     anything unexpected -- callers fall back to the aux-area slot)."""
     try:
-        import Quartz
-        from AppKit import NSBitmapImageRep
-
-        frame = screen.frame()
-        rect = Quartz.CGRectMake(float(frame.origin.x), 0.0, float(frame.size.width), 2.0)
-        option = (
-            Quartz.kCGWindowListOptionOnScreenBelowWindow
-            if below_window_number
-            else Quartz.kCGWindowListOptionOnScreenOnly
+        runs, scale, frame_x = _captured_notch_runs(
+            screen, rows=2, below_window_number=below_window_number
         )
-        image = Quartz.CGWindowListCreateImage(
-            rect, option, int(below_window_number), Quartz.kCGWindowImageNominalResolution
+        # Row 1, as it always was: row 0 can carry a top-edge artifact.
+        silhouette = _validated_notch_silhouette(
+            runs[1:2] or runs[:1], scale, frame_x, max_width=max_width
         )
-        if image is None:
+        if silhouette is None:
             return None
-        rep = NSBitmapImageRep.alloc().initWithCGImage_(image)
-        if rep is None:
-            return None
-        width_px = int(rep.pixelsWide())
-        if width_px <= 0:
-            return None
-        scale = width_px / float(frame.size.width)
-        y = min(1, int(rep.pixelsHigh()) - 1)
-        center_px = width_px / 2.0
-        run_start = None
-        best = None
-        for x in range(width_px):
-            color = rep.colorAtX_y_(x, y)
-            is_black = (
-                color is not None
-                and color.redComponent() == 0.0
-                and color.greenComponent() == 0.0
-                and color.blueComponent() == 0.0
-            )
-            if is_black:
-                if run_start is None:
-                    run_start = x
-                continue
-            if run_start is not None:
-                if run_start <= center_px <= x:
-                    best = (run_start, x)
-                run_start = None
-        if run_start is not None and run_start <= center_px:
-            best = (run_start, width_px)
-        if best is None:
-            return None
-        notch_x = best[0] / scale
-        notch_width = (best[1] - best[0]) / scale
-        # Sanity band: MacBook notches live in roughly 150-260pt; a run
-        # outside that is a black wallpaper edge or a screen-saver, not
-        # the notch.
-        if not (120.0 <= notch_width <= 320.0):
-            return None
-        return (float(frame.origin.x) + notch_x, notch_width)
+        return (silhouette[0], silhouette[1])
     except Exception:
         return None
+
+
+def measured_notch_silhouette(
+    screen, below_window_number: int = 0, max_width: float | None = None
+):
+    """The hardware notch's full measured outline: per-row black-run
+    insets through the notch's depth, so the drawn body can follow the
+    REAL corner curve instead of guessing a radius. The top-row width
+    alone left the body's straight walls standing beside the physical
+    notch's curved bottom corners -- dark slivers a few points wide,
+    visible every day. Returns (x, top_width, insets) where insets[r] is
+    (left_inset, right_inset) in points for pixel row r from the top, or
+    None under exactly the same validation that guards the width scan."""
+    try:
+        depth = int(round(notch_depth_for_screen(screen)))
+        if depth <= 2:
+            return None
+        runs, scale, frame_x = _captured_notch_runs(
+            screen, rows=depth, below_window_number=below_window_number
+        )
+        return _validated_notch_silhouette(runs, scale, frame_x, max_width=max_width)
+    except Exception:
+        return None
+
+
+def _captured_notch_runs(screen, *, rows: int, below_window_number: int = 0):
+    """(per-row center black runs in px, scale, frame_x) for the top rows."""
+    import Quartz
+    from AppKit import NSBitmapImageRep
+
+    frame = screen.frame()
+    rect = Quartz.CGRectMake(
+        float(frame.origin.x), 0.0, float(frame.size.width), float(rows)
+    )
+    option = (
+        Quartz.kCGWindowListOptionOnScreenBelowWindow
+        if below_window_number
+        else Quartz.kCGWindowListOptionOnScreenOnly
+    )
+    image = Quartz.CGWindowListCreateImage(
+        rect, option, int(below_window_number), Quartz.kCGWindowImageNominalResolution
+    )
+    if image is None:
+        raise ValueError("no composite image")
+    rep = NSBitmapImageRep.alloc().initWithCGImage_(image)
+    if rep is None:
+        raise ValueError("unreadable composite image")
+    width_px = int(rep.pixelsWide())
+    if width_px <= 0:
+        raise ValueError("empty composite image")
+    scale = width_px / float(frame.size.width)
+    available = int(rep.pixelsHigh())
+    runs = []
+    for row in range(rows):
+        y = min(row, available - 1) if available > 0 else 0
+        runs.append(_center_black_run(rep, y, width_px))
+    return runs, scale, float(frame.origin.x)
+
+
+def _center_black_run(rep, y: int, width_px: int):
+    """The pure-black run covering the horizontal center, in px, or None."""
+    center_px = width_px / 2.0
+    run_start = None
+    best = None
+    for x in range(width_px):
+        color = rep.colorAtX_y_(x, y)
+        is_black = (
+            color is not None
+            and color.redComponent() == 0.0
+            and color.greenComponent() == 0.0
+            and color.blueComponent() == 0.0
+        )
+        if is_black:
+            if run_start is None:
+                run_start = x
+            continue
+        if run_start is not None:
+            if run_start <= center_px <= x:
+                best = (run_start, x)
+            run_start = None
+    if run_start is not None and run_start <= center_px:
+        best = (run_start, width_px)
+    return best
+
+
+def _validated_notch_silhouette(runs, scale, frame_x, max_width: float | None = None):
+    """Validate raw per-row runs into (x, top_width, per-row insets).
+
+    Every rejection is a fact about the composite, not the notch: the
+    notch itself cannot widen with depth, cannot out-grow the gap the
+    system reports between its auxiliary areas, and cannot vanish
+    mid-face. Anything violating those is an impostor (Alcove's capsule
+    was measured at 266pt over this panel's 186pt notch and sailed
+    through the old 120-320 sanity band) or a corrupted capture -- both
+    fall back to the parametric shape rather than poison the body."""
+    if not runs or runs[0] is None or scale <= 0.0:
+        return None
+    left_0, right_0 = runs[0]
+    top_width = (right_0 - left_0) / scale
+    # Sanity band: MacBook notches live in roughly 150-260pt.
+    if not (120.0 <= top_width <= 320.0):
+        return None
+    if max_width is not None and top_width > float(max_width):
+        return None
+    insets: list[tuple[float, float]] = []
+    floor_left = 0.0
+    floor_right = 0.0
+    for run in runs:
+        if run is None:
+            return None
+        left, right = run
+        inset_left = (left - left_0) / scale
+        inset_right = (right_0 - right) / scale
+        # A row WIDER than the top row is not a notch silhouette.
+        if inset_left < -1.0 or inset_right < -1.0:
+            return None
+        inset_left = max(floor_left, inset_left)
+        inset_right = max(floor_right, inset_right)
+        # A run collapsing toward nothing mid-face is not the notch.
+        if inset_left + inset_right > top_width - 8.0:
+            return None
+        insets.append((inset_left, inset_right))
+        floor_left = inset_left
+        floor_right = inset_right
+    return (frame_x + left_0 / scale, top_width, tuple(insets))
 
 
 def slot_width_for_screen(screen) -> float:
@@ -329,6 +412,21 @@ def slot_width_for_screen(screen) -> float:
     except Exception:
         pass
     return WINDOW_WIDTH
+
+
+def _hardware_slot_ceiling(screen) -> float | None:
+    """The widest the physical notch could possibly be: the raw gap the
+    system reports between its auxiliary top areas, plus antialiasing
+    slop. None on screens that report no areas (external displays)."""
+    try:
+        left = screen.auxiliaryTopLeftArea()
+        right = screen.auxiliaryTopRightArea()
+        gap = right.origin.x - (left.origin.x + left.size.width)
+        if gap >= 120.0:
+            return float(gap) + 6.0
+    except Exception:
+        pass
+    return None
 
 
 def wing_width_for_screen(screen, notch_width: float) -> float:
@@ -772,6 +870,51 @@ def _legibility_boost(color, floor: float):
     return (red * factor, green * factor, blue * factor, floor)
 
 
+def notch_bar_path_from_insets(rect, insets, band_height: float = LED_BAND_HEIGHT):
+    """The classic body following the REAL notch's measured outline.
+
+    ``rect`` is the body's box in view coordinates (width = the measured
+    top width, height = notch depth + the LED band); ``insets[r]`` is the
+    measured (left, right) inset in points for pixel row r counted from
+    the TOP of the notch. The walls trace those insets exactly -- black
+    over black inside the physical notch, never a sliver beside its
+    curved corners -- and the band below continues at the BOTTOM row's
+    width with a small soft corner of its own."""
+    x, y = rect[0]
+    width, height = rect[1]
+    top = y + height
+    rows = len(insets)
+    if rows <= 0 or width <= 0.0 or height <= band_height:
+        return notch_bar_path(rect)
+    bottom_left = x + insets[-1][0]
+    bottom_right = x + width - insets[-1][1]
+    corner = max(0.0, min(4.0, band_height, (bottom_right - bottom_left) / 2.0))
+
+    path = NSBezierPath.bezierPath()
+    path.moveToPoint_((x + insets[0][0], top))
+    path.lineToPoint_((x + width - insets[0][1], top))
+    for row in range(rows):
+        path.lineToPoint_((x + width - insets[row][1], top - row - 1.0))
+    path.lineToPoint_((bottom_right, y + corner))
+    path.curveToPoint_controlPoint1_controlPoint2_(
+        (bottom_right - corner, y),
+        (bottom_right, y + corner * 0.45),
+        (bottom_right - corner * 0.45, y),
+    )
+    path.lineToPoint_((bottom_left + corner, y))
+    path.curveToPoint_controlPoint1_controlPoint2_(
+        (bottom_left, y + corner),
+        (bottom_left + corner * 0.45, y),
+        (bottom_left, y + corner * 0.45),
+    )
+    path.lineToPoint_((bottom_left, y + band_height))
+    for row in reversed(range(rows)):
+        path.lineToPoint_((x + insets[row][0], top - row - 1.0))
+    path.lineToPoint_((x + insets[0][0], top))
+    path.closePath()
+    return path
+
+
 def notch_bar_path(rect):
     """A top-attached notch silhouette extended by the 5 pt LED band."""
     x, y = rect[0]
@@ -1131,6 +1274,7 @@ class VirtualLedView(NSView):
             # view's own width to inset the notch body and let the LED glow
             # spill into the remaining width on each side (see setNotchWidth_).
             self.notch_width = None
+            self.notch_insets = None
         return self
 
     # These four are driven by reposition() every couple of seconds;
@@ -1163,6 +1307,17 @@ class VirtualLedView(NSView):
         if value == self.notch_width:
             return
         self.notch_width = value
+        self.setNeedsDisplay_(True)
+
+    def setNotchInsets_(self, insets):
+        value = (
+            None
+            if not insets
+            else tuple((float(left), float(right)) for left, right in insets)
+        )
+        if value == getattr(self, "notch_insets", None):
+            return
+        self.notch_insets = value
         self.setNeedsDisplay_(True)
 
     def setAlcoveSilhouette_(self, silhouette):
@@ -1443,7 +1598,13 @@ class VirtualLedView(NSView):
         width = self.bounds().size.width
         height = self.bounds().size.height
         notch_width, wing_offset = self._notch_geometry()
-        body = notch_bar_path(((wing_offset, 0.0), (notch_width, height)))
+        insets = getattr(self, "notch_insets", None)
+        body_rect = ((wing_offset, 0.0), (notch_width, height))
+        body = (
+            notch_bar_path_from_insets(body_rect, insets)
+            if insets
+            else notch_bar_path(body_rect)
+        )
         led_width = notch_width / LED_COUNT
         glow_height = min(LED_GLOW_HEIGHT, max(0.0, height - LED_BAND_HEIGHT))
 
@@ -1493,21 +1654,17 @@ class VirtualLedView(NSView):
                 NSGraphicsContext.restoreGraphicsState()
 
             # Pass 3: a vertical riser at each wing's own outer edge -- see
-            # WING_RISER_WIDTH's comment. Sampled at the notch's nearest
-            # edge LED (not the already-tapered-to-~0 color right at the
-            # true edge), since the riser is a new visual element in its
-            # own right, not a continuation of the horizontal taper.
-            left_edge_color = blended_led_color_at_x(colors, led_width * 0.5, led_width)
-            right_edge_color = blended_led_color_at_x(
-                colors, notch_width - led_width * 0.5, led_width
-            )
+            # WING_RISER_WIDTH's comment. Identity blend, not the edge
+            # LED: a riser that pulses whenever LED 0/7 pulses reads as a
+            # blinking corner, not a bookend (same rule as wings-only).
+            riser_color = self._bar_identity_color(colors)
             self._draw_wing_riser(
-                cg_context, left_edge_color, 0.0, min(WING_RISER_WIDTH, wing_offset), height,
+                cg_context, riser_color, 0.0, min(WING_RISER_WIDTH, wing_offset), height,
                 outer_on_left=True,
             )
             self._draw_wing_riser(
                 cg_context,
-                right_edge_color,
+                riser_color,
                 max(width - WING_RISER_WIDTH, wing_offset + notch_width),
                 width,
                 height,
@@ -1687,6 +1844,16 @@ class VirtualLedView(NSView):
         colors = self._bracket_colors(self._colors_for_draw_cached())
         width = self.bounds().size.width
         left_bound, right_bound = alcove_accent_horizontal_bounds(width)
+        # Never paint past the CURRENT capsule. The window frame can run a
+        # beat stale (reposition cadence, granted-frame lag), and a stale
+        # WIDE frame put glowing corners on the wallpaper beside Alcove;
+        # in steady state this clamp is exactly the existing bounds.
+        if self.alcove_silhouette is not None:
+            observed_width = float(self.alcove_silhouette[1])
+            half = max(0.0, min(right_bound - left_bound, observed_width)) / 2.0
+            mid = width / 2.0
+            left_bound = max(left_bound, mid - half)
+            right_bound = min(right_bound, mid + half)
         height = self.bounds().size.height
         notch_width, wing_offset = self._notch_geometry()
         led_width = notch_width / LED_COUNT
@@ -1753,17 +1920,16 @@ class VirtualLedView(NSView):
                     wing_taper_floor=WINGS_ONLY_TAPER_FLOOR,
                 )
                 NSGraphicsContext.restoreGraphicsState()
-        # Sampled at the edge LEDs' centers -- the same fix as
-        # glow_color_for_column's wings: at the geometric edge the
-        # blend has already dropped and the risers came out dimmer
-        # than the bar they belong to.
-        left_edge_color = blended_led_color_at_x(colors, led_width * 0.5, led_width)
-        right_edge_color = blended_led_color_at_x(colors, notch_width - led_width * 0.5, led_width)
+        # The uprights are BOOKENDS, not LEDs: sampling the edge LED made
+        # each riser pulse whenever LED 0/7 pulsed -- a full-height corner
+        # blinking on its own read as "the sides flash and look longer
+        # than the rest". The identity blend breathes with the WHOLE bar.
+        riser_color = self._bar_identity_color(colors)
         # Risers at the window's own ends, even with zero wing -- the
         # bracket's uprights must never be able to vanish.
         self._draw_wing_riser(
             cg_context,
-            left_edge_color,
+            riser_color,
             left_bound,
             min(left_bound + WING_RISER_WIDTH, right_bound),
             height,
@@ -1771,7 +1937,7 @@ class VirtualLedView(NSView):
         )
         self._draw_wing_riser(
             cg_context,
-            right_edge_color,
+            riser_color,
             max(left_bound, right_bound - WING_RISER_WIDTH),
             right_bound,
             height,
@@ -2960,6 +3126,59 @@ class VirtualStatusDevice(NSObject):
             return
         self._refresh_render_cadence(self._animation_active, force=True)
 
+    def reanchor_program(self, started_at: float) -> bool:
+        """Snap the CURRENT program's phase to ``started_at``.
+
+        The linked-hardware handshake: the strip restarts its cycle the
+        moment the firmware picks up a changed LEDS.LED, while the bar
+        anchors to the semantic relay epoch -- the same pulse ran a few
+        hundred milliseconds out of phase on the two surfaces, which is
+        exactly "they don't feel synced". The write-completion moment is
+        the closest observable stand-in for firmware pickup, so the bar
+        snaps its clock to it. Identity dedupe (the blink fix) is
+        deliberately untouched: this changes only the phase of what is
+        already showing, never re-fronts the window, and refuses static
+        programs and sub-50ms nudges outright."""
+        command = self._sampler_command
+        if command is None or self.view is None:
+            return False
+        if command.motion is MotionClass.STATIC:
+            return False
+        # STEADY STATE ONLY. A program that just changed already restarted
+        # both surfaces once; snapping its phase again a beat later is a
+        # second visible restart -- during rapid state flips that read as
+        # "everything is flashing". Long-lived programs get their sync from
+        # the periodic steady-body rewrites instead (patina/reassert
+        # cadence), where a one-time settle is imperceptible.
+        applied_at = float(getattr(self, "_program_applied_at", 0.0) or 0.0)
+        if time.monotonic() - applied_at < REANCHOR_STEADY_SECONDS:
+            return False
+        anchor = float(started_at)
+        if not math.isfinite(anchor) or abs(anchor - command.parse_anchor) < 0.05:
+            return False
+        record_program = getattr(
+            self.view, "setPresentationProgram_startedAt_", None
+        )
+        if callable(record_program):
+            record_program(command.program, anchor)
+        else:
+            self.view.started_at = anchor
+        self._advance_presentation_generation(enqueue=False)
+        self._sampler_command = SamplerCommand(
+            generation=self._presentation_generation,
+            program=command.program,
+            parse_anchor=anchor,
+            static_fallback_program=command.static_fallback_program,
+            sample_interval=command.sample_interval,
+            motion=command.motion,
+            next_visual_change_at=command.next_visual_change_at,
+        )
+        if self._sampler is None:
+            self._resume_sampler()
+        else:
+            self._sampler.reconcile(self._sampler_command)
+        return True
+
     def reposition(self):
         screen = NSScreen.mainScreen()
         if screen is None or self.window is None:
@@ -2997,22 +3216,37 @@ class VirtualStatusDevice(NSObject):
             and getattr(self, "follow_alcove_width", True)
         )
         effective_gap = gap_override
+        measured_notch_insets = None
         if gap_override is None:
             # Pixel-exact notch, measured once per screen configuration
             # (the notch can't change at runtime) -- see
             # measured_notch_bounds for why this beats a model table.
+            # Guards, each one earned: never measure while Alcove is up
+            # (its capsule composites pure black over the very rows the
+            # scan reads -- 266pt "notch" over a 186pt panel), cap by the
+            # auxiliary-area gap for the same reason, and never cache a
+            # failed read forever (retry later instead of wearing a
+            # one-time contamination for the rest of the session).
             frame = screen.frame()
             cache_key = (round(frame.size.width), round(frame.size.height))
             cache = getattr(self, "_notch_measure_cache", None)
-            if cache is None or cache[0] != cache_key:
-                bounds = measured_notch_bounds(
+            cache_stale = cache is None or cache[0] != cache_key
+            retry_due = cache is not None and cache[1] is None and (
+                now >= getattr(self, "_notch_measure_retry_at", 0.0)
+            )
+            if not alcove_active and (cache_stale or retry_due):
+                silhouette = measured_notch_silhouette(
                     screen,
                     below_window_number=int(self.window.windowNumber() or 0),
+                    max_width=_hardware_slot_ceiling(screen),
                 )
-                self._notch_measure_cache = (cache_key, bounds)
+                self._notch_measure_cache = (cache_key, silhouette)
                 cache = self._notch_measure_cache
-            if cache[1] is not None:
+                if silhouette is None:
+                    self._notch_measure_retry_at = now + 60.0
+            if cache is not None and cache[0] == cache_key and cache[1] is not None:
                 effective_gap = cache[1][1]
+                measured_notch_insets = cache[1][2]
         # Follow Alcove's visible capsule through the serial observer.
         # Reposition resolves AppKit and window identity on main, consumes
         # only a validated plain result, and never captures or scans pixels.
@@ -3204,6 +3438,11 @@ class VirtualStatusDevice(NSObject):
             else:
                 notch_width = None
             self.view.setNotchWidth_(notch_width)
+            set_notch_insets = getattr(self.view, "setNotchInsets_", None)
+            if callable(set_notch_insets):
+                # Only meaningful when the body's width IS the measured
+                # width; a manual gap or a slot fallback draws parametric.
+                set_notch_insets(measured_notch_insets)
         self._publish_presentation_schedule()
 
     def _build_window(self):
