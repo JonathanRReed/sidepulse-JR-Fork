@@ -17,7 +17,9 @@ permissions:
 env:
   PYTHONHASHSEED: "0"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  PIP_CONSTRAINT: requirements/release-constraints.txt
+  # Absolute: setup-python's internal pip upgrade runs outside the workspace,
+  # and a relative constraint path kills the job before the first real step.
+  PIP_CONSTRAINT: ${{ github.workspace }}/requirements/release-constraints.txt
 
 jobs:
   build:
@@ -37,6 +39,10 @@ jobs:
           python -m pip install pip==26.1.2
           python -m pip install --constraint requirements/release-constraints.txt -e '.[dev]'
       - name: Verify tag and build artifacts
+        # verify.sh defaults to the repo-local .venv; on CI the pinned tools
+        # live in the setup-python interpreter, so hand it over explicitly.
+        env:
+          PYTHON: ${{ env.pythonLocation }}/bin/python
         run: |
           python scripts/validate_release_version.py --tag "${{ inputs.tag }}"
           ./scripts/verify.sh --no-bootstrap --portable

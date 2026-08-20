@@ -1,5 +1,8 @@
 # SidePulse fork — master plan
 
+> **Historical build ledger.** Superseded as a plan on 2026-08-18 by
+> [`docs/superpowers/plans/2026-08-18-make-it-the-best.md`](superpowers/plans/2026-08-18-make-it-the-best.md).
+
 > **QUALITY MODE (2026-08-12).** Feature freeze by Jonathan's call:
 > enhance, clean, fix. Landed: **completion sweep** (a finishing
 > agent claims the bar in its identity color — the aggregate hid

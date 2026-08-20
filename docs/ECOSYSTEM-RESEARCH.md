@@ -178,3 +178,72 @@ work. Nothing above touches the interrupt budget.
 The full brainstorm and its sequencing live in
 `docs/superpowers/plans/2026-08-18-make-it-the-best.md` — seven waves,
 gated the same way every shipped wave has been.
+
+## Survey refresh (2026-08-19)
+
+### Upstream (inteliwear/sidepulse) since 08-16
+
+- Two direct commits on 08-17: `0d1082c` (closed-lid control rework,
+  audit.py status-history JSONL + CSV/HTML export — we already carry our
+  own hardened audit.py; theirs adds battery/lid snapshots to rows) and
+  `5b7ea52` (`scripts/macos-sd-diagnostics.sh`). Any future idea-port of
+  keep-awake/lid work should read `0d1082c` first — it rewrote those
+  surfaces on top of what we forked.
+- **PR #22 (SSH remote monitoring, +1794)**: `sidepulse remote add`, a
+  Settings Remote tab, remote hook-JSONL tailed over outbound
+  batch-mode SSH into the local event socket, host-namespaced session
+  ids ("Claude on macmini"). The strongest candidate for our Wave 6
+  fleet work; its DND/LED-off raw writes must be rerouted through the
+  presentation safety compiler if adapted.
+- **Issue #23 (08-19)**: suspend/resume on macOS 26 re-enumerates the
+  USB device and SidePulse doesn't survive it ("Disk Not Ejected
+  Properly"). Hardware-first-class is our pitch — reproduce with the
+  Pro and decide whether the eject-guard needs a sleep-aware reconnect.
+- **PR #13 (Hermes plugin)**: the metadata allowlist +
+  per-session hashed identities are the best-engineered privacy
+  patterns in the ecosystem; steal patterns, not the provider.
+- **PR #14**: models T3 Code as a session ORIGIN, not a provider — the
+  split our Agent Browser wants for T3-sourced rows.
+- **PR #19**: invocation-scoped monitoring (`sidepulse claude ...` via
+  inline `--settings` hooks + execv) — cheap opt-in "watch only this
+  session" mode. PR #10: `doctor --verbose` + redacted diagnostics ZIP.
+- Forks: adamstambouli `fleet-mode` (sub-agent rollup/retirement edge
+  cases — an independent implementation of our sub-agents-invisible
+  law, worth diffing); bambidotexe (headless LED daemon for driving a
+  device from a headless Mac; pairs with PR #22); seanhellwig (Ghostty
+  terminal support); CoolColby23 `agent/kiro-session-opening` (resume
+  Kiro sessions from the menu — one commit past the PR #16 we ported).
+- Upstream ships an iOS companion (`ios/SidePulse`, FastAPI server) —
+  the phone-glance wave should build on it, not start fresh.
+- Kiro caveat from PR #16 discussion: Kiro CLI 2.18.1 omits
+  `session_id`, so concurrent Kiro sessions may collapse into one row —
+  add a conformance test when Kiro is actually installed.
+
+### T3 Code deep-dive (pingdotgg/t3code, checked 2026-08-19)
+
+- **Machine identity is SOLVED for us**: one SQLite DB = one
+  ExecutionEnvironment; the stable id lives in the plain-text file
+  `~/.t3/userdata/environment-id` (UUID), BY DESIGN never a DB column.
+  Read that file alongside `state.sqlite` to tag which machine a T3 row
+  came from; aggregation across machines is client-side. The 08-18
+  "waits for a schema bump" note is obsolete. Schema unchanged since
+  migration 040 (2026-08-09); note `instance_id` columns are provider
+  configs, NOT machines.
+- Inbox semantics worth copying: strict priority ladder
+  approval > input > working > failed > monitoring > ready with fixed
+  colors (amber/indigo/sky/red/sky/emerald, pulse only while working);
+  **static ordering** (activity never reorders rows — position is
+  identity, the colored edge strip is status); settle/snooze with
+  hand-raising (approval/input/fresh-failure/completion wake a snoozed
+  thread; a thread snoozed while failed stays snoozed); "Completed"
+  shown only when completedAt > lastVisitedAt (per-thread unread);
+  rollup = max child priority, and passive Monitoring must never mask
+  a Plan Ready sibling; canSettle/canSnooze refuse while something is
+  pending, including a 2-minute "queued but no session adopted it"
+  grace state we do not track yet.
+- Aggregate headline formula (their Live Activity): "N active agents,
+  M need attention"; at zero active lead with the outcome, and a
+  failure anywhere dominates a newer success. Ready-made announcer copy.
+- T3 Code has NO Mac-native ambient surface (no tray/badge/notification
+  code anywhere; agent awareness is iOS Live Activities via their
+  relay). The menu bar + LEDs + notch remain our moat.

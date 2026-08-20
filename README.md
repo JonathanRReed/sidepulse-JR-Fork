@@ -104,7 +104,7 @@ wearing your colors.
   resets.
 - Engineering: no SD-card I/O, subprocess forks, or sqlite on the main
   thread; a 30fps change-gated Screen Bar with 15Hz WASM sampling;
-  570+ tests on macOS CI; corrupt settings are preserved for recovery,
+  6,200+ tests in the verification gate; corrupt settings are preserved for recovery,
   never silently reset. Architecture notes live in
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), the build ledger in
   [`docs/FORK-ROADMAP.md`](docs/FORK-ROADMAP.md).

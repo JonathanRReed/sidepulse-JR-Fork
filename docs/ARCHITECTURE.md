@@ -12,6 +12,20 @@ The historical AppKit controller grew beyond 18,000 lines. It is retained in `st
 
 `status_bar.py` is now the public compatibility facade. It preserves the existing import and monkeypatch contract, delegates the application entrypoint to the retained runtime, and replaces selected controller methods with implementations extracted into small modules. New deterministic behavior must not be added to `status_bar_legacy.py`. Extract it, test it without AppKit, then wire it through the facade.
 
+The production controller is actually a THREE-deep chain, not two:
+`status_bar_legacy.StatusBarController` → `_status_bar_production.JRStatusBarController`
+(rebinds the legacy name) → `provider_usage_status_bar.JRProviderUsageStatusBarController`,
+which the real entrypoint (`cli_entry` → `provider_usage_status_bar.main`) launches.
+The third layer also patches `build_menu` and installs settings navigation and the
+screen-bar runtime as import-time side effects — any reasoning about "what runs in
+production" must start there, not at the facade.
+
+Two coupling channels are invisible to the import graph and must be treated as
+load-bearing until removed: `settings_window._install()` copies the monolith's
+global namespace into `settings_window` (dozens of names resolve only through
+that injection), and several modules take function-level imports to dodge the
+one real cycle (`colors ↔ led_status ↔ _led_status_legacy`).
+
 ## Domain map
 
 | Domain | Module(s) | State or responsibility |
@@ -24,11 +38,16 @@ The historical AppKit controller grew beyond 18,000 lines. It is retained in `st
 | Canonical operator semantics | `operator_state.py`, `provider_facts.py`, `attention.py`, `mailbox.py` | Work identity, requests, transitions, parent/worker relationships, actionable attention |
 | Signals and presentation | `signals.py`, `signal_coordinator.py`, `presentation_policy.py`, `presentation_scheduler.py` | Semantic precedence, finite cues, continuous state, interruption policy, schedule decisions |
 | Rendering | `led_status.py`, `colors.py`, `animation.py`, `render_policy.py` | LED programs, colors, transfer functions, motion, frame cadence, brightness, calibration |
-| Screen Bar | `virtual_device.py`, `screen_bar_pipeline.py`, `alcove_observation.py` | Notch geometry, Alcove observation, frame scheduling, draw safety, on-screen rendering |
-| Device I/O | `device_writer.py`, `sd_eject_guard_launch.py` | Discovery, size validation, atomic program writes, eject protection |
+| Screen Bar | `virtual_device.py`, `screen_bar_pipeline.py`, `screen_bar_runtime.py`, `screen_bar_design.py`, `alcove_observation.py` | Notch geometry (measured silhouette), Alcove observation, frame scheduling, draw safety, on-screen rendering |
+| Device I/O | `device_writer.py` → `presentation_compiler.py` → `firmware_validation.py` → `_device_writer_legacy.py`, `sd_eject_guard_launch.py` | Discovery, flash-safety compilation, firmware-grammar validation, size validation, atomic program writes, eject protection |
+| Native provider usage | `provider_usage_*` modules (platform, runtime, sync service, status bar host, credential store, event store) | Claude/Codex quota accounting, Usage Center, cross-Mac SFTP usage sync, pairing, keychain-consented credentials |
+| Agent Browser & history | `agent_browser.py`, `agent_browser_window.py`, `mailbox.py`, `operator_history*`, `activity_ledger*` | Session browser shelves and retention, mailbox ordering, operator history, "since you left" ledger |
+| Remote & integrations | `remote_peers.py`, `cloud_ingest.py`, `webhook_delivery.py`, `t3_compat.py` | Peer Macs over SFTP, loopback cloud-event ingest, outbound webhooks, T3 Code local-state reads |
+| Runtime scheduling | `runtime_scheduler.py`, `core_state.py`, `refresh_admission.py` | Timer/worker registries, latest-wins workers, core-state observation, refresh admission |
 | Firmware grammar | `led_wasm.py`, packaged `sdled.wasm` | Authoritative LED parser and animation stepping |
 | Usage and capacity | `usage_stats.py`, `provider_capacity.py`, `capacity_*` modules | Local usage aggregation, provider evidence, authority gates, forecasts, history, reset handling |
-| Persistence | `settings.py`, `*_store.py`, `private_io.py` | Settings, ledgers, histories, atomic private-file writes, recovery from corrupt data |
+| Persistence | `settings.py` → `_settings_legacy.py`, `*_store.py`, `private_io.py` | Settings (facade + legacy body), ledgers, histories, atomic private-file writes, recovery from corrupt data |
+| Settings UI | `settings_window.py`, `settings_category_runtime.py`, `settings_navigation.py` | Pane builders, seven-category IA, navigation — currently glued to the monolith by `_install()` namespace injection (see Controller boundary) |
 | Packaging and launch | `app_bundle.py`, `status_bar_launch.py`, `packaging/` | Sealed app bundle, launch agent, signing, verification, installer and notarization |
 
 ## Display pipeline

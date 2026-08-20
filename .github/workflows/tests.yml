@@ -15,7 +15,9 @@ concurrency:
 env:
   PYTHONHASHSEED: "0"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  PIP_CONSTRAINT: requirements/release-constraints.txt
+  # Absolute: setup-python's internal pip upgrade runs outside the workspace,
+  # and a relative constraint path kills the job before the first real step.
+  PIP_CONSTRAINT: ${{ github.workspace }}/requirements/release-constraints.txt
 
 jobs:
   portable:
@@ -39,7 +41,11 @@ jobs:
           python -m pip install pip==26.1.2
           python -m pip install --constraint requirements/release-constraints.txt -e '.[dev]'
       - name: Verify portable surfaces
+        # verify.sh defaults to the repo-local .venv; on CI the pinned tools
+        # live in the setup-python interpreter, so hand it over explicitly.
         run: ./scripts/verify.sh --no-bootstrap --portable
+        env:
+          PYTHON: ${{ env.pythonLocation }}/bin/python
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sidepulse-python-${{ matrix.python-version }}

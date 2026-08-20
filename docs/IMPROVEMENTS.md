@@ -1,5 +1,8 @@
 # Improvements, from user stories
 
+> **Historical snapshot (2026-08-14).** Open work is tracked in
+> [`docs/superpowers/plans/2026-08-18-make-it-the-best.md`](superpowers/plans/2026-08-18-make-it-the-best.md).
+
 Written 2026-08-14, after walking real usage rather than reading code. Each
 story is something the owner actually does; each finding is what breaks when
 you follow it end to end. Ordered by how much harm it does today.

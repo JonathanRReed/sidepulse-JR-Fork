@@ -1,5 +1,8 @@
 # Wave status — measured, not asserted
 
+> **Historical snapshot (2026-08-14).** Current wave status lives in
+> [`docs/superpowers/plans/2026-08-18-make-it-the-best.md`](superpowers/plans/2026-08-18-make-it-the-best.md).
+
 Updated 2026-08-14. Every number here came from the running machine or the
 test suite, not from reading code.
 

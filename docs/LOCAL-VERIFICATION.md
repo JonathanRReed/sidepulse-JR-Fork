@@ -35,6 +35,19 @@ A non-macOS machine cannot certify AppKit, PyObjC, TCC, signing, or hardware beh
 ./scripts/verify.sh --portable
 ```
 
+## GitHub-hosted macOS runners are informational only
+
+A hosted `macos-latest` runner has no logged-in window session, no
+Screen Recording grant, no `bun`, a python.org framework interpreter
+the installer-safety check rightly refuses, and shared-tenant timing.
+A full-suite run there fails a known set of environment-coupled tests
+(observed 2026-08-19: alcove honesty, installer transaction, screen-bar
+motion, agent-browser p95, OpenCode-under-bun, Codex trust refresh)
+while the same commit passes 100% on a real Mac. Treat hosted macOS
+results as informational; the authoritative full gate is a clean local
+checkout or the self-hosted workflow
+(`.github/workflows/self-hosted-macos.yml`).
+
 ## Signed package verification
 
 ```sh

@@ -1,5 +1,8 @@
 # JR-BAR — THE PLAN
 
+> **Historical.** Superseded on 2026-08-18 by
+> [`docs/superpowers/plans/2026-08-18-make-it-the-best.md`](superpowers/plans/2026-08-18-make-it-the-best.md).
+
 Coalesced 2026-08-14 from: an exhaustive sweep of every SidePulse issue,
 PR and fork; a reuse audit of CodexBar (c4ed34d0) and t3code against our
 own source; and live read-only inspection of Alcove 1.7.9 and CodexBar

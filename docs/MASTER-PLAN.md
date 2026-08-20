@@ -1,5 +1,8 @@
 # Master plan — JR-BAR
 
+> **Historical.** Superseded on 2026-08-18 by
+> [`docs/superpowers/plans/2026-08-18-make-it-the-best.md`](superpowers/plans/2026-08-18-make-it-the-best.md).
+
 Agreed 2026-08-13. Four pushes, sequenced; the rename ships as a
 display name first and an identity migration much later.
 
