@@ -507,6 +507,19 @@ PROVIDER_BRAND_COLORS: dict[str, str] = {
     # warm tones crowd Hermes orange in hue. This mulberry clears every
     # provider and state seed by dE >= 22 and every hue gap by > 20 deg.
     "kiro": "#4B1E3C",
+    # 2026-08-20: every registered provider now has a DELIBERATE entry --
+    # the positional fallback is a mechanism, not a palette. cursor,
+    # hermes, and opencode keep the exact colours the fallback had been
+    # assigning (hermes' is the literal Hermes brand orange), promoted so
+    # they can never shift when the registry grows.
+    "cursor": "#FFCC00",
+    "hermes": "#FF9500",
+    "opencode": "#AF52DE",
+    # openclaw's fallback #FF2D55 was a KNOWN_COLLAPSES defect (dE 4.9
+    # from devin, 10.5 from claude for a dichromat). This deep rust --
+    # a claw, as it happens -- was grid-searched under all three vision
+    # models against every provider and state seed: worst-case dE 40.2.
+    "openclaw": "#601800",
 }
 
 
@@ -1229,6 +1242,17 @@ def _palette_written_agent_colors() -> dict[str, frozenset[str]]:
             written.setdefault(provider, set()).add(
                 normalize_hex(
                     oklch_hex(0.72, 0.15, (hue + offset) % 360.0), "#000000"
+                )
+            )
+        # Between 2026-08-19 and 2026-08-20, palettes fanned exactly the
+        # four then-brandless providers at 90-degree steps (sorted id
+        # order). They are branded now, so installs carrying that
+        # window's fan-out must repair byte-exactly too.
+        for index, provider in enumerate(("cursor", "hermes", "openclaw", "opencode")):
+            written.setdefault(provider, set()).add(
+                normalize_hex(
+                    oklch_hex(0.72, 0.15, (hue + index * 90.0) % 360.0),
+                    "#000000",
                 )
             )
     return {provider: frozenset(values) for provider, values in written.items()}

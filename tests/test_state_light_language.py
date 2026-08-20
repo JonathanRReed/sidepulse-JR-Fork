@@ -392,3 +392,53 @@ def test_a_blocked_agent_beats_while_a_working_one_chases() -> None:
     blocked_ms = int(blocked_segments[0].split()[1].removesuffix("ms"))
     working_ms = int(working_segments[0].split()[1].removesuffix("ms"))
     assert blocked_ms < working_ms
+
+
+def test_completion_green_is_a_sweep_not_a_resting_state() -> None:
+    """2026-08-20 evening: 'a normal animation will happen but it is
+    just all the LEDs return to green' -- every interactive turn ends in
+    a Stop, and the strip painted the done color for two minutes after
+    each one. The LIGHTS settle after COMPLETED_GLOW_SECONDS; rows,
+    badge, and gauge keep the longer memory."""
+    from datetime import datetime, timedelta, timezone
+
+    from sidepulse.collector import MonitorSnapshot, aggregate_status
+    from sidepulse.models import AgentMode, AgentStatus
+    from sidepulse.operator_state import COMPLETED_GLOW_SECONDS
+    from sidepulse.status_bar_legacy import settled_completion_display_mode
+
+    finished = datetime(2026, 8, 20, 18, 0, 0, tzinfo=timezone.utc)
+    done = AgentStatus(
+        provider="claude",
+        agent_id="claude:session:x",
+        display_name="Claude x",
+        mode=AgentMode.COMPLETED,
+        updated_at=finished,
+        event_name="Stop",
+        session_id="x",
+    )
+
+    def snapshot(seconds_later: float) -> MonitorSnapshot:
+        return MonitorSnapshot(
+            aggregate=aggregate_status((done,)),
+            statuses=(done,),
+            stale_statuses=(),
+            sources=(),
+            collected_at=finished + timedelta(seconds=seconds_later),
+        )
+
+    fresh = snapshot(COMPLETED_GLOW_SECONDS - 5.0)
+    assert (
+        settled_completion_display_mode(AgentMode.COMPLETED, fresh)
+        == AgentMode.COMPLETED
+    )
+    settled = snapshot(COMPLETED_GLOW_SECONDS + 5.0)
+    assert (
+        settled_completion_display_mode(AgentMode.COMPLETED, settled)
+        == AgentMode.IDLE_READY
+    )
+    # Non-completed aggregates pass through untouched.
+    assert (
+        settled_completion_display_mode(AgentMode.WORKING, settled)
+        == AgentMode.WORKING
+    )

@@ -17920,9 +17920,17 @@ class PaletteTests(unittest.TestCase):
             self.controller.settings.colors.mode_colors["working"],
             expected["modes"]["working"],
         )
+        # 2026-08-20: every registered provider carries a deliberate
+        # brand color now, so palettes own the MODES and no providers --
+        # brands stay brands. apply_palette always skipped branded rows;
+        # with none left brandless, the agents fan is empty and a theme
+        # can never repaint Cursor off its identity.
+        self.assertEqual(expected["agents"], {})
+        from sidepulse.colors import PROVIDER_BRAND_COLORS
+
         self.assertEqual(
             self.controller.settings.colors.agent_color("cursor"),
-            expected["agents"]["cursor"],
+            PROVIDER_BRAND_COLORS["cursor"],
         )
 
 

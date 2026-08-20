@@ -412,6 +412,7 @@ from .operator_history_store import (
     save_operator_history,
 )
 from .operator_state import (
+    COMPLETED_GLOW_SECONDS,
     CanonicalOperatorEvent,
     CanonicalOperatorState,
     InterruptionClass,
@@ -1416,6 +1417,34 @@ def displayed_state(state: StatusBarState, report) -> StatusBarState:
     if disclosure == NOT_HEARING_LABEL:
         return STATE_NOT_HEARING
     return state
+
+
+def settled_completion_display_mode(display_mode, snapshot):
+    """The strip celebrates a completion BRIEFLY, then settles.
+
+    Every interactive turn ends in a Stop, so a two-minute whole-strip
+    done-green after each one read as "it's just green all the time."
+    Past COMPLETED_GLOW_SECONDS from the NEWEST completion, the lights
+    rest at the idle whisper; the menu rows, the title's unseen-done ✓,
+    and the right-tip gauge keep the longer memory.
+    """
+    if display_mode != AgentMode.COMPLETED:
+        return display_mode
+    newest_completion = max(
+        (
+            status.updated_at
+            for status in (*snapshot.statuses, *snapshot.stale_statuses)
+            if status.mode == AgentMode.COMPLETED
+        ),
+        default=None,
+    )
+    if (
+        newest_completion is not None
+        and (snapshot.collected_at - newest_completion).total_seconds()
+        > COMPLETED_GLOW_SECONDS
+    ):
+        return AgentMode.IDLE_READY
+    return display_mode
 
 
 def state_for_projection(projection: AttentionProjection) -> StatusBarState:
@@ -2687,7 +2716,9 @@ class StatusBarController(NSObject):
         )
         projection = self.update_attention_projection(snapshot)
         battery_snapshot = self.read_battery_snapshot()
-        display_mode = self.display_aggregate_mode(projection)
+        display_mode = settled_completion_display_mode(
+            self.display_aggregate_mode(projection), snapshot
+        )
         state = state_for_projection(projection)
         self.observe_connected_devices()
         self.track_ask_blocked(projection)

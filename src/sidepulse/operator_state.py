@@ -75,6 +75,14 @@ def active_work_went_silent(work, now_epoch: float | None) -> bool:
 # to an HOUR of "it's done!" for something the owner saw finish.
 COMPLETED_RECENT_SECONDS: Final = 120.0
 
+# The LIGHTS' own, shorter window: in an interactive session every
+# assistant turn ends in a Stop, so a 120s whole-strip done-green after
+# each turn read as "the strip is just green all the time." The strip
+# gets a brief completion sweep; the menu rows, the title's unseen-done
+# check, and the right-tip gauge keep carrying "something finished
+# since you looked" for as long as that stays true.
+COMPLETED_GLOW_SECONDS: Final = 20.0
+
 
 def completed_work_no_longer_recent(work, now_epoch: float | None) -> bool:
     """True when a COMPLETED work finished past the recent window."""
