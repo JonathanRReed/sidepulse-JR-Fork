@@ -175,3 +175,51 @@ def test_hidden_providers_leave_the_rows_and_the_title():
     )
     assert [row.provider_id for row in projection.rows] == ["codex"]
     assert projection.title == "Usage · Codex 71%"
+
+
+def test_lanes_past_their_threshold_are_flagged_for_alert_rendering():
+    projection = project_usage_menu(
+        ProviderUsageState(
+            (snapshot("claude", "5-hour", 12), snapshot("codex", "Weekly", 80)),
+            1000,
+            1100,
+            False,
+        ),
+        now=1000,
+        thresholds={"claude": 20.0, "codex": 20.0},
+    )
+    by_provider = {row.provider_id: row for row in projection.rows}
+    assert by_provider["claude"].alert_lane_indexes == (0,)
+    assert by_provider["codex"].alert_lane_indexes == ()
+
+
+def test_menu_bar_suffix_is_the_tightest_visible_number_or_nothing():
+    from sidepulse.provider_usage_menu import menu_bar_quota_suffix
+
+    state = ProviderUsageState(
+        (snapshot("claude", "5-hour", 36), snapshot("codex", "Weekly", 71)),
+        1000,
+        1100,
+        False,
+    )
+    assert menu_bar_quota_suffix(state) == "36%"
+    assert (
+        menu_bar_quota_suffix(state, hidden_providers=frozenset({"claude"}))
+        == "71%"
+    )
+    # No numbers anywhere -> no suffix, never "unknown%".
+    empty = ProviderUsageState(
+        (
+            snapshot(
+                "claude",
+                "Weekly",
+                None,
+                state=ProviderSourceState.NEEDS_CONSENT,
+                action="Connect Claude usage",
+            ),
+        ),
+        1000,
+        1100,
+        False,
+    )
+    assert menu_bar_quota_suffix(empty) is None

@@ -28,6 +28,9 @@ class MenuUsageDisplay:
     show_totals: bool = True
     show_cost: bool = True
     show_detail_lanes: bool = True
+    #: Codex Bar parity: the tightest visible limit rides next to the
+    #: menu-bar icon itself.
+    show_menu_bar_percent: bool = True
 
     def __post_init__(self) -> None:
         if not all(
@@ -41,6 +44,7 @@ MENU_USAGE_DISPLAY_FLAGS = (
     "show_totals",
     "show_cost",
     "show_detail_lanes",
+    "show_menu_bar_percent",
 )
 
 

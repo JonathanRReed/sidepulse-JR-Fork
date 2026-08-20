@@ -117,6 +117,7 @@ def _native_usage_pane(target):
         ("show_totals", "Token and model totals"),
         ("show_cost", "Estimated cost"),
         ("show_detail_lanes", "Model-scoped lanes (e.g. “Fable only”)"),
+        ("show_menu_bar_percent", "Tightest limit next to the menu-bar icon"),
     ):
         box = ui.make_checkbox(label, target, "toggleUsageMenuElement:")
         box.setIdentifier_(flag)

@@ -27,6 +27,9 @@ class ProviderUsageMenuRow:
     #: resets in 2h 10m") -- the codebar/t3code-style at-a-glance limits.
     #: Renderers show these INSTEAD of `detail` when non-empty.
     lane_lines: tuple[str, ...] = ()
+    #: Indexes into lane_lines whose lane has crossed the provider's
+    #: low-remaining threshold -- renderers paint these as a warning.
+    alert_lane_indexes: tuple[int, ...] = ()
 
 
 def _lane_lines(
@@ -34,18 +37,22 @@ def _lane_lines(
     *,
     now: float,
     display: MenuUsageDisplay,
-) -> tuple[str, ...]:
+    threshold: float | None,
+) -> tuple[tuple[str, ...], tuple[int, ...]]:
     lines = []
+    alerts = []
     lanes = tuple(
         lane
         for lane in snapshot.lanes
         if display.show_detail_lanes or lane.bindable
     )[:6]
-    for lane in lanes:
+    for index, lane in enumerate(lanes):
         countdown = format_reset_countdown(lane.reset_at, now=now)
         if lane.remaining_percent is None:
             lines.append(f"{lane.label} · {countdown}")
             continue
+        if threshold is not None and lane.remaining_percent <= threshold:
+            alerts.append(index)
         meter = (
             f"{format_lane_meter(lane.remaining_percent)}  "
             if display.show_meters
@@ -54,7 +61,7 @@ def _lane_lines(
         lines.append(
             f"{meter}{lane.label} · {lane.remaining_percent:.0f}% left · {countdown}"
         )
-    return tuple(lines)
+    return tuple(lines), tuple(alerts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +92,7 @@ def _row(
     *,
     now: float,
     display: MenuUsageDisplay,
+    threshold: float | None = None,
 ) -> ProviderUsageMenuRow:
     provider_label = provider_descriptor(snapshot.provider_id).label
     lane = most_constrained_lane(snapshot)
@@ -116,6 +124,9 @@ def _row(
         )
     if display.show_cost and snapshot.estimated_cost_usd is not None:
         usage_parts.append(f"est. ${snapshot.estimated_cost_usd:.2f}")
+    lane_lines, alert_indexes = _lane_lines(
+        snapshot, now=now, display=display, threshold=threshold
+    )
     return ProviderUsageMenuRow(
         snapshot.provider_id,
         title,
@@ -123,7 +134,8 @@ def _row(
         " · ".join(usage_parts) if usage_parts else None,
         snapshot.action_label,
         snapshot.state is ProviderSourceState.STALE,
-        _lane_lines(snapshot, now=now, display=display),
+        lane_lines,
+        alert_indexes,
     )
 
 
@@ -133,14 +145,24 @@ def project_usage_menu(
     now: float,
     display: MenuUsageDisplay | None = None,
     hidden_providers: frozenset[str] = frozenset(),
+    thresholds: dict[str, float] | None = None,
 ) -> ProviderUsageMenuProjection:
     display = MenuUsageDisplay() if display is None else display
+    thresholds = {} if thresholds is None else thresholds
     snapshots = tuple(
         snapshot
         for snapshot in state.snapshots
         if snapshot.provider_id not in hidden_providers
     )
-    rows = tuple(_row(snapshot, now=now, display=display) for snapshot in snapshots)
+    rows = tuple(
+        _row(
+            snapshot,
+            now=now,
+            display=display,
+            threshold=thresholds.get(snapshot.provider_id),
+        )
+        for snapshot in snapshots
+    )
     actionable = tuple(
         snapshot
         for snapshot in snapshots
@@ -177,8 +199,33 @@ def project_usage_menu(
     )
 
 
+def menu_bar_quota_suffix(
+    state: ProviderUsageState,
+    *,
+    hidden_providers: frozenset[str] = frozenset(),
+) -> str | None:
+    """The tightest trustworthy visible percentage, for the status item
+    itself (Codex Bar parity). None when nothing has a number -- the
+    title must never say "unknown%"."""
+    tightest = None
+    for snapshot in state.snapshots:
+        if snapshot.provider_id in hidden_providers:
+            continue
+        if snapshot.state not in {
+            ProviderSourceState.READY,
+            ProviderSourceState.STALE,
+        }:
+            continue
+        lane = most_constrained_lane(snapshot)
+        if lane is not None and lane.remaining_percent is not None:
+            if tightest is None or lane.remaining_percent < tightest:
+                tightest = lane.remaining_percent
+    return None if tightest is None else f"{tightest:.0f}%"
+
+
 __all__ = [
     "ProviderUsageMenuProjection",
     "ProviderUsageMenuRow",
+    "menu_bar_quota_suffix",
     "project_usage_menu",
 ]

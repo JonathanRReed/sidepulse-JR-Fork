@@ -14,7 +14,7 @@ from .provider_usage_event_store import (
     load_seen_reset_events,
     save_seen_reset_events,
 )
-from .provider_usage_menu import project_usage_menu
+from .provider_usage_menu import menu_bar_quota_suffix, project_usage_menu
 from .provider_usage_qol import detect_reset_events, threshold_crossings
 from .provider_usage_runtime import ProviderUsageService, ProviderUsageState
 from .provider_usage_settings import load_provider_usage_settings
@@ -37,13 +37,36 @@ _BaseStatusBarController = _legacy.StatusBarController
 _original_build_menu = _legacy.build_menu
 
 
-def _disabled_item(title: str):
+def _disabled_item(title: str, *, alert: bool = False):
     item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         title,
         None,
         "",
     )
     item.setEnabled_(False)
+    if alert:
+        # A lane past its low-remaining threshold gets amber, not just a
+        # shorter meter -- peripheral vision again.
+        try:
+            from AppKit import (
+                NSAttributedString,
+                NSColor,
+                NSFont,
+                NSFontAttributeName,
+                NSForegroundColorAttributeName,
+            )
+
+            item.setAttributedTitle_(
+                NSAttributedString.alloc().initWithString_attributes_(
+                    title,
+                    {
+                        NSForegroundColorAttributeName: NSColor.systemOrangeColor(),
+                        NSFontAttributeName: NSFont.menuFontOfSize_(13.0),
+                    },
+                )
+            )
+        except Exception:
+            pass
     return item
 
 
@@ -95,13 +118,18 @@ def _native_usage_menu_item(target):
         settings = load_provider_usage_settings().settings
         display = settings.menu_display
         hidden = settings.hidden_menu_providers()
+        thresholds = {
+            preference.provider_id: preference.threshold_remaining
+            for preference in settings.providers
+        }
     except Exception:
-        display, hidden = None, frozenset()
+        display, hidden, thresholds = None, frozenset(), None
     projection = project_usage_menu(
         state,
         now=time.time(),
         display=display,
         hidden_providers=hidden,
+        thresholds=thresholds,
     )
     item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         projection.title,
@@ -123,9 +151,12 @@ def _native_usage_menu_item(target):
         provider_menu = _legacy.NSMenu.alloc().init()
         provider_menu.setAutoenablesItems_(False)
         lane_lines = getattr(row, "lane_lines", ())
+        alert_indexes = set(getattr(row, "alert_lane_indexes", ()))
         if lane_lines:
-            for line in lane_lines:
-                provider_menu.addItem_(_disabled_item(line))
+            for index, line in enumerate(lane_lines):
+                provider_menu.addItem_(
+                    _disabled_item(line, alert=index in alert_indexes)
+                )
         elif row.detail:
             provider_menu.addItem_(_disabled_item(row.detail))
         if row.usage_detail:
@@ -458,6 +489,7 @@ else:
                 _legacy.log_status_bar(f"usage menu display: {exc}")
                 return
             self._menu_signature = None
+            self._sidepulse_usage_menu_settings_cache = None
 
         @_legacy.objc.IBAction
         def toggleUsageMenuProvider_(self, sender) -> None:
@@ -474,6 +506,58 @@ else:
                 _legacy.log_status_bar(f"usage menu providers: {exc}")
                 return
             self._menu_signature = None
+            self._sidepulse_usage_menu_settings_cache = None
+
+        # --- Tightest limit beside the menu-bar icon (Codex Bar parity)
+
+        def _usage_menu_settings(self):
+            """Loaded usage settings with a short TTL -- set_status runs
+            on every presentation tick and must not hit the disk each
+            time. The toggles above clear the cache on change."""
+            cached = getattr(self, "_sidepulse_usage_menu_settings_cache", None)
+            now = time.monotonic()
+            if cached is not None and now - cached[0] < 15.0:
+                return cached[1]
+            try:
+                settings = load_provider_usage_settings().settings
+            except Exception:
+                settings = None
+            self._sidepulse_usage_menu_settings_cache = (now, settings)
+            return settings
+
+        def set_status(
+            self, state, *, ask_count: int = 0, done_badge: bool = False
+        ) -> None:
+            _BaseStatusBarController.set_status(
+                self, state, ask_count=ask_count, done_badge=done_badge
+            )
+            try:
+                self._append_quota_to_status_title()
+            except Exception:
+                # The status title is agent truth first; a quota suffix
+                # failure must never take the tick down with it.
+                pass
+
+        def _append_quota_to_status_title(self) -> None:
+            settings = self._usage_menu_settings()
+            if settings is None or not settings.menu_display.show_menu_bar_percent:
+                return
+            item = getattr(self, "status_item", None)
+            button = item.button() if item is not None else None
+            if button is None:
+                return
+            suffix = menu_bar_quota_suffix(
+                self.provider_usage_state,
+                hidden_providers=settings.hidden_menu_providers(),
+            )
+            if not suffix:
+                return
+            title = str(button.title() or "")
+            if suffix in title:
+                return
+            button.setTitle_(
+                f"{title} · {suffix}" if title.strip() else f" {suffix}"
+            )
 
         @_legacy.objc.IBAction
         def openProviderUsageCenter_(self, _sender) -> None:

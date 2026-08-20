@@ -16430,13 +16430,16 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         menu.addItem_(
             disabled_menu_item("Plug in a SidePulse, or add the Screen Bar below")
         )
-    if SCREEN_BAR_FEATURE_ENABLED:
+    # "Remove Screen Bar" lives INSIDE the Screen Bar's own submenu (see
+    # build_device_menu_item) -- a destructive-looking top-level item
+    # right under "Screen Bar >" read as clutter. Only the affordance to
+    # ADD one belongs at the top level, and only while there is none.
+    if (
+        SCREEN_BAR_FEATURE_ENABLED
+        and not target.settings.virtual_status_device_enabled
+    ):
         virtual_toggle = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            (
-                "Add Screen Bar"
-                if not target.settings.virtual_status_device_enabled
-                else "Remove Screen Bar"
-            ),
+            "Add Screen Bar",
             "toggleVirtualStatusDevice:",
             "",
         )
@@ -16675,6 +16678,16 @@ def build_device_menu_item(device: StatusBarDevice, target: StatusBarController)
         remove.setTarget_(target)
         remove.setRepresentedObject_(device.device_id)
         submenu.addItem_(remove)
+
+    if device.device_id == VIRTUAL_DEVICE_ID:
+        submenu.addItem_(NSMenuItem.separatorItem())
+        remove_bar = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Remove Screen Bar",
+            "toggleVirtualStatusDevice:",
+            "",
+        )
+        remove_bar.setTarget_(target)
+        submenu.addItem_(remove_bar)
 
     item.setSubmenu_(submenu)
     return item
