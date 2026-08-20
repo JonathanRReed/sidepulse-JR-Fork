@@ -88,3 +88,51 @@ def test_browser_sources_are_rejected_for_providers_without_browser_support() ->
         assert "browser" in str(exc)
     else:
         raise AssertionError("unsupported browser source was enabled")
+
+
+def test_menu_display_and_visibility_round_trip(tmp_path) -> None:
+    path = tmp_path / "provider-usage.json"
+    updated = (
+        default_provider_usage_settings()
+        .with_menu_flag("show_cost", False)
+        .with_menu_flag("show_detail_lanes", False)
+        .with_menu_visible("devin", False)
+    )
+    save_provider_usage_settings(updated, path)
+    loaded = load_provider_usage_settings(path).settings
+    assert loaded.menu_display.show_cost is False
+    assert loaded.menu_display.show_detail_lanes is False
+    assert loaded.menu_display.show_meters is True
+    assert loaded.preference("devin").menu_visible is False
+    assert loaded.preference("claude").menu_visible is True
+    assert loaded.hidden_menu_providers() == frozenset({"devin"})
+
+
+def test_menu_display_tolerates_old_documents_and_junk(tmp_path) -> None:
+    # A pre-menu_display document (and garbage values) must load as the
+    # defaults: everything visible, everything shown.
+    path = tmp_path / "provider-usage.json"
+    path.write_text(
+        json.dumps(
+            {
+                "settings_schema_version": PROVIDER_USAGE_SETTINGS_SCHEMA_VERSION,
+                "providers": [
+                    {"provider_id": "claude", "menu_visible": "yes-please"},
+                ],
+                "menu_display": {"show_meters": "definitely", "surprise": 1},
+            }
+        )
+    )
+    loaded = load_provider_usage_settings(path).settings
+    assert loaded.menu_display.show_meters is True
+    assert loaded.preference("claude").menu_visible is True
+    assert loaded.hidden_menu_providers() == frozenset()
+
+
+def test_menu_flag_rejects_unknown_names() -> None:
+    import pytest
+
+    from sidepulse.provider_usage_settings import ProviderUsageSettingsError
+
+    with pytest.raises(ProviderUsageSettingsError):
+        default_provider_usage_settings().with_menu_flag("show_everything", True)

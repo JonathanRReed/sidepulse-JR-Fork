@@ -8812,6 +8812,25 @@ def isolate_controller(case, *, build_controller=True):
     )
     focus.start()
     case.addCleanup(focus.stop)
+    # Refresh cadence and render pacing read the machine's LIVE Low
+    # Power Mode through runtime_render_environment -- at 20% battery
+    # macOS flips it on and the capacity fresh window silently becomes
+    # 900s instead of 300s. Real incident 2026-08-20: the reset-boundary
+    # suppression test failed only while the gate machine's battery was
+    # low. Other machine-truthy fields (thermal, accessibility) are
+    # pinned to the same hermetic defaults. Tests that WANT low power or
+    # a thermal state patch this themselves.
+    from sidepulse.render_policy import RenderEnvironment
+
+    def _mains_powered_environment(*, visible, display_asleep=False, process_info=None):
+        return RenderEnvironment(visible=visible, display_asleep=display_asleep)
+
+    render_env = patch(
+        "sidepulse.status_bar.runtime_render_environment",
+        _mains_powered_environment,
+    )
+    render_env.start()
+    case.addCleanup(render_env.stop)
     try:
         from sidepulse import status_bar
     except SystemExit as exc:

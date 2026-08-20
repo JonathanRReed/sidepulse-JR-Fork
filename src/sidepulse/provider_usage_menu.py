@@ -12,6 +12,7 @@ from .provider_usage_platform import (
 )
 from .provider_usage_qol import format_lane_meter, format_reset_countdown
 from .provider_usage_runtime import ProviderUsageState
+from .provider_usage_settings import MenuUsageDisplay
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,17 +29,31 @@ class ProviderUsageMenuRow:
     lane_lines: tuple[str, ...] = ()
 
 
-def _lane_lines(snapshot: ProviderUsageSnapshot, *, now: float) -> tuple[str, ...]:
+def _lane_lines(
+    snapshot: ProviderUsageSnapshot,
+    *,
+    now: float,
+    display: MenuUsageDisplay,
+) -> tuple[str, ...]:
     lines = []
-    for lane in snapshot.lanes[:6]:
+    lanes = tuple(
+        lane
+        for lane in snapshot.lanes
+        if display.show_detail_lanes or lane.bindable
+    )[:6]
+    for lane in lanes:
         countdown = format_reset_countdown(lane.reset_at, now=now)
         if lane.remaining_percent is None:
             lines.append(f"{lane.label} · {countdown}")
-        else:
-            lines.append(
-                f"{format_lane_meter(lane.remaining_percent)}"
-                f"  {lane.label} · {lane.remaining_percent:.0f}% left · {countdown}"
-            )
+            continue
+        meter = (
+            f"{format_lane_meter(lane.remaining_percent)}  "
+            if display.show_meters
+            else ""
+        )
+        lines.append(
+            f"{meter}{lane.label} · {lane.remaining_percent:.0f}% left · {countdown}"
+        )
     return tuple(lines)
 
 
@@ -65,7 +80,12 @@ def _state_label(snapshot: ProviderUsageSnapshot) -> str:
     }[snapshot.state]
 
 
-def _row(snapshot: ProviderUsageSnapshot, *, now: float) -> ProviderUsageMenuRow:
+def _row(
+    snapshot: ProviderUsageSnapshot,
+    *,
+    now: float,
+    display: MenuUsageDisplay,
+) -> ProviderUsageMenuRow:
     provider_label = provider_descriptor(snapshot.provider_id).label
     lane = most_constrained_lane(snapshot)
     if lane is None:
@@ -87,14 +107,14 @@ def _row(snapshot: ProviderUsageSnapshot, *, now: float) -> ProviderUsageMenuRow
         + snapshot.output_tokens
     )
     usage_parts = []
-    if token_total:
+    if display.show_totals and token_total:
         usage_parts.append(f"{token_total:,} tokens")
-    if snapshot.model_count:
+    if display.show_totals and snapshot.model_count:
         usage_parts.append(
             f"{snapshot.model_count} model"
             f"{'s' if snapshot.model_count != 1 else ''}"
         )
-    if snapshot.estimated_cost_usd is not None:
+    if display.show_cost and snapshot.estimated_cost_usd is not None:
         usage_parts.append(f"est. ${snapshot.estimated_cost_usd:.2f}")
     return ProviderUsageMenuRow(
         snapshot.provider_id,
@@ -103,7 +123,7 @@ def _row(snapshot: ProviderUsageSnapshot, *, now: float) -> ProviderUsageMenuRow
         " · ".join(usage_parts) if usage_parts else None,
         snapshot.action_label,
         snapshot.state is ProviderSourceState.STALE,
-        _lane_lines(snapshot, now=now),
+        _lane_lines(snapshot, now=now, display=display),
     )
 
 
@@ -111,16 +131,24 @@ def project_usage_menu(
     state: ProviderUsageState,
     *,
     now: float,
+    display: MenuUsageDisplay | None = None,
+    hidden_providers: frozenset[str] = frozenset(),
 ) -> ProviderUsageMenuProjection:
-    rows = tuple(_row(snapshot, now=now) for snapshot in state.snapshots)
-    actionable = tuple(
+    display = MenuUsageDisplay() if display is None else display
+    snapshots = tuple(
         snapshot
         for snapshot in state.snapshots
+        if snapshot.provider_id not in hidden_providers
+    )
+    rows = tuple(_row(snapshot, now=now, display=display) for snapshot in snapshots)
+    actionable = tuple(
+        snapshot
+        for snapshot in snapshots
         if snapshot.action_label is not None
         and snapshot.state is not ProviderSourceState.DISABLED
     )
     constrained = []
-    for snapshot in state.snapshots:
+    for snapshot in snapshots:
         if snapshot.state not in {ProviderSourceState.READY, ProviderSourceState.STALE}:
             continue
         lane = most_constrained_lane(snapshot)

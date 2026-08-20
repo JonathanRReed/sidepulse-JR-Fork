@@ -91,7 +91,18 @@ def _native_usage_menu_item(target):
         "_sidepulse_provider_usage_state",
         ProviderUsageState((), None, None, False),
     )
-    projection = project_usage_menu(state, now=time.time())
+    try:
+        settings = load_provider_usage_settings().settings
+        display = settings.menu_display
+        hidden = settings.hidden_menu_providers()
+    except Exception:
+        display, hidden = None, frozenset()
+    projection = project_usage_menu(
+        state,
+        now=time.time(),
+        display=display,
+        hidden_providers=hidden,
+    )
     item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         projection.title,
         None,
@@ -433,6 +444,36 @@ else:
         @_legacy.objc.IBAction
         def refreshNativeProviderUsage_(self, sender) -> None:
             self.refreshProviderUsage_(sender)
+
+        @_legacy.objc.IBAction
+        def toggleUsageMenuElement_(self, sender) -> None:
+            from .provider_usage_settings import save_provider_usage_settings
+
+            flag = str(sender.identifier() or "")
+            loaded = load_provider_usage_settings()
+            try:
+                updated = loaded.settings.with_menu_flag(flag, bool(sender.state()))
+                save_provider_usage_settings(updated, loaded=loaded)
+            except Exception as exc:
+                _legacy.log_status_bar(f"usage menu display: {exc}")
+                return
+            self._menu_signature = None
+
+        @_legacy.objc.IBAction
+        def toggleUsageMenuProvider_(self, sender) -> None:
+            from .provider_usage_settings import save_provider_usage_settings
+
+            provider_id = str(sender.identifier() or "")
+            loaded = load_provider_usage_settings()
+            try:
+                updated = loaded.settings.with_menu_visible(
+                    provider_id, bool(sender.state())
+                )
+                save_provider_usage_settings(updated, loaded=loaded)
+            except Exception as exc:
+                _legacy.log_status_bar(f"usage menu providers: {exc}")
+                return
+            self._menu_signature = None
 
         @_legacy.objc.IBAction
         def openProviderUsageCenter_(self, _sender) -> None:

@@ -20,6 +20,30 @@ class ProviderUsageSettingsWriteRefusedError(ProviderUsageSettingsError):
     pass
 
 
+#: The user-curatable elements of the menu's Usage rows. Field names are
+#: the durable keys used by ``with_menu_flag`` and the settings document.
+@dataclass(frozen=True, slots=True)
+class MenuUsageDisplay:
+    show_meters: bool = True
+    show_totals: bool = True
+    show_cost: bool = True
+    show_detail_lanes: bool = True
+
+    def __post_init__(self) -> None:
+        if not all(
+            type(getattr(self, field)) is bool for field in MENU_USAGE_DISPLAY_FLAGS
+        ):
+            raise ProviderUsageSettingsError("invalid menu usage display")
+
+
+MENU_USAGE_DISPLAY_FLAGS = (
+    "show_meters",
+    "show_totals",
+    "show_cost",
+    "show_detail_lanes",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderPreference:
     provider_id: str
@@ -28,6 +52,10 @@ class ProviderPreference:
     reset_celebrations: bool = True
     threshold_remaining: float = 20.0
     options: tuple[tuple[str, str], ...] = ()
+    #: Collection can stay on while the menu row is hidden -- "I track
+    #: Devin but don't want it in my face" is a curation choice, not a
+    #: data choice.
+    menu_visible: bool = True
 
     def __post_init__(self) -> None:
         descriptor = provider_descriptor(self.provider_id)
@@ -35,6 +63,7 @@ class ProviderPreference:
             type(self.enabled) is not bool
             or type(self.browser_sources) is not bool
             or type(self.reset_celebrations) is not bool
+            or type(self.menu_visible) is not bool
             or isinstance(self.threshold_remaining, bool)
             or not isinstance(self.threshold_remaining, (int, float))
             or not 0.0 <= float(self.threshold_remaining) <= 100.0
@@ -73,6 +102,7 @@ class ProviderPreference:
 class ProviderUsageSettings:
     schema_version: int
     providers: tuple[ProviderPreference, ...]
+    menu_display: MenuUsageDisplay = MenuUsageDisplay()
 
     def __post_init__(self) -> None:
         expected = tuple(descriptor.provider_id for descriptor in provider_descriptors())
@@ -82,6 +112,7 @@ class ProviderUsageSettings:
             or self.schema_version != PROVIDER_USAGE_SETTINGS_SCHEMA_VERSION
             or type(self.providers) is not tuple
             or actual != expected
+            or type(self.menu_display) is not MenuUsageDisplay
         ):
             raise ProviderUsageSettingsError("invalid provider usage settings")
 
@@ -162,6 +193,34 @@ class ProviderUsageSettings:
     ) -> ProviderUsageSettings:
         return self._replace(self.preference(provider_id).with_option(key, value))
 
+    def with_menu_visible(
+        self,
+        provider_id: str,
+        visible: bool,
+    ) -> ProviderUsageSettings:
+        if type(visible) is not bool:
+            raise ProviderUsageSettingsError("menu_visible must be a boolean")
+        return self._replace(
+            replace(self.preference(provider_id), menu_visible=visible)
+        )
+
+    def with_menu_flag(self, flag: str, enabled: bool) -> ProviderUsageSettings:
+        if flag not in MENU_USAGE_DISPLAY_FLAGS:
+            raise ProviderUsageSettingsError(f"unknown menu display flag: {flag!r}")
+        if type(enabled) is not bool:
+            raise ProviderUsageSettingsError("menu display flag must be a boolean")
+        return replace(
+            self,
+            menu_display=replace(self.menu_display, **{flag: enabled}),
+        )
+
+    def hidden_menu_providers(self) -> frozenset[str]:
+        return frozenset(
+            preference.provider_id
+            for preference in self.providers
+            if not preference.menu_visible
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class LoadedProviderUsageSettings:
@@ -203,6 +262,7 @@ def _preference_from_payload(
         "reset_celebrations",
         fallback.reset_celebrations,
     )
+    menu_visible = payload.get("menu_visible", fallback.menu_visible)
     threshold = payload.get("threshold_remaining", fallback.threshold_remaining)
     raw_options = payload.get("options", {})
     options = ()
@@ -233,9 +293,25 @@ def _preference_from_payload(
             ),
             threshold_remaining=threshold,
             options=options,
+            menu_visible=(
+                menu_visible
+                if type(menu_visible) is bool
+                else fallback.menu_visible
+            ),
         )
     except (ProviderUsageSettingsError, TypeError, ValueError):
         return fallback
+
+
+def _menu_display_from_payload(payload: object) -> MenuUsageDisplay:
+    defaults = MenuUsageDisplay()
+    if not isinstance(payload, dict):
+        return defaults
+    values = {}
+    for flag in MENU_USAGE_DISPLAY_FLAGS:
+        value = payload.get(flag, getattr(defaults, flag))
+        values[flag] = value if type(value) is bool else getattr(defaults, flag)
+    return MenuUsageDisplay(**values)
 
 
 def load_provider_usage_settings(
@@ -278,11 +354,12 @@ def load_provider_usage_settings(
             )
             for default in defaults.providers
         ),
+        _menu_display_from_payload(document.get("menu_display")),
     )
     unknown = tuple(
         (key, value)
         for key, value in document.items()
-        if key not in {"settings_schema_version", "providers"}
+        if key not in {"settings_schema_version", "providers", "menu_display"}
     )
     return LoadedProviderUsageSettings(settings, False, unknown)
 
@@ -301,9 +378,14 @@ def _settings_document(
             "reset_celebrations": preference.reset_celebrations,
             "threshold_remaining": preference.threshold_remaining,
             "options": dict(preference.options),
+            "menu_visible": preference.menu_visible,
         }
         for preference in settings.providers
     ]
+    document["menu_display"] = {
+        flag: getattr(settings.menu_display, flag)
+        for flag in MENU_USAGE_DISPLAY_FLAGS
+    }
     return document
 
 
@@ -338,8 +420,10 @@ def save_provider_usage_settings(
 
 
 __all__ = [
+    "MENU_USAGE_DISPLAY_FLAGS",
     "PROVIDER_USAGE_SETTINGS_SCHEMA_VERSION",
     "LoadedProviderUsageSettings",
+    "MenuUsageDisplay",
     "ProviderPreference",
     "ProviderUsageSettings",
     "ProviderUsageSettingsError",

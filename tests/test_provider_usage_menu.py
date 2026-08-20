@@ -139,3 +139,39 @@ def test_lane_without_percent_still_lists_its_reset():
     ).rows[0]
     assert row.lane_lines == ()  # snapshot() builds no lanes when remaining is None
     assert row.title == "Claude · ready"
+
+
+def test_display_flags_curate_meters_totals_cost_and_detail_lanes():
+    from sidepulse.provider_usage_settings import MenuUsageDisplay
+
+    state = ProviderUsageState((snapshot("claude", "5-hour", 74),), 1000, 1100, False)
+    quiet = project_usage_menu(
+        state,
+        now=1000,
+        display=MenuUsageDisplay(
+            show_meters=False, show_totals=False, show_cost=False
+        ),
+    ).rows[0]
+    assert quiet.lane_lines == ("5-hour · 74% left · resets in 33m",)
+    assert quiet.usage_detail is None
+
+    no_cost = project_usage_menu(
+        state,
+        now=1000,
+        display=MenuUsageDisplay(show_cost=False),
+    ).rows[0]
+    assert no_cost.usage_detail == "175 tokens · 2 models"
+
+
+def test_hidden_providers_leave_the_rows_and_the_title():
+    state = ProviderUsageState(
+        (snapshot("claude", "5-hour", 36), snapshot("codex", "Weekly", 71)),
+        1000,
+        1100,
+        False,
+    )
+    projection = project_usage_menu(
+        state, now=1000, hidden_providers=frozenset({"claude"})
+    )
+    assert [row.provider_id for row in projection.rows] == ["codex"]
+    assert projection.title == "Usage · Codex 71%"

@@ -94,6 +94,57 @@ def _native_usage_pane(target):
         )
     )
     stack.addArrangedSubview_(source_outer)
+
+    # Curation: what the menu's Usage rows show, and which providers get
+    # a row at all. Checkbox state is read fresh from disk at pane build;
+    # the toggles save immediately and invalidate the menu signature.
+    from .provider_usage_platform import provider_descriptor
+    from .provider_usage_settings import load_provider_usage_settings
+
+    usage_settings = load_provider_usage_settings().settings
+    display_outer, display_inner = ui.make_card("In the Usage Menu")
+    display_inner.addArrangedSubview_(
+        ui.make_wrapping_label(
+            "Choose what each provider's row shows. The Usage Center window "
+            "always shows everything.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    for flag, label in (
+        ("show_meters", "Meter per limit lane"),
+        ("show_totals", "Token and model totals"),
+        ("show_cost", "Estimated cost"),
+        ("show_detail_lanes", "Model-scoped lanes (e.g. “Fable only”)"),
+    ):
+        box = ui.make_checkbox(label, target, "toggleUsageMenuElement:")
+        box.setIdentifier_(flag)
+        box.setState_(1 if getattr(usage_settings.menu_display, flag) else 0)
+        display_inner.addArrangedSubview_(box)
+    stack.addArrangedSubview_(display_outer)
+
+    providers_outer, providers_inner = ui.make_card("Providers in the Menu")
+    providers_inner.addArrangedSubview_(
+        ui.make_wrapping_label(
+            "Hidden providers keep collecting; they just stay out of the "
+            "menu (and the Usage Center still lists them).",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    for preference in usage_settings.providers:
+        box = ui.make_checkbox(
+            provider_descriptor(preference.provider_id).label,
+            target,
+            "toggleUsageMenuProvider:",
+        )
+        box.setIdentifier_(preference.provider_id)
+        box.setState_(1 if preference.menu_visible else 0)
+        providers_inner.addArrangedSubview_(box)
+    stack.addArrangedSubview_(providers_outer)
+
     return ui.wrap_in_scroll_pane(stack), {
         "native_usage_summary": summary,
         "native_usage_source_status": source_status,
