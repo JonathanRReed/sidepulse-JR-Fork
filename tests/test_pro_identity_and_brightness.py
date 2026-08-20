@@ -203,12 +203,24 @@ def test_recent_working_stays_working() -> None:
 
 def test_long_thinking_turn_survives_the_post_tool_window() -> None:
     """WORKING that is NOT post-tool (agent mid-turn, thinking) gets the
-    longer silence window, not the 2-minute post-tool one."""
-    from sidepulse._collector_legacy import status_for_snapshot
+    LONGER silence window, not the 2-minute post-tool one -- derived
+    from the shared constant so the pin moves with the ratified line."""
+    from sidepulse._collector_legacy import (
+        WORKING_SILENCE_SECONDS,
+        status_for_snapshot,
+    )
     from sidepulse.models import AgentMode
 
-    status, now = _working_status("UserPromptSubmit", 5 * 60.0)
+    status, now = _working_status("UserPromptSubmit", WORKING_SILENCE_SECONDS - 60.0)
     effective = status_for_snapshot(
         status, now, post_tool_working_visible_seconds=2 * 60.0
     )
     assert effective.mode is AgentMode.WORKING
+
+    ended, later = _working_status("UserPromptSubmit", WORKING_SILENCE_SECONDS + 60.0)
+    assert (
+        status_for_snapshot(
+            ended, later, post_tool_working_visible_seconds=2 * 60.0
+        ).mode
+        is AgentMode.ENDED_UNCONFIRMED
+    )

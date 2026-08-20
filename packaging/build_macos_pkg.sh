@@ -121,7 +121,12 @@ export PYINSTALLER_CONFIG_DIR="$BUILD_DIR/pyinstaller-cache"
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT_DIR" show -s --format=%ct HEAD)}"
 "$BUILD_PYTHON" -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install "pip==$PINNED_PIP"
+# --no-cache-dir is LOAD-BEARING: pip caches the built sidepulse wheel
+# BY VERSION, so every rebuild between version bumps could silently ship
+# a stale wheel from an older commit (it did: a deploy passed md5 parity
+# against its own stale build while the source had moved two commits).
 "$VENV_DIR/bin/python" -m pip install \
+    --no-cache-dir \
     --constraint "$CONSTRAINTS" \
     --only-binary=:all: \
     "pyinstaller==$PINNED_PYINSTALLER" \

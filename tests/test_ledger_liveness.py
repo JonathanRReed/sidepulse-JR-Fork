@@ -382,3 +382,44 @@ def test_a_source_still_losing_is_not_released_by_the_lease() -> None:
     )
 
     assert still_lost.state.clock_continuity.status is ClockContinuityStatus.UNCERTAIN
+
+
+def test_quiescent_only_quarantine_survives_the_v2_round_trip() -> None:
+    """The live-source election can leave the GLOBAL clock STABLE while
+    quiescent sources still hold timing entries. v2 used to reconstruct
+    per-source stamps from the global uncertain_since -- impossible in
+    that shape -- so the app's own latest.json failed its own validator
+    and every restart lost its warm start."""
+    from sidepulse._collector_legacy import (
+        _state_to_document,
+        _v2_state_from_document,
+    )
+
+    state = reduce_operator_state(
+        empty_operator_state(),
+        _hook_batch("event:001", epoch=1_800_000_000.0),
+        clock=_clock(100.0),
+    ).state
+    jumped = reduce_operator_state(
+        state,
+        _hook_batch("event:002", epoch=1_800_000_001.0),
+        clock=ClockSample(1_800_000_101.0, 3_701.0, BootIdentifier("boot:01")),
+    ).state
+    assert jumped.timing_uncertain_sources
+
+    document = _state_to_document(jumped)
+    restored = _v2_state_from_document(document)
+    assert restored.timing_uncertain_sources == jumped.timing_uncertain_sources
+    assert restored._source_timing == jumped._source_timing
+
+    # And a document from the broken window (no source_timing, STABLE
+    # clock, uncertain sources listed) HEALS instead of failing restore.
+    legacy = dict(document)
+    legacy.pop("source_timing")
+    legacy["clock_continuity"] = {
+        "status": "stable",
+        "uncertain_since_monotonic": None,
+        "recovery_confirmations": 0,
+    }
+    healed = _v2_state_from_document(legacy)
+    assert healed.timing_uncertain_sources == ()

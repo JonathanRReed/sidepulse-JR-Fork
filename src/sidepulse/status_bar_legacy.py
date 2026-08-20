@@ -18278,6 +18278,18 @@ def unseen_completions(snapshot, target) -> list[AgentStatus]:
             continue
         if opened_at is not None and status.updated_at <= opened_at:
             continue
+        # Attended completions were WATCHED, not missed: the same rule
+        # that keeps the sweep quiet keeps the green wing gauge dark --
+        # it read as "a green hue that's always on" during an active
+        # conversation.
+        prompted_at = getattr(target, "_attended_prompt_monotonic", {}).get(
+            status.agent_id
+        )
+        if (
+            prompted_at is not None
+            and time.monotonic() - prompted_at <= ATTENDED_COMPLETION_QUIET_SECONDS
+        ):
+            continue
         unseen.append(status)
     return unseen
 

@@ -1694,6 +1694,8 @@ class VirtualLedView(NSView):
             # LED: a riser that pulses whenever LED 0/7 pulses reads as a
             # blinking corner, not a bookend (same rule as wings-only).
             riser_color = self._bar_identity_color(colors)
+            breath = self._riser_breath()
+            riser_color = (*riser_color[:3], riser_color[3] * breath)
             self._draw_wing_riser(
                 cg_context, riser_color, 0.0, min(WING_RISER_WIDTH, wing_offset), height,
                 outer_on_left=True,
@@ -1844,6 +1846,16 @@ class VirtualLedView(NSView):
     def setMinGlow_(self, fraction):
         self.min_glow = max(0.0, min(1.0, float(fraction)))
 
+    def _riser_breath(self) -> float:
+        """Bookends breathe. Steady uprights read as 'two LEDs that are
+        always on' next to a moving underline; a slow six-second swell
+        makes them part of one living piece. Reduce Motion holds steady."""
+        preferences = getattr(self, "accessibility_display_preferences", None)
+        if preferences is not None and getattr(preferences, "reduce_motion", False):
+            return 1.0
+        phase = (time.monotonic() % 6.0) / 6.0
+        return 0.62 + 0.19 * (1.0 + math.cos(2.0 * math.pi * phase))
+
     def _bar_identity_color(self, colors):
         """ONE color representing the whole strip: the alpha-weighted
         blend of the lit LEDs, at the brightest lit LED's intensity.
@@ -1961,6 +1973,8 @@ class VirtualLedView(NSView):
         # blinking on its own read as "the sides flash and look longer
         # than the rest". The identity blend breathes with the WHOLE bar.
         riser_color = self._bar_identity_color(colors)
+        breath = self._riser_breath()
+        riser_color = (*riser_color[:3], riser_color[3] * breath)
         # Risers at the window's own ends, even with zero wing -- the
         # bracket's uprights must never be able to vanish.
         self._draw_wing_riser(

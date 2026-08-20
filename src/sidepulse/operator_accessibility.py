@@ -28,6 +28,7 @@ from .operator_state import (
     RequestPhase,
     SemanticEventKey,
     TransitionKind,
+    active_work_went_silent,
     semantic_event_key_to_payload,
 )
 from .presentation_policy import (
@@ -69,12 +70,14 @@ MAX_TEXT_SELECTION_COMPONENT: Final = (1 << 63) - 1
 MAX_ANNOUNCED_EVENT_KEYS: Final = 2_000
 
 _PRODUCT_PROVIDER_LABELS: Final = {
+    "antigravity": "Antigravity",
     "claude": "Claude",
     "codex": "Codex",
     "cursor": "Cursor",
     "devin": "Devin",
     "grok": "Grok",
     "hermes": "Hermes",
+    "kiro": "Kiro",
     "openclaw": "OpenClaw",
     "opencode": "OpenCode",
 }
@@ -281,7 +284,12 @@ def status_item_accessibility(
     if stale_holds:
         details.append(f"Stale request held: {stale_holds}")
 
-    active = sum(work.lifecycle is WorkLifecycle.ACTIVE for work in primary_works)
+    now_epoch = state.last_clock.wall_epoch if state.last_clock else None
+    active = sum(
+        work.lifecycle is WorkLifecycle.ACTIVE
+        and not active_work_went_silent(work, now_epoch)
+        for work in primary_works
+    )
     failures = sum(work.lifecycle is WorkLifecycle.FAILED for work in primary_works)
     if active:
         details.append(f"Active: {active}")
@@ -355,7 +363,12 @@ def status_item_title(
     failed = sum(work.lifecycle is WorkLifecycle.FAILED for work in primary_works)
     if failed:
         return "1 failed" if failed == 1 else f"{failed} failed"
-    active = sum(work.lifecycle is WorkLifecycle.ACTIVE for work in primary_works)
+    now_epoch = state.last_clock.wall_epoch if state.last_clock else None
+    active = sum(
+        work.lifecycle is WorkLifecycle.ACTIVE
+        and not active_work_went_silent(work, now_epoch)
+        for work in primary_works
+    )
     if active:
         return f"{active} working"
     headline = _GLANCE_HEADLINES.get(glance.semantic)

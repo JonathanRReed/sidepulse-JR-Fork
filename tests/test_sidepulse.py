@@ -10836,11 +10836,12 @@ class HardeningTests(unittest.TestCase):
 
 
 def _recent_state_iso() -> str:
-    """A fixture timestamp inside the presence horizon, whatever "now" is."""
+    """A fixture timestamp inside EVERY liveness window (presence 1h,
+    active-silence 4min), whatever "now" is."""
     from datetime import datetime, timedelta, timezone
 
     return (
-        datetime.now(timezone.utc) - timedelta(minutes=5)
+        datetime.now(timezone.utc) - timedelta(seconds=60)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -16013,6 +16014,11 @@ class CompletionThroughSnapshotTests(unittest.TestCase):
         self._ingest("hero", "UserPromptSubmit", prompt="finish this")
         self.controller.refresh_(None)
         self._ingest("hero", "Stop", last_assistant_message="All done.")
+        # The owner stepped away: an ATTENDED completion (prompt typed
+        # seconds ago) deliberately never badges or lights the gauge.
+        self.controller._attended_prompt_monotonic = {
+            "claude:session:hero": time.monotonic() - 300.0
+        }
         snapshot = self.controller.monitor.snapshot()
         unseen = self.status_bar.unseen_completions(snapshot, self.controller)
         self.assertIn("claude:session:hero", [s.agent_id for s in unseen])

@@ -50,6 +50,23 @@ TIMING_UNCERTAINTY_LEASE_SECONDS: Final = 3_600.0
 # clock-continuity status, and the menu-bar title's counts. The catalog
 # itself keeps entries until CANONICAL_WORK_RETENTION_SECONDS.
 PRESENCE_HORIZON_SECONDS: Final = 3_600.0
+# ACTIVE means HEARD FROM. Hooks die with the agent's process, so a
+# killed session's work stays lifecycle-ACTIVE forever -- and every
+# surface that read raw lifecycle said "1 working" long after the owner
+# watched it finish. Four minutes of total hook+transcript silence is
+# the line (transcript heartbeats keep long tool runs alive for
+# claude/codex); a WAITING ask is exempt -- waiting on the OWNER is
+# silence by design and must never expire into invisibility.
+ACTIVE_SILENCE_SECONDS: Final = 240.0
+
+
+def active_work_went_silent(work, now_epoch: float | None) -> bool:
+    """True when an ACTIVE work has been unheard past the silence line."""
+    return (
+        work.lifecycle is WorkLifecycle.ACTIVE
+        and now_epoch is not None
+        and now_epoch - work.watermark.occurred_at_epoch > ACTIVE_SILENCE_SECONDS
+    )
 TIMING_RECOVERY_CONFIRMATIONS: Final = 2
 MAX_CANONICAL_WORKS: Final = 1_000
 # A work whose newest event is older than a day is history, not state:

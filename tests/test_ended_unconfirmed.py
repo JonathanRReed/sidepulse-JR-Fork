@@ -91,3 +91,93 @@ def test_replayed_normalized_records_keep_their_own_time() -> None:
     record = parse_log_line("grok", line)
     assert record is not None
     assert abs(record.logged_at.timestamp() - epoch) < 1.0
+
+
+def test_a_silent_active_work_claims_active_nowhere() -> None:
+    """ONE clock for 'working went silent', consumed by every canonical
+    surface: the row layer demoted at its window while the menu-bar
+    title, the mailbox count, and the LIGHTS kept reading raw lifecycle
+    ACTIVE -- 'it says an agent's running even though it's been done for
+    10 minutes.'"""
+    from sidepulse._settings_legacy import AgentMonitorSettings
+    from sidepulse.attention import project_attention_from_operator_state
+    from sidepulse.capacity_types import SourceKey
+    from sidepulse.mailbox import project_canonical_mailbox
+    from sidepulse.operator_state import (
+        ACTIVE_SILENCE_SECONDS,
+        BootIdentifier,
+        ClockSample,
+        active_work_went_silent,
+        empty_operator_state,
+        reduce_operator_state,
+    )
+    from sidepulse.provider_facts import (
+        EventToken,
+        NextActor,
+        ObservationAuthority,
+        ProviderFactBatch,
+        ProviderWatermark,
+        ProviderWorkFact,
+        SourceFreshness,
+        SourceHealth,
+        WatermarkBasis,
+        WorkIdentifier,
+        WorkKey,
+        WorkLifecycle,
+    )
+
+    source = SourceKey("grok", "hooks", "global", "live_agent_events")
+    watermark = ProviderWatermark(
+        source_key=source,
+        basis=WatermarkBasis.PROVIDER_EVENT_ID,
+        occurred_at_epoch=1_800_000_000.0,
+        event_token=EventToken("tok"),
+        sequence=None,
+        tie_break_rank=10,
+    )
+    batch = ProviderFactBatch(
+        source_key=source,
+        observation_authority=ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        source_health=SourceHealth.HEALTHY,
+        source_freshness=SourceFreshness.FRESH,
+        observed_at_epoch=1_800_000_000.0,
+        watermark=watermark,
+        work_facts=(
+            ProviderWorkFact(
+                key=WorkKey(source, WorkIdentifier("session:x")),
+                lifecycle=WorkLifecycle.ACTIVE,
+                watermark=watermark,
+                safe_label="Grok session:x",
+                parent_key=None,
+                next_actor=NextActor.PROVIDER,
+            ),
+        ),
+        request_facts=(),
+        diagnostics=(),
+    )
+    silent_for = ACTIVE_SILENCE_SECONDS + 60.0
+    state = reduce_operator_state(
+        empty_operator_state(),
+        batch,
+        clock=ClockSample(
+            1_800_000_000.0 + silent_for,
+            100.0 + silent_for,
+            BootIdentifier("boot:01"),
+        ),
+    ).state
+    assert state.works[0].lifecycle is WorkLifecycle.ACTIVE  # raw truth kept
+
+    projection = project_attention_from_operator_state(
+        state, (), AgentMonitorSettings()
+    )
+    assert all(
+        row.lifecycle_mode.value != "active" for row in projection.visible_rows
+    ), "the lights must not claim work from a silent session"
+
+    mailbox = project_canonical_mailbox(state)
+    assert mailbox.active_count == 0
+    in_progress = next(
+        section for section in mailbox.sections if section.kind.value == "in_progress"
+    )
+    assert not in_progress.rows
+    assert active_work_went_silent(state.works[0], state.last_clock.wall_epoch)

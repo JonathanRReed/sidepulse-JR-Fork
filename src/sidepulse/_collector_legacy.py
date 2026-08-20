@@ -16,6 +16,14 @@ from typing import Any
 from .boot_identity import boot_identifier_basis
 from .capacity_types import SourceKey
 from .freshness import bounded_age_seconds, is_recent
+from .latest_state_timing import (
+    clock_continuity_from_payload,
+    clock_continuity_to_payload,
+    clock_from_payload,
+    clock_to_payload,
+    source_timing_from_payload,
+    source_timing_payloads,
+)
 from .models import (
     _CODEX_TRANSCRIPT_USAGE_LIMIT_PROVENANCE,
     MODE_PRIORITY,
@@ -27,6 +35,7 @@ from .models import (
     provider_label,
 )
 from .operator_state import (
+    ACTIVE_SILENCE_SECONDS,
     PRESENCE_HORIZON_SECONDS,
     AcknowledgementEligibility,
     BootIdentifier,
@@ -108,9 +117,8 @@ CODEX_SESSION_INDEX_MAX_LINES = 5000
 COMPLETED_VISIBLE_SECONDS = 20 * 60.0
 IDLE_VISIBLE_SECONDS = 0.0
 POST_TOOL_WORKING_VISIBLE_SECONDS = 2 * 60.0
-# A "working" agent whose hooks have been silent this long is a dead one
-# (crashed turn, killed terminal) -- demote instead of pulsing for an hour.
-WORKING_SILENCE_SECONDS = 10 * 60.0
+# one clock for "working went silent" -- see operator_state
+WORKING_SILENCE_SECONDS = ACTIVE_SILENCE_SECONDS
 CODEX_USAGE_LIMIT_TERMINAL_CLASSIFICATIONS = frozenset({"usage_limit_exceeded"})
 LATEST_STATE_MAX_BYTES = 4 * 1_024 * 1_024
 MAX_PENDING_OPERATOR_EVENTS = 2_000
@@ -1313,6 +1321,7 @@ _LATEST_DOCUMENT_FIELDS = frozenset(
         "requests",
         "source_watermarks",
         "timing_uncertain_sources",
+        "source_timing",
         "clock_continuity",
         "last_clock",
         "presentation_hints",
@@ -1361,10 +1370,6 @@ _REQUEST_FIELDS = frozenset(
         "observation_authority",
     }
 )
-_CLOCK_CONTINUITY_FIELDS = frozenset(
-    {"status", "uncertain_since_monotonic", "recovery_confirmations"}
-)
-_CLOCK_FIELDS = frozenset({"wall_epoch", "monotonic_seconds", "boot_id"})
 _PRESENTATION_HINT_FIELDS = frozenset(
     {"key", "mode", "event_name", "updated_at", "source_label"}
 )
@@ -1510,24 +1515,6 @@ def _request_to_payload(request: CanonicalRequestTruth) -> dict[str, object]:
     }
 
 
-def _clock_continuity_to_payload(
-    continuity: ClockContinuityState,
-) -> dict[str, object]:
-    return {
-        "status": continuity.status.value,
-        "uncertain_since_monotonic": continuity.uncertain_since_monotonic,
-        "recovery_confirmations": continuity.recovery_confirmations,
-    }
-
-
-def _clock_to_payload(clock: ClockSample) -> dict[str, object]:
-    return {
-        "wall_epoch": clock.wall_epoch,
-        "monotonic_seconds": clock.monotonic_seconds,
-        "boot_id": clock.boot_id.value,
-    }
-
-
 def _presentation_hint_payloads(
     overlays: Mapping[WorkKey, CanonicalStatusOverlay],
 ) -> list[dict[str, object]]:
@@ -1570,9 +1557,10 @@ def _state_to_document(
             _source_key_to_payload(source)
             for source in state.timing_uncertain_sources
         ],
-        "clock_continuity": _clock_continuity_to_payload(state.clock_continuity),
+        "source_timing": source_timing_payloads(state, _source_key_to_payload),
+        "clock_continuity": clock_continuity_to_payload(state.clock_continuity),
         "last_clock": (
-            None if state.last_clock is None else _clock_to_payload(state.last_clock)
+            None if state.last_clock is None else clock_to_payload(state.last_clock)
         ),
         "presentation_hints": _presentation_hint_payloads(overlays),
     }
@@ -1702,42 +1690,6 @@ def _request_from_payload(payload: object) -> CanonicalRequestTruth:
     )
 
 
-def _clock_continuity_from_payload(payload: object) -> ClockContinuityState:
-    if not _has_exact_fields(payload, _CLOCK_CONTINUITY_FIELDS):
-        raise ValueError("invalid clock continuity")
-    since = payload["uncertain_since_monotonic"]
-    confirmations = payload["recovery_confirmations"]
-    if not (
-        type(payload["status"]) is str
-        and (since is None or type(since) in {int, float})
-        and type(confirmations) is int
-    ):
-        raise ValueError("invalid clock continuity")
-    return ClockContinuityState(
-        ClockContinuityStatus(payload["status"]),
-        since,
-        confirmations,
-    )
-
-
-def _clock_from_payload(payload: object) -> ClockSample | None:
-    if payload is None:
-        return None
-    if not _has_exact_fields(payload, _CLOCK_FIELDS):
-        raise ValueError("invalid clock sample")
-    if not (
-        type(payload["wall_epoch"]) in {int, float}
-        and type(payload["monotonic_seconds"]) in {int, float}
-        and type(payload["boot_id"]) is str
-    ):
-        raise ValueError("invalid clock sample")
-    return ClockSample(
-        payload["wall_epoch"],
-        payload["monotonic_seconds"],
-        BootIdentifier(payload["boot_id"]),
-    )
-
-
 def _presentation_overlays_from_document(
     document: object,
 ) -> dict[WorkKey, CanonicalStatusOverlay]:
@@ -1785,7 +1737,11 @@ def _presentation_overlays_from_document(
 
 
 def _v2_state_from_document(document: object) -> CanonicalOperatorState:
-    if not _has_exact_fields(document, _LATEST_DOCUMENT_FIELDS):
+    # source_timing is OPTIONAL (older documents must restore)
+    if not (
+        _has_exact_fields(document, _LATEST_DOCUMENT_FIELDS)
+        or _has_exact_fields(document, _LATEST_DOCUMENT_FIELDS - {"source_timing"})
+    ):
         raise ValueError("invalid latest-state document")
     if type(document["version"]) is not int or document["version"] != 2:
         raise _UnsupportedLatestState
@@ -1814,6 +1770,17 @@ def _v2_state_from_document(document: object) -> CanonicalOperatorState:
     uncertain = tuple(_source_key_from_payload(item) for item in uncertain_payload)
     if any(item is None for item in watermarks) or any(item is None for item in uncertain):
         raise ValueError("invalid latest-state document")
+    continuity = clock_continuity_from_payload(document["clock_continuity"])
+    source_timing = source_timing_from_payload(
+        document.get("source_timing"), _source_key_from_payload
+    )
+    if (
+        not source_timing
+        and uncertain
+        and continuity.uncertain_since_monotonic is None
+    ):
+        # heal the broken-window shape: see latest_state_timing
+        uncertain = ()
     state = CanonicalOperatorState(
         schema_version=1,
         generation=document["generation"],
@@ -1823,8 +1790,9 @@ def _v2_state_from_document(document: object) -> CanonicalOperatorState:
             (watermark.source_key, watermark) for watermark in watermarks
         ),
         timing_uncertain_sources=uncertain,
-        clock_continuity=_clock_continuity_from_payload(document["clock_continuity"]),
-        last_clock=_clock_from_payload(document["last_clock"]),
+        _source_timing=source_timing,
+        clock_continuity=continuity,
+        last_clock=clock_from_payload(document["last_clock"]),
     )
     request_keys_by_work: dict[WorkKey, list[RequestKey]] = {}
     for request in state.requests:

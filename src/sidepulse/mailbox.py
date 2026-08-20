@@ -12,6 +12,7 @@ from enum import Enum
 from .attention import AttentionProjection, LifecycleMode, ProjectedAgentRow
 from .models import AgentMode, AgentStatus
 from .operator_state import (
+    ACTIVE_SILENCE_SECONDS,
     PRESENCE_HORIZON_SECONDS,
     CanonicalOperatorState,
     CanonicalRequestTruth,
@@ -459,6 +460,15 @@ def _canonical_section_for(
         return MailboxSectionKind.RECENT
     if row.actionable:
         return MailboxSectionKind.NEEDS_YOU
+    # ACTIVE means HEARD FROM: a silent-past-the-line work is not "In
+    # Progress" and must not count active. WAITING stays -- waiting on
+    # the owner is silence by design.
+    if (
+        row.lifecycle is WorkLifecycle.ACTIVE
+        and now_epoch is not None
+        and now_epoch - row.updated_at_epoch > ACTIVE_SILENCE_SECONDS
+    ):
+        return MailboxSectionKind.RECENT
     if row.lifecycle in {WorkLifecycle.ACTIVE, WorkLifecycle.WAITING}:
         return MailboxSectionKind.IN_PROGRESS
     if row.lifecycle in {WorkLifecycle.COMPLETED, WorkLifecycle.FAILED}:
