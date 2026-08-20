@@ -306,6 +306,7 @@ INTERRUPT_COURTESY = "courtesy"
 INTERRUPT_ASK = "ask"
 INTERRUPT_FAILURE = "failure"
 INTERRUPT_ESCALATION = "escalation"
+INTERRUPT_TIMEBOX = "timebox"
 
 # The one table that says which rung a signal sits on. A kind with no
 # entry here is REFUSED: a signal added later that forgets to declare
@@ -321,6 +322,9 @@ INTERRUPT_CLASS_BY_KIND: dict[str, str] = {
     SIGNAL_COMPLETION: INTERRUPT_COURTESY,
     SIGNAL_CALENDAR: INTERRUPT_COURTESY,
     SIGNAL_REMINDERS: INTERRUPT_COURTESY,
+    # The timebox chime used to be the one raw NSSound outside this
+    # table -- the only sound the budget could not hush during a Focus.
+    INTERRUPT_TIMEBOX: INTERRUPT_COURTESY,
 }
 
 # Quiet Hour is the owner's own manual snooze and predates this budget.

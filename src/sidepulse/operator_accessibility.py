@@ -21,6 +21,7 @@ from .agent_browser import AgentBrowserDocument
 from .mailbox import MailboxRow
 from .navigation_policy import OperatorActionDescriptor
 from .operator_state import (
+    PRESENCE_HORIZON_SECONDS,
     CanonicalOperatorEvent,
     CanonicalOperatorState,
     InterruptionClass,
@@ -36,6 +37,27 @@ from .presentation_policy import (
     ResolvedGlance,
 )
 from .provider_facts import SourceFreshness, WorkKey, WorkLifecycle
+
+
+def _present_primary_works(state: CanonicalOperatorState) -> tuple:
+    """Primary works heard within the presence horizon.
+
+    Counts built from raw lifecycle said "1 working" in the menu bar for
+    a session dead for 21 hours, while the Agent Browser beside it
+    already called the same work stale. Presence, not history, is what a
+    count in shared menu-bar space may claim.
+    """
+    clock = state.last_clock
+    if clock is None:
+        return tuple(work for work in state.works if work.parent_key is None)
+    horizon = clock.wall_epoch - PRESENCE_HORIZON_SECONDS
+    return tuple(
+        work
+        for work in state.works
+        if work.parent_key is None
+        and work.watermark.occurred_at_epoch >= horizon
+    )
+
 
 MAX_ACCESSIBILITY_LABEL_LENGTH: Final = 256
 MAX_ACCESSIBILITY_VALUE_LENGTH: Final = 512
@@ -242,8 +264,8 @@ def status_item_accessibility(
     # this line read "Active: 34" with one main agent running. A worker
     # also never asks for the user, so its requests are not "requests
     # need you" either.
-    primary_work_keys = frozenset(work.key for work in state.works if work.parent_key is None)
-    primary_works = tuple(work for work in state.works if work.parent_key is None)
+    primary_works = _present_primary_works(state)
+    primary_work_keys = frozenset(work.key for work in primary_works)
     primary_requests = tuple(
         request for request in state.requests if request.key.work_key in primary_work_keys
     )
@@ -321,7 +343,8 @@ def status_item_title(
     """
     if type(state) is not CanonicalOperatorState or type(glance) is not ResolvedGlance:
         return ""
-    primary_keys = frozenset(work.key for work in state.works if work.parent_key is None)
+    primary_works = _present_primary_works(state)
+    primary_keys = frozenset(work.key for work in primary_works)
     needs_you = sum(
         request.phase is RequestPhase.LIVE_UNACKNOWLEDGED
         for request in state.requests
@@ -329,7 +352,6 @@ def status_item_title(
     )
     if needs_you:
         return "1 needs you" if needs_you == 1 else f"{needs_you} need you"
-    primary_works = tuple(work for work in state.works if work.parent_key is None)
     failed = sum(work.lifecycle is WorkLifecycle.FAILED for work in primary_works)
     if failed:
         return "1 failed" if failed == 1 else f"{failed} failed"

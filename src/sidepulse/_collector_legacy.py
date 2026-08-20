@@ -13,6 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from .boot_identity import boot_identifier_basis
 from .capacity_types import SourceKey
 from .freshness import bounded_age_seconds, is_recent
 from .models import (
@@ -26,6 +27,7 @@ from .models import (
     provider_label,
 )
 from .operator_state import (
+    PRESENCE_HORIZON_SECONDS,
     AcknowledgementEligibility,
     BootIdentifier,
     CanonicalOperatorEvent,
@@ -112,16 +114,8 @@ WORKING_SILENCE_SECONDS = 10 * 60.0
 CODEX_USAGE_LIMIT_TERMINAL_CLASSIFICATIONS = frozenset({"usage_limit_exceeded"})
 LATEST_STATE_MAX_BYTES = 4 * 1_024 * 1_024
 MAX_PENDING_OPERATOR_EVENTS = 2_000
-_BOOT_EPOCH_BUCKET_SECONDS = 10
 _LOCAL_BOOT_IDENTIFIER = BootIdentifier(
-    hashlib.sha256(
-        str(
-            int(
-                (time.time() - time.monotonic())
-                // _BOOT_EPOCH_BUCKET_SECONDS
-            )
-        ).encode("ascii")
-    ).hexdigest()
+    hashlib.sha256(boot_identifier_basis().encode("utf-8")).hexdigest()
 )
 
 
@@ -364,12 +358,12 @@ def _snapshot_from_operator_state(
                 status
                 for status in supplemental_statuses
                 if (
-                    (projected := projected_by_agent_id.get(status.agent_id)) is None
-                    or status.priority < projected.priority
+                    (existing := projected_by_agent_id.get(status.agent_id)) is None
+                    or status.priority < existing.priority
                     or (
-                        status.updated_at > projected.updated_at
+                        status.updated_at > existing.updated_at
                         and (
-                            status.priority <= projected.priority
+                            status.priority <= existing.priority
                             or status.event_name == "Notification"
                         )
                     )
@@ -377,9 +371,13 @@ def _snapshot_from_operator_state(
             ),
         )
     )
+    # Hour-silent rows are history, not presence.
+    presence_horizon = max(PRESENCE_HORIZON_SECONDS, float(stale_after_seconds or 0.0))
     fresh: list[AgentStatus] = []
     stale: list[AgentStatus] = []
     for status in merged:
+        if bounded_age_seconds(collected_at, status.updated_at) > presence_horizon:
+            continue
         effective = status_for_snapshot(
             status,
             collected_at,
@@ -923,6 +921,8 @@ class AgentMonitor:
         return records
 
     def is_stale_status(self, status: AgentStatus, now: datetime) -> bool:
+        if status.stale:  # facade rule: self-marked stays stale
+            return True
         age = bounded_age_seconds(now, status.updated_at)
         if status.mode == AgentMode.COMPLETED and self.completed_visible_seconds >= 0:
             return age > self.completed_visible_seconds
@@ -1169,14 +1169,17 @@ class LiveAgentMonitor:
             events = self._pending_operator_events
             self._pending_operator_events = ()
             health = self.restore_health
+            # copy under the lock (ingest_record mutates these)
+            overlays = MappingProxyType(dict(self._status_overlays_by_work_key))
+            supplemental = tuple(self._compatibility_statuses_by_agent_id.values())
         return _snapshot_from_operator_state(
             state,
             events=events,
             sources=self.sources,
             collected_at=now,
             restore_health=health,
-            status_overlays=MappingProxyType(dict(self._status_overlays_by_work_key)),
-            supplemental_statuses=tuple(self._compatibility_statuses_by_agent_id.values()),
+            status_overlays=overlays,
+            supplemental_statuses=supplemental,
             stale_after_seconds=self.stale_after_seconds,
             tool_running_timeout_seconds=self.tool_running_timeout_seconds,
             completed_visible_seconds=self.completed_visible_seconds,
@@ -1239,6 +1242,7 @@ class LiveAgentMonitor:
         with self.lock:
             state = self.operator_state
             overlays = MappingProxyType(dict(self._status_overlays_by_work_key))
+            supplemental = tuple(self._compatibility_statuses_by_agent_id.values())
         snapshot = _snapshot_from_operator_state(
             state,
             events=(),
@@ -1246,7 +1250,7 @@ class LiveAgentMonitor:
             collected_at=_canonical_datetime(self._clock_sampler().wall_epoch),
             restore_health=self.restore_health,
             status_overlays=overlays,
-            supplemental_statuses=tuple(self._compatibility_statuses_by_agent_id.values()),
+            supplemental_statuses=supplemental,
             stale_after_seconds=self.stale_after_seconds,
             tool_running_timeout_seconds=self.tool_running_timeout_seconds,
             completed_visible_seconds=self.completed_visible_seconds,
@@ -2028,11 +2032,6 @@ def unique_sources(sources: Iterable[SourceSpec]) -> tuple[SourceSpec, ...]:
     return tuple(result)
 
 
-def iter_codex_transcript_records(root: Path) -> Iterable[HookEvent]:
-    for path in recent_transcript_files(root):
-        yield from iter_codex_transcript_file(path)
-
-
 def recent_transcript_files(
     root: Path,
     *,
@@ -2261,11 +2260,6 @@ def codex_usage_limit_terminal(payload: Mapping[str, Any]) -> bool:
         _string_or_none(error.get(field)) in CODEX_USAGE_LIMIT_TERMINAL_CLASSIFICATIONS
         for field in ("code", "message")
     )
-
-
-def iter_claude_transcript_records(root: Path) -> Iterable[HookEvent]:
-    for path in recent_transcript_files(root, limit=CLAUDE_TRANSCRIPT_MAX_FILES):
-        yield from iter_claude_transcript_file(path)
 
 
 def iter_claude_transcript_file(path: Path) -> Iterable[HookEvent]:
@@ -2635,7 +2629,7 @@ def mode_for_event(record: HookEvent) -> AgentMode | None:
 
 def explicit_mode_for_record(record: HookEvent) -> AgentMode | None:
     raw = record.raw
-    for key in ("sidepulse_status", "sidepulse_mode", "sidepulse_status", "sidepulse_mode"):
+    for key in ("sidepulse_status", "sidepulse_mode"):
         mode = explicit_mode_from_value(raw.get(key))
         if mode is not None:
             return mode
@@ -2764,7 +2758,7 @@ def aggregate_status(
     )
 
 
-def _status_merge_key(status: AgentStatus) -> tuple[datetime, bool, bool, str]:
+def _status_merge_key(status: AgentStatus) -> tuple[int, datetime, bool, bool, str]:
     return (
         -status.priority,
         status.updated_at,

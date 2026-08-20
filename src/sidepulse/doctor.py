@@ -39,9 +39,10 @@ from .status_bar_launch import launch_agent_path
 from .trusted_tools import trusted_system_tool
 
 DOCTOR_DOCUMENT: Final = "sidepulse-doctor"
-# 2: adds alcove_follow_state. The document gained a row, so anything
-# holding a v1 export is reading a different shape -- version it rather
-# than let a consumer silently miss a check that is now reported.
+# 2: adds alcove_follow_state; 3: adds event_intake_freshness. The
+# document gains rows, so anything holding an older export is reading a
+# different shape -- version it rather than let a consumer silently miss
+# a check that is now reported.
 DOCTOR_VERSION: Final = 3
 MAX_DOCTOR_EXPORT_BYTES: Final = 64 * 1024
 PUBLIC_COLLECTION_ERROR_MESSAGE: Final = "Diagnostics could not be collected."

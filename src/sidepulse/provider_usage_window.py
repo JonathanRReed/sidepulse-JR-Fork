@@ -6,7 +6,6 @@ import time
 
 from AppKit import (
     NSApp,
-    NSApplicationActivateIgnoringOtherApps,
     NSBackingStoreBuffered,
     NSFont,
     NSScrollView,
@@ -85,7 +84,12 @@ class ProviderUsageWindowController:
         try:
             NSApp.activateIgnoringOtherApps_(True)
         except Exception:
-            NSApp.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+            # activateWithOptions: lives on NSRunningApplication, not
+            # NSApplication -- the modern NSApplication API is activate().
+            try:
+                NSApp.activate()
+            except Exception:
+                pass
 
     def close(self) -> None:
         self.window.orderOut_(None)

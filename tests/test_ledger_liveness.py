@@ -235,8 +235,12 @@ def _quarantined():
     jumped = reduce_operator_state(
         state,
         _hook_batch("event:002", epoch=1_800_000_001.0),
-        # Wall clock leaps an hour while monotonic advances one second.
-        clock=ClockSample(1_800_003_701.0, 101.0, BootIdentifier("boot:01")),
+        # Monotonic leaps an hour while the wall advances one second: the
+        # wall clock stepped BACKWARDS relative to the machine's own
+        # timeline. (A forward wall gap is ordinary sleep now -- macOS
+        # monotonic time pauses while the lid is closed -- and must stay
+        # continuous, so it can no longer enter the quarantine here.)
+        clock=ClockSample(1_800_000_101.0, 3_701.0, BootIdentifier("boot:01")),
     )
     assert jumped.state.clock_continuity.status is ClockContinuityStatus.UNCERTAIN
     return jumped.state
@@ -254,7 +258,7 @@ def test_a_routine_partial_batch_no_longer_erases_earned_confirmations() -> None
     clean_one = reduce_operator_state(
         state,
         _hook_batch("event:003", epoch=1_800_000_002.0),
-        clock=_clock(102.0, wall=1_800_003_600.0),
+        clock=_clock(3_702.0, wall=1_799_996_400.0),
     ).state
     assert clean_one.clock_continuity.status is ClockContinuityStatus.UNCERTAIN
 
@@ -266,13 +270,13 @@ def test_a_routine_partial_batch_no_longer_erases_earned_confirmations() -> None
             freshness=SourceFreshness.PARTIAL,
             health=SourceHealth.PARTIAL,
         ),
-        clock=_clock(103.0, wall=1_800_003_600.0),
+        clock=_clock(3_703.0, wall=1_799_996_400.0),
     ).state
 
     clean_two = reduce_operator_state(
         partial,
         _hook_batch("event:005", epoch=1_800_000_004.0),
-        clock=_clock(104.0, wall=1_800_003_600.0),
+        clock=_clock(3_704.0, wall=1_799_996_400.0),
     ).state
 
     assert clean_two.clock_continuity.status is ClockContinuityStatus.STABLE
@@ -290,7 +294,7 @@ def test_lifecycle_updates_are_applied_again_once_the_source_is_out() -> None:
     state = reduce_operator_state(
         state,
         _hook_batch("event:006", epoch=1_800_000_006.0),
-        clock=_clock(102.0, wall=1_800_003_600.0),
+        clock=_clock(3_702.0, wall=1_799_996_400.0),
     ).state
     state = reduce_operator_state(
         state,
@@ -300,10 +304,10 @@ def test_lifecycle_updates_are_applied_again_once_the_source_is_out() -> None:
             freshness=SourceFreshness.PARTIAL,
             health=SourceHealth.PARTIAL,
         ),
-        clock=_clock(103.0, wall=1_800_003_600.0),
+        clock=_clock(3_703.0, wall=1_799_996_400.0),
     ).state
 
-    closing = _hook_batch("event:100", epoch=1_800_000_500.0)
+    closing = _hook_batch("event:100", epoch=1_800_000_050.0)
     closed = reduce_operator_state(
         state,
         ProviderFactBatch(
@@ -326,7 +330,7 @@ def test_lifecycle_updates_are_applied_again_once_the_source_is_out() -> None:
             request_facts=(),
             diagnostics=(),
         ),
-        clock=_clock(104.0, wall=1_800_003_600.0),
+        clock=_clock(3_704.0, wall=1_799_996_400.0),
     ).state
 
     assert closed.works[0].lifecycle is WorkLifecycle.COMPLETED
@@ -345,8 +349,8 @@ def test_the_quarantine_expires_on_a_clock_that_stayed_continuous() -> None:
         state,
         _hook_batch("event:200", epoch=1_800_000_010.0),
         clock=_clock(
-            101.0 + TIMING_UNCERTAINTY_LEASE_SECONDS,
-            wall=1_800_003_600.0,
+            3_701.0 + TIMING_UNCERTAINTY_LEASE_SECONDS,
+            wall=1_799_996_400.0,
         ),
     )
 
@@ -372,8 +376,8 @@ def test_a_source_still_losing_is_not_released_by_the_lease() -> None:
             health=SourceHealth.UNAVAILABLE,
         ),
         clock=_clock(
-            101.0 + 2 * TIMING_UNCERTAINTY_LEASE_SECONDS,
-            wall=1_800_003_600.0,
+            3_701.0 + 2 * TIMING_UNCERTAINTY_LEASE_SECONDS,
+            wall=1_799_996_400.0,
         ),
     )
 

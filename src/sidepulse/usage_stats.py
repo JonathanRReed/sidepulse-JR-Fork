@@ -37,7 +37,7 @@ import os
 import secrets
 import stat
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 
@@ -1705,13 +1705,17 @@ def _scan_inventory_usage(
     )
     if rate_candidates:
         totals.codex_rate_limit_evidence = max(rate_candidates, key=lambda item: item[0])[1]
-    _LATEST_CODEX_RATE_LIMITS.clear()
     codex_source = next(
         (source for source in inventory.sources if source.provider_id == "codex"),
         None,
     )
+    # Rebind, never clear-then-repopulate: the UI thread reads this global
+    # between scans, and the gap after clear() showed it an empty table.
+    latest: dict[str, tuple[dict, ...]] = {}
     if codex_source is not None and codex_source.root_key is not None:
-        _LATEST_CODEX_RATE_LIMITS[codex_source.root_key] = totals.codex_rate_limit_evidence
+        latest[codex_source.root_key] = totals.codex_rate_limit_evidence
+    global _LATEST_CODEX_RATE_LIMITS
+    _LATEST_CODEX_RATE_LIMITS = latest
     return totals
 
 
@@ -2033,7 +2037,7 @@ def daily_buckets(records, days: int = 7, *, now: datetime | None = None):
     time (the CodexBar rule: a 23:30 UTC session lands in YOUR day)."""
     current = now or datetime.now()
     day_keys = [
-        (current - __import__("datetime").timedelta(days=offset)).date().isoformat()
+        (current - timedelta(days=offset)).date().isoformat()
         for offset in range(days - 1, -1, -1)
     ]
     buckets = {

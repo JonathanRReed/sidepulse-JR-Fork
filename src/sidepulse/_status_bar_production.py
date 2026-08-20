@@ -419,8 +419,8 @@ else:
             except (TypeError, ValueError):
                 escalation_stage = 0
             urgent = bool(
-                getattr(attention, "requests", ())
-                or getattr(attention, "failures", ())
+                getattr(attention, "actionable_attention", ())
+                or getattr(attention, "transient_signals", ())
                 or escalation_stage > 0
             )
             return self._core_state_store().observe(

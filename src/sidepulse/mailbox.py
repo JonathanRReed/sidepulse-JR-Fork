@@ -11,7 +11,12 @@ from enum import Enum
 
 from .attention import AttentionProjection, LifecycleMode, ProjectedAgentRow
 from .models import AgentMode, AgentStatus
-from .operator_state import CanonicalOperatorState, CanonicalRequestTruth, RequestPhase
+from .operator_state import (
+    PRESENCE_HORIZON_SECONDS,
+    CanonicalOperatorState,
+    CanonicalRequestTruth,
+    RequestPhase,
+)
 from .provider_facts import (
     NextActor,
     RequestKey,
@@ -359,7 +364,9 @@ def project_canonical_mailbox(
             stable_order=order_by_key[work.key],
             timing_uncertain=any(member.timing_uncertain for member in family),
         )
-        section = _canonical_section_for(row)
+        section = _canonical_section_for(
+            row, now_epoch=state.last_clock.wall_epoch if state.last_clock else None
+        )
         candidate_sections[work.key] = section
         candidate_epochs[work.key] = updated_at_epoch
         section_rows[section].append(row)
@@ -438,7 +445,18 @@ def _canonical_candidate_epoch(work, requests: tuple[CanonicalRequestTruth, ...]
     return min(actionable_epochs, default=work.watermark.occurred_at_epoch)
 
 
-def _canonical_section_for(row: MailboxRow) -> MailboxSectionKind:
+def _canonical_section_for(
+    row: MailboxRow, *, now_epoch: float | None = None
+) -> MailboxSectionKind:
+    # Presence horizon: a family heard NOTHING for an hour is history.
+    # Without this gate an hour-dead ACTIVE work sat "In Progress" (and
+    # counted active) until 24h retention -- while the Agent Browser
+    # beside it already called the same work stale.
+    if (
+        now_epoch is not None
+        and now_epoch - row.updated_at_epoch > PRESENCE_HORIZON_SECONDS
+    ):
+        return MailboxSectionKind.RECENT
     if row.actionable:
         return MailboxSectionKind.NEEDS_YOU
     if row.lifecycle in {WorkLifecycle.ACTIVE, WorkLifecycle.WAITING}:

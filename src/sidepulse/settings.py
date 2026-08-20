@@ -230,6 +230,7 @@ _OWNED_COLLECTION_PATHS = frozenset(
         "focus_signal_policy",
         "focus_dim_rules",
         "session_open_preferences",
+        "timebox_shortcuts",
     }
 )
 
@@ -267,6 +268,9 @@ def _merge_unknown_fields(
             _merge_unknown_fields(
                 source_by_id.get(item.get("id")) if isinstance(item, dict) else None,
                 item,
+                # A prefix no owned path starts with: a device-entry field
+                # must never alias a top-level owned collection name.
+                path="devices[]",
             )
             for item in encoded
         ]

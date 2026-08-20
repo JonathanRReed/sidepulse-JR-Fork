@@ -10,12 +10,12 @@ _ORIGINAL_WRITE_LED_PROGRAM = _legacy.write_led_program
 
 
 def _led_count_for_target(target: Path) -> int:
-    normalized = "".join(
-        character
-        for character in target.parent.name.lower()
-        if character.isalnum()
-    )
-    return 2 if "sidepulsedot" in normalized else 8
+    # One classification, not two: delegate to led_status's table-driven
+    # rule so the write path can never disagree with the display path.
+    # (Function-level import: _led_status_legacy imports this module.)
+    from .led_status import led_count_for_target
+
+    return led_count_for_target(target)
 
 
 def write_led_program(

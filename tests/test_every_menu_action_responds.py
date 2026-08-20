@@ -176,12 +176,41 @@ def test_sampler_serves_frames_from_one_batched_engine_call() -> None:
         "repeat"
     )
     assert raw.parse(program, 1000).ok
-    pixels = sampler._pixels_for(Counting(), 1.0, 0.033)
+    # The production cadence: GENTLE_MOTION_FPS accumulates a FLOAT
+    # interval (1/30s), while batch stamps once stepped by the rounded
+    # integer millisecond interval -- a ~1/3ms-per-frame drift that blew
+    # the +/-1ms gate and silently discarded most of every batch.
+    interval = 1.0 / 30.0
+    sampled_at = 1.0
+    pixels = sampler._pixels_for(Counting(), sampled_at, interval)
     assert pixels is not None and len(pixels) == 8
     # 23 more frames ride the same engine call.
-    for k in range(1, 24):
-        served = sampler._pixels_for(Counting(), 1.0 + k * 0.033, 0.033)
+    for _ in range(1, 24):
+        sampled_at += interval
+        served = sampler._pixels_for(Counting(), sampled_at, interval)
         assert served is not None
-    assert calls["batch"] >= 1
+    assert calls["batch"] == 1, "a served batch must not be re-rendered"
     assert calls["step"] == 0
     sampler.close(timeout_seconds=2.0)
+
+
+def test_every_hook_provider_has_install_and_uninstall_actions(request):
+    """Settings and Setup build install/uninstall buttons for EVERY entry
+    in HOOK_PROVIDERS via f"install{Provider}Hooks:" -- a provider added
+    without its controller IBActions ships dead buttons (opencode,
+    antigravity, and kiro did exactly that)."""
+    case = SimpleNamespace(
+        addCleanup=lambda fn, *a, **k: request.addfinalizer(lambda: fn(*a, **k)),
+    )
+    isolate_controller(case)
+    controller = case.controller
+
+    from sidepulse.providers import HOOK_PROVIDERS
+
+    dead: list[str] = []
+    for provider in HOOK_PROVIDERS:
+        for prefix in ("install", "uninstall"):
+            method = f"{prefix}{provider.title()}Hooks_"
+            if not callable(getattr(controller, method, None)):
+                dead.append(method)
+    assert dead == [], f"hook buttons with no action: {dead}"

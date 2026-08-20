@@ -27,7 +27,6 @@ from .private_io import (
     atomic_private_write,
     enforce_retention,
     ensure_private_directory,
-    ensure_private_file,
     read_private_bytes,
     read_private_bytes_with_identity,
     read_private_text,
@@ -1391,7 +1390,12 @@ def uninstall_kiro_hooks(
 ) -> InstallResult:
     config = config_path or default_kiro_agent_config_path()
     target_log = (log_path or detect_log_path("kiro")).expanduser()
-    original = config.read_text() if config.exists() else ""
+    try:
+        original = config.read_text() if config.exists() else ""
+    except OSError:
+        # Unreadable is "not provably ours": refuse to touch it rather
+        # than crash the uninstall sweep.
+        original = ""
     managed = False
     if original:
         try:
@@ -2367,13 +2371,6 @@ def grok_hook_entry(event_name: str, command: str) -> dict[str, Any]:
     return entry
 
 
-def hook_pythonpath_assignment() -> str:
-    package_root = Path(__file__).resolve().parents[1]
-    if not package_root.exists():
-        return ""
-    return f"PYTHONPATH={shlex.quote(str(package_root))} "
-
-
 def codex_hook_block(
     log_path: Path,
     python_executable: str | None = None,
@@ -2773,10 +2770,6 @@ def backup_file(path: Path) -> Path | None:
         ),
     )
     return backup
-
-
-def _ensure_hook_log(path: Path) -> None:
-    ensure_private_file(path)
 
 
 def _private_config_write(path: Path, text: str) -> None:

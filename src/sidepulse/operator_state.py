@@ -44,6 +44,12 @@ from .provider_facts import (
 
 MAX_CLOCK_DELTA_DIVERGENCE_SECONDS: Final = 5.0
 TIMING_UNCERTAINTY_LEASE_SECONDS: Final = 3_600.0
+# The presence horizon: something heard NOTHING for this long is history,
+# not presence. It gates what the snapshot surfaces (menu rows, counts,
+# LEDs, Screen Bar), which sources ELECT the globally-reported
+# clock-continuity status, and the menu-bar title's counts. The catalog
+# itself keeps entries until CANONICAL_WORK_RETENTION_SECONDS.
+PRESENCE_HORIZON_SECONDS: Final = 3_600.0
 TIMING_RECOVERY_CONFIRMATIONS: Final = 2
 MAX_CANONICAL_WORKS: Final = 1_000
 # A work whose newest event is older than a day is history, not state:
@@ -701,10 +707,17 @@ def _clock_discontinuous(previous: ClockSample | None, current: ClockSample) -> 
         return True
     monotonic_delta = current.monotonic_seconds - previous.monotonic_seconds
     wall_delta = current.wall_epoch - previous.wall_epoch
+    # Wall AHEAD of monotonic is SLEEP, not distrust: macOS monotonic time
+    # pauses while the machine sleeps, so every nap over the tolerance used
+    # to read as a "discontinuity" and quarantined every source on wake.
+    # The wall clock is exactly as trustworthy after a nap as before it.
+    # Only backwards motion -- either clock running in reverse, or the wall
+    # falling BEHIND monotonic (a wall clock stepped backwards) -- is
+    # evidence the wall clock cannot be trusted for ordering.
     return (
         monotonic_delta < 0.0
         or wall_delta < 0.0
-        or abs(wall_delta - monotonic_delta) > MAX_CLOCK_DELTA_DIVERGENCE_SECONDS
+        or (monotonic_delta - wall_delta) > MAX_CLOCK_DELTA_DIVERGENCE_SECONDS
     )
 
 
@@ -822,8 +835,24 @@ def _continuity_from_source_timing(
     source_timing: dict[SourceKey, _SourceTimingState],
     *,
     stable_confirmations: int = 0,
+    live_sources: frozenset[SourceKey] | None = None,
 ) -> ClockContinuityState:
-    if not source_timing:
+    # The GLOBAL report is elected only by sources that can still speak.
+    # A quiescent source's timing entry (a dead session's) keeps its
+    # per-source gating but must not pin the whole system "uncertain,
+    # 0 confirmations" for the full hour lease after every wake -- live
+    # sources recover in two batches and their entries are deleted, so
+    # the old max() only ever surfaced the dead sources' zeros.
+    driving = (
+        source_timing
+        if live_sources is None
+        else {
+            source: entry
+            for source, entry in source_timing.items()
+            if source in live_sources
+        }
+    )
+    if not driving:
         return ClockContinuityState(
             ClockContinuityStatus.STABLE,
             None,
@@ -831,8 +860,8 @@ def _continuity_from_source_timing(
         )
     return ClockContinuityState(
         ClockContinuityStatus.UNCERTAIN,
-        min(item.uncertain_since_monotonic for item in source_timing.values()),
-        max(item.recovery_confirmations for item in source_timing.values()),
+        min(item.uncertain_since_monotonic for item in driving.values()),
+        max(item.recovery_confirmations for item in driving.values()),
     )
 
 
@@ -843,6 +872,7 @@ def _continuity_decision(
     metadata_allowed: bool,
     clock_quarantine: bool,
     stable_confirmations: int = 0,
+    live_sources: frozenset[SourceKey] | None = None,
 ) -> _ContinuityDecision:
     ordered_timing = tuple(
         source_timing[source]
@@ -852,6 +882,7 @@ def _continuity_decision(
         continuity=_continuity_from_source_timing(
             source_timing,
             stable_confirmations=stable_confirmations,
+            live_sources=live_sources,
         ),
         uncertain_sources=frozenset(source_timing),
         source_timing=ordered_timing,
@@ -869,6 +900,12 @@ def _determine_continuity(
     diagnostics: dict[str, int],
 ) -> _ContinuityDecision:
     source_timing = {item.source_key: item for item in previous._source_timing}
+    live_sources = frozenset(
+        source
+        for source, watermark in previous.source_watermarks
+        if clock.wall_epoch - watermark.occurred_at_epoch
+        <= PRESENCE_HORIZON_SECONDS
+    ) | {batch.source_key}
 
     if _clock_discontinuous(previous.last_clock, clock):
         affected = _known_sources(previous) | {batch.source_key}
@@ -879,6 +916,7 @@ def _determine_continuity(
         diagnostics["clock_discontinuity"] = 1
         return _continuity_decision(
             source_timing,
+            live_sources=live_sources,
             semantic_allowed=False,
             metadata_allowed=False,
             clock_quarantine=True,
@@ -893,6 +931,7 @@ def _determine_continuity(
         diagnostics["future_fact_quarantined"] = 1
         return _continuity_decision(
             source_timing,
+            live_sources=live_sources,
             semantic_allowed=False,
             metadata_allowed=False,
             clock_quarantine=True,
@@ -930,6 +969,7 @@ def _determine_continuity(
             )
         return _continuity_decision(
             source_timing,
+            live_sources=live_sources,
             semantic_allowed=True,
             metadata_allowed=True,
             clock_quarantine=False,
@@ -955,6 +995,7 @@ def _determine_continuity(
     if _restored(batch):
         return _continuity_decision(
             source_timing,
+            live_sources=live_sources,
             semantic_allowed=True,
             metadata_allowed=True,
             clock_quarantine=False,
@@ -965,6 +1006,7 @@ def _determine_continuity(
         # releases one on the strength of a healthy, fresh, direct observation.
         return _continuity_decision(
             source_timing,
+            live_sources=live_sources,
             semantic_allowed=False,
             metadata_allowed=True,
             clock_quarantine=False,
@@ -974,6 +1016,7 @@ def _determine_continuity(
         diagnostics["timing_quarantine_lease_expired"] = 1
         return _continuity_decision(
             source_timing,
+            live_sources=live_sources,
             semantic_allowed=True,
             metadata_allowed=True,
             clock_quarantine=False,
@@ -984,6 +1027,7 @@ def _determine_continuity(
     if not _recovery_eligible(batch, retained_watermark):
         return _continuity_decision(
             source_timing,
+            live_sources=live_sources,
             semantic_allowed=False,
             metadata_allowed=False,
             clock_quarantine=False,
@@ -1598,15 +1642,43 @@ def reduce_operator_state(
     sorted_work_keys = sorted(works, key=_work_sort_key)
     if len(sorted_work_keys) > MAX_CANONICAL_WORKS:
         diagnostics["canonical_work_limit"] = len(sorted_work_keys) - MAX_CANONICAL_WORKS
-        sorted_work_keys = sorted_work_keys[:MAX_CANONICAL_WORKS]
+        # Evict by recency, never by name: the survivors are the most
+        # recently heard works (epoch ties broken by the canonical key),
+        # then laid out in canonical order so the state stays
+        # deterministic. A lexical cut could retire the newest live work
+        # while an alphabetically earlier dead one survived.
+        survivors = set(
+            sorted(
+                works,
+                key=lambda key: (
+                    -works[key].watermark.occurred_at_epoch,
+                    _work_sort_key(key),
+                ),
+            )[:MAX_CANONICAL_WORKS]
+        )
+        sorted_work_keys = [key for key in sorted_work_keys if key in survivors]
     works = {key: works[key] for key in sorted_work_keys}
 
+    # NOTE: requests are deliberately NOT filtered to surviving works --
+    # a request-only truth (no canonical work yet) is a real state the
+    # reducer retains; see test_request_only_truth_retains_authority_*.
     sorted_request_keys = sorted(requests, key=_request_sort_key)
     if len(sorted_request_keys) > MAX_CANONICAL_REQUESTS:
         diagnostics["canonical_request_limit"] = (
             len(sorted_request_keys) - MAX_CANONICAL_REQUESTS
         )
-        sorted_request_keys = sorted_request_keys[:MAX_CANONICAL_REQUESTS]
+        surviving_requests = set(
+            sorted(
+                requests,
+                key=lambda key: (
+                    -requests[key].watermark.occurred_at_epoch,
+                    _request_sort_key(key),
+                ),
+            )[:MAX_CANONICAL_REQUESTS]
+        )
+        sorted_request_keys = [
+            key for key in sorted_request_keys if key in surviving_requests
+        ]
     requests = {key: requests[key] for key in sorted_request_keys}
 
     requests_by_work: dict[WorkKey, list[RequestKey]] = {}

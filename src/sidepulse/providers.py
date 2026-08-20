@@ -552,7 +552,12 @@ def detect_codex_config(home: Path | None = None) -> ProviderConfig:
     if not config_path.exists():
         return ProviderConfig("codex", config_path, False, False, (), ())
 
-    text = config_path.read_text()
+    try:
+        text = config_path.read_text()
+    except (OSError, UnicodeDecodeError):
+        # Unreadable is "exists, can't confirm hooks" -- every other
+        # detector degrades this way instead of raising into the sweep.
+        return ProviderConfig("codex", config_path, True, False, (), ())
     try:
         if tomllib is None:
             raise RuntimeError("tomllib unavailable")

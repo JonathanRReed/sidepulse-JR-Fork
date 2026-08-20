@@ -177,6 +177,16 @@ def _refresh_hint_for_record(
     return ProviderRefreshHint(record.source_key, event_token)
 
 
+def _hook_event_name_from_line(line: dict[str, Any]) -> str | None:
+    # Codex lines nest the payload under "event"; every other provider's
+    # name sits at the top level. The breaker bypass for lifecycle events
+    # depends on this name, so both shapes must resolve.
+    name = line.get("hook_event_name")
+    if not name and isinstance(line.get("event"), dict):
+        name = line["event"].get("hook_event_name")
+    return str(name) if name else None
+
+
 def hook_log_main(provider: str, log_path: Path) -> int:
     try:
         actual_provider, actual_log_path, line = routed_hook_payload(
@@ -200,7 +210,7 @@ def hook_log_main(provider: str, log_path: Path) -> int:
                 return 0
             send_refresh_hint(
                 hint,
-                event_name=str(line.get("hook_event_name") or "") or None,
+                event_name=_hook_event_name_from_line(line),
             )
         write_hook_status_audit(record)
     except Exception:

@@ -326,7 +326,6 @@ from .keep_awake import KEEPALIVE_FILE_NAME, KeepAwakeController
 from .led_status import (
     MAX_CHANNEL_GAIN,
     MIN_CHANNEL_GAIN,
-    NEUTRAL_CHANNEL_GAINS,
     AgentLedController,
     LedDisplayState,
     LedStatusWrite,
@@ -1252,7 +1251,11 @@ STATE_DONE = StatusBarState("Done", "checkmark.circle", 3)
 STATE_ASK = StatusBarState("Ask", "questionmark.circle", 1)
 STATE_FAILED = StatusBarState("Failed", "exclamationmark.triangle", 2)
 STATUS_BAR_DEVICE_PRIORITY = ("sidepulsepro", "sidepulsedot")
+# Every current device mounts as "SidePulse" (identity comes from the
+# firmware serial in STATUS.TXT, not the volume name); the Pro/Dot names
+# survive for owners who renamed their volumes to tell devices apart.
 STATUS_BAR_KEEPALIVE_VOLUME_NAMES = (
+    "SidePulse",
     "SidePulsePro",
     "SidePulseDot",
 )
@@ -2565,12 +2568,18 @@ class StatusBarController(NSObject):
             LifecycleMode.UNKNOWN: 5,
         }
         lifecycle = min(rows, key=lambda row: priority[row.lifecycle_mode]).lifecycle_mode
+        # `pin` was UNBOUND here for one release: any snapshot carrying a
+        # sub-agent worker row raised NameError inside the hardware write
+        # worker -- the strip froze precisely when a session fanned out.
+        pin = self.settings.device_provider_pin(device.device_id)
         return dataclass_replace(
             projection,
             lifecycle_mode=lifecycle,
             visible_rows=rows,
             worker_rows=tuple(
-                row for row in projection.worker_rows if row.provider == pin
+                row
+                for row in projection.worker_rows
+                if not pin or row.provider == pin
             ),
             dominant_provider=rows[0].provider,
             click_target_agent_id=None,
@@ -4431,10 +4440,6 @@ class StatusBarController(NSObject):
             )
 
     @objc.IBAction
-    def forceRefresh_(self, _sender):
-        self.refresh_(None)
-
-    @objc.IBAction
     def openSessionPrimary_(self, sender):
         self.open_session(
             sender.representedObject(),
@@ -5806,19 +5811,6 @@ class StatusBarController(NSObject):
             pass
 
     @objc.IBAction
-    def clearFlash_(self, timer):
-        view = self._tip_highlight_view if timer is None else timer.userInfo()
-        try:
-            layer = view.layer()
-            if layer is not None:
-                layer.setBackgroundColor_(None)
-        except Exception:
-            pass
-        if view is self._tip_highlight_view:
-            self._tip_highlight_view = None
-            self._tip_highlight_until = 0.0
-
-    @objc.IBAction
     def dismissTip_(self, sender):
         text = str(sender.representedObject() or "").strip()
         if not text:
@@ -5986,28 +5978,6 @@ class StatusBarController(NSObject):
         self.refresh_(None)
 
     @objc.IBAction
-    def toggleQuotaAlerts_(self, sender):
-        self.settings = self.settings.with_quota_alerts_enabled(checkbox_is_on(sender))
-        save_settings(self.settings)
-        self.refresh_(None)
-
-    @objc.IBAction
-    def applyQuotaThresholds_(self, sender):
-        raw = str(sender.stringValue())
-        try:
-            values = [float(part) for part in raw.replace(";", ",").split(",") if part.strip()]
-            self.settings = self.settings.with_quota_alert_thresholds(values)
-        except ValueError:
-            self.set_settings_message(
-                "Thresholds are percentages, like 50, 75, 90."
-            )
-            return
-        save_settings(self.settings)
-        pretty = ", ".join(f"{value:g}%" for value in self.settings.quota_alert_thresholds)
-        self.set_settings_message(f"Quota blinks at {pretty}.")
-        self.refresh_(None)
-
-    @objc.IBAction
     def toggleClaudePlanLimits_(self, sender):
         self.settings = self.settings.with_claude_plan_limits_enabled(
             checkbox_is_on(sender)
@@ -6147,6 +6117,30 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def uninstallOpenclawHooks_(self, _sender):
         self.update_hooks("openclaw", install=False)
+
+    @objc.IBAction
+    def installOpencodeHooks_(self, _sender):
+        self.update_hooks("opencode", install=True)
+
+    @objc.IBAction
+    def uninstallOpencodeHooks_(self, _sender):
+        self.update_hooks("opencode", install=False)
+
+    @objc.IBAction
+    def installAntigravityHooks_(self, _sender):
+        self.update_hooks("antigravity", install=True)
+
+    @objc.IBAction
+    def uninstallAntigravityHooks_(self, _sender):
+        self.update_hooks("antigravity", install=False)
+
+    @objc.IBAction
+    def installKiroHooks_(self, _sender):
+        self.update_hooks("kiro", install=True)
+
+    @objc.IBAction
+    def uninstallKiroHooks_(self, _sender):
+        self.update_hooks("kiro", install=False)
 
     @objc.IBAction
     def toggleCodexTranscripts_(self, sender):
@@ -9309,15 +9303,6 @@ class StatusBarController(NSObject):
             self.push_colors_preview_to_device()
 
     @objc.IBAction
-    def selectAgentColorSwatch_(self, sender):
-        payload = sender.representedObject() or {}
-        provider = payload.get("provider")
-        hex_value = payload.get("hex")
-        if not provider or not hex_value:
-            return
-        self.apply_color_change(("agent", provider), hex_value)
-
-    @objc.IBAction
     def selectModeColorSwatch_(self, sender):
         payload = sender.representedObject() or {}
         key = payload.get("key")
@@ -9504,18 +9489,6 @@ class StatusBarController(NSObject):
             self.push_colors_preview_to_device()
 
     @objc.IBAction
-    def setAnimationStyle_(self, sender):
-        payload = sender.selectedItem().representedObject() if sender.selectedItem() else None
-        if not payload or "mode_key" not in payload or "style" not in payload:
-            return
-        try:
-            colors = self.settings.colors.with_mode_animation(payload["mode_key"], payload["style"])
-        except ValueError:
-            return
-        # Same shared commit, same reason as setBlendMode_.
-        self._commit_colors_and_refresh(colors)
-
-    @objc.IBAction
     def resetColorsToDefaults_(self, _sender):
         self.settings = self.settings.with_colors(ColorSettings.defaults())
         save_settings(self.settings)
@@ -9541,16 +9514,7 @@ class StatusBarController(NSObject):
             self.push_colors_preview_to_device()
 
     @objc.IBAction
-    def closeColorsWindow_(self, _sender):
-        # Retired with the standalone window; kept for selector compat.
-        self.stop_colors_preview_animation()
-
-    @objc.IBAction
     def setScreenBarGapWidth_(self, sender):
-        self._apply_screen_bar_geometry_from_sliders(commit=not self._slider_event_is_drag())
-
-    @objc.IBAction
-    def setScreenBarWingLength_(self, sender):
         self._apply_screen_bar_geometry_from_sliders(commit=not self._slider_event_is_drag())
 
     def _slider_event_is_drag(self) -> bool:
@@ -9974,6 +9938,14 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("screen_bar_follow_alcove"),
             self.settings.screen_bar_follow_alcove,
         )
+        set_checkbox_state(
+            self.settings_fields.get("profile_plan_limits_switch"),
+            self.settings.claude_plan_limits_enabled,
+        )
+        set_checkbox_state(
+            self.settings_fields.get("profile_codex_pct_switch"),
+            self.settings.codex_percent_enabled,
+        )
         self.refresh_screen_bar_preview()
         closed_lid_policy_popup = self.settings_fields.get("closed_lid_awake_policy_popup")
         if closed_lid_policy_popup is not None:
@@ -10293,14 +10265,6 @@ class StatusBarController(NSObject):
             label.animator().setAlphaValue_(0.0)
 
         NSAnimationContext.runAnimationGroup_completionHandler_(_animate, None)
-
-    @objc.IBAction
-    def exportDebugCsv_(self, _sender):
-        self.export_debug_log("csv")
-
-    @objc.IBAction
-    def exportDebugHtml_(self, _sender):
-        self.export_debug_log("html")
 
     def export_debug_log(self, format_name: str) -> None:
         path = choose_debug_export_path(format_name)
@@ -12953,6 +12917,18 @@ class StatusBarController(NSObject):
                 request.projection,
                 request.relay_elapsed_seconds,
             )
+        elif (
+            presentation_sync is not None
+            and self.settings.link_screen_bar_to_hardware
+            and write.changed
+            and write.error is None
+        ):
+            # Linked means SYNCED: the strip restarted its cycle at this
+            # write; snap the bar's phase to the same moment so the two
+            # surfaces loop together instead of a few hundred ms apart.
+            reanchor = getattr(self.virtual_status_device, "reanchor_program", None)
+            if callable(reanchor):
+                reanchor(result.completed_at)
 
     def _lid_observation_relevant(self) -> bool:
         if self.settings.closed_lid_awake_policy != CLOSED_LID_AWAKE_NEVER:
@@ -13840,7 +13816,11 @@ class StatusBarController(NSObject):
                 inputs,
             )
         ):
-            self.animate_colors_preview_once()
+            # The full tick: preview strip dots AND the visible pane's
+            # animation thumbnails. Calling only animate_colors_preview_once
+            # here once froze every thumb -- the repaint half lives in
+            # animateColorsPreviewTick_ and nothing else invokes it.
+            self.animateColorsPreviewTick_(None)
 
     def _setup_demo_fired(self) -> None:
         inputs = self._presentation_scheduler_inputs
@@ -14036,14 +14016,17 @@ class StatusBarController(NSObject):
         self.fire_timebox_off_shortcut()
         if self.webhook_event_enabled("timebox"):
             self.post_webhook({"event": "sidepulse.timebox_finished"})
-        try:
-            from AppKit import NSSound
+        # Through the budget like every other sound: a timebox finishing
+        # during a Focus or quiet hour should not ding at a meeting.
+        if self.interrupt_grant(signals_module.INTERRUPT_TIMEBOX).audible:
+            try:
+                from AppKit import NSSound
 
-            sound = NSSound.soundNamed_("Glass")
-            if sound is not None:
-                sound.play()
-        except Exception:
-            pass
+                sound = NSSound.soundNamed_("Glass")
+                if sound is not None:
+                    sound.play()
+            except Exception:
+                pass
         self.set_settings_message("Timebox finished.")
         self.refresh_(None)
 
@@ -14663,10 +14646,6 @@ class StatusBarController(NSObject):
             for status in snapshot.statuses
         )
 
-    @objc.IBAction
-    def pollDevices_(self, _sender):
-        self.poll_devices_once()
-
     def poll_devices_once(self) -> None:
         if not self.observe_connected_devices():
             return
@@ -14855,11 +14834,6 @@ def daily_tip(settings=None) -> tuple[str, str | None, str | None] | None:
 def target_quiet_active(target) -> bool:
     quiet = getattr(target, "quiet_active", None)
     return bool(quiet()) if callable(quiet) else False
-
-
-def concise_usage_error(error: Exception) -> str:
-    text = " ".join(str(error).split())
-    return (text or "usage unavailable")[:80]
 
 
 # `usage_window_payloads` lived here: it flattened a typed model back into
@@ -15775,7 +15749,12 @@ def _canonical_agent_browser_projection(
     # (state, query): the state object is held strongly so its identity
     # cannot be recycled underneath the cache, and every call still has
     # its side effects applied by the pass that actually computed.
-    memo_key = (text, shelf, family_key, selected_work_key)
+    # The minute bucket keeps age-derived facts honest: keyed on the
+    # state object alone, a session that died QUIETLY never crossed the
+    # browser's one-hour stale boundary until some unrelated event
+    # produced a new state -- the shelf only aged when something else
+    # happened to move.
+    memo_key = (text, shelf, family_key, selected_work_key, int(time.time() // 60.0))
     memo = getattr(target, "_mailbox_projection_memo", None)
     if memo is not None and memo[0] is state and memo[1] == memo_key:
         return memo[2]
@@ -16421,7 +16400,7 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     why.setTarget_(target)
     menu.addItem_(why)
     setup = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Setup...",
+        "Setup…",
         "openSetup:",
         "",
     )
@@ -17031,26 +17010,6 @@ class UsageGraphView(NSView):
             self.model = {}
         self.setNeedsDisplay_(True)
 
-    def setData_hourly_(self, day_bars, hourly):
-        """Compatibility adapter for old tests and an in-flight old publish."""
-        del hourly
-        bars = list(day_bars or [])
-        self.setModel_(
-            {
-                "metric": "tokens",
-                "labels": tuple(bar.get("label", "") for bar in bars),
-                "series": (
-                    {
-                        "provider_id": "codex",
-                        "values": tuple(bar.get("codex_tokens", 0) for bar in bars),
-                    },
-                ),
-                "scale_max": usage_stats.nice_usage_scale(
-                    max((bar.get("codex_tokens", 0) for bar in bars), default=0)
-                ),
-            }
-        )
-
     def isFlipped(self):
         return False
 
@@ -17173,26 +17132,6 @@ def add_color_swatch(parent, hex_color: str, x: int, y: int, target, selector: s
         layer.setBackgroundColor_(nscolor_from_hex(hex_color).CGColor())
         layer.setCornerRadius_(COLOR_SWATCH_SIZE / 2.0)
         layer.setBorderWidth_(0.0)
-    except Exception:
-        pass
-    parent.addSubview_(button)
-    return button
-
-
-def add_custom_color_swatch(parent, x: int, y: int, target, selector: str, represented: dict):
-    button = NSButton.alloc().initWithFrame_(((x, y), (COLOR_SWATCH_SIZE, COLOR_SWATCH_SIZE)))
-    button.setTitle_("+")
-    button.setBordered_(False)
-    button.setTarget_(target)
-    button.setAction_(selector)
-    button.setRepresentedObject_(dict(represented))
-    try:
-        button.setWantsLayer_(True)
-        layer = button.layer()
-        layer.setBackgroundColor_(NSColor.controlColor().CGColor())
-        layer.setCornerRadius_(COLOR_SWATCH_SIZE / 2.0)
-        layer.setBorderWidth_(1.0)
-        layer.setBorderColor_(NSColor.separatorColor().CGColor())
     except Exception:
         pass
     parent.addSubview_(button)
@@ -17377,17 +17316,6 @@ def colors_legend_text(statuses, *, is_live: bool, prefix: str | None = None) ->
         name = re.sub(r"\s*\([0-9a-f]{6,}\)", "", str(name))
         parts.append(f"{name} ({MODE_LABELS.get(status.mode, status.mode.value)})")
     return prefix + " · ".join(parts)
-
-
-def add_label(parent, text: str, x: int, y: int, width: int, height: int):
-    label = NSTextField.alloc().initWithFrame_(((x, y), (width, height)))
-    label.setStringValue_(text)
-    label.setBezeled_(False)
-    label.setDrawsBackground_(False)
-    label.setEditable_(False)
-    label.setSelectable_(False)
-    parent.addSubview_(label)
-    return label
 
 
 def add_button(
@@ -17726,9 +17654,10 @@ def device_id_for_root(root: Path) -> str:
 def persistable_device_identity(device_id: str, path: str) -> bool:
     """True for real user mounts and the on-screen bar, not test leftovers.
 
-    Device IDs are mount paths. Pytest and /tmp volumes used to be
-    written into the live settings file and then shown forever as
-    disconnected SidePulse Dots.
+    LEGACY BODY: here device IDs are mount paths; the status_bar facade
+    wraps both this and device_id_for_root with stable hardware-serial
+    keys. Pytest and /tmp volumes used to be written into the live
+    settings file and then shown forever as disconnected SidePulse Dots.
     """
     if device_id == VIRTUAL_DEVICE_ID or path == VIRTUAL_DEVICE_ID:
         return True
@@ -17771,12 +17700,6 @@ def device_display_name(name: str) -> str:
     if "sidepulsepro" in normalized:
         return "SidePulse Pro"
     return name or "SidePulse Device"
-
-
-def device_display_label(display: str) -> str:
-    if display == LED_DISPLAY_BATTERY:
-        return "Battery Level"
-    return "Agent Status"
 
 
 def disabled_menu_item(title: str) -> NSMenuItem:
@@ -18213,25 +18136,6 @@ def flatten_menu_title(title: str) -> str:
     return " · ".join(part.strip() for part in title.splitlines() if part.strip())
 
 
-def add_action_item(
-    menu: NSMenu,
-    title: str,
-    selector: str,
-    represented_object: str | None,
-    target: StatusBarController,
-) -> None:
-    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        title if represented_object else f"{title} unavailable",
-        selector,
-        "",
-    )
-    item.setTarget_(target)
-    item.setEnabled_(represented_object is not None)
-    if represented_object is not None:
-        item.setRepresentedObject_(represented_object)
-    menu.addItem_(item)
-
-
 def build_error_menu(exc: Exception) -> NSMenu:
     menu = NSMenu.alloc().init()
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -18441,13 +18345,6 @@ def image_for_symbol(symbol: str, description: str):
 def log_status_bar(message: str) -> None:
     timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
     print(f"{timestamp} {message}", flush=True)
-
-
-def compact_path(path: str, max_len: int = 48) -> str:
-    if len(path) <= max_len:
-        return path
-    keep = max_len - 1
-    return "." + path[-keep:]
 
 
 def format_age(seconds: float) -> str:

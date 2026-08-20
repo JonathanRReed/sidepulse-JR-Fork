@@ -511,7 +511,7 @@ PROVIDER_BRAND_COLORS: dict[str, str] = {
 def _hue_gap(left: str, right: str) -> float:
     """Degrees between two hues, 0-180. Only ever used to rank candidate
     colours against colours already spoken for."""
-    delta = abs(_hex_to_oklch_hue(left) - _hex_to_oklch_hue(right)) % 360.0
+    delta = abs(_hex_to_hls_hue(left) - _hex_to_hls_hue(right)) % 360.0
     return min(delta, 360.0 - delta)
 
 
@@ -608,7 +608,7 @@ _PALETTE_DEFAULTS_BY_PROVIDER: dict[str, str] | None = None
 
 def palette_defaults_by_provider() -> dict[str, str]:
     """Memoized because it is pure over module constants, and lazy because
-    it needs _hex_to_oklch_hue, which is defined further down this file."""
+    it needs _hex_to_hls_hue, which is defined further down this file."""
     global _PALETTE_DEFAULTS_BY_PROVIDER
     if _PALETTE_DEFAULTS_BY_PROVIDER is None:
         _PALETTE_DEFAULTS_BY_PROVIDER = _palette_defaults_by_provider()
@@ -1217,6 +1217,18 @@ def _palette_written_agent_colors() -> dict[str, frozenset[str]]:
     for _name, seed in BRAND_SEED_COLORS:
         for provider in PROVIDER_BRAND_COLORS:
             written.setdefault(provider, set()).add(normalize_hex(seed, "#000000"))
+    # Palettes before 2026-08-19 fanned BRANDED providers too (claude at
+    # the seed hue, codex +90, devin +270, at oklch 0.72/0.15). Current
+    # palettes no longer emit those entries, but installs damaged back
+    # then must still repair byte-exactly.
+    for _name, seed in (*CURATED_PALETTE_SEEDS, *BRAND_SEED_COLORS):
+        hue = _hex_to_hls_hue(normalize_hex(seed, "#00E5FF"))
+        for provider, offset in (("claude", 0.0), ("codex", 90.0), ("devin", 270.0)):
+            written.setdefault(provider, set()).add(
+                normalize_hex(
+                    oklch_hex(0.72, 0.15, (hue + offset) % 360.0), "#000000"
+                )
+            )
     return {provider: frozenset(values) for provider, values in written.items()}
 
 
@@ -2782,8 +2794,6 @@ class AgentLayoutStabilizer:
 # derived sets stay legible by construction.
 
 def _oklch_to_linear_srgb(lightness: float, chroma: float, hue_degrees: float):
-    import math
-
     hue = math.radians(hue_degrees)
     a = chroma * math.cos(hue)
     b = chroma * math.sin(hue)
@@ -2821,7 +2831,9 @@ def oklch_hex(lightness: float, chroma: float, hue_degrees: float) -> str:
     return f"#{_encode(red):02X}{_encode(green):02X}{_encode(blue):02X}"
 
 
-def _hex_to_oklch_hue(hex_value: str) -> float:
+def _hex_to_hls_hue(hex_value: str) -> float:
+    """HLS wheel hue (NOT OKLCH -- see hex_to_oklch): cheap and only ever
+    used to rank hue gaps and fan palette slots around the wheel."""
     import colorsys
 
     red, green, blue = (int(hex_value[i : i + 2], 16) / 255.0 for i in (1, 3, 5))
@@ -2920,7 +2932,7 @@ def derive_palette(accent_hex: str) -> dict[str, dict[str, str]]:
     can never be confused with "busy", ask leans warm (attention), and
     idle is the accent at whisper chroma. Agents fan out around the
     wheel from the accent so a crowd stays tellable-apart."""
-    hue = _hex_to_oklch_hue(normalize_hex(accent_hex, "#00E5FF"))
+    hue = _hex_to_hls_hue(normalize_hex(accent_hex, "#00E5FF"))
     return {
         "modes": {
             "working": oklch_hex(0.72, 0.16, hue),
@@ -2929,22 +2941,48 @@ def derive_palette(accent_hex: str) -> dict[str, dict[str, str]]:
             "idle": oklch_hex(0.55, 0.035, hue),
         },
         "agents": {
-            "claude": oklch_hex(0.72, 0.15, hue),
-            "codex": oklch_hex(0.72, 0.15, (hue + 90.0) % 360.0),
-            "gemini": oklch_hex(0.72, 0.15, (hue + 180.0) % 360.0),
-            "devin": oklch_hex(0.72, 0.15, (hue + 270.0) % 360.0),
+            # A palette owns exactly the providers with no declared brand
+            # hue (apply_palette skips the branded ones anyway); fanning
+            # branded names -- or a "gemini" that is not a provider at
+            # all -- wrote junk entries and recolored nothing. Sorted so
+            # the assignment never depends on registry order.
+            provider: oklch_hex(
+                0.72,
+                0.15,
+                (hue + index * (360.0 / max(1, _brandless_count()))) % 360.0,
+            )
+            for index, provider in enumerate(_brandless_providers())
         },
     }
 
 
+def _brandless_providers() -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            spec.provider
+            for spec in PROVIDER_SPECS
+            if spec.provider not in PROVIDER_BRAND_COLORS
+        )
+    )
+
+
+def _brandless_count() -> int:
+    return len(_brandless_providers())
+
+
 # One-click looks, each derived through the same engine so every set is
 # gamut-safe, then seeded with a deliberately different personality.
+# Seeds live in their own table because the palette-damage repair needs
+# them to reconstruct what OLDER fan-outs once wrote.
+CURATED_PALETTE_SEEDS: tuple[tuple[str, str], ...] = (
+    ("Neon", "#00E5FF"),
+    ("Sunset", "#FF6A3D"),
+    ("Forest", "#2FBF71"),
+    ("Orchid", "#B26EFF"),
+    ("Ember", "#FF9F0A"),
+)
 CURATED_PALETTES: dict[str, dict[str, dict[str, str]]] = {
-    "Neon": derive_palette("#00E5FF"),
-    "Sunset": derive_palette("#FF6A3D"),
-    "Forest": derive_palette("#2FBF71"),
-    "Orchid": derive_palette("#B26EFF"),
-    "Ember": derive_palette("#FF9F0A"),
+    name: derive_palette(seed) for name, seed in CURATED_PALETTE_SEEDS
 }
 
 # The four official brand colours, in one place, as (name, hex) -- the

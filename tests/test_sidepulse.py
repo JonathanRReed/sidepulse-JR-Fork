@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -536,6 +537,7 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertFalse(result.changed)
             self.assertEqual(plugin_path.read_text(), replacement)
 
+    @unittest.skipUnless(shutil.which("bun"), "the OpenCode plugin runs under bun")
     def test_opencode_plugin_forwards_only_bounded_canonical_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -2559,7 +2561,12 @@ for (const event of [
         self.assertNotIn("Never", by_title)
         self.assertNotIn("Strong Sleep Override...", by_title)
         self.assertNotIn("Sleep Helper Missing", by_title)
-        self.assertIn("Setup...", by_title)
+        # Real ellipsis, real rename: the "Setup..." ASCII literal kept
+        # the facade's "Finish Setup…" rename from ever matching.
+        self.assertTrue(
+            "Setup…" in by_title or "Finish Setup…" in by_title,
+            sorted(by_title),
+        )
 
     def test_status_bar_menu_shows_stale_statuses_when_no_fresh_statuses(self) -> None:
         try:
@@ -10820,6 +10827,15 @@ class HardeningTests(unittest.TestCase):
             self.assertEqual(len(small.read_text().splitlines()), 3)
 
 
+def _recent_state_iso() -> str:
+    """A fixture timestamp inside the presence horizon, whatever "now" is."""
+    from datetime import datetime, timedelta, timezone
+
+    return (
+        datetime.now(timezone.utc) - timedelta(minutes=5)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class PrivateStateSecurityTests(unittest.TestCase):
     @staticmethod
     def _mode(path: Path) -> int:
@@ -11023,14 +11039,14 @@ class PrivateStateSecurityTests(unittest.TestCase):
             external_latest.write_text(
                 json.dumps(
                     {
-                        "updated_at": "2026-08-12T12:00:00Z",
+                        "updated_at": _recent_state_iso(),
                         "statuses": [
                             {
                                 "provider": "claude",
                                 "agent_id": "claude:session:external",
                                 "display_name": "external private task",
                                 "mode": "working",
-                                "updated_at": "2026-08-12T12:00:00Z",
+                                "updated_at": _recent_state_iso(),
                                 "event_name": "PreToolUse",
                                 "session_id": "external",
                             }
@@ -11103,14 +11119,14 @@ class PrivateStateSecurityTests(unittest.TestCase):
             latest_path.write_text(
                 json.dumps(
                     {
-                        "updated_at": "2026-08-12T12:00:00Z",
+                        "updated_at": _recent_state_iso(),
                         "statuses": [
                             {
                                 "provider": "claude",
                                 "agent_id": "claude:session:owned",
                                 "display_name": "owned state",
                                 "mode": "working",
-                                "updated_at": "2026-08-12T12:00:00Z",
+                                "updated_at": _recent_state_iso(),
                                 "event_name": "PreToolUse",
                                 "session_id": "owned",
                             }
@@ -17810,9 +17826,18 @@ class PaletteTests(unittest.TestCase):
             for key in ("working", "done", "ask", "idle"):
                 value = palette["modes"][key]
                 self.assertRegex(value, r"^#[0-9A-F]{6}$", f"{name}/{key}")
-            self.assertEqual(
-                set(palette["agents"]), {"claude", "codex", "gemini", "devin"}
-            )
+            from sidepulse.colors import PROVIDER_BRAND_COLORS
+            from sidepulse.providers import PROVIDER_SPECS
+
+            brandless = {
+                spec.provider
+                for spec in PROVIDER_SPECS
+                if spec.provider not in PROVIDER_BRAND_COLORS
+            }
+            # A palette owns exactly the brandless providers -- branded
+            # entries would be skipped by apply_palette, and non-provider
+            # names would write junk settings entries.
+            self.assertEqual(set(palette["agents"]), brandless)
             # Working, done and ask must be tellable apart.
             self.assertEqual(
                 len({palette["modes"][k] for k in ("working", "done", "ask")}), 3
@@ -17839,8 +17864,8 @@ class PaletteTests(unittest.TestCase):
             expected["modes"]["working"],
         )
         self.assertEqual(
-            self.controller.settings.colors.agent_color("gemini"),
-            expected["agents"]["gemini"],
+            self.controller.settings.colors.agent_color("cursor"),
+            expected["agents"]["cursor"],
         )
 
 

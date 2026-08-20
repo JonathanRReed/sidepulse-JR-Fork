@@ -108,14 +108,6 @@ except ImportError:
     _HAS_GLASS = False
 
 
-def glass_available() -> bool:
-    """True on macOS 26+ (Tahoe and later), where real Liquid Glass
-    (NSGlassEffectView) exists. Every caller in this module already
-    degrades gracefully when this is False -- callers outside this
-    module normally don't need to check it themselves."""
-    return _HAS_GLASS
-
-
 # --- Sizing helpers ----------------------------------------------------
 
 

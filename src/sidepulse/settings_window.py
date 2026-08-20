@@ -566,7 +566,9 @@ def _build_capacity_pane(target: StatusBarController):
                 size=11.0 * scale,
                 max_width=340.0,
             )
-            label = _CAPACITY_PROFILE_LABELS[policy.profile_id]
+            label = _CAPACITY_PROFILE_LABELS.get(
+                policy.profile_id, policy.profile_id.replace("_", " ").title()
+            )
             status.setAccessibilityLabel_(f"{label} capacity status")
             policy_fields[policy.profile_id] = status
             inner.addArrangedSubview_(
@@ -738,6 +740,7 @@ def _build_profile_pane(target: StatusBarController):
         help_text="The current rate-limit window percent on the Codex line.",
     )
     codex_pct_switch.setState_(1 if target.settings.codex_percent_enabled else 0)
+    fields["profile_codex_pct_switch"] = codex_pct_switch
     today_inner.addArrangedSubview_(codex_pct_row)
     today_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
@@ -2040,10 +2043,9 @@ def _build_focus_pane(target: StatusBarController):
     )
     try:
         focus_modes = focus_sync.configured_focus_modes()
-        log_status_bar(
-            "focus roster: "
-            + (", ".join(name for _id, name in focus_modes) or "EMPTY")
-        )
+        # Count only: custom Focus names are user content and stay out of
+        # logs, same as session titles and transcript text.
+        log_status_bar(f"focus roster: {len(focus_modes)} mode(s)")
     except focus_sync.FocusSyncUnavailableError as exc:
         log_status_bar(f"focus roster unavailable: {exc}")
         focus_modes = None
@@ -4054,10 +4056,6 @@ def _identity_view(row):
     header.addArrangedSubview_(hex_label)
     header.addArrangedSubview_(native_ui.make_hspacer())
     return header, name_label, hex_label
-
-
-# Kept under its old name too: status_bar.py imports this symbol.
-_provider_identity_view = _identity_view
 
 
 def _build_picker_group_row(group, target, selector: str, represented: dict):

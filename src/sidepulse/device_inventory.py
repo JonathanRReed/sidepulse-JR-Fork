@@ -104,7 +104,8 @@ def hardware_status_serial(mount_path: Path) -> str | None:
     exception into the inventory sweep.
     """
     try:
-        payload = (Path(mount_path) / STATUS_FILE_NAME).read_bytes()[:STATUS_MAX_BYTES]
+        with (Path(mount_path) / STATUS_FILE_NAME).open("rb") as status_file:
+            payload = status_file.read(STATUS_MAX_BYTES)
     except OSError:
         return None
     for raw_line in payload.decode("utf-8", errors="replace").splitlines():

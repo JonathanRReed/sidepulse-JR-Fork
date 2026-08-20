@@ -920,7 +920,11 @@ def test_stale_source_holds_request_freezes_elapsed_and_expires_unknown() -> Non
 @pytest.mark.parametrize(
     "discontinuous_clock",
     [
-        _clock(wall=1_800_000_100.0, monotonic=101.0),
+        # Wall BEHIND monotonic (a wall clock stepped backwards relative
+        # to the machine's own timeline). Wall AHEAD is deliberately NOT
+        # here any more: macOS monotonic time pauses during sleep, so a
+        # forward gap is an ordinary nap and must stay continuous.
+        _clock(wall=1_800_000_001.0, monotonic=110.0),
         _clock(wall=1_799_999_999.0, monotonic=101.0),
         _clock(wall=1_800_000_001.0, monotonic=99.0),
         _clock(wall=1_800_000_001.0, monotonic=1.0, boot="boot:02"),
@@ -1003,17 +1007,19 @@ def test_future_dated_fact_is_quarantined_instead_of_becoming_newest() -> None:
 def test_two_current_samples_recover_clock_without_replaying_retained_event() -> None:
     """One clean sample is insufficient, while recovery must not repeat an active cue."""
     state, batch, _, _ = _initial_active_request()
+    # A wall clock stepped BACKWARDS relative to monotonic -- the case
+    # that genuinely distrusts ordering (a forward gap is just sleep).
     jumped = reduce_operator_state(
         state,
         batch,
-        clock=_clock(wall=1_800_000_100.0, monotonic=101.0),
+        clock=_clock(wall=1_800_000_001.0, monotonic=120.0),
     )
     assert jumped.state.clock_continuity.recovery_confirmations == 0
 
     first = reduce_operator_state(
         jumped.state,
         batch,
-        clock=_clock(wall=1_800_000_101.0, monotonic=102.0),
+        clock=_clock(wall=1_800_000_002.0, monotonic=121.0),
     )
     assert first.state.clock_continuity.status is ClockContinuityStatus.UNCERTAIN
     assert first.state.clock_continuity.recovery_confirmations == 1
@@ -1021,7 +1027,7 @@ def test_two_current_samples_recover_clock_without_replaying_retained_event() ->
     second = reduce_operator_state(
         first.state,
         batch,
-        clock=_clock(wall=1_800_000_102.0, monotonic=103.0),
+        clock=_clock(wall=1_800_000_003.0, monotonic=122.0),
     )
     assert second.state.clock_continuity.status is ClockContinuityStatus.STABLE
     assert second.state.clock_continuity.recovery_confirmations == TIMING_RECOVERY_CONFIRMATIONS

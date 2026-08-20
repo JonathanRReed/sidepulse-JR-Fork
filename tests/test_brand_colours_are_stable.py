@@ -198,7 +198,7 @@ def test_applying_a_palette_never_repaints_a_declared_brand() -> None:
     assert colors.agent_color("claude") == PROVIDER_BRAND_COLORS["claude"]
     assert colors.agent_color("codex") == PROVIDER_BRAND_COLORS["codex"]
     # A provider with no declared brand still follows the look.
-    assert colors.agent_color("gemini") == palette["agents"]["gemini"]
+    assert colors.agent_color("cursor") == palette["agents"]["cursor"]
 
 
 def test_the_settings_windows_brand_chips_are_the_brand_colours() -> None:
@@ -254,12 +254,17 @@ def test_a_palette_that_already_ate_a_brand_colour_is_repaired_on_load() -> None
     see the wrong colour after installing the fix.
     """
     palette = colors_module.PROVIDER_PALETTES["OpenAI"]
+    # What the pre-2026-08-19 fan-out actually wrote for devin from the
+    # OpenAI seed -- palettes no longer emit branded entries, but the
+    # damage they left must still repair byte-exactly.
+    seed_hue = colors_module._hex_to_hls_hue("#10A37F")
+    historical_devin = colors_module.oklch_hex(0.72, 0.15, (seed_hue + 270.0) % 360.0)
     damaged = {
         "colors": {
             "agent_colors": {
                 "claude": "#10A37F",
-                "devin": palette["agents"]["devin"],
-                "gemini": palette["agents"]["gemini"],
+                "devin": historical_devin,
+                "cursor": palette["agents"]["cursor"],
             }
         }
     }
@@ -268,8 +273,8 @@ def test_a_palette_that_already_ate_a_brand_colour_is_repaired_on_load() -> None
 
     assert repaired.agent_color("claude") == PROVIDER_BRAND_COLORS["claude"]
     assert repaired.agent_color("devin") == PROVIDER_BRAND_COLORS["devin"]
-    # gemini has no declared brand, so the chosen look is the user's.
-    assert repaired.agent_color("gemini") == palette["agents"]["gemini"]
+    # cursor has no declared brand, so the chosen look is the user's.
+    assert repaired.agent_color("cursor") == palette["agents"]["cursor"]
 
 
 def test_a_hand_picked_provider_colour_is_never_touched() -> None:

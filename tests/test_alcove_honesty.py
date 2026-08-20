@@ -459,7 +459,7 @@ def _alcove_device(monkeypatch, *, granted, alcove_running=True, window=(99, 444
     monkeypatch.setattr(virtual_device, "NSScreen", _ScreenClass)
     monkeypatch.setattr(virtual_device, "is_alcove_running", lambda: alcove_running)
     monkeypatch.setattr(
-        virtual_device, "measured_notch_bounds", lambda *_a, **_k: None
+        virtual_device, "measured_notch_silhouette", lambda *_a, **_k: None
     )
     monkeypatch.setattr(
         virtual_device, "_alcove_window_values", lambda *_a: window

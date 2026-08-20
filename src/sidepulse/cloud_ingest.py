@@ -206,17 +206,21 @@ class _TokenBucket:
         self._burst = float(burst)
         self._tokens = float(burst)
         self._updated: float | None = None
+        # Handlers run on ThreadingHTTPServer worker threads; this limit is
+        # security-motivated, so the read-modify-write must hold exactly.
+        self._take_lock = threading.Lock()
 
     def take(self, now: float) -> bool:
-        if self._updated is None:
+        with self._take_lock:
+            if self._updated is None:
+                self._updated = now
+            elapsed = max(0.0, now - self._updated)
             self._updated = now
-        elapsed = max(0.0, now - self._updated)
-        self._updated = now
-        self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
-        if self._tokens < 1.0:
-            return False
-        self._tokens -= 1.0
-        return True
+            self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
+            if self._tokens < 1.0:
+                return False
+            self._tokens -= 1.0
+            return True
 
 
 class _SessionTable:
@@ -232,18 +236,22 @@ class _SessionTable:
         self._max = int(max_sessions)
         self._idle = float(idle_seconds)
         self._seen: dict[str, float] = {}
+        # Same story as _TokenBucket: concurrent handler threads must not
+        # check-then-insert past the session ceiling.
+        self._admit_lock = threading.Lock()
 
     def admit(self, key: str, now: float) -> bool:
-        for stale in [
-            known
-            for known, last in self._seen.items()
-            if now - last > self._idle and known != key
-        ]:
-            del self._seen[stale]
-        if key not in self._seen and len(self._seen) >= self._max:
-            return False
-        self._seen[key] = now
-        return True
+        with self._admit_lock:
+            for stale in [
+                known
+                for known, last in self._seen.items()
+                if now - last > self._idle and known != key
+            ]:
+                del self._seen[stale]
+            if key not in self._seen and len(self._seen) >= self._max:
+                return False
+            self._seen[key] = now
+            return True
 
     def __len__(self) -> int:
         return len(self._seen)

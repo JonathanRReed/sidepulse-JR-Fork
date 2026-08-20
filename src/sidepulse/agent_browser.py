@@ -47,12 +47,14 @@ MAX_AGENT_BROWSER_RESULTS: Final = 100
 MAX_AGENT_BROWSER_CATALOG: Final = 1_000
 
 _PROVIDER_LABELS: Final = {
+    "antigravity": "Antigravity",
     "claude": "Claude",
     "codex": "Codex",
     "cursor": "Cursor",
     "devin": "Devin",
     "grok": "Grok",
     "hermes": "Hermes",
+    "kiro": "Kiro",
     "openclaw": "OpenClaw",
     "opencode": "OpenCode",
 }

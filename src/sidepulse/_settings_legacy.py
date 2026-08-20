@@ -1771,20 +1771,6 @@ def save_settings(
     return atomic_private_write(target, payload)
 
 
-def _quota_thresholds_setting(value: object) -> tuple[float, ...]:
-    if isinstance(value, list):
-        cleaned = sorted(
-            {
-                max(1.0, min(100.0, float(item)))
-                for item in value
-                if isinstance(item, (int, float)) and not isinstance(item, bool)
-            }
-        )
-        if cleaned:
-            return tuple(cleaned)
-    return (75.0, 90.0)
-
-
 def _fraction_setting(value: object, default: float) -> float:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return max(0.0, min(1.0, float(value)))
