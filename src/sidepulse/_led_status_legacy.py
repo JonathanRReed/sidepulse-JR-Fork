@@ -1024,6 +1024,8 @@ class AgentLedController:
         self.last_error: str | None = None
         self.last_target: Path | None = None
         self.last_attempt_monotonic = 0.0
+        self.last_device_uptime_ms: float | None = None
+        self.last_uptime_check_monotonic = 0.0
 
     def reset(self) -> None:
         self.last_state = None
@@ -1250,6 +1252,43 @@ class AgentLedController:
             dedupe_token=dedupe_token,
         )
 
+    UPTIME_CHECK_SECONDS = 60.0
+
+    def _device_rebooted_since_last_write(self, now: float) -> bool:
+        """True when the firmware's uptime went BACKWARDS -- the strip
+        rebooted (wake-time USB re-enumeration, replug) and whatever it
+        is displaying no longer corresponds to what this writer believes
+        it last delivered. Live incident 2026-08-20: the device rebooted
+        on lid-open mid-flourish and looped the lid greens for two hours
+        while every dedupe-skipped tick assumed the steady program was
+        still showing. Read at most once a minute; unreadable STATUS.TXT
+        is not evidence of a reboot."""
+        if self.device_path is None or self.dry_run:
+            return False
+        if now - self.last_uptime_check_monotonic < self.UPTIME_CHECK_SECONDS:
+            return False
+        self.last_uptime_check_monotonic = now
+        try:
+            status_path = Path(self.device_path) / "STATUS.TXT"
+            text = status_path.read_text(errors="replace")[:4096]
+        except OSError:
+            return False
+        uptime_ms: float | None = None
+        for line in text.splitlines():
+            if line.startswith("uptime_ms"):
+                parts = line.split()
+                if len(parts) == 2:
+                    try:
+                        uptime_ms = float(parts[1])
+                    except ValueError:
+                        uptime_ms = None
+                break
+        if uptime_ms is None:
+            return False
+        previous = self.last_device_uptime_ms
+        self.last_device_uptime_ms = uptime_ms
+        return previous is not None and uptime_ms < previous
+
     def _write_deduped_program(
         self,
         state: LedDisplayState,
@@ -1263,6 +1302,12 @@ class AgentLedController:
             if dedupe_token is not None
             else ("program", program)
         )
+
+        if self._device_rebooted_since_last_write(now):
+            # The strip is showing its own idea of the world; every
+            # dedupe assumption is void. Repaint unconditionally.
+            self.last_program_identity = None
+            self.last_attempt_monotonic = 0.0
 
         if (
             identity == self.last_program_identity

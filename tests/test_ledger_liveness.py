@@ -423,3 +423,32 @@ def test_quiescent_only_quarantine_survives_the_v2_round_trip() -> None:
     }
     healed = _v2_state_from_document(legacy)
     assert healed.timing_uncertain_sources == ()
+
+
+def test_a_rebooted_strip_voids_the_write_dedupe(tmp_path):
+    """2026-08-20 live incident: the strip rebooted on lid-open and
+    looped the lid flourish for two hours while every dedupe-skipped
+    tick assumed the steady program was still showing. A firmware
+    uptime that goes BACKWARDS voids the dedupe so the next tick
+    repaints unconditionally."""
+    from sidepulse._led_status_legacy import AgentLedController
+
+    status = tmp_path / "STATUS.TXT"
+    status.write_text("serial SPP-000067\nuptime_ms 5000000\nstate idle\n")
+    writer = AgentLedController(device_path=tmp_path)
+    writer.UPTIME_CHECK_SECONDS = 0.0  # check on every call in this test
+
+    import time as time_module
+
+    now = time_module.monotonic()
+    # Prime: first read learns the uptime; no reboot signal.
+    assert writer._device_rebooted_since_last_write(now) is False
+    # Same boot, more uptime: still no signal.
+    status.write_text("serial SPP-000067\nuptime_ms 6000000\nstate idle\n")
+    assert writer._device_rebooted_since_last_write(now + 1) is False
+    # Uptime went BACKWARDS: the device rebooted.
+    status.write_text("serial SPP-000067\nuptime_ms 120000\nstate idle\n")
+    assert writer._device_rebooted_since_last_write(now + 2) is True
+    # Unreadable STATUS.TXT is not evidence of anything.
+    status.unlink()
+    assert writer._device_rebooted_since_last_write(now + 3) is False
