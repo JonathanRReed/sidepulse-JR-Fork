@@ -286,3 +286,63 @@ def test_a_hand_picked_provider_colour_is_never_touched() -> None:
     chosen = ColorSettings.from_dict({"agent_colors": {"claude": "#123456"}})
 
     assert chosen.agent_color("claude") == "#123456"
+
+
+def test_one_engaged_agent_is_a_solo_whatever_else_is_remembered() -> None:
+    """'Even though codex was the only one running it showed claude's
+    colors alongside codex's' (2026-08-20): the crowd gate counted every
+    row inside the presence horizon, so one working Codex plus a
+    finished-but-remembered Claude row painted a two-color crowd. The
+    crowd is counted from ENGAGED rows (working or waiting) only."""
+    from datetime import datetime, timezone
+
+    from sidepulse.attention import LifecycleMode, ProjectedAgentRow
+    from sidepulse.models import AgentMode, AgentStatus
+    from sidepulse.status_bar import StatusBarController
+
+    def row(provider: str, lifecycle: LifecycleMode) -> ProjectedAgentRow:
+        when = datetime(2026, 8, 20, 20, 0, 0, tzinfo=timezone.utc)
+        return ProjectedAgentRow(
+            agent_id=f"{provider}:session:x",
+            provider=provider,
+            display_name=provider.title(),
+            lifecycle_mode=lifecycle,
+            actionable=False,
+            is_subagent=False,
+            updated_at=when,
+            source_status=AgentStatus(
+                provider=provider,
+                agent_id=f"{provider}:session:x",
+                display_name=provider.title(),
+                mode=AgentMode.WORKING,
+                updated_at=when,
+                event_name="PreToolUse",
+                session_id="x",
+            ),
+        )
+
+    def projection(*rows: ProjectedAgentRow):
+        from sidepulse.attention import AttentionProjection
+
+        return AttentionProjection(
+            lifecycle_mode=LifecycleMode.ACTIVE,
+            actionable_attention=(),
+            visible_rows=tuple(rows),
+            transient_signals=(),
+            dominant_provider=rows[0].provider if rows else None,
+            click_target_agent_id=None,
+        )
+
+    check = StatusBarController.should_render_multi_agent
+
+    # Codex working + Claude merely remembered idle: SOLO, no crowd.
+    solo = projection(
+        row("codex", LifecycleMode.ACTIVE), row("claude", LifecycleMode.IDLE)
+    )
+    assert check(None, None, solo) is False
+
+    # Two genuinely engaged agents: the crowd hands over.
+    duo = projection(
+        row("codex", LifecycleMode.ACTIVE), row("claude", LifecycleMode.WAITING)
+    )
+    assert check(None, None, duo) is True

@@ -2608,8 +2608,24 @@ class StatusBarController(NSObject):
         completions, capacity and rest stay whole-strip moments -- they
         are deliberately designed as one unmistakable signal, and a
         crowd of colors would bury them.
+
+        And the crowd is counted from agents actually ENGAGED (working
+        or waiting), not from every row still inside the presence
+        horizon: with Codex working and a finished Claude session merely
+        lingering as an idle row, the strip painted Claude's colors
+        alongside Codex's -- "even though codex was the only one
+        running" (2026-08-20). One engaged agent is a solo, whatever
+        else is remembered.
         """
-        if projection is None or len(projection.light_rows) < 2:
+        if projection is None:
+            return False
+        engaged = sum(
+            1
+            for row in projection.light_rows
+            if row.lifecycle_mode
+            in {LifecycleMode.ACTIVE, LifecycleMode.WAITING}
+        )
+        if engaged < 2:
             return False
         if resolved_glance is None:
             return True
