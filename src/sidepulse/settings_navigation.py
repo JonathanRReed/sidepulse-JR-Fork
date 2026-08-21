@@ -98,8 +98,8 @@ SETTINGS_CATEGORIES: Final = (
         "Appearance & Motion",
         "paintpalette",
         (
-            SettingsPage("color_studio", "Colors & Motion"),
-            SettingsPage("animations", "Lid & Studio"),
+            SettingsPage("color_studio", "Studio"),
+            SettingsPage("animations", "Lid Animations"),
         ),
         "One studio for color, animation, previews, and saved looks.",
     ),

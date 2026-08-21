@@ -9319,6 +9319,8 @@ class StatusBarController(NSObject):
             floor, ceiling = colors.fade_range(key)
             set_field_value(fields.get("floor"), f"{round(floor * 100)}")
             set_field_value(fields.get("ceiling"), f"{round(ceiling * 100)}")
+            set_field_value(fields.get("floor_label"), f"{round(floor * 100)}%")
+            set_field_value(fields.get("ceiling_label"), f"{round(ceiling * 100)}%")
         # Animation Style thumbnails: re-ring the selected style and
         # re-bake each thumb's program -- presets/palettes change both
         # the style AND the mode colors the thumbs preview, and these

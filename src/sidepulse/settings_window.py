@@ -4512,21 +4512,49 @@ def _build_studio_animations_section(target, actions, hex_labels):
     for key in FADE_MODE_KEYS:
         floor, ceiling = target.settings.colors.fade_range(key)
         controls = native_ui.make_stack(orientation="horizontal", spacing=6.0)
-        controls.addArrangedSubview_(native_ui.make_label("Floor", secondary=True, size=11.0))
-        floor_field = native_ui.make_field(
-            f"{round(floor * 100)}", target=target, action="applyFadeIntensity:"
+        # Sliders, not number fields: dragging a range you can SEE is
+        # how a breath's dimmest/brightest moments should be tuned. The
+        # existing plumbing survives -- NSSlider speaks stringValue, so
+        # applyFadeIntensity_'s parse and refresh's set_field_value work
+        # unchanged.
+        controls.addArrangedSubview_(
+            native_ui.make_label("Floor", secondary=True, size=11.0)
         )
-        native_ui.constrain_width(floor_field, 48.0)
+        floor_field = native_ui.make_slider(
+            min_value=0.0,
+            max_value=100.0,
+            value=round(floor * 100),
+            target=target,
+            action="applyFadeIntensity:",
+        )
+        native_ui.constrain_width(floor_field, 110.0)
         controls.addArrangedSubview_(floor_field)
-        controls.addArrangedSubview_(native_ui.make_label("%", secondary=True, size=11.0))
-        controls.addArrangedSubview_(native_ui.make_label("Ceiling", secondary=True, size=11.0))
-        ceiling_field = native_ui.make_field(
-            f"{round(ceiling * 100)}", target=target, action="applyFadeIntensity:"
+        floor_value = native_ui.make_label(
+            f"{round(floor * 100)}%", secondary=True, size=11.0
         )
-        native_ui.constrain_width(ceiling_field, 48.0)
+        controls.addArrangedSubview_(floor_value)
+        controls.addArrangedSubview_(
+            native_ui.make_label("Ceiling", secondary=True, size=11.0)
+        )
+        ceiling_field = native_ui.make_slider(
+            min_value=0.0,
+            max_value=100.0,
+            value=round(ceiling * 100),
+            target=target,
+            action="applyFadeIntensity:",
+        )
+        native_ui.constrain_width(ceiling_field, 110.0)
         controls.addArrangedSubview_(ceiling_field)
-        controls.addArrangedSubview_(native_ui.make_label("%", secondary=True, size=11.0))
-        fade_fields[key] = {"floor": floor_field, "ceiling": ceiling_field}
+        ceiling_value = native_ui.make_label(
+            f"{round(ceiling * 100)}%", secondary=True, size=11.0
+        )
+        controls.addArrangedSubview_(ceiling_value)
+        fade_fields[key] = {
+            "floor": floor_field,
+            "ceiling": ceiling_field,
+            "floor_label": floor_value,
+            "ceiling_label": ceiling_value,
+        }
         fade_inner.addArrangedSubview_(native_ui.make_row(MODE_COLOR_DISPLAY_LABELS[key], controls))
     stack.addArrangedSubview_(fade_outer)
 
