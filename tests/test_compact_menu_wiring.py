@@ -34,7 +34,11 @@ def test_status_bar_wires_cached_device_identity_without_diskutil_on_menu_thread
 
 def test_root_menu_groups_devices_and_removes_permanent_tip() -> None:
     source = _source()
-    assert 'title in {"Profiles", "Timer"}' in source
+    # 2026-08-21: the group grew from devices-only into the whole
+    # physical concern -- one "Hardware" root row.
+    assert '"Keep Awake With Lid Closed",' in source
+    assert '"Brightness",' in source
+    assert '"Screen Bar",' in source
     assert 'title.startswith("SidePulse")' in source
     assert 'title.startswith("Tip:")' in source
     assert 'item.setTitle_("Diagnostics…")' in source

@@ -274,8 +274,18 @@ def _compact_existing_menu(menu, snapshot, target):
     device_items = []
     for item in items:
         title = _safe_title(item)
-        if title in {"Profiles", "Timer"} or (
-            title.startswith("SidePulse") and title != "Quit SidePulse"
+        if (
+            title
+            in {
+                "Profiles",
+                "Timer",
+                "Screen Bar",
+                "Add Screen Bar",
+                "Brightness",
+                "Keep Awake With Lid Closed",
+            }
+            or title.startswith("Sleep warning:")
+            or (title.startswith("SidePulse") and title != "Quit SidePulse")
         ):
             _normalise_device_item_title(item)
             device_items.append(item)

@@ -2541,16 +2541,34 @@ for (const event of [
 
         mailbox_items = find_mailbox_item(menu)
         self.assertEqual(len(mailbox_items), 1)
-        devices_title = next(
-            title for title in titles if title == "Devices" or title.startswith("Devices ·")
+        hardware_title = next(
+            title
+            for title in titles
+            if title.startswith("Hardware ·") or title == "Hardware"
         )
         self.assertLess(
-            items.index(mailbox_items[0]), titles.index(devices_title)
+            items.index(mailbox_items[0]), titles.index(hardware_title)
         )
-        self.assertIn("Keep Awake With Lid Closed", by_title)
-        # The policy choices live in a submenu now -- one dropdown row
-        # for the whole concern, not four.
-        submenu = by_title["Keep Awake With Lid Closed"].submenu()
+        # The whole physical concern lives under ONE root row now:
+        # devices, brightness, keep-awake, calibration -- not four
+        # top-level items.
+        self.assertNotIn("Keep Awake With Lid Closed", by_title)
+        self.assertNotIn("Brightness", by_title)
+        hardware_menu = by_title[hardware_title].submenu()
+        self.assertIsNotNone(hardware_menu)
+        hardware_titles = {
+            hardware_menu.itemAtIndex_(index).title()
+            for index in range(hardware_menu.numberOfItems())
+        }
+        self.assertIn("Keep Awake With Lid Closed", hardware_titles)
+        self.assertIn("Brightness", hardware_titles)
+        keep_awake_item = next(
+            hardware_menu.itemAtIndex_(index)
+            for index in range(hardware_menu.numberOfItems())
+            if hardware_menu.itemAtIndex_(index).title()
+            == "Keep Awake With Lid Closed"
+        )
+        submenu = keep_awake_item.submenu()
         self.assertIsNotNone(submenu)
         sub_items = {
             submenu.itemAtIndex_(index).title(): submenu.itemAtIndex_(index)
@@ -24003,3 +24021,34 @@ class Task10FiniteStatusEmphasisTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionHeardSuffixTests(unittest.TestCase):
+    """Every session row says when it was last heard from (audited gap:
+    the number lived only in Diagnostics; rows made the owner guess)."""
+
+    def _status(self, seconds_old: float) -> AgentStatus:
+        from datetime import timedelta
+
+        now = datetime(2026, 8, 20, 21, 0, 0, tzinfo=timezone.utc)
+        self.now = now
+        return AgentStatus(
+            provider="claude",
+            agent_id="claude:session:x",
+            display_name="proj: fix bar (abc12345)",
+            mode=AgentMode.WORKING,
+            updated_at=now - timedelta(seconds=seconds_old),
+            event_name="PreToolUse",
+            session_id="x",
+        )
+
+    def test_fresh_rows_stay_clean_and_old_rows_say_their_age(self) -> None:
+        from sidepulse.status_bar import session_heard_suffix
+
+        self.assertEqual(session_heard_suffix(self._status(10.0), self.now), "")
+        self.assertEqual(
+            session_heard_suffix(self._status(240.0), self.now), " · 4m ago"
+        )
+        self.assertEqual(
+            session_heard_suffix(self._status(2.5 * 3600), self.now), " · 2h ago"
+        )

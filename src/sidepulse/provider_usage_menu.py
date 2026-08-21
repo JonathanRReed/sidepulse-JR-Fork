@@ -196,7 +196,15 @@ def project_usage_menu(
             f"{provider_descriptor(provider_id).label} {remaining:.0f}%"
             for remaining, provider_id in constrained[:2]
         ]
-        title = "Usage · " + " · ".join(labels)
+        # The tightest lane's meter rides in the row itself: the
+        # at-a-glance answer with zero hovering. Curated off with the
+        # same switch as the per-lane meters.
+        meter = (
+            f"{format_lane_meter(constrained[0][0])}  "
+            if display.show_meters
+            else ""
+        )
+        title = f"Usage · {meter}" + " · ".join(labels)
     elif actionable:
         title = "Usage · setup needed"
     elif state.snapshots:

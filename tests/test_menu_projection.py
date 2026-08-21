@@ -44,7 +44,7 @@ def test_root_menu_is_compact_and_semantic() -> None:
     ]
     assert plan.rows[0].title == "2 active · 1 needs you"
     assert plan.rows[2].title == "Usage · Claude 36% · Codex 71%"
-    assert plan.rows[3].title == "Devices · 2 connected"
+    assert plan.rows[3].title == "Hardware · 2 connected"
     assert plan.rows[3].kind is MenuRowKind.SUBMENU
 
 

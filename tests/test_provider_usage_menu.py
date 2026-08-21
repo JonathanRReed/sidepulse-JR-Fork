@@ -60,7 +60,7 @@ def test_summary_shows_two_tightest_trustworthy_providers():
         False,
     )
     projection = project_usage_menu(state, now=1000)
-    assert projection.title == "Usage · Claude 36% · Codex 71%"
+    assert projection.title == "Usage · ▰▰▰▱▱▱▱▱  Claude 36% · Codex 71%"
     assert projection.rows[0].title.startswith("Codex")
     assert projection.rows[1].title.startswith("Claude")
 
@@ -174,7 +174,7 @@ def test_hidden_providers_leave_the_rows_and_the_title():
         state, now=1000, hidden_providers=frozenset({"claude"})
     )
     assert [row.provider_id for row in projection.rows] == ["codex"]
-    assert projection.title == "Usage · Codex 71%"
+    assert projection.title == "Usage · ▰▰▰▰▰▰▱▱  Codex 71%"
 
 
 def test_lanes_past_their_threshold_are_flagged_for_alert_rendering():

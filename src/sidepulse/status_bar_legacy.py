@@ -7297,6 +7297,95 @@ class StatusBarController(NSObject):
         self.refresh_(None)
 
     @objc.IBAction
+    def resetStripDevice_(self, sender):
+        """Eject the strip so the owner can reseat it -- the recovery
+        for a firmware that stopped honoring writes (2026-08-20). Pauses
+        the sd-eject-guard daemon (it dissents ejects by design), ejects
+        the volume, and restores the guard; discovery re-adopts the
+        device on replug. Everything reports through the settings
+        message and the log."""
+        mount = str(sender.representedObject() or "")
+        if not mount:
+            return
+
+        def _ritual() -> None:
+            import subprocess
+
+            guard = "io.sidepulse.sdejectguard"
+            domain = f"gui/{os.getuid()}"
+            guard_plist = (
+                Path.home() / "Library" / "LaunchAgents" / f"{guard}.plist"
+            )
+            paused = False
+            try:
+                if guard_plist.exists():
+                    paused = (
+                        subprocess.run(
+                            ["launchctl", "bootout", f"{domain}/{guard}"],
+                            capture_output=True,
+                            timeout=10,
+                        ).returncode
+                        == 0
+                    )
+                ejected = subprocess.run(
+                    ["diskutil", "eject", mount],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                message = (
+                    "Strip ejected — unplug it, then plug it back in."
+                    if ejected.returncode == 0
+                    else (
+                        "Could not eject the strip: "
+                        f"{(ejected.stderr or ejected.stdout).strip()[:120]}"
+                    )
+                )
+            except Exception as exc:
+                message = f"Could not eject the strip: {exc}"
+            finally:
+                if paused:
+                    try:
+                        subprocess.run(
+                            ["launchctl", "bootstrap", domain, str(guard_plist)],
+                            capture_output=True,
+                            timeout=10,
+                        )
+                    except Exception:
+                        pass
+            log_status_bar(f"reset strip: {message}")
+
+            try:
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "showSettingsMessage:", message, False
+                )
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=_ritual, name="SidePulseStripReset", daemon=True
+        ).start()
+
+    @objc.IBAction
+    def showSettingsMessage_(self, message):
+        """Main-thread landing pad for background threads' messages."""
+        try:
+            self.set_settings_message(str(message))
+        except Exception:
+            pass
+
+    @objc.IBAction
+    def startQuiet_(self, sender):
+        """Quiet for exactly as long as the chosen menu item says."""
+        try:
+            seconds = float(sender.representedObject())
+        except (TypeError, ValueError):
+            seconds = 3600.0
+        self.quiet_until_monotonic = time.monotonic() + max(60.0, seconds)
+        self._menu_signature = None
+        self.refresh_(None)
+
+    @objc.IBAction
     def clearFinished_(self, _sender):
         """Settle the finished rows out of the dropdown -- they return
         automatically if the session comes back to life."""
@@ -14965,6 +15054,16 @@ def daily_tip(settings=None) -> tuple[str, str | None, str | None] | None:
     return tips[day % len(tips)]
 
 
+def quiet_seconds_until_tomorrow(now: datetime | None = None) -> float:
+    """Seconds until tomorrow 8am local -- "Until Tomorrow" means "when
+    I next sit down," not a fixed duration."""
+    current = datetime.now().astimezone() if now is None else now
+    tomorrow = (current + timedelta(days=1)).replace(
+        hour=8, minute=0, second=0, microsecond=0
+    )
+    return max(3600.0, (tomorrow - current).total_seconds())
+
+
 def target_quiet_active(target) -> bool:
     quiet = getattr(target, "quiet_active", None)
     return bool(quiet()) if callable(quiet) else False
@@ -16572,17 +16671,41 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     settings.setTarget_(target)
     menu.addItem_(settings)
 
-    quiet_title = (
-        "End Quiet Hour" if target_quiet_active(target) else "Quiet for an Hour"
-    )
-    quiet_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        quiet_title,
-        "toggleQuietHour:",
-        "",
-    )
-    quiet_item.setTarget_(target)
-    quiet_item.setState_(1 if target_quiet_active(target) else 0)
-    menu.addItem_(quiet_item)
+    if target_quiet_active(target):
+        remaining = max(
+            0.0,
+            float(getattr(target, "quiet_until_monotonic", 0.0)) - time.monotonic(),
+        )
+        minutes_left = max(1, int(remaining // 60)) if remaining else 0
+        quiet_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"End Quiet ({minutes_left}m left)" if minutes_left else "End Quiet",
+            "toggleQuietHour:",
+            "",
+        )
+        quiet_item.setTarget_(target)
+        quiet_item.setState_(1)
+        menu.addItem_(quiet_item)
+    else:
+        # Snooze granularity: an hour was the only option, and "one
+        # hour" is almost never the actual length of "leave me alone."
+        quiet_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Quiet", None, ""
+        )
+        quiet_menu = NSMenu.alloc().init()
+        quiet_menu.setAutoenablesItems_(False)
+        for label, seconds in (
+            ("For 15 Minutes", 15 * 60),
+            ("For an Hour", 3600),
+            ("Until Tomorrow", quiet_seconds_until_tomorrow()),
+        ):
+            choice = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                label, "startQuiet:", ""
+            )
+            choice.setTarget_(target)
+            choice.setRepresentedObject_(seconds)
+            quiet_menu.addItem_(choice)
+        quiet_item.setSubmenu_(quiet_menu)
+        menu.addItem_(quiet_item)
     completed_rows = [
         status
         for status in statuses
@@ -16763,6 +16886,20 @@ def build_device_menu_item(device: StatusBarDevice, target: StatusBarController)
         )
         remove_bar.setTarget_(target)
         submenu.addItem_(remove_bar)
+    elif device.connected and device.target is not None:
+        # The software replug, one click: the 2026-08-20 firmware wedge
+        # needed the guard daemon paused, the volume ejected, and a
+        # physical reseat -- a ritual the owner should never have to
+        # know. See resetStripDevice_.
+        submenu.addItem_(NSMenuItem.separatorItem())
+        reset_strip = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Reset Strip (eject, then replug)…",
+            "resetStripDevice:",
+            "",
+        )
+        reset_strip.setTarget_(target)
+        reset_strip.setRepresentedObject_(str(device.target))
+        submenu.addItem_(reset_strip)
 
     item.setSubmenu_(submenu)
     return item
@@ -17997,7 +18134,10 @@ def build_session_menu_item(
     # Sub-agent rows carry an explicit elbow -- indentationLevel alone
     # disappears next to the state-spinner and app-icon stack.
     prefix = "\u21b3 " if indent else ""
-    base_title = f"{native_session_menu_title(status)}{title_suffix}"
+    base_title = (
+        f"{native_session_menu_title(status)}"
+        f"{session_heard_suffix(status, now)}{title_suffix}"
+    )
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         f"{prefix}{base_title}",
         "openSessionPrimary:",
@@ -18022,6 +18162,23 @@ def build_session_menu_item(
     if image is not None:
         item.setImage_(image)
     return item
+
+
+def session_heard_suffix(status: AgentStatus, now: datetime) -> str:
+    """" · 4m ago" after every session title -- when SidePulse last
+    HEARD from it. The number existed only in Diagnostics before
+    (audited gap): a row that says nothing about its own recency makes
+    the owner guess whether "working" is live truth or a memory. Fresh
+    rows (under a minute) stay clean -- "just now" on every live row is
+    noise, silence is the freshness signal.
+    """
+    try:
+        age = (now - status.updated_at).total_seconds()
+    except (TypeError, AttributeError):
+        return ""
+    if not math.isfinite(age) or age < 60.0:
+        return ""
+    return f" · {relative_age_label(age)}"
 
 
 def native_session_menu_title(status: AgentStatus) -> str:

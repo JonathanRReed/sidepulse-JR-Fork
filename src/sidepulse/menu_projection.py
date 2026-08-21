@@ -162,7 +162,9 @@ def project_root_menu(inputs: MenuProjectionInputs) -> RootMenuProjection:
         ),
         MenuRow(
             "devices",
-            f"Devices · {inputs.connected_device_count} connected",
+            # One semantic row for the whole physical concern: devices,
+            # the Screen Bar, brightness, keep-awake, calibration, timer.
+            f"Hardware · {inputs.connected_device_count} connected",
             MenuRowKind.SUBMENU,
         ),
         MenuRow(
