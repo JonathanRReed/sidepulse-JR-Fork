@@ -55,6 +55,12 @@ class PresentationSchedulerInputs:
     alcove_enabled: bool
     alcove_relevant: bool
     pointer_interaction_relevant: bool
+    #: The Screen Bar's REAL frame interval while animating (seconds).
+    #: None keeps the historical 60 Hz fallback. Carrying the actual
+    #: cadence here is the fix the virtual_device known-hole comment
+    #: prescribed: the resting 30 fps breathe no longer wakes the app
+    #: 60 times a second to render nothing.
+    frame_interval: float | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -73,6 +79,11 @@ class PresentationSchedulerInputs:
             if not _finite_number(deadline) or float(deadline) <= 0.0:
                 raise ValueError("invalid presentation scheduler deadline")
             object.__setattr__(self, "next_visual_change_at", float(deadline))
+        interval = self.frame_interval
+        if interval is not None:
+            if not _finite_number(interval) or float(interval) <= 0.0:
+                raise ValueError("invalid presentation frame interval")
+            object.__setattr__(self, "frame_interval", float(interval))
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,7 +199,7 @@ def plan_presentation_schedule(
             _repeating_intent(
                 RuntimeFeature.PRESENTATION_FRAME_FALLBACK,
                 now=clock,
-                interval=FRAME_FALLBACK_INTERVAL_SECONDS,
+                interval=inputs.frame_interval or FRAME_FALLBACK_INTERVAL_SECONDS,
                 tolerance=0.0,
             )
         )

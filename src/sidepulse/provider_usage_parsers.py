@@ -109,13 +109,26 @@ def parse_codex_usage(
         raw_label = str(entry.get("label") or f"limit-{index + 1}").strip()
         minutes = _number(entry.get("window_minutes"))
         normalized = raw_label.lower()
-        if normalized in {"primary", "5-hour", "five-hour"}:
+        # For POSITIONAL labels the DURATION names the window. After the
+        # Codex/ChatGPT account merge the CLI reports the WEEKLY window
+        # as "primary" (window_minutes 10080, no 5-hour at all on Pro),
+        # and the old primary->five-hour rule labeled a week's budget
+        # "5-hour" -- usage that "never updates" because the real lane
+        # never existed. Product-scoped labels ("Spark Weekly") keep
+        # their own dynamic lanes untouched.
+        positional = normalized in {
+            "primary",
+            "secondary",
+            "limit",
+            f"limit-{index + 1}",
+        }
+        if positional and minutes is not None and 240.0 <= minutes <= 360.0:
+            lane_id, label = "five-hour", "5-hour"
+        elif positional and minutes is not None and 10000.0 <= minutes <= 10200.0:
+            lane_id, label = "weekly", "Weekly"
+        elif normalized in {"primary", "5-hour", "five-hour"}:
             lane_id, label = "five-hour", "5-hour"
         elif normalized in {"secondary", "weekly"}:
-            lane_id, label = "weekly", "Weekly"
-        elif normalized in {"limit", f"limit-{index + 1}"} and minutes == 300:
-            lane_id, label = "five-hour", "5-hour"
-        elif normalized in {"limit", f"limit-{index + 1}"} and minutes == 10080:
             lane_id, label = "weekly", "Weekly"
         else:
             lane_id = "-".join(

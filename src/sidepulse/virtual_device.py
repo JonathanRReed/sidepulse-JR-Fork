@@ -2613,6 +2613,7 @@ class VirtualStatusDevice(NSObject):
             pointer_interaction_relevant=bool(
                 self._pointer_interaction_relevant
             ),
+            frame_interval=getattr(self, "_frame_interval_current", None),
         )
 
     def _publish_presentation_schedule(self) -> None:

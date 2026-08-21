@@ -222,3 +222,31 @@ def test_claude_reads_the_utilization_key_claude_quota_actually_emits() -> None:
     by_label = {lane.label: lane for lane in snapshot.lanes}
     assert by_label["5-hour"].remaining_percent == 74.0
     assert by_label["Weekly"].remaining_percent == 88.5
+
+
+def test_codex_merged_account_weekly_primary_is_labeled_weekly() -> None:
+    # After the Codex/ChatGPT merge the CLI reports the WEEKLY window as
+    # "primary" (window_minutes 10080; Pro has no 5-hour at all). The
+    # old positional rule labeled a week's budget "5-hour" -- usage that
+    # looked frozen because the real lane never existed. Duration wins.
+    snapshot = parse_codex_usage(
+        windows=[
+            {"label": "primary", "used_percent": 3.0,
+             "window_minutes": 10080, "resets_at": 1787846584},
+        ],
+        observed_at=1000,
+    )
+    assert [lane.label for lane in snapshot.lanes] == ["Weekly"]
+    assert snapshot.lanes[0].lane_id == "weekly"
+    assert snapshot.lanes[0].remaining_percent == 97.0
+    # And a true 5-hour primary still lands where it always did.
+    classic = parse_codex_usage(
+        windows=[
+            {"label": "primary", "used_percent": 30.0,
+             "window_minutes": 300, "resets_at": 2000},
+            {"label": "secondary", "used_percent": 12.0,
+             "window_minutes": 10080, "resets_at": 3000},
+        ],
+        observed_at=1000,
+    )
+    assert [lane.label for lane in classic.lanes] == ["5-hour", "Weekly"]
