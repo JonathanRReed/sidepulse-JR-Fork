@@ -910,7 +910,15 @@ class AgentMonitorSettings:
         self,
         provider_ids: tuple[str, ...],
     ) -> AgentMonitorSettings:
-        allowed = {"claude", "codex"}
+        # Any registry provider: token/cost series exist only for the two
+        # with local transcripts, but the percent metric charts everyone,
+        # and the old {claude, codex} allowlist was why the chart looked
+        # like a two-provider app no matter what was enabled.
+        from .provider_usage_platform import provider_descriptors
+
+        allowed = {
+            descriptor.provider_id for descriptor in provider_descriptors()
+        }
         if (
             type(provider_ids) is not tuple
             or not provider_ids

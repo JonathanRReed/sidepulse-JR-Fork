@@ -131,7 +131,7 @@ def usage_graph_legend_text(settings) -> str:
         " · ".join(
             provider_id.title() for provider_id in settings.usage_graph_providers
         )
-        + " · one shared metric and zero baseline"
+        + " · every other provider charts under Percent left"
     )
 
 
@@ -742,7 +742,7 @@ def _build_profile_pane(target: StatusBarController):
             provider_label,
             target,
             "toggleUsageGraphProvider:",
-            help_text="Show this supported local usage source in the graph.",
+            help_text="Token and cost series come from this provider's local transcripts.",
         )
         switch.setIdentifier_(provider_id)
         switch.setState_(1 if provider_id in selected_providers else 0)
@@ -753,9 +753,10 @@ def _build_profile_pane(target: StatusBarController):
     fields["usage_graph_provider_switches"] = provider_switches
     today_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
-            "All supported local usage sources are selected by default. "
-            "Additional installed agents appear here only when SidePulse has "
-            "a trustworthy, bounded usage source for them.",
+            "Tokens, cost and sessions come from local transcripts, which "
+            "only Claude and Codex leave behind. Every other provider "
+            "charts under the Percent left metric, from its remembered "
+            "remaining-percent readings.",
             secondary=True,
             size=10.0,
             max_width=560.0,

@@ -161,10 +161,22 @@ MOTION_STEADY = "steady"
 # is never a choice -- see agent_motion). "Automatic" is the default and
 # means "whatever the state says", i.e. today's behaviour exactly.
 PROVIDER_ANIMATION_AUTO = "auto"
+# The expanded vocabulary (2026-08-21, from the WLED/Particle/Adafruit
+# pattern survey): rhythm CLASS is the strongest peripheral cue for
+# telling two providers apart -- a sinusoid, a lub-dub, and a travelling
+# dot are distinguishable without looking, where two tempos are not.
+MOTION_HEARTBEAT = "heartbeat"
+MOTION_SCANNER = "scanner"
+MOTION_COMET = "comet"
+MOTION_FLICKER = "flicker"
 PROVIDER_ANIMATION_CHOICES: tuple[str, ...] = (
     PROVIDER_ANIMATION_AUTO,
     MOTION_BREATHE,
     MOTION_CHASE,
+    MOTION_HEARTBEAT,
+    MOTION_SCANNER,
+    MOTION_COMET,
+    MOTION_FLICKER,
     MOTION_STEADY,
     MOTION_BLINK,
 )
@@ -172,6 +184,10 @@ PROVIDER_ANIMATION_LABELS: dict[str, str] = {
     PROVIDER_ANIMATION_AUTO: "Automatic",
     MOTION_BREATHE: "Breathe",
     MOTION_CHASE: "Chase",
+    MOTION_HEARTBEAT: "Heartbeat",
+    MOTION_SCANNER: "Scanner",
+    MOTION_COMET: "Comet",
+    MOTION_FLICKER: "Flicker",
     MOTION_STEADY: "Steady",
     MOTION_BLINK: "Blink",
 }
@@ -179,6 +195,10 @@ PROVIDER_ANIMATION_DESCRIPTIONS: dict[str, str] = {
     PROVIDER_ANIMATION_AUTO: "Follows the state: breathe when idle, chase while working.",
     MOTION_BREATHE: "One slow swell, every LED together.",
     MOTION_CHASE: "The same swell, staggered into a travelling wave.",
+    MOTION_HEARTBEAT: "Two quick swells, then a long rest — a lub-dub.",
+    MOTION_SCANNER: "A bright dot sweeps end to end and bounces back.",
+    MOTION_COMET: "A bright head sweeps one way, trailing off behind.",
+    MOTION_FLICKER: "A warm candle-like shimmer that never quite repeats.",
     MOTION_STEADY: "Holds its color. Never moves.",
     MOTION_BLINK: "Hard-edged on/off, no easing.",
 }
@@ -1597,10 +1617,12 @@ def _speed_safe_motion(motion: str, *, cycle_ms: int) -> str:
     """
     if cycle_ms >= MIN_FLASH_CYCLE_MS:
         return motion
-    if motion == MOTION_BEAT:
+    if motion in (MOTION_BEAT, MOTION_HEARTBEAT, MOTION_FLICKER):
         return MOTION_BREATHE
     if motion == MOTION_BLINK:
         return MOTION_STEADY
+    if motion in (MOTION_SCANNER, MOTION_COMET):
+        return MOTION_CHASE
     return motion
 
 
@@ -1754,7 +1776,30 @@ def _motion_segments(
         # No traveling wave: every asking LED beats together. A wave says
         # "busy", a unison beat says "stop".
         return floor_segment, f"{led_index}:{peak} {beat_ms}ms pulse{tail}"
-    if motion == MOTION_CHASE:
+    if motion == MOTION_HEARTBEAT:
+        # Lub-dub: two quick swells, then the rest of the cycle dark.
+        beat_ms = max(1, cycle_ms // 6)
+        gap_ms = max(1, cycle_ms // 10)
+        return floor_segment, (
+            f"{led_index}:{peak} {beat_ms}ms pulse{tail}; "
+            f"{led_index}:{peak} {beat_ms}ms pulse {delay_ms + beat_ms + gap_ms}ms"
+        )
+    if motion == MOTION_FLICKER:
+        # Frozen per-LED detune: each LED swells on its own duration and
+        # offset inside the shared cycle, so the strip shimmers instead
+        # of breathing in lockstep. Deterministic -- same program bytes
+        # every render, so the write dedupe still holds.
+        duration = max(1, (2 * cycle_ms) // 3 + (led_index * 137) % 331)
+        offset = (led_index * 271) % max(1, cycle_ms // 3)
+        return (
+            floor_segment,
+            f"{led_index}:{peak} {duration}ms pulse {delay_ms + offset}ms",
+        )
+    if motion in (MOTION_CHASE, MOTION_SCANNER, MOTION_COMET):
+        # In a MULTI-agent layout a provider owns interleaved LEDs, so a
+        # positional sweep has no line to travel -- scanner and comet
+        # degrade to the travelling wave here and keep their real shapes
+        # for the solo render (presentation_policy).
         return (
             floor_segment,
             f"{led_index}:{peak} {cycle_ms}ms pulse {delay_ms + chase_delay_ms}ms",

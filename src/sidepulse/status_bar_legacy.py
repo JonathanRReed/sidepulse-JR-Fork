@@ -1376,8 +1376,7 @@ DEVICE_DISCOVERY_CACHE_SECONDS = 1.0
 # seconds; a CLOSED menu tolerates this much staleness before the next
 # rebuild (session-row copy still patches live in between).
 MENU_REBUILD_MIN_INTERVAL_SECONDS = 12.0
-# Green unseen-done tip: far shorter than the menu badge's window -- an
-# all-day fleet re-arming 20 min per finish read as a stuck green glow.
+# Green unseen-done tip: shorter than the menu badge's window.
 GAUGE_UNSEEN_COMPLETION_SECONDS = 300.0
 SCREEN_BAR_FEATURE_ENABLED = True
 STATUS_BAR_MAX_LINES_PER_SOURCE = 500
@@ -4104,8 +4103,7 @@ class StatusBarController(NSObject):
                         windows,
                     )
                 except claude_quota.ClaudeQuotaUnavailableError as error:
-                    # Reason codes are product-owned and content-free; say
-                    # each one ONCE -- unsupported accounts probe forever.
+                    # Say each reason code ONCE.
                     if str(error) != getattr(self, "_last_claude_quota_log", None):
                         self._last_claude_quota_log = str(error)
                         log_status_bar(f"claude quota unavailable: {error}")
@@ -11994,7 +11992,6 @@ class StatusBarController(NSObject):
         # Right tip: the independent unseen-completion gauge.
         if self.settings.screen_bar_gauges_enabled:
             snapshot = getattr(self, "last_snapshot", None)
-            # Five minutes of green per completion, not twenty.
             right_on = (
                 bool(
                     unseen_completions(
@@ -12242,6 +12239,12 @@ class StatusBarController(NSObject):
                     ),
                     preferences=preferences,
                     capacity_remaining_fraction=capacity_remaining_fraction,
+                    provider=(
+                        projection.dominant_provider
+                        if projection is not None
+                        else None
+                    ),
+                    color_settings=colors_for_render,
                 )
                 program = apply_brightness(presentation.dsl, brightness)
             elif projection is not None:
@@ -13255,6 +13258,12 @@ class StatusBarController(NSObject):
                     ),
                     preferences=preferences,
                     capacity_remaining_fraction=request.capacity_remaining_fraction,
+                    provider=(
+                        device_projection.dominant_provider
+                        if device_projection is not None
+                        else None
+                    ),
+                    color_settings=colors_for_render,
                 )
                 continuity = continuous_presentation_identity(presentation)
                 if continuity is not None:
@@ -15185,7 +15194,6 @@ class StatusBarController(NSObject):
                     status_path = self.keep_awake.poke_status_file(target)
                     if status_path is not None:
                         read_any = True
-                        # First touch per target only, not once a minute.
                         seen_touches = getattr(self, "_keepalive_logged_targets", set())
                         if str(status_path) not in seen_touches:
                             seen_touches.add(str(status_path))
@@ -16654,8 +16662,7 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     know what menu you clicked), and one row per secondary concern --
     the keep-awake policy is a submenu, not four inline rows."""
     menu = NSMenu.alloc().init()
-    # Section stopwatch for the flight recorder: a rebuild that costs
-    # seconds must say WHICH section spent them.
+    # Flight-recorder section stopwatch.
     _marks: list[tuple[str, int]] = []
     _mark_t = time.monotonic()
 

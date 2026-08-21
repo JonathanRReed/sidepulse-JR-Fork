@@ -250,10 +250,16 @@ def test_every_offered_animation_has_a_label_and_a_description() -> None:
         assert PROVIDER_ANIMATION_LABELS[motion].strip()
         assert colors_module.PROVIDER_ANIMATION_DESCRIPTIONS[motion].strip()
     assert PROVIDER_ANIMATION_LABELS[PROVIDER_ANIMATION_AUTO] == "Automatic"
-    # The vocabulary the owner asked for, and nothing invented alongside it.
+    # The vocabulary the owner asked for -- expanded 2026-08-21 with the
+    # pattern-survey rhythms (heartbeat/scanner/comet/flicker), and still
+    # nothing invented alongside it.
     assert set(PROVIDER_ANIMATION_CHOICES) - {PROVIDER_ANIMATION_AUTO} == {
         MOTION_BREATHE,
         MOTION_CHASE,
+        colors_module.MOTION_HEARTBEAT,
+        colors_module.MOTION_SCANNER,
+        colors_module.MOTION_COMET,
+        colors_module.MOTION_FLICKER,
         MOTION_STEADY,
         MOTION_BLINK,
     }

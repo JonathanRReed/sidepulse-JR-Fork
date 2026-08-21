@@ -192,8 +192,19 @@ def compose_presentation_program(
     preferences: AccessibilityDisplayPreferences,
     capacity_remaining_fraction: float | None = None,
     calibration: CalibrationState = CalibrationState(),
+    motion_style: str | None = None,
+    provider: str | None = None,
+    color_settings=None,
 ) -> PresentationProgram:
-    """Compose one hue-independent semantic glyph for a bounded surface."""
+    """Compose one hue-independent semantic glyph for a bounded surface.
+
+    ``motion_style`` is the provider's own chosen rhythm ("breathe",
+    "blink", "steady") and applies ONLY to the ACTIVE semantic: this was
+    the dead half of the per-provider animation setting -- the
+    multi-agent renderers honored it, but a SOLO agent renders through
+    this composer, which always chased. Urgent semantics ignore it,
+    exactly as agent_motion does.
+    """
     if (
         not isinstance(resolved, ResolvedGlance)
         or not valid_presentation_time(presentation_time)
@@ -213,6 +224,16 @@ def compose_presentation_program(
         relay_step_ms,
     )
     from .led_status import ASK_AMBER, settle_duration_ms
+
+    if motion_style is None and provider and color_settings is not None:
+        from .colors import PROVIDER_ANIMATION_AUTO
+
+        try:
+            chosen = color_settings.agent_animation(provider)
+        except Exception:
+            chosen = PROVIDER_ANIMATION_AUTO
+        if chosen != PROVIDER_ANIMATION_AUTO:
+            motion_style = chosen
 
     normalized_color = normalize_hex(color, ASK_AMBER)
     intensities = _glyph_intensities(
@@ -277,6 +298,113 @@ def compose_presentation_program(
             trusted_period_seconds=None,
             relay_epoch=resolved.relay_epoch,
             next_visual_change_at=resolved.next_visual_change_at,
+        )
+        return _bounded_and_safe(candidate, calibration=calibration)
+
+    if resolved.semantic is GlanceSemantic.ACTIVE and motion_style in (
+        "breathe",
+        "blink",
+        "steady",
+        "heartbeat",
+        "scanner",
+        "comet",
+        "flicker",
+    ):
+        if motion_style == "steady":
+            return _static_program(resolved, dsl=fallback)
+        floor_color = _scaled_color(normalized_color, 0.05)
+        peak_color = _scaled_color(normalized_color, 1.0)
+        settle_text = f"{floor_color} 160ms cosine"
+        if motion_style == "breathe":
+            cycle_ms = round(RELAY_TRAVERSAL_SECONDS * 2000.0)
+            lines = (
+                settle_text,
+                f"{peak_color} {cycle_ms}ms pulse",
+                "repeat",
+            )
+            cycle_seconds = 0.16 + cycle_ms / 1000.0
+        elif motion_style == "blink":
+            half_ms = round(RELAY_TRAVERSAL_SECONDS * 500.0)
+            lines = (
+                f"{peak_color} {half_ms}ms none",
+                f"{floor_color} {half_ms}ms none",
+                "repeat",
+            )
+            cycle_seconds = half_ms / 500.0
+        elif motion_style == "heartbeat":
+            # Lub-dub then a long rest: the rhythm most separable from a
+            # sinusoid in peripheral vision (Particle/WLED survey).
+            lines = (
+                settle_text,
+                f"{peak_color} 300ms pulse; {peak_color} 300ms pulse 500ms",
+                f"{floor_color} 1400ms none",
+                "repeat",
+            )
+            cycle_seconds = 0.16 + 0.8 + 1.4
+        elif motion_style == "scanner":
+            # A dot bounces 0..7..0 across 2.8s -- born on 8 elements.
+            step_ms, width_ms = 200, 400
+            segments = [
+                f"{index}:{peak_color} {width_ms}ms pulse {index * step_ms}ms"
+                for index in range(led_count)
+            ] + [
+                f"{index}:{peak_color} {width_ms}ms pulse {(2 * led_count - 2 - index) * step_ms}ms"
+                for index in range(1, led_count - 1)
+            ]
+            lines = (settle_text, "; ".join(segments), "repeat")
+            cycle_seconds = 0.16 + ((2 * led_count - 3) * step_ms + width_ms) / 1000.0
+        elif motion_style == "comet":
+            # One-way sweep with an eased tail, then a dark beat.
+            step_ms, width_ms = 180, 420
+            segments = [
+                f"{index}:{peak_color} {width_ms}ms pulse {index * step_ms}ms"
+                for index in range(led_count)
+            ]
+            lines = (
+                settle_text,
+                "; ".join(segments),
+                f"{floor_color} 600ms none",
+                "repeat",
+            )
+            cycle_seconds = 0.16 + ((led_count - 1) * step_ms + width_ms + 600) / 1000.0
+        else:
+            # Flicker: frozen per-LED detune -- deterministic shimmer.
+            base_ms = 1800
+            segments = [
+                f"{index}:{peak_color} "
+                f"{base_ms + (index * 137) % 331}ms pulse {(index * 271) % 600}ms"
+                for index in range(led_count)
+            ]
+            lines = (settle_text, "; ".join(segments), "repeat")
+            cycle_seconds = 0.16 + (base_ms + 330 + 599) / 1000.0
+        cycle_ms = max(1, round(cycle_seconds * 1000.0))
+        elapsed = max(0.0, float(presentation_time) - resolved.relay_epoch)
+        elapsed_ms = round(elapsed * 1000.0)
+        anchor = float(presentation_time) - (elapsed_ms % cycle_ms) / 1000.0
+        temporal = TemporalProgram(
+            # Two full periods: the safety pass requires the analyzed
+            # envelope to cover trusted_period + 1s.
+            frames=tuple(
+                TemporalFrame(_mean_intensity(intensities), cycle_seconds / 2.0)
+                for _ in range(4)
+            ),
+            repeat_count=1,
+            static_fallback=StaticSemanticFallback(
+                resolved.semantic.value,
+                _mean_intensity(intensities),
+            ),
+        )
+        candidate = PresentationProgram(
+            semantic=resolved.semantic,
+            glyph=resolved.glyph,
+            motion=motion,
+            dsl="\n".join(lines),
+            static_fallback_dsl=fallback,
+            temporal=temporal,
+            trusted_period_seconds=cycle_seconds,
+            relay_epoch=resolved.relay_epoch,
+            next_visual_change_at=resolved.next_visual_change_at,
+            playback_anchor=anchor,
         )
         return _bounded_and_safe(candidate, calibration=calibration)
 
