@@ -54,7 +54,7 @@ def _native_usage_pane(target):
     from . import native_ui as ui
 
     stack = ui.make_fill_stack(spacing=ui.SPACE_L)
-    overview_outer, overview_inner = ui.make_card("Native Usage Center")
+    overview_outer, overview_inner = ui.make_card("Usage Center")
     summary = ui.make_wrapping_label(
         "SidePulse collects quota, reset, token, model, credit, incident, and "
         "estimated-cost facts directly. Sources that need permission say so "

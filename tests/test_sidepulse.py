@@ -23334,15 +23334,15 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
         )
         titles = self._titles(menu)
 
-        self.assertTrue(titles[0].startswith("5 active · 5 needs you"))
+        self.assertTrue(titles[0].startswith("5 active · 5 need you"))
         self.assertEqual(sum(title.endswith("· needs you") for title in titles), 3)
-        self.assertEqual(titles[4], "2 more...")
+        self.assertEqual(titles[4], "2 more…")
         self.assertTrue(menu.itemAtIndex_(4).isEnabled())
         self.assertEqual(
             menu.itemAtIndex_(4).representedObject().shelf,
             MailboxSectionKind.NEEDS_YOU,
         )
-        self.assertEqual(titles[5], "Open Agent Browser...")
+        self.assertEqual(titles[5], "Open Agent Browser…")
         self.assertNotIn("In Progress", titles)
         self.assertNotIn("Ready for Review", titles)
         self.assertNotIn("Recent", titles)
@@ -23390,7 +23390,7 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
         browser = next(
             item
             for item in (menu.itemAtIndex_(index) for index in range(menu.numberOfItems()))
-            if item.title() == "Open Agent Browser..."
+            if item.title() == "Open Agent Browser…"
         )
         self.assertTrue(self.controller.openAgentBrowser_(browser))
         row_key = snapshot.operator_state.works[0].key
@@ -23423,7 +23423,7 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
                 root_menu.itemAtIndex_(index)
                 for index in range(root_menu.numberOfItems())
             )
-            if item.title() == "Open Agent Browser..."
+            if item.title() == "Open Agent Browser…"
         )
         self.assertTrue(self.controller.openAgentBrowser_(browser_item))
         self.controller.mailbox_preferences_saver = MagicMock(
@@ -23593,7 +23593,7 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
         browser_item = next(
             item
             for item in (menu.itemAtIndex_(index) for index in range(menu.numberOfItems()))
-            if item.title() == "Open Agent Browser..."
+            if item.title() == "Open Agent Browser…"
         )
 
         self.assertTrue(self.controller.openAgentBrowser_(browser_item))

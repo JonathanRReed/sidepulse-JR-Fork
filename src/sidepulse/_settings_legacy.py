@@ -352,6 +352,10 @@ class AgentMonitorSettings:
     # expanded live activity never outgrows the bracket. On by default;
     # manual wing lengths always win over it.
     screen_bar_follow_alcove: bool = True
+    # Full-screen spaces hide the menu bar; a status bar floating over a
+    # full-screen VIDEO reads as a glitch, not a feature. Off by default;
+    # the switch exists for people who want the bar everywhere.
+    screen_bar_show_in_full_screen: bool = False
     # Off by default and opt-in by policy: reading consumer Claude limits
     # means presenting the user's own subscription credential.
     claude_plan_limits_enabled: bool = False
@@ -967,6 +971,11 @@ class AgentMonitorSettings:
     def with_screen_bar_follow_alcove(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, screen_bar_follow_alcove=bool(enabled))
 
+    def with_screen_bar_show_in_full_screen(
+        self, enabled: bool
+    ) -> AgentMonitorSettings:
+        return replace(self, screen_bar_show_in_full_screen=bool(enabled))
+
     def with_screen_bar_min_glow(self, fraction: float) -> AgentMonitorSettings:
         return replace(
             self, screen_bar_min_glow=max(0.0, min(1.0, float(fraction)))
@@ -1347,6 +1356,7 @@ class AgentMonitorSettings:
             "link_screen_bar_to_hardware": self.link_screen_bar_to_hardware,
             "screen_bar_gauges_enabled": self.screen_bar_gauges_enabled,
             "screen_bar_follow_alcove": self.screen_bar_follow_alcove,
+            "screen_bar_show_in_full_screen": self.screen_bar_show_in_full_screen,
             "claude_plan_limits_enabled": self.claude_plan_limits_enabled,
             "claude_plan_limits_consent_version": (
                 self.claude_plan_limits_consent_version
@@ -1653,6 +1663,9 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         screen_bar_gauges_enabled=_bool_setting(data.get("screen_bar_gauges_enabled"), False),
         screen_bar_follow_alcove=_bool_setting(data.get("screen_bar_follow_alcove"), True),
+        screen_bar_show_in_full_screen=_bool_setting(
+            data.get("screen_bar_show_in_full_screen"), False
+        ),
         # A stored `true` is honoured only when it carries this build's
         # consent stamp. 0.2.1 persisted this key from a build whose own
         # comments called the flag inert, so on those machines the value is

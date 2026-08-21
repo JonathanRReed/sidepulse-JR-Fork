@@ -1,5 +1,5 @@
-"""The Settings window's construction -- every pane builder, the
-window assembly, and their private helpers -- extracted from
+"""The Settings window's construction — every pane builder, the
+window assembly, and their private helpers — extracted from
 status_bar.py (backlog #14: ~2,300 lines of module-level functions
 with target/snapshot passed explicitly, so the cut is import-shuffling).
 
@@ -7,7 +7,7 @@ Namespace contract: this module never imports status_bar (so no import
 cycle can exist in either direction). Instead status_bar, at the end
 of its own module body, calls _install() with its complete namespace
 -- the moved code keeps referencing shared helpers, constants, AppKit
-symbols and sibling modules exactly as it did in place -- and then
+symbols and sibling modules exactly as it did in place — and then
 re-imports every public name defined here, so controller methods,
 tests, and external callers keep addressing status_bar.<name>.
 Do not import this module without importing status_bar first.
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 # The only import-time dependencies: module-level constants below use
 # these as dict keys, evaluated before _install() runs. They come from
-# settings.py, which never imports status_bar -- still no cycle.
+# settings.py, which never imports status_bar — still no cycle.
 # objc/Foundation are imported here rather than inherited from
 # status_bar's namespace because SidePulseStudioActions is defined at
 # module scope, i.e. before _install() has run.
@@ -52,7 +52,7 @@ from AppKit import (
 from Foundation import NSObject
 
 # calendar_watch/reminders_watch import EventKit lazily, inside their own
-# helpers -- importing the modules here costs nothing at start-up and is
+# helpers — importing the modules here costs nothing at start-up and is
 # what lets the Extras pane read a permission without owning EventKit.
 from . import calendar_watch, display_brightness, reminders_watch, remote_peers
 from . import colors as colors_module
@@ -78,7 +78,7 @@ from .settings import (
 )
 
 # _install() only fills names this module does not already define, so an
-# explicit import here wins over status_bar's namespace injection -- and
+# explicit import here wins over status_bar's namespace injection — and
 # these three are new, which status_bar does not re-export.
 from .virtual_device import (
     LED_COUNT,
@@ -593,7 +593,7 @@ def _build_capacity_pane(target: StatusBarController):
 
 
 def _install(status_bar_namespace: dict) -> None:
-    """Bind status_bar's module namespace as ours -- called exactly
+    """Bind status_bar's module namespace as ours — called exactly
     once, from the bottom of status_bar.py."""
     for key, value in status_bar_namespace.items():
         if not key.startswith("__") and key not in globals():
@@ -714,7 +714,7 @@ def _build_profile_pane(target: StatusBarController):
     today_inner.addArrangedSubview_(plan_label)
     fields["profile_plan_label"] = plan_label
     # Was a static "Not supported" row. The consumer policy declares real
-    # lanes now, so the honest control is the opt-in itself -- and without a
+    # lanes now, so the honest control is the opt-in itself — and without a
     # switch the toggle action had no way for the user to reach it.
     plan_limits_row, plan_limits_switch = native_ui.make_switch_row(
         "Show Claude plan limits",
@@ -723,7 +723,7 @@ def _build_profile_pane(target: StatusBarController):
         help_text=(
             "Reads your Claude subscription's own usage endpoint using the "
             "credential Claude Code already stores, and shows every window it "
-            "reports -- the 5-hour and weekly ceilings and the weekly Opus and "
+            "reports — the 5-hour and weekly ceilings and the weekly Opus and "
             "Sonnet sub-caps. Off until you turn it on. SidePulse never reads "
             "browser sessions or private provider endpoints."
         ),
@@ -745,7 +745,7 @@ def _build_profile_pane(target: StatusBarController):
     today_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "Costs use Anthropic list rates; cached reads bill at a tenth "
-            "of the uncached rate -- \u201csaved with caching\u201d is that "
+            "of the uncached rate — \u201csaved with caching\u201d is that "
             "difference. Counted once per message, so resumed sessions "
             "never double-count.",
             secondary=True,
@@ -795,7 +795,7 @@ def _build_devices_pane(target: StatusBarController):
         inner.addArrangedSubview_(
             native_ui.make_wrapping_label(
                 "No devices yet. Plug a SidePulse into any USB port and it "
-                "appears here by itself -- or start with the on-screen bar:",
+                "appears here by itself — or start with the on-screen bar:",
                 secondary=True,
                 size=12.0,
                 max_width=560.0,
@@ -845,7 +845,7 @@ def _build_devices_pane(target: StatusBarController):
             action="setDeviceBrightness:",
             identifier=device.device_id,
             # Continuous so the LED preview below tracks the thumb while
-            # dragging, not just after release -- setDeviceBrightness_
+            # dragging, not just after release — setDeviceBrightness_
             # itself still only commits (saves + syncs hardware) on the
             # final tick, so this doesn't turn every pixel of drag into a
             # disk write.
@@ -856,7 +856,7 @@ def _build_devices_pane(target: StatusBarController):
         brightness_row_controls = native_ui.make_stack(orientation="horizontal", spacing=10.0)
         brightness_row_controls.addArrangedSubview_(brightness_slider)
         brightness_row_controls.addArrangedSubview_(brightness_label)
-        # The slider stretches to whatever width the row gives it -- a
+        # The slider stretches to whatever width the row gives it — a
         # brightness track is the one control here that gets better the
         # longer it is.
         brightness_slider.setContentHuggingPriority_forOrientation_(
@@ -919,7 +919,7 @@ def _build_devices_pane(target: StatusBarController):
                 "Resting glow",
                 resting_slider,
                 help_text=(
-                    "A faint ember on every LED, even the unlit ones -- "
+                    "A faint ember on every LED, even the unlit ones — "
                     "the dots read as physical objects instead of "
                     "vanishing. 0% is classic full dark."
                 ),
@@ -948,7 +948,7 @@ def _build_devices_pane(target: StatusBarController):
                 display_popup,
                 help_text=(
                     "Working timer fill lights the strip as elapsed working "
-                    "time crosses your expected length -- a timer, not a "
+                    "time crosses your expected length — a timer, not a "
                     "claim about task progress. Studio program plays the "
                     "animation you wrote in the Studio tab, all the time."
                 ),
@@ -972,8 +972,8 @@ def _build_devices_pane(target: StatusBarController):
                 blend_popup.selectItem_(item)
         inner.addArrangedSubview_(native_ui.make_row("Blend Mode", blend_popup))
 
-        # Story #16: pin this device to one provider -- "the Dot is
-        # Codex's" -- while other devices keep the aggregate.
+        # Story #16: pin this device to one provider — "the Dot is
+        # Codex's" — while other devices keep the aggregate.
         pin_popup = native_ui.make_popup_button(target, "setDeviceProviderPin:")
         pin_popup.setIdentifier_(device.device_id)
         current_pin = target.settings.device_provider_pin(device.device_id)
@@ -994,12 +994,12 @@ def _build_devices_pane(target: StatusBarController):
                 help_text=(
                     "A pinned device shows only that provider's sessions "
                     "and rests dark when none are live. Asks still light "
-                    "every device -- blocked-on-you is never filtered."
+                    "every device — blocked-on-you is never filtered."
                 ),
             )
         )
 
-        # Backlog #21: per-device courtesy muting -- "the Dot only
+        # Backlog #21: per-device courtesy muting — "the Dot only
         # speaks asks" while the Pro carries the full signal chorus.
         policy_popup = native_ui.make_popup_button(target, "setDeviceSignalPolicy:")
         policy_popup.setIdentifier_(device.device_id)
@@ -1019,7 +1019,7 @@ def _build_devices_pane(target: StatusBarController):
                 policy_popup,
                 help_text=(
                     "Asks only keeps this device to agent status and "
-                    "blocked-on-you -- completions, notifications, quota, "
+                    "blocked-on-you — completions, notifications, quota, "
                     "calendar and reminder glows stay off it. Weather and "
                     "low battery always land."
                 ),
@@ -1058,7 +1058,7 @@ def reset_screen_brightness_cache() -> None:
 def screen_brightness_readable() -> bool:
     """Can this Mac actually report its screen brightness right now?
 
-    ``CoreDisplay_Display_GetUserBrightness`` is undocumented -- see
+    ``CoreDisplay_Display_GetUserBrightness`` is undocumented — see
     display_brightness.py, which says in its own first paragraph that
     Apple may remove it without notice. When it goes, every
     auto-brightness device silently keeps its MANUAL brightness and no
@@ -1090,7 +1090,7 @@ def calibration_summary_text(
     brightness_readable: bool | None = None,
 ) -> str:
     """The at-a-glance summary next to the Calibrate button. Channel
-    percentages only appear once they differ from the default -- an
+    percentages only appear once they differ from the default — an
     uncalibrated device just says what Auto-Brightness is doing, not a
     wall of R100% G100% B100% that reads as debug output.
 
@@ -1138,7 +1138,7 @@ CALIBRATION_TEST_PATCHES: tuple[tuple[str, str], ...] = (
 def build_calibration_popover_content(device: StatusBarDevice, target: StatusBarController):
     """The content shown inside the "Calibrate…" popover for one device:
     a guided matching flow, not blind sliders. The reference patches at
-    the top are the ground truth -- click one and the device lights with
+    the top are the ground truth — click one and the device lights with
     that exact color (through the current gains), so you hold the device
     beside the screen and adjust each slider until light and patch agree.
     Closing the popover returns the device to live status automatically.
@@ -1150,7 +1150,7 @@ def build_calibration_popover_content(device: StatusBarDevice, target: StatusBar
         native_ui.make_label(
             "Every LED is now TRUE WHITE, and the patch below\n"
             "shows true white on screen. Adjust Red, Green, and\n"
-            "Blue until the light looks white to you -- then check\n"
+            "Blue until the light looks white to you — then check\n"
             "the other patches if you want to fine-tune.",
             secondary=True,
             size=11.0,
@@ -1218,7 +1218,7 @@ def build_calibration_popover_content(device: StatusBarDevice, target: StatusBar
 
 SCREEN_BAR_PREVIEW_NOTCH_WIDTH = 200.0
 # A representative amount, not the real per-screen measurement
-# wing_width_for_screen computes -- this preview shows the *shape* of
+# wing_width_for_screen computes — this preview shows the *shape* of
 # "extend glow along the menu bar" (does the light actually reach the
 # edge it's given?) rather than standing in for any one real screen.
 SCREEN_BAR_PREVIEW_WING_WIDTH = 12.0
@@ -1241,7 +1241,7 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
             glow_slider,
             help_text=(
                 "How dark the bar may get. 0% = pitch black: only the "
-                "moving signal shows -- the relay dot ticking around, "
+                "moving signal shows — the relay dot ticking around, "
                 "the timer filling up. Higher keeps a soft outline."
             ),
         )
@@ -1281,8 +1281,8 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
     )
     native_ui.add_separator(inner)
 
-    # A live, real miniature of the Screen Bar itself -- the same drawing
-    # code the actual on-screen widget uses, not an illustration -- so
+    # A live, real miniature of the Screen Bar itself — the same drawing
+    # code the actual on-screen widget uses, not an illustration — so
     # "extend glow along the menu bar" and Alcove Compatibility show
     # their effect immediately instead of asking you to trust a checkbox
     # label and go look at the real menu bar to check.
@@ -1316,7 +1316,7 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         target,
         "toggleScreenBarFollowAlcove:",
         help_text=(
-            "The bracket tracks Alcove's visible capsule -- widening "
+            "The bracket tracks Alcove's visible capsule — widening "
             "for a timer or now-playing pill and easing back when it "
             "collapses, hugging it within a couple of points. While a "
             "capsule is visible this supersedes the Bar Size gap, so "
@@ -1326,9 +1326,20 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         ),
     )
     inner.addArrangedSubview_(follow_row)
+    fullscreen_row, fullscreen_switch = native_ui.make_switch_row(
+        "Show over full-screen apps",
+        target,
+        "toggleScreenBarFullScreen:",
+        help_text=(
+            "Off (the default) hides the bar whenever the active space "
+            "is full-screen — a movie stays a movie. On keeps the bar "
+            "everywhere, including over full-screen video."
+        ),
+    )
+    inner.addArrangedSubview_(fullscreen_row)
     # A switch that reads ON while the feature does nothing is the defect,
     # not the cosmetics. This row says which of the four things is
-    # actually happening, and -- when the answer is a permission -- offers
+    # actually happening, and — when the answer is a permission — offers
     # the one click that fixes it, exactly as the dropdown does for a
     # stale hook.
     alcove_actions = alcove_actions_for(target)
@@ -1385,13 +1396,13 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
 
     # Manual bar geometry (Jonathan's ask): the gap between the risers
     # and the wings' reach, adjustable for notch companions like Alcove
-    # whose visual width changes at runtime -- and for whatever notch
+    # whose visual width changes at runtime — and for whatever notch
     # future Macs ship with. Automatic uses the hardware measurements.
     size_outer, size_inner = native_ui.make_card("Bar Size")
     try:
         auto_gap = slot_width_for_screen(NSScreen.mainScreen())
     except Exception:
-        # WINDOW_WIDTH, not a literal. This was 232.0 -- a number that
+        # WINDOW_WIDTH, not a literal. This was 232.0 — a number that
         # appears nowhere in the geometry it claims to stand in for, so
         # the slider parked 12pt away from the size Automatic actually
         # uses and the owner was reading a measurement of nothing.
@@ -1410,7 +1421,7 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
             "Gap width",
             gap_slider,
             fill_control=True,
-            help_text="How wide the dark center is -- widen it to clear Alcove's pill.",
+            help_text="How wide the dark center is — widen it to clear Alcove's pill.",
         )
     )
     auto_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
@@ -1433,6 +1444,7 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         "screen_bar_gauges": gauges_switch,
         "link_screen_bar_to_hardware": link_switch,
         "screen_bar_follow_alcove": follow_switch,
+        "screen_bar_show_in_full_screen": fullscreen_switch,
         "alcove_screen_recording_permission": alcove_permission_button,
     }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
@@ -1507,7 +1519,7 @@ def alcove_follow_state(target) -> AlcoveCaptureStatus | None:
 
     Prefers the render path's own live reading, because only a real
     capture may claim success. Falls back to a promptless preflight and
-    window probe, which can only ever report a BLOCKER -- "nothing is in
+    window probe, which can only ever report a BLOCKER — "nothing is in
     the way" is not evidence that anything worked, and this function
     returns None for it rather than implying otherwise.
     """
@@ -1525,7 +1537,7 @@ def alcove_follow_status_text(target) -> str:
     """The sentence under the "Match Alcove's width" switch.
 
     Before this row the switch was the only signal, and it read ON in all
-    four failure modes -- including the one where macOS had never granted
+    four failure modes — including the one where macOS had never granted
     Screen Recording, which no surface anywhere mentioned.
     """
     status = alcove_follow_state(target)
@@ -1562,8 +1574,8 @@ def alcove_menu_alert_title(target) -> str:
     """The dropdown's one line about Alcove following, or "".
 
     Only the permission case earns a row in the menu. It is the one
-    failure the user can actually fix, and -- unlike a missing Alcove or
-    an unmeasurable capsule -- the one with no other symptom at all: the
+    failure the user can actually fix, and — unlike a missing Alcove or
+    an unmeasurable capsule — the one with no other symptom at all: the
     bar simply keeps its old size forever and nothing says why.
     """
     if not alcove_follow_needs_permission(target):
@@ -1603,7 +1615,7 @@ class SidePulseAlcoveActions(NSObject):
     Same reason SidePulseStudioActions exists: every other selector in
     this window belongs to StatusBarController, which lives in a file
     this one may not edit, and PyObjC dispatches target/action through
-    respondsToSelector: -- which a plain Python object cannot satisfy.
+    respondsToSelector: — which a plain Python object cannot satisfy.
     The controller retains this via ``target.alcove_actions``.
     """
 
@@ -1618,7 +1630,7 @@ class SidePulseAlcoveActions(NSObject):
 
     @objc.IBAction
     def grantScreenRecording_(self, _sender):
-        """Explicit user action -- the ONLY place a prompt is allowed.
+        """Explicit user action — the ONLY place a prompt is allowed.
 
         Requesting first is what puts SidePulse in the Screen Recording
         list at all; an app that never asked does not appear there, so
@@ -1653,7 +1665,7 @@ class SidePulseAlcoveActions(NSObject):
 
 
 def _build_power_pane(target: StatusBarController):
-    """Keep-awake policy and battery display together -- both are "what
+    """Keep-awake policy and battery display together — both are "what
     SidePulse does with the Mac's power state"."""
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
 
@@ -1673,8 +1685,8 @@ def _build_power_pane(target: StatusBarController):
             "Wait before releasing",
             grace_controls,
             help_text=(
-                "A buffer against a false “done” reading -- e.g. a command still "
-                "running with no events for a stretch -- closing the lid into sleep."
+                "A buffer against a false “done” reading — e.g. a command still "
+                "running with no events for a stretch — closing the lid into sleep."
             ),
         )
     )
@@ -1725,7 +1737,7 @@ def _build_power_pane(target: StatusBarController):
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
-# Style cards: every signal is edited BY EYE -- a color well, pattern
+# Style cards: every signal is edited BY EYE — a color well, pattern
 # thumbnails that ANIMATE their pattern live, continuous sliders, and a
 # live preview strip rendering exactly what the Screen Bar will show.
 SIGNAL_STYLE_CARDS: tuple[tuple[str, str, bool], ...] = (
@@ -1745,7 +1757,7 @@ SIGNAL_THUMB_SIZE = (52.0, 20.0)
 # SidePulse-2026-08-11-202021.ips).
 #
 # Read out of colors.BRAND_SEED_COLORS, never restated. The literal that
-# used to live here still named Codex #FF3A00 -- which is this app's own
+# used to live here still named Codex #FF3A00 — which is this app's own
 # ask/blocked signal colour (led_status.ASK_AMBER), not Codex's #2B8FFF --
 # so the chip captioned "Codex" painted the alert red. colors.py fixed its
 # own copy and left this one behind, which is exactly the failure mode
@@ -1804,7 +1816,7 @@ def _solid_swatch_image(hex_color: str, size: float = SWATCH_BUTTON_SIZE):
 
 def _mode_animation_thumb_program(target: StatusBarController, mode_key: str, style: str) -> str:
     """One mode-animation choice rendered live in that mode's own color
-    -- the Colors window speaks the Signals pane's visual language."""
+    — the Colors window speaks the Signals pane's visual language."""
     spec = {
         "idle": (LedDisplayState.IDLE, "idle_color"),
         "working": (LedDisplayState.WORKING, "working_color"),
@@ -1836,7 +1848,7 @@ def _mode_animation_thumb_program(target: StatusBarController, mode_key: str, st
 
 def make_signal_color_row(target: StatusBarController, key: str, current_color: str):
     """Brand + palette swatches and a Custom… button (classic
-    NSColorPanel). No NSColorWell anywhere -- see BRAND_SWATCHES."""
+    NSColorPanel). No NSColorWell anywhere — see BRAND_SWATCHES."""
     row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
     swatches = list(BRAND_SWATCHES) + [
         (f"Palette {index + 1}", hex_color)
@@ -1949,7 +1961,7 @@ def make_signal_style_card(target: StatusBarController, key: str, title: str, *,
 
 
 def _build_focus_pane(target: StatusBarController):
-    """What each macOS Focus does to the lights -- its own pane because
+    """What each macOS Focus does to the lights — its own pane because
     this lived at the BOTTOM of Signals and the user who asked for
     per-Focus control had never seen that it already existed."""
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
@@ -1971,7 +1983,7 @@ def _build_focus_pane(target: StatusBarController):
         "toggleFocusSync:",
         help_text=(
             "Needs Full Disk Access for SidePulse (granted in the Setup "
-            "window) -- otherwise this has no effect."
+            "window) — otherwise this has no effect."
         ),
     )
     enable_inner.addArrangedSubview_(focus_row)
@@ -1984,7 +1996,7 @@ def _build_focus_pane(target: StatusBarController):
         target,
         "toggleNightWarmth:",
         help_text=(
-            "Eases green and blue down after dark -- like Night Shift, "
+            "Eases green and blue down after dark — like Night Shift, "
             "for your LEDs. Composes with each device's calibration."
         ),
     )
@@ -1993,13 +2005,13 @@ def _build_focus_pane(target: StatusBarController):
     stack.addArrangedSubview_(warmth_outer)
 
     # Story #10: timebox presets can run a named Shortcut when they
-    # start and another when they end -- Focus on with the drain, Focus
+    # start and another when they end — Focus on with the drain, Focus
     # off when it finishes.
     handshake_outer, handshake_inner = native_ui.make_card("Timebox Focus Handshake")
     handshake_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "Each Timer preset can run a Shortcut when it starts and "
-            "another when it ends or you press Stop -- name a Shortcut "
+            "another when it ends or you press Stop — name a Shortcut "
             "that turns a Focus on, and its partner that turns it off. "
             "macOS asks permission once per Shortcut the first time it "
             "runs.",
@@ -2040,7 +2052,7 @@ def _build_focus_pane(target: StatusBarController):
     focus_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "Each Focus can dim, turn the lights off entirely, or apply a "
-            "calibration profile the moment it activates -- e.g. School \u2192 "
+            "calibration profile the moment it activates — e.g. School \u2192 "
             "Turn off, Work \u2192 Dim to 50%.",
             secondary=True,
             size=12.0,
@@ -2125,7 +2137,7 @@ def _build_focus_pane(target: StatusBarController):
                 if slot == current_rule:
                     profile_popup.selectItem_(item)
             # Story #12: what this Focus does to SIGNALS (not just
-            # brightness) -- hold the courtesy glows, or go fully silent.
+            # brightness) — hold the courtesy glows, or go fully silent.
             signal_popup = native_ui.make_popup_button(target, "setFocusSignalPolicy:")
             signal_popup.setIdentifier_(identifier)
             current_policy = target.settings.focus_signal_policy.get(identifier, "all")
@@ -2201,7 +2213,7 @@ def _build_led_behavior_pane(target: StatusBarController):
         "toggleSubagentAsksAlert:",
         help_text=(
             "Workers often end with question-shaped text nobody can "
-            "answer -- off (default) means only MAIN sessions turn the "
+            "answer — off (default) means only MAIN sessions turn the "
             "lights amber."
         ),
     )
@@ -2242,7 +2254,7 @@ def _build_led_behavior_pane(target: StatusBarController):
     fields["escalation_webhook_field"] = webhook_field
     native_ui.add_separator(esc_inner)
     # Webhook bridge: moment events beyond stage-3, each opt-in. The
-    # indicator escapes the device -- Home Assistant, ntfy, a Hue
+    # indicator escapes the device — Home Assistant, ntfy, a Hue
     # scene, anything that takes JSON.
     bridge_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     webhook_event_boxes: dict[str, object] = {}
@@ -2305,7 +2317,7 @@ def _build_notifications_pane(target: StatusBarController):
         target,
         "toggleCompletionSweep:",
         help_text=(
-            "A brief sweep in the finishing agent's own color -- without "
+            "A brief sweep in the finishing agent's own color — without "
             "it, a completion is invisible whenever another agent is "
             "still working."
         ),
@@ -2418,7 +2430,7 @@ def _add_remote_machine_rows(target, inner) -> dict[str, object]:
             native_ui.make_label(
                 "No other Macs seen yet."
                 if target.settings.remote_peers.enabled
-                else "Turn on Other Macs in the Agents pane first.",
+                else "Turn on Other Macs in Agents & Providers first.",
                 secondary=True,
                 size=11.0,
             )
@@ -2446,7 +2458,7 @@ def _build_extras_pane(target: StatusBarController):
     Calendar, Reminders, weather and the (still withheld) quota effects
     used to live inside Signals, three cards below a dimming slider, with
     nothing tying them together except "we had nowhere else to put them".
-    They are a coherent group -- ambient facts that are not agents -- and
+    They are a coherent group — ambient facts that are not agents — and
     the owner asked for them to have their own area.
     """
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
@@ -2466,8 +2478,8 @@ def _build_extras_pane(target: StatusBarController):
     )
     cal_inner.addArrangedSubview_(cal_row)
     # Same defect as the Alcove switch, one pane over. Turning this on
-    # asks macOS once; if the answer is no -- or was no a year ago, in
-    # which case macOS never asks again -- the switch stays ON forever
+    # asks macOS once; if the answer is no — or was no a year ago, in
+    # which case macOS never asks again — the switch stays ON forever
     # and nothing ever glows. The toggle handler says so in the status
     # line, but that line is gone by the next time anyone looks.
     calendar_access_label = native_ui.make_wrapping_label(
@@ -2524,7 +2536,7 @@ def _build_extras_pane(target: StatusBarController):
         help_text=(
             "An urgent heartbeat while a Severe or Extreme National "
             "Weather Service warning covers your area. Location comes "
-            "from your network address -- no Location permission "
+            "from your network address — no Location permission "
             "needed. A live agent ask still takes the bar first."
         ),
     )
@@ -2569,7 +2581,7 @@ def _build_extras_pane(target: StatusBarController):
     stack.addArrangedSubview_(weather_outer)
 
     # Capacity EFFECTS remain withheld. Capacity HISTORY is a different
-    # decision -- it is a record kept on this Mac, not an outbound event --
+    # decision — it is a record kept on this Mac, not an outbound event --
     # and it is the owner's to make, which is why it has a switch and the
     # effects have a sentence.
     quota_outer, quota_inner = native_ui.make_card("Quota")
@@ -2619,7 +2631,7 @@ def _build_extras_pane(target: StatusBarController):
 
 # EventKit's authorization status is a TCC cache read, but the Extras
 # pane can be rebuilt and refreshed repeatedly, so it is asked at most
-# this often. Same reason -- and the same shape -- as the Screen
+# this often. Same reason — and the same shape — as the Screen
 # Recording preflight cache in alcove_observation.
 EVENT_ACCESS_TTL_SECONDS: Final = 5.0
 _event_access_cache: dict[str, tuple[float, str]] = {}
@@ -2655,7 +2667,7 @@ def _event_access_status(key: str, watch) -> str:
 def _access_status_text(enabled: bool, status: str, *, subject: str, pane: str) -> str:
     """One sentence for a switch whose feature needs a macOS permission.
 
-    The switch alone said the same thing -- ON -- whether the glow was
+    The switch alone said the same thing — ON — whether the glow was
     working, whether macOS had refused a year ago and would never ask
     again, or whether EventKit was not usable at all. The toggle handler
     does say which, once, in a status line that is gone by the next time
@@ -2694,7 +2706,7 @@ def refresh_event_access_controls(target) -> None:
     """Keep both rows current while the window is open.
 
     Panes are built once, lazily, so without this the row freezes at
-    whatever was true the first time the pane was visited -- including a
+    whatever was true the first time the pane was visited — including a
     stale "Denied" after the owner granted access in System Settings.
     The cache is NOT dropped here: its five seconds are shorter than any
     trip to System Settings, and clearing it would turn every unrelated
@@ -2720,7 +2732,7 @@ FOCUS_DIM_CHOICES: tuple[tuple[str, str], ...] = (
 
 def select_focus_dim_choice(popup, fraction: float | None) -> None:
     """Selects the popup item matching a saved rule (None = shared
-    default) -- refresh_settings_window's counterpart to
+    default) — refresh_settings_window's counterpart to
     make_focus_dim_popup's construction-time selection."""
     wanted = "default" if fraction is None else f"{float(fraction):g}"
     for index in range(popup.numberOfItems()):
@@ -2787,7 +2799,7 @@ def _build_agents_pane(target: StatusBarController):
     fallback_outer, fallback_inner = native_ui.make_card("Transcript Fallback")
     fallback_help = (
         "Reads the CLI's transcript files directly when hook events aren't "
-        "available -- a fallback, not the primary detection path."
+        "available — a fallback, not the primary detection path."
     )
     codex_row, codex_switch = native_ui.make_switch_row(
         "Watch Codex CLI transcripts", target, "toggleCodexTranscripts:", help_text=fallback_help
@@ -2807,14 +2819,14 @@ def _build_agents_pane(target: StatusBarController):
     stack.addArrangedSubview_(openers_outer)
 
     # Pick a provider, choose how it moves. The same setting the Studio's
-    # Animations section writes -- one fact, two doors, and both of them
+    # Animations section writes — one fact, two doors, and both of them
     # read `colors.provider_animation` rather than keeping a copy.
     anim_outer, anim_inner = native_ui.make_card("Agent Animation")
     anim_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "Pick a provider, choose how it moves. Automatic follows the "
             "state (breathe when idle, chase while working). Whatever you "
-            "choose, an agent that needs you keeps its urgent beat -- that "
+            "choose, an agent that needs you keeps its urgent beat — that "
             "one is not up for negotiation.",
             secondary=True,
             size=11.0,
@@ -2925,7 +2937,7 @@ def _build_remote_peers_card(target: StatusBarController):
         "toggleRemoteMessages:",
         help_text=(
             "Off (default) publishes the session name and its state, not "
-            "its words. On sends the question text too -- turn it on only "
+            "its words. On sends the question text too — turn it on only "
             "for machines you would read those questions on."
         ),
     )
@@ -2958,7 +2970,7 @@ def remote_peer_status_text(target) -> str:
     Tailscale is not installed on this Mac at all, the refresh has not
     run yet, and the refresh ran and genuinely found nobody. The first
     of those is the only one the owner can act on, and it was the one
-    the sentence actively argued against -- "yet" promises a peer is
+    the sentence actively argued against — "yet" promises a peer is
     still coming when there is no CLI to discover one with.
     """
     remote = target.settings.remote_peers
@@ -2997,7 +3009,7 @@ def _build_cloud_agents_card(target: StatusBarController):
     outer, inner = native_ui.make_card("Cloud Agents")
     inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
-            "Let a cloud agent -- a hosted code review, say -- post its own "
+            "Let a cloud agent — a hosted code review, say — post its own "
             "lifecycle to a loopback port so it appears here like any other "
             "session. Binds 127.0.0.1 only, and every request needs a token "
             "kept in your private state directory.",
@@ -3012,7 +3024,7 @@ def _build_cloud_agents_card(target: StatusBarController):
         "toggleCloudIngest:",
         help_text=(
             "Off by default: this opens a listening socket, and any process "
-            "running as you can reach a loopback port -- which is why the "
+            "running as you can reach a loopback port — which is why the "
             "token exists."
         ),
     )
@@ -3035,7 +3047,7 @@ def _build_cloud_agents_card(target: StatusBarController):
 def cloud_ingest_status_text(target) -> str:
     """The listening address, or why there is not one.
 
-    "Enabled -- starts with the app." was a PROMISE, and it was printed
+    "Enabled — starts with the app." was a PROMISE, and it was printed
     in the one case where the promise had already been broken:
     ``start_cloud_ingest_server`` sets ``cloud_ingest`` back to None and
     logs when the bind raises (a port already in use is the ordinary
@@ -3055,7 +3067,7 @@ def cloud_ingest_status_text(target) -> str:
 
 # Curated one-shot lid looks. Built only from grammar primitives already
 # proven against the firmware (colors, durations, pulse/cosine/linear,
-# off) -- a test parses every preset through the real sdled.wasm.
+# off) — a test parses every preset through the real sdled.wasm.
 LID_ANIMATION_PRESETS: dict[str, tuple[tuple[str, float, str], ...]] = {
     LID_ANIMATION_CLOSED: (
         ("Fade Out", 1.0, "#8A7CFF 300ms pulse\noff 700ms cosine"),
@@ -3093,7 +3105,7 @@ LID_ANIMATION_PRESETS: dict[str, tuple[tuple[str, float, str], ...]] = {
 
 def _build_lid_preset_row(target: StatusBarController, kind: str, current_program: str):
     """A strip of live-playing preset thumbnails; clicking one applies
-    it. The raw editor below stays for hand-tuning -- the picker is how
+    it. The raw editor below stays for hand-tuning — the picker is how
     normal people choose."""
     row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_M)
     thumbs = getattr(target, "lid_animation_thumbs", None)
@@ -3150,7 +3162,7 @@ def _add_studio_card(target: StatusBarController, stack) -> None:
     target.studio_editor = studio_editor
     # Live validation, in sentences. What this replaces was a single
     # message that appeared only when you pressed a button and said
-    # "syntax at line 2, column 7" -- the firmware parser's vocabulary,
+    # "syntax at line 2, column 7" — the firmware parser's vocabulary,
     # not a person's. These name the STEP and the fix, and they update
     # as you type because the checker is pure and never touches hardware.
     problem_label = native_ui.make_wrapping_label(
@@ -3255,7 +3267,7 @@ def _build_lid_animations_pane(target: StatusBarController):
     closed_inner.addArrangedSubview_(native_ui.make_row("Duration (sec)", closed_duration))
     closed_scroll, closed_program = native_ui.make_text_editor("")
     # Programs commit when editing ends (see textDidEndEditing_), same
-    # instant-apply contract as every field -- no Save button.
+    # instant-apply contract as every field — no Save button.
     closed_program.setDelegate_(target)
     closed_inner.addArrangedSubview_(closed_scroll)
     closed_buttons = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
@@ -3327,7 +3339,7 @@ def _build_debug_pane(target: StatusBarController):
     status_label = native_ui.make_label("", secondary=True, size=12.0)
     inner.addArrangedSubview_(status_label)
     # The settings-file path lives here with the rest of the diagnostic
-    # detail -- not as a permanent footer under every pane, where it read
+    # detail — not as a permanent footer under every pane, where it read
     # as debug output leaking into a settings window.
     settings_path_label = native_ui.make_label("", secondary=True, size=12.0)
     inner.addArrangedSubview_(settings_path_label)
@@ -3367,7 +3379,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     window.setContentView_(root)
     # Same treatment build_colors_window documents for its own root: with
     # a pure-Auto-Layout content hierarchy, the window pulls itself to the
-    # content's computed fitting width -- which for a sidebar + a column
+    # content's computed fitting width — which for a sidebar + a column
     # of natural-width form rows is well under the size this window is
     # designed at. Pin the design size explicitly; panes still lay out
     # freely inside it (and the window stays user-resizable above it).
@@ -3409,7 +3421,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     split.setHoldingPriority_forSubviewAtIndex_(250, 0)
 
     # The footer holds only the transient confirmation message ("Screen
-    # Bar now extends...") -- diagnostic paths live in the Debug pane.
+    # Bar now extends...") — diagnostic paths live in the Debug pane.
     footer = native_ui.make_stack(orientation="vertical", spacing=2.0)
     message = native_ui.make_label("", secondary=True, size=12.0)
     footer.addArrangedSubview_(message)
@@ -3427,7 +3439,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
         ]
     )
 
-    # Audit #5: panes build LAZILY, on first visit -- the gear click
+    # Audit #5: panes build LAZILY, on first visit — the gear click
     # used to construct all ten panes (and ~98 WASM preview engines,
     # one JSContext each) before the window could even appear. Only the
     # default pane exists now; ensure_settings_pane() installs the rest
@@ -3446,7 +3458,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
 
 
 def _build_settings_pane(target: StatusBarController, key: str):
-    """(pane, fields, buttons) for one sidebar key -- fields and
+    """(pane, fields, buttons) for one sidebar key — fields and
     buttons may be empty. The Devices builder also installs its own
     control map (it owns per-device rows)."""
     if key == "profile":
@@ -3498,14 +3510,14 @@ COLOR_ROW_HEIGHT = 40
 
 def _build_agent_or_mode_color_row(row, target, actions, swatches, hex_labels):
     """One state's colour row, rendered straight from
-    ``colors.mode_color_row()`` -- identity, then a labelled Default group,
+    ``colors.mode_color_row()`` — identity, then a labelled Default group,
     then Palette, then the picker.
 
     Three things this replaces, all reproduced live before the rewrite:
 
     1. It drew ``CURATED_PALETTE[:6]`` and nothing else. Not one of the four
        shipped state colours is in that strip, so on a fresh install every
-       state row rendered with ZERO chips ringed -- the row could not show
+       state row rendered with ZERO chips ringed — the row could not show
        you what it was currently set to.
     2. Its picker chip was hardcoded ``name="Pick…"`` with ``selected``
        never set, so a hand-picked colour could not become the named,
@@ -3563,7 +3575,7 @@ def _build_agent_or_mode_color_row(row, target, actions, swatches, hex_labels):
 # cosmetic:
 #
 #   1. The "Agent Colors" card said in body text that its first four swatches
-#      were the Claude/OpenAI/Codex/Gemini brand colours. They were not -- the
+#      were the Claude/OpenAI/Codex/Gemini brand colours. They were not — the
 #      strip it drew was CURATED_PALETTE, whose first four are system red,
 #      blue, green and purple. A source comment in this very file already
 #      admitted the anonymous swatches made the tip "a lie".
@@ -3808,7 +3820,7 @@ class SidePulseStudioActions(NSObject):
     @objc.python_method
     def hover_provider_animation(self, view) -> None:
         """Hovering a provider's rhythm thumb plays that rhythm, in that
-        provider's colour, alone on the Screen Bar -- the same bargain
+        provider's colour, alone on the Screen Bar — the same bargain
         hovering a colour makes. Without this the pane's own body copy
         ("hover any color or animation") was simply untrue."""
         provider = (getattr(view, "hover_payload", None) or {}).get("provider")
@@ -3845,15 +3857,15 @@ class _StudioRowSync:
 
     StatusBarController.refresh_color_row re-rings the row's swatches and
     then calls ``setStringValue_(hex)`` on whatever it finds there. Putting
-    this object in that slot is how the Studio's extra per-row chrome -- the
+    this object in that slot is how the Studio's extra per-row chrome — the
     colour's NAME, the picker chip, the animation popup, the sentence
-    explaining the animation -- stays in sync with settings changed from
+    explaining the animation — stays in sync with settings changed from
     anywhere else (a palette button, Reset to Defaults) without adding a
     hook inside a file this module may not edit.
 
     THE RULE THIS CLASS EXISTS TO ENFORCE: if a view can go stale, this
     object holds a live reference to it. The shipped bug was the opposite
-    -- views built as throwaway locals, added to a stack, and dropped:
+    — views built as throwaway locals, added to a stack, and dropped:
 
       * the per-provider animation DESCRIPTION (settings_window.py:3155)
         was a local, so choosing Chase left the popup reading "Chase" above
@@ -3866,7 +3878,7 @@ class _StudioRowSync:
         the old hex;
       * the state rows' picker chip was dropped entirely.
 
-    Nothing rebuilds this pane -- it is cached for the window's lifetime --
+    Nothing rebuilds this pane — it is cached for the window's lifetime --
     so a dropped reference is a permanently wrong string, not a flicker.
     Every registration below is therefore a list: one row can be drawn in
     more than one section, and all of its copies have to agree.
@@ -3950,7 +3962,7 @@ def _paint_swatch(button, swatch) -> None:
 
     A picker that is not itself the selection renders neutral (the hollow
     "+" chip this window has always used) rather than wearing the row's
-    current colour -- otherwise the same colour appears twice on one row and
+    current colour — otherwise the same colour appears twice on one row and
     reads as a duplicate swatch.
     """
     try:
@@ -3998,7 +4010,7 @@ def _build_swatch_group_row(
 ):
     """A LABELLED run of named chips: "Brand  [Claude][OpenAI]...".
 
-    The label is the whole point -- it is the only thing on screen that says
+    The label is the whole point — it is the only thing on screen that says
     these four colours are brands rather than an arbitrary strip.
 
     ``action_target`` is which object the chips send their selector to, and
@@ -4037,7 +4049,7 @@ def _identity_view(row):
     well as hex.
 
     Returns (header, name_label, hex_label). BOTH labels must be handed to
-    the row's _StudioRowSync by every caller -- a section that draws this
+    the row's _StudioRowSync by every caller — a section that draws this
     header and drops the labels is a section that will keep showing a colour
     the row no longer has.
     """
@@ -4067,7 +4079,7 @@ def _identity_view(row):
 def _build_picker_group_row(group, target, selector: str, represented: dict):
     """The labelled "Custom [chip]" run. The picker keeps the controller's
     own colour-panel selector: NSColorPanel plumbing already lives there and
-    is not worth duplicating for one chip. Returns (row, button) -- the
+    is not worth duplicating for one chip. Returns (row, button) — the
     button is a REFERENCE the caller must register, never a local to drop.
     """
     column, picker = _studio_swatch_column(
@@ -4180,7 +4192,7 @@ def _build_provider_animation_row(row, target, actions, hex_labels):
     The version this replaces registered only the popup and the thumb, so
     picking Chase left a popup reading "Chase" directly beside a sentence
     still reading "Follows the state: breathe when idle, chase while
-    working" -- and left the identity line showing whatever hex the provider
+    working" — and left the identity line showing whatever hex the provider
     had when the window opened.
     """
     stack = native_ui.make_stack(orientation="vertical", spacing=native_ui.SPACE_XS)
@@ -4250,7 +4262,7 @@ def refresh_studio_compare(
     target: StatusBarController, colors=None, caption=None, *, statuses=None
 ) -> None:
     """The before/after strip: what the lights do now, and what they would do
-    with the thing under the pointer. Static peak colours on purpose -- this
+    with the thing under the pointer. Static peak colours on purpose — this
     is a comparison, and two strips breathing out of phase compare badly."""
     compare = getattr(target, "studio_compare", None)
     if not compare:
@@ -4307,7 +4319,7 @@ def _build_studio_colors_section(target, actions, swatches, hex_labels):
     agent_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "One row per agent, each led by its own name. The Brand group is "
-            "the official color of Claude, OpenAI, Codex and Gemini -- an "
+            "the official color of Claude, OpenAI, Codex and Gemini — an "
             "agent whose own color is none of those leads its Brand group "
             "with it, named Default. Palette is the system set. Hover any "
             "color to see it on the Screen Bar before you keep it.",
@@ -4358,7 +4370,7 @@ def _build_studio_colors_section(target, actions, swatches, hex_labels):
     palette_outer, palette_inner = native_ui.make_card("Palettes")
     palette_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
-            "A complete look in one click -- state colors and agent colors "
+            "A complete look in one click — state colors and agent colors "
             "together, derived so every set stays legible. Individual "
             "colors above still override anything.",
             secondary=True,
@@ -4403,7 +4415,7 @@ def _build_studio_animations_section(target, actions, hex_labels):
         native_ui.make_wrapping_label(
             "Pick a provider, choose how it moves. Automatic follows the "
             "state (breathe when idle, chase while working). Whatever you "
-            "choose, an agent that needs you keeps its urgent beat -- that "
+            "choose, an agent that needs you keeps its urgent beat — that "
             "one is not up for negotiation.",
             secondary=True,
             size=11.0,
@@ -4448,7 +4460,7 @@ def _build_studio_animations_section(target, actions, hex_labels):
             thumbs[style] = thumb
             # A NAME under every one, and a hover on every one. These four
             # thumbnails were identified by setToolTip_ alone and told apart
-            # only by position -- the exact failure ("a colour square with no
+            # only by position — the exact failure ("a colour square with no
             # word attached is a guess") that the Studio's own header comment
             # claims to have ended, three cards above this one.
             hover_area = native_ui.make_hover_area(
@@ -4514,7 +4526,7 @@ def _build_studio_animations_section(target, actions, hex_labels):
         controls = native_ui.make_stack(orientation="horizontal", spacing=6.0)
         # Sliders, not number fields: dragging a range you can SEE is
         # how a breath's dimmest/brightest moments should be tuned. The
-        # existing plumbing survives -- NSSlider speaks stringValue, so
+        # existing plumbing survives — NSSlider speaks stringValue, so
         # applyFadeIntensity_'s parse and refresh's set_field_value work
         # unchanged.
         controls.addArrangedSubview_(
@@ -4597,7 +4609,7 @@ def _build_studio_animations_section(target, actions, hex_labels):
         target,
         "toggleColorByProject:",
         help_text=(
-            "Sessions in the same repo share one hue family -- providers "
+            "Sessions in the same repo share one hue family — providers "
             "are told apart by lightness within it. Off: every session "
             "gets its own hue."
         ),
@@ -4724,7 +4736,7 @@ def _build_color_studio_pane(target: StatusBarController) -> NSView:
     #
     # The title goes through make_card, which places it ABOVE the panel at
     # 13pt semibold like every other group header in this window. It used to
-    # be a 15pt bold label INSIDE the glass panel -- the only display-size
+    # be a 15pt bold label INSIDE the glass panel — the only display-size
     # headline in the app, against the rule make_card's own docstring states.
     header_outer, header_inner = native_ui.make_card("Color & Animation Studio")
     root.addSubview_(header_outer)
@@ -4818,7 +4830,7 @@ def refresh_blend_and_speed_fields(target: StatusBarController) -> None:
     colors = target.settings.colors
     fields = target.color_fields
     # Called once per refresh_colors_window, which is the one hook this
-    # module has into "the saved colours just changed" -- so the Studio's
+    # module has into "the saved colours just changed" — so the Studio's
     # before/after strip re-bakes here rather than needing its own, and an
     # in-flight hover is rebased onto the new baseline rather than left
     # holding a candidate derived from settings that no longer exist

@@ -659,10 +659,11 @@ else:
                     safe = "".join(
                         ch for ch in label if ch.isalnum() or ch == " "
                     ).strip() or provider_id
+                    article = "An" if safe[:1].upper() in "AEIOU" else "A"
                     client.deliver(
                         "quota.pace." + key.replace(":", "-"),
                         "SidePulse",
-                        f"A {safe} limit is running low",
+                        f"{article} {safe} limit is running low",
                         {},
                     )
             except Exception as exc:
@@ -798,11 +799,11 @@ else:
                 if not result.ok:
                     message = {
                         CredentialOutcome.DENIED: (
-                            "Keychain access was declined -- click Connect "
+                            "Keychain access was declined — click Connect "
                             "again and choose Allow."
                         ),
                         CredentialOutcome.COOLING_DOWN: (
-                            "Keychain access was declined recently -- try "
+                            "Keychain access was declined recently — try "
                             "again in a few minutes."
                         ),
                     }.get(
@@ -813,8 +814,8 @@ else:
                     credential = credential_from_keychain_payload(result.secret)
                     if credential is None:
                         message = (
-                            "Claude Code's stored sign-in is EMPTY -- run "
-                            "`claude` in a terminal and log in, then click "
+                            "Claude Code's stored sign-in is empty — run "
+                            "claude in a terminal and sign in, then click "
                             "Connect Claude usage again."
                         )
                     else:

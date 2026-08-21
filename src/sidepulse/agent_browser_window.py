@@ -163,7 +163,7 @@ def build_agent_root_items(
     overflow_count = sum(row.actionable for row in projection.rows) - len(urgent)
     if overflow_count > 0:
         overflow = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            f"{overflow_count} more...",
+            f"{overflow_count} more…",
             "openAgentBrowser:",
             "",
         )
@@ -180,7 +180,7 @@ def build_agent_root_items(
         overflow.setEnabled_(True)
         items.append(overflow)
     browser = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Open Agent Browser...",
+        "Open Agent Browser…",
         "openAgentBrowser:",
         "",
     )

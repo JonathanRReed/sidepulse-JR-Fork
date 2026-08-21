@@ -101,7 +101,8 @@ def _glance_title(inputs: MenuProjectionInputs) -> str:
         return "No agents active"
     parts = [f"{inputs.active_count} active"]
     if inputs.needs_you_count:
-        parts.append(f"{inputs.needs_you_count} needs you")
+        count = inputs.needs_you_count
+        parts.append(f"{count} {'needs' if count == 1 else 'need'} you")
     if inputs.ready_count:
         parts.append(f"{inputs.ready_count} ready")
     return " · ".join(parts)

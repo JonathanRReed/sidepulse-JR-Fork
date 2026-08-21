@@ -22,6 +22,8 @@ from AppKit import (
     NSScrollView,
     NSStackView,
     NSTextField,
+    NSUserInterfaceLayoutOrientationHorizontal,
+    NSUserInterfaceLayoutOrientationVertical,
     NSView,
     NSWindow,
     NSWindowStyleMaskClosable,
@@ -110,11 +112,30 @@ def _label(text: str, *, secondary: bool = False, bold: bool = False, size: floa
 def _hstack(*views, spacing: float = 8.0):
     stack = NSStackView.alloc().init()
     stack.setTranslatesAutoresizingMaskIntoConstraints_(False)
-    stack.setOrientation_(1)  # horizontal
+    stack.setOrientation_(NSUserInterfaceLayoutOrientationHorizontal)
+    stack.setAlignment_(10)  # NSLayoutAttributeCenterY: bar on the text midline
     stack.setSpacing_(spacing)
     for view in views:
         stack.addArrangedSubview_(view)
     return stack
+
+
+_UUID_ISH = None
+
+
+def _account_display(account: str) -> str:
+    """A raw UUID is an implementation detail, not an account name."""
+    import re
+
+    global _UUID_ISH
+    if _UUID_ISH is None:
+        _UUID_ISH = re.compile(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            re.IGNORECASE,
+        )
+    if _UUID_ISH.fullmatch(account.strip()):
+        return f"account {account.strip()[:8]}…"
+    return account
 
 
 class ProviderUsageWindowController:
@@ -146,7 +167,7 @@ class ProviderUsageWindowController:
 
         self.stack = NSStackView.alloc().init()
         self.stack.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        self.stack.setOrientation_(0)  # vertical
+        self.stack.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
         self.stack.setAlignment_(1)  # leading
         self.stack.setSpacing_(14.0)
         self.stack.setEdgeInsets_((20.0, 20.0, 20.0, 20.0))
@@ -175,7 +196,7 @@ class ProviderUsageWindowController:
     def _card(self, title_views, body_views):
         card = NSStackView.alloc().init()
         card.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        card.setOrientation_(0)
+        card.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
         card.setAlignment_(1)
         card.setSpacing_(6.0)
         card.setEdgeInsets_((12.0, 14.0, 12.0, 14.0))
@@ -222,7 +243,9 @@ class ProviderUsageWindowController:
             )
             title_views = [title_row]
             if section.account:
-                title_views.append(_label(section.account, secondary=True, size=11.0))
+                title_views.append(
+                    _label(_account_display(section.account), secondary=True, size=11.0)
+                )
             body: list = []
             for lane in section.lanes:
                 bar = UsageMeterBarView.alloc().initWithFraction_color_alert_(
@@ -230,7 +253,9 @@ class ProviderUsageWindowController:
                     default_agent_color(lane.provider_id or section.provider_id),
                     lane.alert,
                 )
-                body.append(_hstack(bar, _label(lane.title, size=12.0)))
+                body.append(
+                    _hstack(bar, _label(lane.plain_title or lane.title, size=12.0))
+                )
                 body.append(_label(lane.subtitle, secondary=True, size=11.0))
             if section.metrics:
                 body.append(

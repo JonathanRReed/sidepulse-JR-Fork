@@ -559,6 +559,23 @@ def screen_bar_wing_state(
     return ScreenBarWingState.EXTENDED
 
 
+def space_hides_menu_bar(screen) -> bool:
+    """True on a full-screen space: the menu bar is gone, so the
+    screen's visible frame reaches the very top. A bar drawn at the
+    notch then floats over someone's full-screen VIDEO -- the 2026-08-21
+    report. (A user who auto-hides the menu bar reads the same way;
+    the show-in-full-screen switch exists for them.)"""
+    try:
+        frame = screen.frame()
+        visible = screen.visibleFrame()
+        top_inset = (frame.origin.y + frame.size.height) - (
+            visible.origin.y + visible.size.height
+        )
+        return top_inset < 1.0
+    except Exception:
+        return False
+
+
 def notch_depth_for_screen(screen) -> float:
     try:
         notch_depth = float(screen.safeAreaInsets().top)
@@ -3129,6 +3146,85 @@ class VirtualStatusDevice(NSObject):
         self.gap_width_override = gap_width
         self.wing_length_override = wing_length
 
+    def set_show_in_full_screen(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == getattr(self, "_show_in_full_screen", False):
+            return
+        self._show_in_full_screen = enabled
+        self._reconcile_fullscreen_visibility()
+
+    def _install_space_observer(self) -> None:
+        if getattr(self, "_space_observer_center", None) is not None:
+            return
+        try:
+            from AppKit import NSWorkspace
+
+            center = NSWorkspace.sharedWorkspace().notificationCenter()
+            center.addObserver_selector_name_object_(
+                self,
+                "activeSpaceDidChange:",
+                "NSWorkspaceActiveSpaceDidChangeNotification",
+                None,
+            )
+            self._space_observer_center = center
+        except Exception:
+            self._space_observer_center = None
+
+    def _remove_space_observer(self) -> None:
+        center = getattr(self, "_space_observer_center", None)
+        if center is None:
+            return
+        self._space_observer_center = None
+        try:
+            center.removeObserver_name_object_(
+                self,
+                "NSWorkspaceActiveSpaceDidChangeNotification",
+                None,
+            )
+        except Exception:
+            pass
+
+    @objc.IBAction
+    def activeSpaceDidChange_(self, _notification) -> None:
+        self._reconcile_fullscreen_visibility()
+
+    def _reconcile_fullscreen_visibility(self) -> None:
+        """Full-screen spaces hide the bar unless the owner opted in.
+
+        The bar's window level rides above even full-screen video (it
+        must, to beat Alcove's overlay), so without this it floated over
+        movies -- the 2026-08-21 report. Hiding via orderOut_ also
+        drops _is_surface_visible, so the whole render pipeline rests
+        while a video plays."""
+        window = self.window
+        if window is None or self._terminating:
+            return
+        screen = None
+        try:
+            screen = window.screen()
+        except Exception:
+            screen = None
+        if screen is None:
+            try:
+                screen = NSScreen.mainScreen()
+            except Exception:
+                return
+        hide = (
+            not getattr(self, "_show_in_full_screen", False)
+            and screen is not None
+            and space_hides_menu_bar(screen)
+        )
+        if hide == getattr(self, "_fullscreen_hidden", False):
+            return
+        self._fullscreen_hidden = hide
+        if hide:
+            window.orderOut_(None)
+            pill = getattr(self, "_announcer_pill", None)
+            if pill is not None:
+                pill.hide()
+        elif self._enabled:
+            window.orderFrontRegardless()
+
     def show(self):
         if self._terminating or not self._enabled:
             return
@@ -3138,6 +3234,9 @@ class VirtualStatusDevice(NSObject):
         self.reposition()
         self._last_reposition_at = time.monotonic()
         self.window.orderFrontRegardless()
+        self._install_space_observer()
+        self._fullscreen_hidden = False
+        self._reconcile_fullscreen_visibility()
         if not was_visible:
             self._display_link_setup_failed = False
         self._install_power_observers()
@@ -3176,6 +3275,7 @@ class VirtualStatusDevice(NSObject):
         self._stop_sampler()
         self._stop_alcove_observer()
         self._remove_power_observers()
+        self._remove_space_observer()
         if self._announcer_pill is not None:
             try:
                 self._announcer_pill.close()

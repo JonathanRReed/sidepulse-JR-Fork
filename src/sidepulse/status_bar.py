@@ -159,8 +159,13 @@ def _intake_warnings(target) -> tuple[str, ...]:
         return ()
     warnings: list[str] = []
     try:
+        # The intake alert row near the top of the menu already states
+        # these two facts, in better words, with the RIGHT click target
+        # (Setup) -- any_installed False guarantees that row exists, so
+        # repeating the fact here as a second differently-worded warning
+        # that opens Diagnostics instead was pure noise.
         if not report.any_installed:
-            warnings.append("No agents are connected")
+            pass
         for provider in report.stuck_providers:
             warnings.append(f"{provider.label} hooks are silent")
         grok = next(
@@ -274,6 +279,13 @@ def _compact_existing_menu(menu, snapshot, target):
     device_items = []
     for item in items:
         title = _safe_title(item)
+        if title == "Devices":
+            # The legacy section header: the group's own "Hardware · N
+            # connected" parent replaces it, and an orphaned "Devices"
+            # label above a submenu named Hardware is two names for one
+            # thing.
+            _remove_item(menu, item)
+            continue
         if (
             title
             in {
@@ -283,6 +295,8 @@ def _compact_existing_menu(menu, snapshot, target):
                 "Add Screen Bar",
                 "Brightness",
                 "Keep Awake With Lid Closed",
+                "No devices yet",
+                "Plug in a SidePulse, or add the Screen Bar below",
             }
             or title.startswith("Sleep warning:")
             or (title.startswith("SidePulse") and title != "Quit SidePulse")

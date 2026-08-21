@@ -1648,3 +1648,50 @@ def test_reanchor_program_snaps_phase_to_the_hardware_write_moment() -> None:
         next_visual_change_at=None,
     )
     assert device.reanchor_program(200.0) is False
+
+
+def test_a_full_screen_space_hides_the_bar_unless_opted_in():
+    """'In full screen videos it is still there' (2026-08-21): the bar's
+    window level rides above full-screen video by necessity, so a
+    full-screen space (menu bar gone -- the visible frame reaches the
+    screen top) hides the bar unless the owner flipped the switch."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from sidepulse.virtual_device import VirtualStatusDevice, space_hides_menu_bar
+
+    def screen(top_inset: float):
+        return SimpleNamespace(
+            frame=lambda: SimpleNamespace(
+                origin=SimpleNamespace(x=0.0, y=0.0),
+                size=SimpleNamespace(width=1512.0, height=982.0),
+            ),
+            visibleFrame=lambda: SimpleNamespace(
+                origin=SimpleNamespace(x=0.0, y=0.0),
+                size=SimpleNamespace(width=1512.0, height=982.0 - top_inset),
+            ),
+        )
+
+    assert space_hides_menu_bar(screen(0.0)) is True  # full-screen space
+    assert space_hides_menu_bar(screen(24.0)) is False  # normal menu bar
+
+    device = VirtualStatusDevice.alloc().init()
+    window = MagicMock()
+    window.screen.return_value = screen(0.0)
+    device.window = window
+    device._enabled = True
+
+    device._reconcile_fullscreen_visibility()
+    window.orderOut_.assert_called_once()
+
+    # Space returns to normal: the bar comes back.
+    window.screen.return_value = screen(24.0)
+    device._reconcile_fullscreen_visibility()
+    window.orderFrontRegardless.assert_called_once()
+
+    # Opted in: full-screen no longer hides it.
+    device.set_show_in_full_screen(True)
+    window.screen.return_value = screen(0.0)
+    window.orderOut_.reset_mock()
+    device._reconcile_fullscreen_visibility()
+    window.orderOut_.assert_not_called()

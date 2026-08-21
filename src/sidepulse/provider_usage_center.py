@@ -21,6 +21,9 @@ class UsageCenterLane:
     provider_id: str = ""
     fraction: float | None = None
     alert: bool = False
+    #: The title without the text-glyph meter -- for renderers that draw
+    #: a REAL bar and would otherwise show the meter twice.
+    plain_title: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +101,7 @@ def project_usage_center(
                 UsageCenterLane(
                     f"{meter}{lane.label} · {remaining}",
                     " · ".join(subtitle_parts),
+                    plain_title=f"{lane.label} · {remaining}",
                     provider_id=snapshot.provider_id,
                     fraction=(
                         None

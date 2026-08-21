@@ -371,7 +371,7 @@ def test_injected_root_items_cap_urgent_rows_and_keep_action_depth_shallow() -> 
             assert action.representedObject().work_key == row.work_key
 
     browser = items[5]
-    assert browser.title() == "Open Agent Browser..."
+    assert browser.title() == "Open Agent Browser…"
     assert browser.isEnabled()
     assert type(browser.representedObject()) is AgentBrowserOpenPayload
     assert browser.representedObject().generation == 7
@@ -418,13 +418,13 @@ def test_injected_root_exposes_enabled_exact_shelf_overflow() -> None:
     )
 
     overflow = items[-2]
-    assert overflow.title() == "2 more..."
+    assert overflow.title() == "2 more…"
     assert overflow.isEnabled()
     assert overflow.representedObject() == AgentBrowserOpenPayload(
         7,
         shelf=MailboxSectionKind.NEEDS_YOU,
     )
-    assert items[-1].title() == "Open Agent Browser..."
+    assert items[-1].title() == "Open Agent Browser…"
 
 
 def test_injected_root_expands_snooze_presets_without_nested_action_menu() -> None:

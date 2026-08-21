@@ -553,13 +553,14 @@ def generic_notification_copy(
     subject = route.event_key.subject_key
     source = subject.source_key if type(subject) is not RequestKey else subject.work_key.source_key
     provider = _PROVIDER_LABELS.get(source.provider_id, "Provider")
+    article = "An" if provider[:1].upper() in "AEIOU" else "A"
     if route.interruption_class is InterruptionClass.ACTION_REQUIRED:
-        body = f"A {provider} session needs you"
+        body = f"{article} {provider} session needs you"
     elif route.interruption_class in {
         InterruptionClass.IMPORTANT_OUTCOME,
         InterruptionClass.COURTESY,
     }:
-        body = f"A {provider} session finished"
+        body = f"{article} {provider} session finished"
     else:
         body = "SidePulse has 1 update"
     return GenericNotificationCopy("SidePulse", body)

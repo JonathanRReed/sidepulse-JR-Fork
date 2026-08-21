@@ -25,8 +25,8 @@ _PRIVATE_COPY: Final = re.compile(
     re.IGNORECASE,
 )
 _GENERIC_BODY: Final = re.compile(
-    r"(?:A [A-Za-z][A-Za-z0-9 ]{0,31} session (?:needs you|finished)|"
-    r"A [A-Za-z][A-Za-z0-9 ]{0,31} limit is running low|"
+    r"(?:An? [A-Za-z][A-Za-z0-9 ]{0,31} session (?:needs you|finished)|"
+    r"An? [A-Za-z][A-Za-z0-9 ]{0,31} limit is running low|"
     r"SidePulse has [1-9][0-9]{0,2} updates?)\Z"
 )
 _MAX_PENDING_DELIVERIES: Final = 256

@@ -2199,20 +2199,35 @@ class StatusBarController(NSObject):
         )
         button = self.settings_buttons.get("notification_permission")
         if button is not None:
-            button.setTitle_(
-                "Retry Permission Check\u2026"
-                if self._notification_authorization_checked
+            denied = (
+                self._notification_authorization_checked
                 and self.notification_authorization_state
-                is NotificationAuthorizationState.UNAVAILABLE
-                else "Enable Notifications\u2026"
+                is NotificationAuthorizationState.DENIED
             )
+            if denied:
+                # "Denied by macOS" with no route to fix it was a dead
+                # end: only System Settings can flip a denial.
+                button.setTitle_("Open System Settings\u2026")
+                button.setAction_("openNotificationSystemSettings:")
+            else:
+                button.setTitle_(
+                    "Retry Permission Check\u2026"
+                    if self._notification_authorization_checked
+                    and self.notification_authorization_state
+                    is NotificationAuthorizationState.UNAVAILABLE
+                    else "Enable Notifications\u2026"
+                )
+                button.setAction_("requestNotificationPermission:")
             button.setHidden_(
                 not self._notification_authorization_checked
-                or self.notification_authorization_state
-                not in {
-                    NotificationAuthorizationState.NOT_DETERMINED,
-                    NotificationAuthorizationState.UNAVAILABLE,
-                }
+                or (
+                    not denied
+                    and self.notification_authorization_state
+                    not in {
+                        NotificationAuthorizationState.NOT_DETERMINED,
+                        NotificationAuthorizationState.UNAVAILABLE,
+                    }
+                )
             )
 
     def start_notification_authorization_refresh(self) -> None:
@@ -2259,6 +2274,20 @@ class StatusBarController(NSObject):
         self._notification_authorization_checked = True
         self._notification_authorization_refresh_in_flight = False
         self.refresh_notification_authorization_controls()
+
+    @objc.IBAction
+    def openNotificationSystemSettings_(self, _sender) -> None:
+        """Only System Settings can flip a notification denial."""
+        try:
+            from AppKit import NSURL, NSWorkspace
+
+            NSWorkspace.sharedWorkspace().openURL_(
+                NSURL.URLWithString_(
+                    "x-apple.systempreferences:com.apple.preference.notifications"
+                )
+            )
+        except Exception:
+            pass
 
     @objc.IBAction
     def requestNotificationPermission_(self, _sender) -> None:
@@ -7142,7 +7171,7 @@ class StatusBarController(NSObject):
             active = focus_sync.active_focus_mode_identifiers()
             names = dict(focus_sync.configured_focus_modes())
         except focus_sync.FocusSyncUnavailableError:
-            text = "Needs Full Disk Access (see Settings > Focus) to read Focus modes."
+            text = "Needs Full Disk Access (see Settings → Notifications & Focus → Focus) to read Focus modes."
         else:
             if not active:
                 text = "No Focus is active."
@@ -9800,6 +9829,19 @@ class StatusBarController(NSObject):
         self.refresh_(None)
 
     @objc.IBAction
+    def toggleScreenBarFullScreen_(self, sender):
+        self.settings = self.settings.with_screen_bar_show_in_full_screen(
+            checkbox_is_on(sender)
+        )
+        save_settings(self.settings)
+        set_fullscreen = getattr(
+            self.virtual_status_device, "set_show_in_full_screen", None
+        )
+        if callable(set_fullscreen):
+            set_fullscreen(self.settings.screen_bar_show_in_full_screen)
+        self.refresh_(None)
+
+    @objc.IBAction
     def toggleLinkScreenBarToHardware_(self, sender):
         self.settings = self.settings.with_link_screen_bar_to_hardware(
             checkbox_is_on(sender)
@@ -11805,6 +11847,11 @@ class StatusBarController(NSObject):
         self.virtual_status_device.set_follow_alcove(
             self.settings.screen_bar_follow_alcove
         )
+        set_fullscreen = getattr(
+            self.virtual_status_device, "set_show_in_full_screen", None
+        )
+        if callable(set_fullscreen):
+            set_fullscreen(self.settings.screen_bar_show_in_full_screen)
         # Left tip: the quota ember, brightening as the tightest visible
         # lane sinks below its provider's threshold (the usage-aware
         # subclass answers; this base has no usage and answers 0.0).
@@ -15718,7 +15765,7 @@ def _add_mailbox_empty_teaching(menu: NSMenu, target) -> None:
         any_hooks = hooks_probe[1]
     if any_hooks:
         menu.addItem_(
-            disabled_menu_item("Start Claude Code or Codex -- sessions appear here")
+            disabled_menu_item("Start Claude Code or Codex — sessions appear here")
         )
         return
     connect_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -16296,7 +16343,7 @@ def _canonical_agent_root_snapshot(snapshot, target, *, menu=None):
             identity = _work_key_menu_identity(row.work_key)
             item_key = f"agent-mailbox:urgent:{identity}"
             submenu_key = f"{item_key}:actions:g{projection.generation}"
-        elif title.endswith("more..."):
+        elif title.endswith(("more...", "more…")):
             item_key = f"agent-mailbox:overflow:g{projection.generation}"
             submenu_key = None
         else:
@@ -16361,7 +16408,10 @@ def remote_ledger_menu_rows(target) -> tuple[LedgerRow, ...]:
 
 def remote_ledger_row_title(row: LedgerRow, now: datetime) -> str:
     state = state_for_mode(row.status.mode)
-    parts = [state.label, format_age(row.status.age_seconds(now))]
+    # relative_age_label, not format_age: "one dropdown should not
+    # measure time two ways" (its own docstring) -- the Other Macs rows
+    # were the last holdout saying "12m03s" beside rows saying "12m ago".
+    parts = [state.label, relative_age_label(row.status.age_seconds(now))]
     if row.status.stale:
         parts.append("stale")
     return f"{row.ledger_label} — {' · '.join(parts)}"
@@ -16666,7 +16716,7 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     menu.addItem_(setup)
 
     settings = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Settings...",
+        "Settings…",
         "openSettings:",
         ",",
     )
@@ -17121,7 +17171,7 @@ def build_setup_window(target: StatusBarController) -> NSWindow:
                 "can dim or turn off per Focus. Grant\u2026 opens the "
                 "Privacy pane; click +, then pick the app Reveal shows "
                 "you (macOS won't list it by itself). The full "
-                "walkthrough lives in Settings > Focus."
+                "walkthrough lives in Settings → Notifications & Focus → Focus."
             ),
         )
     )
