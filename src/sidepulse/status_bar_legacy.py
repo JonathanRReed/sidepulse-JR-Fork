@@ -16774,7 +16774,7 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     devices = target.status_bar_devices()
     if devices:
         for device in devices:
-            menu.addItem_(build_device_menu_item(device, target))
+            menu.addItem_(cached_device_menu_item(device, target))
     else:
         menu.addItem_(disabled_menu_item("No devices yet"))
         menu.addItem_(
@@ -16980,6 +16980,31 @@ def build_closed_lid_awake_policy_item(policy: str, target: StatusBarController)
     item.setTarget_(target)
     item.setRepresentedObject_(policy)
     item.setState_(1 if target.settings.closed_lid_awake_policy == policy else 0)
+    return item
+
+
+_device_menu_item_cache: dict[str, tuple[object, object]] = {}
+
+
+def cached_device_menu_item(
+    device: StatusBarDevice, target: StatusBarController
+) -> NSMenuItem:
+    """build_device_menu_item, reused while the device's fields are
+    unchanged. The submenu carries four NSSlider custom-view items --
+    the most expensive constructions in the whole dropdown -- and
+    device settings change orders of magnitude less often than the menu
+    rebuilds. The device dataclass itself is the change signature; a
+    reused item is detached from the discarded tree first, because an
+    NSMenuItem belongs to at most one menu."""
+    cached = _device_menu_item_cache.get(device.device_id)
+    if cached is not None and cached[0] == device:
+        item = cached[1]
+        old_menu = item.menu()
+        if old_menu is not None:
+            old_menu.removeItem_(item)
+        return item
+    item = build_device_menu_item(device, target)
+    _device_menu_item_cache[device.device_id] = (device, item)
     return item
 
 
