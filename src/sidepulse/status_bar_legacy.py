@@ -3019,17 +3019,32 @@ class StatusBarController(NSObject):
                 self.native_agent_menu_registry.publish(states, tracking=True)
             self._menu_rebuild_pending = (snapshot, state)
             return
+        _t0 = time.monotonic()
         signature = menu_content_signature(snapshot, state, self)
+        _t1 = time.monotonic()
         if signature == getattr(self, "_menu_signature", None):
+            if _t1 - _t0 > 0.3:
+                log_status_bar(
+                    f"menu timing: signature={int((_t1 - _t0) * 1000)}ms (unchanged)"
+                )
             return
         self._menu_signature = signature
         menu = build_menu(snapshot, state, self)
+        _t2 = time.monotonic()
         menu.setDelegate_(self)
         self.status_item.setMenu_(menu)
         native = _canonical_agent_root_snapshot(snapshot, self, menu=menu)
         if native is not None:
             states, items = native
             self.native_agent_menu_registry.install(states, items)
+        _t3 = time.monotonic()
+        if _t3 - _t0 > 0.5:
+            log_status_bar(
+                "menu timing: "
+                f"signature={int((_t1 - _t0) * 1000)}ms "
+                f"build={int((_t2 - _t1) * 1000)}ms "
+                f"install={int((_t3 - _t2) * 1000)}ms"
+            )
 
     def maybe_refresh_usage_summary(self, *, reason: str | None = None) -> None:
         """Plan due provider work without putting transcript IO on AppKit."""
@@ -11769,6 +11784,7 @@ class StatusBarController(NSObject):
             )
             self.set_status_emphasis_plan(resolved_glance, cues)
 
+        _t_disc0 = time.monotonic()
         devices = tuple(
             sorted(
                 (
@@ -11779,6 +11795,11 @@ class StatusBarController(NSObject):
                 key=lambda device: device.device_id,
             )[:MAX_RUNTIME_PHYSICAL_DEVICES]
         )
+        _t_disc1 = time.monotonic()
+        if _t_disc1 - _t_disc0 > 0.1:
+            log_status_bar(
+                f"leds timing: discovery={int((_t_disc1 - _t_disc0) * 1000)}ms"
+            )
         self.sync_virtual_status_device(
             mode,
             battery_snapshot,
@@ -11790,6 +11811,11 @@ class StatusBarController(NSObject):
                 capacity.remaining_fraction if capacity is not None else None
             ),
         )
+        _t_virtual = time.monotonic()
+        if _t_virtual - _t_disc1 > 0.1:
+            log_status_bar(
+                f"leds timing: virtual={int((_t_virtual - _t_disc1) * 1000)}ms"
+            )
         if not devices:
             return
 
@@ -11851,6 +11877,7 @@ class StatusBarController(NSObject):
         if not self.settings.virtual_status_device_enabled:
             self.virtual_status_device.set_pointer_interaction_relevant(False)
             return
+        _vt0 = time.monotonic()
         if relay_elapsed_seconds is None:
             relay_elapsed_seconds = max(0.0, time.monotonic() - self._relay_epoch)
         if resolved_glance is not None and started_at is None:
@@ -11911,6 +11938,7 @@ class StatusBarController(NSObject):
         set_announcer = getattr(self.virtual_status_device, "set_announcer_text", None)
         if callable(set_announcer):
             set_announcer(announcer_text_for_attention(projection))
+        _vt1 = time.monotonic()
         device = next(
             (
                 item for item in self.status_bar_devices(remember=False)
@@ -11935,6 +11963,7 @@ class StatusBarController(NSObject):
             LED_DISPLAY_QUOTA_RUNWAY,
         ):
             brightness = self.effective_signal_brightness_for_device(device)
+        _vt2 = time.monotonic()
 
         def _set_virtual(program: str, presentation=None) -> None:
             # The Screen Bar honors ITS calibration exactly like a
@@ -12139,6 +12168,14 @@ class StatusBarController(NSObject):
                     relay_elapsed_seconds=relay_elapsed_seconds,
                 )
             _set_virtual(program, presentation)
+        _vt3 = time.monotonic()
+        if _vt3 - _vt0 > 0.1:
+            log_status_bar(
+                "virtual timing: "
+                f"pre={int((_vt1 - _vt0) * 1000)}ms "
+                f"device={int((_vt2 - _vt1) * 1000)}ms "
+                f"program={int((_vt3 - _vt2) * 1000)}ms"
+            )
 
     def schedule_screen_bar_sync(
         self,
@@ -16545,6 +16582,17 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     know what menu you clicked), and one row per secondary concern --
     the keep-awake policy is a submenu, not four inline rows."""
     menu = NSMenu.alloc().init()
+    # Section stopwatch for the flight recorder: a rebuild that costs
+    # seconds must say WHICH section spent them.
+    _marks: list[tuple[str, int]] = []
+    _mark_t = time.monotonic()
+
+    def _mark(label: str) -> None:
+        nonlocal _mark_t
+        _now = time.monotonic()
+        _marks.append((label, int((_now - _mark_t) * 1000)))
+        _mark_t = _now
+
     browser_projection = _canonical_agent_browser_projection(snapshot, target)
     if browser_projection is None:
         menu.addItem_(build_agent_mailbox_menu_item(snapshot, target))
@@ -16565,6 +16613,7 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     # First-run honesty: an empty mailbox means one of three completely
     # different things, and only one of them is "nothing to do". The other
     # two get the same one click that fixes them.
+    _mark("sessions")
     add_intake_menu_items(menu, target)
     # An out-of-date hook cannot deliver live events. Say so where the
     # user already looks, with the one click that fixes it -- this
@@ -16596,6 +16645,7 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     # Sessions answer "what is happening now"; this answers "what changed
     # while I was gone". Directly under the sessions because it is the second
     # question, never above them because it is not the first.
+    _mark("alerts")
     activity_item = build_activity_ledger_menu_item(snapshot, target)
     if activity_item is not None:
         menu.addItem_(NSMenuItem.separatorItem())
@@ -16620,8 +16670,10 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         # user is already looking.
         menu.addItem_(disabled_menu_item(f"Focus: {focus_summary}"))
 
+    _mark("ledger")
     menu.addItem_(NSMenuItem.separatorItem())
     menu.addItem_(build_usage_menu_item(target))
+    _mark("usage")
     menu.addItem_(NSMenuItem.separatorItem())
     menu.addItem_(disabled_menu_item("Devices"))
     # A device whose writes are failing must say so HERE, not only in
@@ -16689,6 +16741,7 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         timebox_menu.addItem_(stop_item)
     timebox_item.setSubmenu_(timebox_menu)
     menu.addItem_(timebox_item)
+    _mark("profiles")
     devices = target.status_bar_devices()
     if devices:
         for device in devices:
@@ -16854,6 +16907,12 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     quit_item.setTarget_(target)
     menu.addItem_(quit_item)
 
+    _mark("tail")
+    if sum(ms for _, ms in _marks) > 400:
+        log_status_bar(
+            "menu build timing: "
+            + " ".join(f"{label}={ms}ms" for label, ms in _marks)
+        )
     return menu
 
 
@@ -18368,14 +18427,34 @@ def add_session_open_action_item(
     menu.addItem_(item)
 
 
+_session_row_icon_cache: dict[tuple, object] = {}
+
+
 def session_row_icon_for_status(status: AgentStatus):
+    # The composite (two lockFocus draws per row) ran fresh for every
+    # session row on every menu rebuild -- the single largest cost of a
+    # rebuild once app icons were cached. The result depends only on
+    # (mode, provider, origin), all of which recur across rows and
+    # rebuilds, so the composite is computed once per combination.
+    key = (
+        status.mode,
+        (status.provider or "").lower(),
+        normalized_origin_text(status.origin),
+    )
+    cached = _session_row_icon_cache.get(key)
+    if cached is not None:
+        return cached
     status_icon = status_icon_for_status(status)
     origin_icon = session_origin_icon_for_status(status)
     if origin_icon is None:
-        return status_icon
-    if status_icon is None:
-        return origin_icon
-    return horizontal_icon_pair(status_icon, origin_icon)
+        icon = status_icon
+    elif status_icon is None:
+        icon = origin_icon
+    else:
+        icon = horizontal_icon_pair(status_icon, origin_icon)
+    if icon is not None:
+        _session_row_icon_cache[key] = icon
+    return icon
 
 
 def status_icon_for_status(status: AgentStatus):
@@ -18782,7 +18861,17 @@ def project_name_from_cwd(cwd: str | None) -> str | None:
     return path.name or cwd
 
 
+_symbol_image_cache: dict[tuple[str, str], object] = {}
+
+
 def image_for_symbol(symbol: str, description: str):
+    # SF-symbol lookups hit the system symbol catalog every call, and the
+    # menu rebuild asks for the same dozen symbols on every signature
+    # change. Symbols are static; cache them for the process lifetime.
+    key = (symbol, description)
+    cached = _symbol_image_cache.get(key)
+    if cached is not None:
+        return cached
     try:
         image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
             symbol,
@@ -18792,6 +18881,8 @@ def image_for_symbol(symbol: str, description: str):
             image.setTemplate_(True)
     except Exception:
         image = None
+    if image is not None:
+        _symbol_image_cache[key] = image
     return image
 
 

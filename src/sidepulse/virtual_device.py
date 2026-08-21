@@ -3231,8 +3231,19 @@ class VirtualStatusDevice(NSObject):
         was_visible = self._is_surface_visible()
         if self.window is None:
             self._build_window()
+        _reposition_started = time.monotonic()
         self.reposition()
         self._last_reposition_at = time.monotonic()
+        if self._last_reposition_at - _reposition_started > 0.08:
+            try:
+                from .status_bar import log_status_bar
+
+                log_status_bar(
+                    "screen bar reposition: "
+                    f"{int((self._last_reposition_at - _reposition_started) * 1000)}ms"
+                )
+            except Exception:
+                pass
         self.window.orderFrontRegardless()
         self._install_space_observer()
         self._fullscreen_hidden = False
