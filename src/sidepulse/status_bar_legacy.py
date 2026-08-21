@@ -15027,6 +15027,27 @@ class StatusBarController(NSObject):
 
         def _poke():
             try:
+                # Firmware-reboot watch rides the SAME background thread
+                # as the keepalive touch: STATUS.TXT lives on the SD
+                # card, and reading it inline on the tick path blocked
+                # the main thread for seconds (flight recorder,
+                # 2026-08-21). A regression arms the controller's
+                # pending repaint flag; the write path only reads memory.
+                poke_now = time.monotonic()
+                for controller in list(
+                    self.agent_led_controllers_by_device.values()
+                ):
+                    check = getattr(
+                        controller, "_device_rebooted_since_last_write", None
+                    )
+                    if callable(check):
+                        try:
+                            if check(poke_now):
+                                log_status_bar(
+                                    "strip rebooted -- repaint armed"
+                                )
+                        except Exception:
+                            pass
                 read_any = False
                 for target in targets:
                     status_path = self.keep_awake.poke_status_file(target)

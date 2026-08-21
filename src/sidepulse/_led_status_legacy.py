@@ -1038,6 +1038,7 @@ class AgentLedController:
         self.last_attempt_monotonic = 0.0
         self.last_device_uptime_ms: float | None = None
         self.last_uptime_check_monotonic = 0.0
+        self.pending_reboot_repaint = False
 
     def reset(self) -> None:
         self.last_state = None
@@ -1299,7 +1300,10 @@ class AgentLedController:
             return False
         previous = self.last_device_uptime_ms
         self.last_device_uptime_ms = uptime_ms
-        return previous is not None and uptime_ms < previous
+        if previous is not None and uptime_ms < previous:
+            self.pending_reboot_repaint = True
+            return True
+        return False
 
     def _write_deduped_program(
         self,
@@ -1315,9 +1319,14 @@ class AgentLedController:
             else ("program", program)
         )
 
-        if self._device_rebooted_since_last_write(now):
-            # The strip is showing its own idea of the world; every
-            # dedupe assumption is void. Repaint unconditionally.
+        if getattr(self, "pending_reboot_repaint", False):
+            # Set by the background keepalive poke after it saw the
+            # firmware's uptime go backwards. The 2026-08-21 flight
+            # recorder caught the ORIGINAL inline STATUS.TXT read
+            # blocking the main thread for up to 13.7s -- a slow SD FAT
+            # read is exactly the settings lag it caused. The write path
+            # now only consumes this memory flag.
+            self.pending_reboot_repaint = False
             self.last_program_identity = None
             self.last_attempt_monotonic = 0.0
 

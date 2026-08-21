@@ -446,9 +446,13 @@ def test_a_rebooted_strip_voids_the_write_dedupe(tmp_path):
     # Same boot, more uptime: still no signal.
     status.write_text("serial SPP-000067\nuptime_ms 6000000\nstate idle\n")
     assert writer._device_rebooted_since_last_write(now + 1) is False
-    # Uptime went BACKWARDS: the device rebooted.
+    # Uptime went BACKWARDS: the device rebooted -- and the repaint
+    # flag arms for the WRITE path to consume (the check itself runs on
+    # the background keepalive thread; the write path reads only memory,
+    # after the inline SD read blocked the main thread for seconds).
     status.write_text("serial SPP-000067\nuptime_ms 120000\nstate idle\n")
     assert writer._device_rebooted_since_last_write(now + 2) is True
+    assert writer.pending_reboot_repaint is True
     # Unreadable STATUS.TXT is not evidence of anything.
     status.unlink()
     assert writer._device_rebooted_since_last_write(now + 3) is False
