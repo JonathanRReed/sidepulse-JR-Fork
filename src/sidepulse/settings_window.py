@@ -118,6 +118,34 @@ OPERATOR_HISTORY_FIELD_MANIFEST: tuple[str, ...] = (
 )
 
 
+def usage_graph_legend_text(settings) -> str:
+    """Legend under the usage chart, honest about the current metric.
+
+    Percent mode charts the whole registry from remembered capacity
+    observations; the token/cost/sessions modes chart the curated
+    local-transcript providers. One legend claiming the other's
+    provider set was a small lie every time the mode switched."""
+    if getattr(settings, "usage_display_mode", "tokens") == "percent":
+        return "All providers · worst remaining % each day"
+    return (
+        " · ".join(
+            provider_id.title() for provider_id in settings.usage_graph_providers
+        )
+        + " · one shared metric and zero baseline"
+    )
+
+
+def refresh_usage_graph_legend(target) -> None:
+    """Repaint the chart legend after a metric change, if it is on screen."""
+    legend = target.settings_fields.get("usage_graph_legend")
+    if legend is None:
+        return
+    try:
+        legend.setStringValue_(usage_graph_legend_text(target.settings))
+    except Exception:
+        pass
+
+
 def _make_history_radio_group(
     target,
     choices: tuple[tuple[str, int], ...],
@@ -676,11 +704,11 @@ def _build_profile_pane(target: StatusBarController):
     today_inner.addArrangedSubview_(range_row)
     selected_providers = target.settings.usage_graph_providers
     legend = native_ui.make_label(
-        " · ".join(provider_id.title() for provider_id in selected_providers)
-        + " · one shared metric and zero baseline",
+        usage_graph_legend_text(target.settings),
         secondary=True,
         size=10.0,
     )
+    fields["usage_graph_legend"] = legend
     today_inner.addArrangedSubview_(legend)
     fields["profile_usage_legend"] = legend
     provider_row = native_ui.make_stack(

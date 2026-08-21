@@ -751,6 +751,88 @@ def read_private_text(
     ).decode(encoding, errors)
 
 
+def read_private_log_slice(
+    path: Path,
+    *,
+    cursor: tuple[int, int, int] | None,
+    max_bytes: int,
+    tighten: bool = True,
+    encoding: str = "utf-8",
+    errors: str = "replace",
+) -> tuple[str, tuple[int, int, int]]:
+    """(newly appended text, next cursor) for an append-only private log.
+
+    ``cursor`` is (device, inode, offset). A matching cursor on a file at
+    least ``offset`` bytes long yields ONLY the bytes appended since --
+    the read that makes per-event reconciles O(new data) instead of
+    re-parsing a bounded tail every time (a busy hook stream pegged a
+    full core doing exactly that, 2026-08-21). A missing, mismatched, or
+    shrunken cursor -- rotation, trim, first sight -- yields the newest
+    ``max_bytes`` as a fresh start. The next cursor always stops at the
+    last newline boundary, so a torn trailing line is re-delivered whole
+    on the next read instead of being half-parsed and skipped past.
+    """
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive integer")
+    with _private_parent(path, tighten=tighten) as (
+        target,
+        parent_descriptor,
+        name,
+    ):
+        expected = _require_private_leaf(target, parent_descriptor, name)
+        if expected is None:
+            raise FileNotFoundError(target)
+        descriptor = os.open(
+            name,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent_descriptor,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            _require_opened_leaf(target, expected, opened)
+            if tighten:
+                os.fchmod(descriptor, PRIVATE_FILE_MODE)
+            identity = (opened.st_dev, opened.st_ino)
+            size = opened.st_size
+            start = 0
+            if (
+                cursor is not None
+                and (cursor[0], cursor[1]) == identity
+                and 0 <= cursor[2] <= size
+            ):
+                start = cursor[2]
+            if size - start > max_bytes:
+                start = size - max_bytes
+            os.lseek(descriptor, start, os.SEEK_SET)
+            chunks: list[bytes] = []
+            remaining = max_bytes
+            while remaining > 0:
+                chunk = os.read(descriptor, min(65_536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            _require_leaf_identity(
+                target,
+                parent_descriptor,
+                name,
+                opened,
+            )
+            payload = b"".join(chunks)
+        finally:
+            os.close(descriptor)
+    boundary = payload.rfind(b"\n")
+    if boundary < 0:
+        return "", (identity[0], identity[1], start)
+    complete = payload[: boundary + 1]
+    return (
+        complete.decode(encoding, errors),
+        (identity[0], identity[1], start + boundary + 1),
+    )
+
+
 def read_private_text_with_identity(
     path: Path,
     *,

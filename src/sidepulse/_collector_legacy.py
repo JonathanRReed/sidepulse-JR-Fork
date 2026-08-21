@@ -1123,18 +1123,19 @@ class LiveAgentMonitor:
         )
         if source is None:
             return
-        try:
-            # tail=True is load-bearing: an over-cap log must yield its
-            # NEWEST bytes, never raise -- the raising read silenced
-            # claude for a day (2026-08-21).
-            lines = read_private_text(
-                Path(log_path),
-                max_bytes=LATEST_STATE_MAX_BYTES,
-                tail=True,
-            ).splitlines()
-        except OSError:
+        # Only bytes appended since this source's last reconcile -- the
+        # bounded-tail re-read pegged a core (see reconcile_cursors).
+        from .reconcile_cursors import take_new_lines
+
+        lines = take_new_lines(
+            self,
+            hint.source_key,
+            Path(log_path),
+            max_bytes=LATEST_STATE_MAX_BYTES,
+        )
+        if lines is None:
             return
-        for line in lines[-5_000:]:
+        for line in lines:
             normalized = None
             try:
                 payload = _decode_strict_json_document(line)

@@ -1376,11 +1376,8 @@ DEVICE_DISCOVERY_CACHE_SECONDS = 1.0
 # seconds; a CLOSED menu tolerates this much staleness before the next
 # rebuild (session-row copy still patches live in between).
 MENU_REBUILD_MIN_INTERVAL_SECONDS = 12.0
-# The Screen Bar's green unseen-done tip holds this long per completion.
-# Deliberately far shorter than COMPLETED_VISIBLE_SECONDS (the menu
-# badge's window): the tip is peripheral and always visible, and an
-# all-day agent fleet re-arming 20 minutes of green per finish made it
-# read as a stuck green glow rather than news.
+# Green unseen-done tip: far shorter than the menu badge's window -- an
+# all-day fleet re-arming 20 min per finish read as a stuck green glow.
 GAUGE_UNSEEN_COMPLETION_SECONDS = 300.0
 SCREEN_BAR_FEATURE_ENABLED = True
 STATUS_BAR_MAX_LINES_PER_SOURCE = 500
@@ -3819,8 +3816,6 @@ class StatusBarController(NSObject):
                 shared_error = "local_activity_unavailable"
                 log_status_bar("usage scan error: local_activity_unavailable")
         if self.settings.usage_display_mode == "percent":
-            # Every provider, from remembered capacity observations --
-            # see usage_percent_history.shared_percent_graph_model.
             try:
                 shared["usage_graph"] = (
                     usage_percent_history.shared_percent_graph_model(
@@ -4073,13 +4068,16 @@ class StatusBarController(NSObject):
                         windows,
                     )
                 except claude_quota.ClaudeQuotaUnavailableError as error:
-                    # The reason code is product-owned and content-free, so it
-                    # is safe to say out loud -- and saying WHY is the whole
-                    # difference between "unavailable" and "reconnect Claude".
-                    log_status_bar(f"claude quota unavailable: {error}")
+                    # Reason codes are product-owned and content-free; say
+                    # each one ONCE -- unsupported accounts probe forever.
+                    if str(error) != getattr(self, "_last_claude_quota_log", None):
+                        self._last_claude_quota_log = str(error)
+                        log_status_bar(f"claude quota unavailable: {error}")
                     failure = RefreshFailureKind.SOURCE_UNAVAILABLE
                 except Exception:
-                    log_status_bar("claude usage unavailable: source_unavailable")
+                    if getattr(self, "_last_claude_quota_log", None) != "source_unavailable":
+                        self._last_claude_quota_log = "source_unavailable"
+                        log_status_bar("claude usage unavailable: source_unavailable")
                     failure = RefreshFailureKind.SOURCE_UNAVAILABLE
             result = {
                 "provider_id": "claude",
@@ -6112,6 +6110,9 @@ class StatusBarController(NSObject):
         except ValueError:
             return
         save_settings(self.settings)
+        from .settings_window import refresh_usage_graph_legend
+
+        refresh_usage_graph_legend(self)
         self.invalidate_usage_providers(("codex", "claude"))
         self.maybe_refresh_usage_summary()
 
@@ -11957,10 +11958,7 @@ class StatusBarController(NSObject):
         # Right tip: the independent unseen-completion gauge.
         if self.settings.screen_bar_gauges_enabled:
             snapshot = getattr(self, "last_snapshot", None)
-            # Five minutes of green per completion, not twenty: the menu
-            # badge keeps the full window, but a peripheral always-visible
-            # tip that re-arms on every completion of an all-day agent
-            # fleet read as "the bar is stuck green".
+            # Five minutes of green per completion, not twenty.
             right_on = (
                 bool(
                     unseen_completions(
@@ -15151,7 +15149,12 @@ class StatusBarController(NSObject):
                     status_path = self.keep_awake.poke_status_file(target)
                     if status_path is not None:
                         read_any = True
-                        log_status_bar(f"sd_keepalive touch={status_path}")
+                        # First touch per target only, not once a minute.
+                        seen_touches = getattr(self, "_keepalive_logged_targets", set())
+                        if str(status_path) not in seen_touches:
+                            seen_touches.add(str(status_path))
+                            self._keepalive_logged_targets = seen_touches
+                            log_status_bar(f"sd_keepalive touch={status_path}")
                 if (
                     not read_any
                     and self.keep_awake.last_status_error != self.last_status_read_error
@@ -15194,11 +15197,19 @@ class StatusBarController(NSObject):
         connected_targets = [
             device.target
             for device in self.status_bar_devices(remember=False)
-            if device.connected and device.device_id != VIRTUAL_DEVICE_ID
+            if device.connected
+            and device.device_id != VIRTUAL_DEVICE_ID
+            and path_exists(Path(device.target).parent)
         ]
         if connected_targets:
             return connected_targets
-        return [MOUNT_ROOT / name / KEEPALIVE_FILE_NAME for name in STATUS_BAR_KEEPALIVE_VOLUME_NAMES]
+        # Mounted volumes only: touching every known NAME failed loudly
+        # at boot for whichever device wasn't plugged in.
+        return [
+            MOUNT_ROOT / name / KEEPALIVE_FILE_NAME
+            for name in STATUS_BAR_KEEPALIVE_VOLUME_NAMES
+            if path_exists(MOUNT_ROOT / name)
+        ]
 
 
 # One per day, keyed to the calendar: each teaches a feature people
@@ -17551,9 +17562,7 @@ def _finite_graph_value(value, fallback: float) -> float:
 class UsageGraphView(NSView):
     """One calm shared-axis chart for the selected period and metric."""
 
-    # The complete brand palette, not a stale four-entry copy: with all
-    # ten providers chartable in percent mode, a partial map painted six
-    # of them the same anonymous gray.
+    # The complete brand palette, not a stale four-entry copy.
     PROVIDER_COLORS: ClassVar[dict[str, str]] = {
         "opencode": "#AF52DE",
         "google": "#4285F4",
@@ -18769,9 +18778,7 @@ def unseen_completions(
     that clears them -- modeled, not guessed (T3's lastVisitedAt).
 
     ``within_seconds`` narrows the window for surfaces with less
-    patience than the menu badge: the Screen Bar's green tip re-armed
-    for 20 minutes on EVERY completion, and with agents finishing all
-    day that read as "the bar is stuck green", not as news."""
+    patience than the menu badge (the Screen Bar's green tip)."""
     opened_at = getattr(target, "menu_last_opened_at", None)
     cleared = getattr(target, "cleared_session_ids", set())
     unseen = []

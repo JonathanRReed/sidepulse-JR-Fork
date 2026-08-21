@@ -16,6 +16,7 @@ from sidepulse.private_io import (
     enforce_retention,
     ensure_private_directory,
     ensure_private_file,
+    read_private_log_slice,
     read_private_text,
     redact_event_payload,
 )
@@ -597,3 +598,44 @@ def test_tail_read_returns_newest_bytes_of_an_over_cap_file(tmp_path: Path) -> N
 
     # A file under the cap is returned whole in both modes.
     assert read_private_text(target, max_bytes=1_000_000, tail=True) == "".join(lines)
+
+
+def test_log_slice_reads_only_appended_bytes(tmp_path: Path) -> None:
+    """The cursor read that keeps per-event reconciles O(new data)."""
+    target = tmp_path / "events.jsonl"
+    atomic_private_write(target, "one\ntwo\n")
+
+    text, cursor = read_private_log_slice(target, cursor=None, max_bytes=1_000)
+    assert text == "one\ntwo\n"
+
+    # Nothing new: empty slice, cursor unchanged.
+    again, cursor2 = read_private_log_slice(target, cursor=cursor, max_bytes=1_000)
+    assert again == ""
+    assert cursor2 == cursor
+
+    append_private_text(target, "three\n")
+    fresh, cursor3 = read_private_log_slice(target, cursor=cursor, max_bytes=1_000)
+    assert fresh == "three\n"
+
+    # A torn trailing line is withheld and re-delivered whole.
+    append_private_text(target, "fo")
+    torn, cursor4 = read_private_log_slice(target, cursor=cursor3, max_bytes=1_000)
+    assert torn == ""
+    append_private_text(target, "ur\n")
+    healed, _ = read_private_log_slice(target, cursor=cursor4, max_bytes=1_000)
+    assert healed == "four\n"
+
+    # Rotation (new inode) falls back to a fresh bounded tail.
+    atomic_private_write(target, "rotated-a\nrotated-b\n")
+    rotated, rotated_cursor = read_private_log_slice(
+        target, cursor=cursor3, max_bytes=1_000
+    )
+    assert rotated == "rotated-a\nrotated-b\n"
+    assert (rotated_cursor[0], rotated_cursor[1]) != (cursor3[0], cursor3[1])
+
+    # Over-cap fresh start keeps only the newest bytes; the possibly
+    # partial first line is the caller's parse-skip, same as tail reads.
+    atomic_private_write(target, "x" * 50 + "\n" + "tail-line\n")
+    capped, _ = read_private_log_slice(target, cursor=None, max_bytes=16)
+    assert capped.endswith("tail-line\n")
+    assert len(capped.encode("utf-8")) <= 16
