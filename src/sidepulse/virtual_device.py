@@ -333,7 +333,6 @@ def measured_notch_silhouette(
 def _captured_notch_runs(screen, *, rows: int, below_window_number: int = 0):
     """(per-row center black runs in px, scale, frame_x) for the top rows."""
     import Quartz
-    from AppKit import NSBitmapImageRep
 
     frame = screen.frame()
     rect = Quartz.CGRectMake(
@@ -349,19 +348,98 @@ def _captured_notch_runs(screen, *, rows: int, below_window_number: int = 0):
     )
     if image is None:
         raise ValueError("no composite image")
-    rep = NSBitmapImageRep.alloc().initWithCGImage_(image)
-    if rep is None:
-        raise ValueError("unreadable composite image")
-    width_px = int(rep.pixelsWide())
+    width_px = int(Quartz.CGImageGetWidth(image))
     if width_px <= 0:
         raise ValueError("empty composite image")
     scale = width_px / float(frame.size.width)
+    runs = _cgimage_black_runs(image, rows=rows, width_px=width_px)
+    if runs is None:
+        runs = _bitmap_rep_black_runs(image, rows=rows, width_px=width_px)
+    return runs, scale, float(frame.origin.x)
+
+
+def _cgimage_black_runs(image, *, rows: int, width_px: int):
+    """Per-row center black runs read from the image's raw bytes.
+
+    ``colorAtX_y_`` crossed the PyObjC bridge once per PIXEL -- >100k
+    NSColor round trips per measure, 150-300ms of main-thread time. The
+    raw buffer is one bridge crossing and the scan is a plain byte loop.
+    Returns None when the pixel format is not the 32-bit layout window
+    composites use, and the caller falls back to the bridge path.
+    """
+    import Quartz
+
+    try:
+        bytes_per_pixel = int(Quartz.CGImageGetBitsPerPixel(image)) // 8
+        if bytes_per_pixel != 4:
+            return None
+        bytes_per_row = int(Quartz.CGImageGetBytesPerRow(image))
+        available = int(Quartz.CGImageGetHeight(image))
+        provider = Quartz.CGImageGetDataProvider(image)
+        data = bytes(Quartz.CGDataProviderCopyData(provider))
+    except Exception:
+        return None
+    if available <= 0 or len(data) < bytes_per_row * available:
+        return None
+    runs = []
+    for row in range(rows):
+        y = min(row, available - 1)
+        runs.append(
+            _center_black_run_in_bytes(
+                data, y * bytes_per_row, width_px, bytes_per_pixel
+            )
+        )
+    return runs
+
+
+def _center_black_run_in_bytes(data, base: int, width_px: int, bytes_per_pixel: int):
+    """The pure-black run covering the horizontal center, in px, or None.
+
+    A black pixel in an opaque 32-bit composite is three zero colour
+    channels plus a full alpha byte, in whichever byte order the image
+    uses -- so "at most one nonzero byte in the pixel" identifies black
+    without knowing the channel layout: any actual colour keeps alpha
+    AND at least one colour channel nonzero. A fully transparent pixel
+    (all four bytes zero) also reads black, exactly as the NSColor path
+    always treated it.
+    """
+    center_px = width_px / 2.0
+    run_start = None
+    best = None
+    for x in range(width_px):
+        i = base + x * bytes_per_pixel
+        nonzero = (
+            (1 if data[i] else 0)
+            + (1 if data[i + 1] else 0)
+            + (1 if data[i + 2] else 0)
+            + (1 if data[i + 3] else 0)
+        )
+        if nonzero <= 1:
+            if run_start is None:
+                run_start = x
+            continue
+        if run_start is not None:
+            if run_start <= center_px <= x:
+                best = (run_start, x)
+            run_start = None
+    if run_start is not None and run_start <= center_px:
+        best = (run_start, width_px)
+    return best
+
+
+def _bitmap_rep_black_runs(image, *, rows: int, width_px: int):
+    """The original per-pixel bridge path, kept as the format fallback."""
+    from AppKit import NSBitmapImageRep
+
+    rep = NSBitmapImageRep.alloc().initWithCGImage_(image)
+    if rep is None:
+        raise ValueError("unreadable composite image")
     available = int(rep.pixelsHigh())
     runs = []
     for row in range(rows):
         y = min(row, available - 1) if available > 0 else 0
         runs.append(_center_black_run(rep, y, width_px))
-    return runs, scale, float(frame.origin.x)
+    return runs
 
 
 def _center_black_run(rep, y: int, width_px: int):
@@ -3586,7 +3664,19 @@ class VirtualStatusDevice(NSObject):
             retry_due = cache is not None and cache[1] is None and (
                 now >= getattr(self, "_notch_measure_retry_at", 0.0)
             )
-            if not alcove_active and (cache_stale or retry_due):
+            if (
+                not alcove_active
+                and (cache_stale or retry_due)
+                # A full-screen Space hides the menu bar and paints app
+                # content over the very rows the scan reads: the measure
+                # CANNOT succeed there, and each doomed attempt is a
+                # synchronous WindowServer capture on the main thread --
+                # measured at 150ms typical and 10s worst-case during
+                # full-screen video. Wait for a Space that can answer.
+                and not space_hides_menu_bar(screen)
+            ):
+                if cache_stale:
+                    self._notch_measure_backoff = 60.0
                 silhouette = measured_notch_silhouette(
                     screen,
                     below_window_number=int(self.window.windowNumber() or 0),
@@ -3595,7 +3685,15 @@ class VirtualStatusDevice(NSObject):
                 self._notch_measure_cache = (cache_key, silhouette)
                 cache = self._notch_measure_cache
                 if silhouette is None:
-                    self._notch_measure_retry_at = now + 60.0
+                    # Repeated failure means something durable (an overlay
+                    # compositing over the notch rows); retrying every
+                    # minute forever just burns main-thread time. Back off
+                    # up to 15 minutes; success or a screen change resets.
+                    backoff = max(60.0, getattr(self, "_notch_measure_backoff", 60.0))
+                    self._notch_measure_retry_at = now + backoff
+                    self._notch_measure_backoff = min(900.0, backoff * 2.0)
+                else:
+                    self._notch_measure_backoff = 60.0
             if cache is not None and cache[0] == cache_key and cache[1] is not None:
                 effective_gap = cache[1][1]
                 measured_notch_insets = cache[1][2]

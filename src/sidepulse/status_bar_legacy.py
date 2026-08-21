@@ -1371,6 +1371,10 @@ TIMEBOX_PRESET_MINUTES = (15, 25, 45, 60)
 BATTERY_SNAPSHOT_CACHE_SECONDS = 5.0
 # One /Volumes scan per second instead of 4-6 per refresh.
 DEVICE_DISCOVERY_CACHE_SECONDS = 1.0
+# Full dropdown rebuilds are main-thread AppKit work measured in whole
+# seconds; a CLOSED menu tolerates this much staleness before the next
+# rebuild (session-row copy still patches live in between).
+MENU_REBUILD_MIN_INTERVAL_SECONDS = 12.0
 SCREEN_BAR_FEATURE_ENABLED = True
 STATUS_BAR_MAX_LINES_PER_SOURCE = 500
 STATUS_BAR_STARTUP_REPLAY_LINES = 200
@@ -3028,7 +3032,24 @@ class StatusBarController(NSObject):
                     f"menu timing: signature={int((_t1 - _t0) * 1000)}ms (unchanged)"
                 )
             return
+        # A full rebuild is AppKit item construction on the main thread --
+        # measured at 0.6-2.5s with real session rows -- and during active
+        # agent work the signature changes on most ticks. A closed menu
+        # nobody is looking at does not need that immediately: live
+        # session-row copy still flows to the existing tree through the
+        # registry patch path, and the full rebuild happens on the first
+        # tick after the window passes. Live app only (_runtime_started);
+        # tests keep deterministic rebuild-per-change behavior.
+        if getattr(self, "_runtime_started", False):
+            since_last = _t1 - getattr(self, "_menu_last_rebuild_at", 0.0)
+            if since_last < MENU_REBUILD_MIN_INTERVAL_SECONDS:
+                native = _canonical_agent_root_snapshot(snapshot, self)
+                if native is not None:
+                    states, _items = native
+                    self.native_agent_menu_registry.publish(states, tracking=False)
+                return
         self._menu_signature = signature
+        self._menu_last_rebuild_at = _t1
         menu = build_menu(snapshot, state, self)
         _t2 = time.monotonic()
         menu.setDelegate_(self)
