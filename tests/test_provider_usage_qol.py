@@ -113,3 +113,36 @@ def test_usage_totals_add_machine_local_usage_without_summing_quota_lanes():
     assert totals.providers_with_usage == 2
     assert totals.estimated_cost_usd == 5.5
     assert totals.cache_savings_usd == 1.0
+
+
+def test_codex_banked_credits_ride_evidence_into_the_snapshot():
+    """rollout rate_limits carries {"credits": ...}; it must surface as
+    credits_remaining, never as a phantom usage lane."""
+    from sidepulse.provider_usage_parsers import parse_codex_usage
+    from sidepulse.usage_stats import codex_windows_from_limits
+
+    windows = codex_windows_from_limits(
+        {
+            "primary": {
+                "used_percent": 13.0,
+                "window_minutes": 10080,
+                "resets_at": 1_787_846_584,
+            },
+            "credits": {"has_credits": True, "unlimited": False, "balance": "2.5"},
+        }
+    )
+    assert {"label": "credits", "credits_balance": 2.5} in windows
+
+    snapshot_result = parse_codex_usage(windows=windows, observed_at=1_000)
+    assert snapshot_result.credits_remaining == 2.5
+    assert all(lane.lane_id != "credits" for lane in snapshot_result.lanes)
+    assert any(lane.lane_id == "weekly" for lane in snapshot_result.lanes)
+
+    # No credits / zero balance: nothing invented.
+    empty = codex_windows_from_limits(
+        {
+            "primary": {"used_percent": 10.0, "window_minutes": 10080},
+            "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
+        }
+    )
+    assert all("credits_balance" not in window for window in empty)

@@ -2543,7 +2543,13 @@ class StatusBarController(NSObject):
         if projection.actionable_attention:
             row = projection.actionable_attention[0]
             if row.request_key is not None:
-                actionable_episode_key = f"attention:{row.request_key.request_id.value}"
+                from .ask_episodes import batched_episode_key
+
+                actionable_episode_key = batched_episode_key(
+                    self,
+                    f"attention:{row.request_key.request_id.value}",
+                    presentation_time,
+                )
                 # Stage 2 IS the promised menu-bar flash: an ask ignored
                 # into escalation RE-ANNOUNCES itself -- the stage-keyed
                 # episode replays the finite arrival taps on the status

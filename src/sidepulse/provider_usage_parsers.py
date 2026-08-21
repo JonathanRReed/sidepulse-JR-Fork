@@ -103,8 +103,14 @@ def parse_codex_usage(
     account_label: str | None = None,
 ) -> ProviderUsageSnapshot:
     lanes: list[UsageLane] = []
+    credits_remaining: float | None = None
     for index, entry in enumerate(tuple(windows)[:64]):
         if not isinstance(entry, dict):
+            continue
+        balance = _number(entry.get("credits_balance"))
+        if balance is not None:
+            # Banked credits: a balance, not a window -- no lane.
+            credits_remaining = balance
             continue
         raw_label = str(entry.get("label") or f"limit-{index + 1}").strip()
         minutes = _number(entry.get("window_minutes"))
@@ -159,6 +165,7 @@ def parse_codex_usage(
         model_count=model_count,
         estimated_cost_usd=estimated_cost_usd,
         cache_savings_usd=cache_savings_usd,
+        credits_remaining=credits_remaining,
     )
 
 

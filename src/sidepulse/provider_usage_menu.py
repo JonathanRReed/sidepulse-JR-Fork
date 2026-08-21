@@ -136,6 +136,9 @@ def _row(
         )
     if display.show_cost and snapshot.estimated_cost_usd is not None:
         usage_parts.append(f"est. ${snapshot.estimated_cost_usd:.2f}")
+    if display.show_totals and snapshot.credits_remaining:
+        # Banked credits are headroom the meters don't show.
+        usage_parts.append(f"{snapshot.credits_remaining:g} credits banked")
     lane_lines, alert_indexes = _lane_lines(
         snapshot, now=now, display=display, threshold=threshold
     )

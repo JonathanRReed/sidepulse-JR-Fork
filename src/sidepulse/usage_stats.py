@@ -856,6 +856,20 @@ def codex_windows_from_limits(payload: object) -> list[dict]:
                 if len(windows) != before:
                     continue
             add(label, entry)
+    # Banked credits ride the same evidence stream as windows: the
+    # rollout's rate_limits carries {"credits": {has_credits, balance}}
+    # and nothing surfaced it (t3code PR #7813 showed how much operators
+    # want this number). A credits record has no used_percent, so it
+    # travels under its own key and the parser lifts it off the lane
+    # path into snapshot.credits_remaining.
+    credits = payload.get("credits")
+    if isinstance(credits, dict) and credits.get("has_credits") is True:
+        try:
+            balance = float(str(credits.get("balance", "")).replace(",", ""))
+        except (TypeError, ValueError):
+            balance = None
+        if balance is not None and math.isfinite(balance) and balance > 0.0:
+            windows.append({"label": "credits", "credits_balance": balance})
     return windows
 
 

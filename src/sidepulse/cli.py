@@ -85,6 +85,17 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
     )
     add_doctor_arguments(doctor)
     doctor.set_defaults(func=cmd_doctor)
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Serve agent + usage state as JSON on loopback (Stream Deck, Waybar, scripts).",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=8737,
+        help="Loopback port (default 8737).",
+    )
+    serve_parser.set_defaults(func=cmd_serve)
     subparsers.add_parser(
         "agent-monitor",
         help="Install hooks and show live AI agent statuses.",
@@ -609,6 +620,18 @@ def build_parser(prog: str = "agent-monitor") -> argparse.ArgumentParser:
     add_doctor_arguments(doctor)
     doctor.set_defaults(func=cmd_doctor)
 
+    monitor_serve = subparsers.add_parser(
+        "serve",
+        help="Serve agent + usage state as JSON on loopback (Stream Deck, Waybar, scripts).",
+    )
+    monitor_serve.add_argument(
+        "--port",
+        type=int,
+        default=8737,
+        help="Loopback port (default 8737).",
+    )
+    monitor_serve.set_defaults(func=cmd_serve)
+
     status = subparsers.add_parser("status", help="Show current aggregate status once.")
     add_status_args(status)
     status.set_defaults(func=cmd_status)
@@ -722,6 +745,13 @@ def add_doctor_arguments(parser: argparse.ArgumentParser) -> None:
         type=Path,
         help="Save one bounded private JSON diagnostic file.",
     )
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    from .serve import serve
+
+    serve(port=int(getattr(args, "port", 8737)))
+    return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
