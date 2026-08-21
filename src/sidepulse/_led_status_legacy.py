@@ -164,6 +164,15 @@ STRIP_CODE_TO_LIGHT_EXPONENT = 1.0
 # off. The cost is that the strip's dimmest ember stays a few times brighter
 # than the screen's; the alternative is idle silently going black on hardware.
 STRIP_MIN_LIT_DRIVE = 1
+# ...but a floor is only honest if it can hold its HUE. At drive 1-2 the
+# physical dies dominate the math: green emits several times more light
+# per code than red or blue, so "barely-visible white" #010101 renders as
+# a clearly GREEN glow ("why is the SidePulse green when it should be
+# off", 2026-08-20, photographed). A whole LED whose brightest computed
+# drive lands below this threshold cannot say its own color -- it goes
+# honestly dark instead of lying in green. Colors with at least one
+# channel at or above it keep the classic floor behavior.
+STRIP_HUE_HOLDING_DRIVE = 3
 
 MIN_CHANNEL_GAIN = 0.3
 MAX_CHANNEL_GAIN = 1.5
@@ -219,6 +228,9 @@ def apply_strip_transfer_to_hex(hex_color: str, gains: tuple[float, float, float
     red, green, blue = (
         strip_drive_code(value, gain) for value, gain in zip(channels, gains)
     )
+    if 0 < max(red, green, blue) < STRIP_HUE_HOLDING_DRIVE:
+        # Too dim to hold a hue: the die imbalance would paint it green.
+        return "#000000"
     return f"#{red:02X}{green:02X}{blue:02X}"
 
 

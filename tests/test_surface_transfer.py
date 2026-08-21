@@ -200,21 +200,19 @@ def test_the_strips_response_is_one_named_constant() -> None:
     assert strip_drive_code(128) == 55  # and the lever is back where it was
 
 
-def test_a_lit_led_never_goes_dark_on_the_strip() -> None:
-    """8-bit linear PWM cannot represent an sRGB shadow: idle's #020204 is
-    0.06% of full light, which rounds to drive code 0. "Lit" is a state the
-    user reads off this surface, so it bottoms out one code above off. The
-    price is that idle stays a few times brighter on the strip than on screen;
-    the alternative is the strip going black whenever an agent is idle."""
+def test_a_lit_led_holds_its_floor_only_when_it_can_hold_its_hue() -> None:
+    """The per-CHANNEL floor survives (a channel that means light never
+    rounds to nothing inside a color that can say its hue), but a WHOLE
+    LED whose brightest drive lands below STRIP_HUE_HOLDING_DRIVE now
+    goes honestly dark. At drive 1-2 the green die out-emits red and
+    blue several times over, so the old always-lit floor painted
+    'barely-visible white' as a clearly green glow -- photographed live
+    2026-08-20: 'why is the SidePulse green when it should be off.'"""
     assert strip_drive_code(1) == STRIP_MIN_LIT_DRIVE
     assert strip_drive_code(2) == STRIP_MIN_LIT_DRIVE
     assert strip_drive_code(0) == 0
-    assert apply_strip_transfer_to_hex("#020204", NEUTRAL_CHANNEL_GAINS) == "#010101"
-    # Still a large improvement on the 12.9x it used to be, and the residual
-    # is the hardware's, not the pipeline's.
-    strip = sum(_strip_light("#020204"))
-    screen = sum(_screen_light("#020204"))
-    assert 1.0 < strip / screen < 8.0
+    # The whisper is below the hue-holding line: honest black now.
+    assert apply_strip_transfer_to_hex("#020204", NEUTRAL_CHANNEL_GAINS) == "#000000"
     assert strip_drive_code(0, 0.0) == 0  # a zero gain is still off
 
 

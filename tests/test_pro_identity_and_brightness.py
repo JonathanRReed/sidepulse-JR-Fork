@@ -224,3 +224,22 @@ def test_long_thinking_turn_survives_the_post_tool_window() -> None:
         ).mode
         is AgentMode.ENDED_UNCONFIRMED
     )
+
+
+def test_a_whisper_too_dim_to_hold_its_hue_goes_honestly_dark():
+    """2026-08-20, photographed live: at drive 1-2 the green die emits
+    several times more light than red or blue, so 'barely-visible white'
+    #010101 rendered as a clearly GREEN glow -- 'why is the SidePulse
+    green when it should be off.' A whole LED whose brightest drive
+    lands below STRIP_HUE_HOLDING_DRIVE goes dark instead of lying."""
+    from sidepulse._led_status_legacy import (
+        NEUTRAL_CHANNEL_GAINS,
+        apply_strip_transfer_to_hex,
+    )
+
+    for whisper in ("#010101", "#000101", "#020204"):
+        assert apply_strip_transfer_to_hex(whisper, NEUTRAL_CHANNEL_GAINS) == "#000000"
+    # A dim color that CAN say its hue keeps the classic floor behavior.
+    assert apply_strip_transfer_to_hex("#010530", NEUTRAL_CHANNEL_GAINS) != "#000000"
+    # And true black stays black.
+    assert apply_strip_transfer_to_hex("#000000", NEUTRAL_CHANNEL_GAINS) == "#000000"
