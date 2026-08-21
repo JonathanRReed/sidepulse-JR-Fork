@@ -471,6 +471,11 @@ else:
                 state.snapshots,
                 thresholds,
             )
+            # Pace as an interruption, not just a color: a lane that
+            # JUST became projected-to-run-dry-before-reset earns one
+            # content-free banner per window, through the same gates as
+            # every other quota effect.
+            self._alert_new_critical_pace(previous_state, state)
             controller = getattr(self, "_sidepulse_provider_usage_window", None)
             if controller is not None:
                 controller.refresh(state)
@@ -613,6 +618,55 @@ else:
                 return max(0.0, min(1.0, worst))
             except Exception:
                 return 0.0
+
+        def _alert_new_critical_pace(self, previous_state, state) -> None:
+            from .provider_usage_platform import provider_descriptor
+            from .usage_pace import critical_pace_transitions
+
+            try:
+                seen = tuple(
+                    getattr(self, "_sidepulse_seen_pace_alerts", ())
+                )
+                alerts = critical_pace_transitions(
+                    previous_state.snapshots,
+                    state.snapshots,
+                    now=time.time(),
+                    seen_keys=frozenset(seen),
+                )
+                if not alerts:
+                    return
+                self._sidepulse_seen_pace_alerts = (
+                    *seen,
+                    *(key for key, _p, _l in alerts),
+                )[-256:]
+                if not getattr(self.settings, "quota_alerts_enabled", False):
+                    return
+                may_interrupt = getattr(self, "may_interrupt", None)
+                signal = getattr(_legacy.signals_module, "SIGNAL_QUOTA", None)
+                if callable(may_interrupt) and signal is not None:
+                    if not may_interrupt(signal):
+                        return
+                quiet = getattr(self, "quiet_active", None)
+                if callable(quiet) and quiet():
+                    return
+                self.quota_blink_until = max(
+                    float(getattr(self, "quota_blink_until", 0.0) or 0.0),
+                    time.monotonic() + 4.0,
+                )
+                client = self._notification_client_for_use()
+                for key, provider_id, _label in alerts[:3]:
+                    label = provider_descriptor(provider_id).label
+                    safe = "".join(
+                        ch for ch in label if ch.isalnum() or ch == " "
+                    ).strip() or provider_id
+                    client.deliver(
+                        "quota.pace." + key.replace(":", "-"),
+                        "SidePulse",
+                        f"A {safe} limit is running low",
+                        {},
+                    )
+            except Exception as exc:
+                _legacy.log_status_bar(f"pace alert: {exc}")
 
         def _active_usage_providers(self) -> frozenset[str]:
             """Providers with a MAIN session actually working right now --

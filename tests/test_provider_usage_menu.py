@@ -285,3 +285,62 @@ def test_lane_lines_carry_the_pace_tag():
         now=1000,
     ).rows[0]
     assert row.lane_lines[0].endswith("· on pace")
+
+
+def test_a_lane_alerts_once_per_reset_window_when_it_turns_critical():
+    from sidepulse.usage_pace import critical_pace_transitions
+
+    hour = 3600.0
+    base = 1_000_000.0
+
+    def snap(remaining):
+        # Halfway through a 5-hour window; heavy use turns it critical.
+        return snapshot_with_lane("codex", "5-hour", "five-hour", remaining,
+                                  reset_at=base + 2.5 * hour)
+
+    def snapshot_with_lane(provider, label, lane_id, remaining, *, reset_at):
+        return ProviderUsageSnapshot(
+            provider_id=provider,
+            account_label=None,
+            observed_at=base,
+            state=ProviderSourceState.READY,
+            reason_code=None,
+            action_label=None,
+            lanes=(
+                UsageLane(
+                    provider_id=provider,
+                    lane_id=lane_id,
+                    label=label,
+                    remaining_percent=remaining,
+                    reset_at=reset_at,
+                    scope="all",
+                    model=None,
+                    feature=None,
+                    bindable=True,
+                    source_id="fixture",
+                ),
+            ),
+            input_tokens=0, cached_input_tokens=0, output_tokens=0,
+            model_count=0, estimated_cost_usd=None, cache_savings_usd=None,
+            credits_remaining=None, incident=None,
+        )
+
+    healthy = (snap(55.0),)   # on pace
+    critical = (snap(30.0),)  # projected dry before reset
+
+    # Transition INTO critical: one alert.
+    alerts = critical_pace_transitions(
+        healthy, critical, now=base, seen_keys=frozenset()
+    )
+    assert len(alerts) == 1
+    key, provider_id, label = alerts[0]
+    assert provider_id == "codex" and label == "5-hour"
+
+    # Same critical state again: not news.
+    assert critical_pace_transitions(
+        critical, critical, now=base, seen_keys=frozenset()
+    ) == ()
+    # And the seen-set silences even a fresh transition for that window.
+    assert critical_pace_transitions(
+        healthy, critical, now=base, seen_keys=frozenset({key})
+    ) == ()

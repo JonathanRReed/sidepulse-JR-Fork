@@ -118,6 +118,66 @@ __all__ = [
     "SURPLUS_RATIO",
     "WINDOW_MINUTES_BY_LANE_ID",
     "PaceReading",
+    "critical_pace_transitions",
     "lane_pace",
     "pace_phrase",
 ]
+
+
+def critical_pace_transitions(
+    previous_snapshots,
+    current_snapshots,
+    *,
+    now: float,
+    seen_keys: frozenset[str],
+) -> tuple[tuple[str, str, str], ...]:
+    """Lanes that JUST became critical: (key, provider_id, label).
+
+    A lane is critical when its pace projects it dry before its reset
+    (or already out). The key binds provider, lane, and reset window,
+    so one window alerts at most once -- a re-render of the same
+    critical state is not news, and neither is the same window after a
+    restart when the caller persists ``seen_keys``.
+    """
+
+    def verdicts(snapshots) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for snapshot in snapshots:
+            for lane in getattr(snapshot, "lanes", ()):
+                pace = lane_pace(
+                    remaining_percent=lane.remaining_percent,
+                    reset_at=lane.reset_at,
+                    lane_id=lane.lane_id,
+                    now=now,
+                )
+                if pace is None:
+                    continue
+                key = (
+                    f"{snapshot.provider_id}:{lane.lane_id}:"
+                    f"{int(lane.reset_at or 0)}"
+                )
+                found[key] = pace.verdict
+        return found
+
+    before = verdicts(previous_snapshots)
+    alerts: list[tuple[str, str, str]] = []
+    for snapshot in current_snapshots:
+        for lane in getattr(snapshot, "lanes", ()):
+            pace = lane_pace(
+                remaining_percent=lane.remaining_percent,
+                reset_at=lane.reset_at,
+                lane_id=lane.lane_id,
+                now=now,
+            )
+            if pace is None or pace.verdict not in {PACE_CRITICAL, PACE_OUT}:
+                continue
+            key = (
+                f"{snapshot.provider_id}:{lane.lane_id}:"
+                f"{int(lane.reset_at or 0)}"
+            )
+            if key in seen_keys:
+                continue
+            if before.get(key) in {PACE_CRITICAL, PACE_OUT}:
+                continue
+            alerts.append((key, snapshot.provider_id, lane.label))
+    return tuple(alerts)
