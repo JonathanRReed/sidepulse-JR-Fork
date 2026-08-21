@@ -393,6 +393,8 @@ class AgentMonitorSettings:
     usage_graph_providers: tuple[str, ...] = ("claude", "codex")
     codex_percent_enabled: bool = True
     escalation_webhook_url: str = ""
+    #: Executable run on edge-triggered usage events (usage_event_hooks).
+    usage_event_hook_path: str = ""
     # Named Studio programs -- a shelf of looks.
     studio_library: tuple[tuple[str, str], ...] = ()
     night_warmth_enabled: bool = False
@@ -894,6 +896,9 @@ class AgentMonitorSettings:
     def with_escalation_webhook_url(self, url: str) -> AgentMonitorSettings:
         return replace(self, escalation_webhook_url=str(url).strip())
 
+    def with_usage_event_hook_path(self, path: str) -> AgentMonitorSettings:
+        return replace(self, usage_event_hook_path=str(path).strip())
+
     def with_usage_display_mode(self, mode: str) -> AgentMonitorSettings:
         if mode not in ("tokens", "cost", "sessions", "percent"):
             raise ValueError(
@@ -1390,6 +1395,7 @@ class AgentMonitorSettings:
             "usage_graph_providers": list(self.usage_graph_providers),
             "codex_percent_enabled": self.codex_percent_enabled,
             "escalation_webhook_url": self.escalation_webhook_url,
+            "usage_event_hook_path": self.usage_event_hook_path,
             "studio_library": [list(item) for item in self.studio_library],
             "night_warmth_enabled": self.night_warmth_enabled,
             "global_brightness_scale": self.global_brightness_scale,
@@ -1730,6 +1736,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         codex_percent_enabled=_bool_setting(data.get("codex_percent_enabled"), True),
         escalation_webhook_url=str(data.get("escalation_webhook_url") or "").strip(),
+        usage_event_hook_path=str(data.get("usage_event_hook_path") or "").strip(),
         night_warmth_enabled=_bool_setting(data.get("night_warmth_enabled"), False),
         global_brightness_scale=max(
             0.05, _fraction_setting(data.get("global_brightness_scale"), 1.0)

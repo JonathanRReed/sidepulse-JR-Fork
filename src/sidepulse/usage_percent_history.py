@@ -175,6 +175,39 @@ def percent_graph_model(
     }
 
 
+def record_state_observations(controller, snapshots) -> None:
+    """Record a fresh usage state's lane percents, dedup'd, off-main.
+
+    The controller carries the last-recorded map so dedupe never rereads
+    the file; the append itself rides a daemon thread.
+    """
+    import threading
+    import time
+
+    observations = [
+        (snapshot.provider_id, lane.lane_id, lane.remaining_percent)
+        for snapshot in snapshots
+        for lane in snapshot.lanes
+        if lane.remaining_percent is not None
+    ]
+    if not observations:
+        return
+    fresh, updated = filter_new_observations(
+        getattr(controller, "_sidepulse_percent_history_last", {}),
+        observations,
+        now_epoch=time.time(),
+    )
+    controller._sidepulse_percent_history_last = updated
+    if fresh:
+        threading.Thread(
+            target=lambda: append_percent_observations(
+                default_percent_history_path(), fresh
+            ),
+            name="SidePulsePercentHistory",
+            daemon=True,
+        ).start()
+
+
 def shared_percent_graph_model(
     *,
     days: int,

@@ -2410,6 +2410,36 @@ class StatusBarController(NSObject):
         # exact end of the second visible pulse.
         self.refresh_(None)
 
+    def snooze_filtered(self, statuses):
+        """Drop held snoozes; prune broken ones so rows wake exactly once."""
+        snoozes = getattr(self, "session_snoozes", None)
+        if not snoozes:
+            return statuses
+        from .session_snooze import filter_snoozed
+
+        visible, kept = filter_snoozed(statuses, snoozes, time.time())
+        self.session_snoozes = kept
+        return visible
+
+    @objc.IBAction
+    def snoozeSession_(self, sender):
+        from .session_snooze import can_snooze
+
+        status = sender.representedObject()
+        if status is None or not can_snooze(status):
+            return
+        snoozes = dict(getattr(self, "session_snoozes", {}) or {})
+        snoozes[status.agent_id] = time.time()
+        self.session_snoozes = snoozes
+        self._menu_signature = None
+        self.refresh_(None)
+
+    @objc.IBAction
+    def wakeSnoozedSessions_(self, _sender):
+        self.session_snoozes = {}
+        self._menu_signature = None
+        self.refresh_(None)
+
     def update_attention_projection(
         self,
         snapshot,
@@ -2418,7 +2448,7 @@ class StatusBarController(NSObject):
     ) -> AttentionProjection:
         observed_at = time.monotonic() if now is None else float(now)
         attention_snapshot = SimpleNamespace(
-            statuses=mailbox_attention_statuses(snapshot),
+            statuses=self.snooze_filtered(mailbox_attention_statuses(snapshot)),
             collected_at=snapshot.collected_at,
         )
         projection = project_attention(attention_snapshot, self.settings)
@@ -15212,46 +15242,7 @@ class StatusBarController(NSObject):
         ]
 
 
-# One per day, keyed to the calendar: each teaches a feature people
-# don't find on their own. (text, settings pane key or None).
-DAILY_TIPS: tuple[tuple[str, str | None, str | None], ...] = (
-    ("Each agent gets its own color when several run at once", "color_studio", None),
-    ("Give a session a permanent color from its row's Identity Color menu", None, None),
-    ("The Screen Bar hugs your notch -- style it under Screen Bar", "colors_screen_bar", None),
-    ("Timer fills your lights as working time passes -- try it below", None, None),
-    ("Write your own light animation under Animations", "animations", None),
-    ("Whites looking off? Calibrate each device under Devices", "devices", None),
-    ("Day, Night, and Travel calibration profiles live under Profiles", None, None),
-    ("Ignored asks can escalate: light, menu bar, chime, takeover", "led_behavior", None),
-    ("Severe-weather warnings can flash your lights", "extras", None),
-    ("Calendar events and Reminders can glow before they're due", "extras", None),
-    ("Every signal card in Signals has a Test button -- try one", "led_behavior", None),
-    ("Agents on your other Macs can show up in this menu", "agents", None),
-    ("A cloud code review can post its own status to SidePulse", "agents", None),
-    ("Choose how each provider's light moves under Agents", "agents", None),
-    ("A macOS Focus can dim or silence your lights automatically", "focus", None),
-    ("A device can show Agent status, Battery, Timer, or your Studio program", "devices", None),
-    (
-        "Claude, OpenAI, Codex, and Gemini brand colors are the swatches on every Agent color row",
-        "color_studio",
-        "brand_colors",
-    ),
-    ("Celebrate when finished sweeps green the moment an agent completes", "color_studio", None),
-)
-
-
-def daily_tip(settings=None) -> tuple[str, str | None, str | None] | None:
-    """The day's tip, skipping anything the user dismissed. None when
-    every tip is dismissed or tips are off entirely."""
-    if settings is not None and not getattr(settings, "tips_enabled", True):
-        return None
-    dismissed = set(getattr(settings, "dismissed_tips", ()) or ())
-    tips = [tip for tip in DAILY_TIPS if tip[0] not in dismissed]
-    if not tips:
-        return None
-    # Local calendar day: the tip changes overnight, like a calendar page.
-    day = datetime.now().timetuple().tm_yday
-    return tips[day % len(tips)]
+from .daily_tips import DAILY_TIPS, daily_tip  # noqa: E402
 
 
 def quiet_seconds_until_tomorrow(now: datetime | None = None) -> float:
@@ -15706,9 +15697,11 @@ def mailbox_projection_for_menu(snapshot, target) -> AgentMailboxProjection:
         return current
     attention = getattr(target, "current_attention_projection", None)
     if not isinstance(attention, AttentionProjection):
+        snooze = getattr(target, "snooze_filtered", None)
+        statuses = mailbox_attention_statuses(snapshot)
         attention = project_attention(
             SimpleNamespace(
-                statuses=mailbox_attention_statuses(snapshot),
+                statuses=snooze(statuses) if callable(snooze) else statuses,
                 collected_at=snapshot.collected_at,
             ),
             target.settings,
@@ -15792,6 +15785,7 @@ def menu_content_signature(snapshot, state, target) -> tuple:
             else None
         ),
         tuple(sorted(getattr(target, "cleared_session_ids", set()))),
+        tuple(sorted(getattr(target, "session_snoozes", {}) or {})),
         tuple(sorted(u.agent_id for u in unseen_completions(snapshot, target))),
         # Both halves, not just the revision: closing the menu changes only
         # the seen watermark, and without it the "Since you left" heading
@@ -16685,6 +16679,13 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     # First-run honesty: an empty mailbox means one of three completely
     # different things, and only one of them is "nothing to do". The other
     # two get the same one click that fixes them.
+    snoozed_count = len(getattr(target, "session_snoozes", {}) or {})
+    if snoozed_count:
+        wake = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"{snoozed_count} snoozed — wake", "wakeSnoozedSessions:", ""
+        )
+        wake.setTarget_(target)
+        menu.addItem_(wake)
     _mark("sessions")
     add_intake_menu_items(menu, target)
     # An out-of-date hook cannot deliver live events. Say so where the
@@ -18503,6 +18504,16 @@ def build_session_options_menu(
         identity_menu.addItem_(choice)
     identity_item.setSubmenu_(identity_menu)
     menu.addItem_(identity_item)
+    from .session_snooze import can_snooze
+
+    if can_snooze(status):
+        menu.addItem_(NSMenuItem.separatorItem())
+        snooze_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Snooze until it needs you", "snoozeSession:", ""
+        )
+        snooze_item.setTarget_(target)
+        snooze_item.setRepresentedObject_(status)
+        menu.addItem_(snooze_item)
     return menu
 
 

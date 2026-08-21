@@ -59,13 +59,32 @@ PRESENCE_HORIZON_SECONDS: Final = 3_600.0
 # silence by design and must never expire into invisibility.
 ACTIVE_SILENCE_SECONDS: Final = 240.0
 
+# Providers whose hooks are SPARSE by design get a longer line. Hermes
+# fires one pre_llm_call per turn and has no transcript heartbeats, so
+# a flat four-minute window flipped it to "silent" mid-thought on any
+# long turn -- the exact false-Completed upstream PR #20 fixed with
+# per-provider expiry. Keyed by provider_id; absent means the default.
+PROVIDER_ACTIVE_SILENCE_SECONDS: Final = {
+    "hermes": 900.0,
+}
+
+
+def active_silence_seconds_for(provider_id: str | None) -> float:
+    return PROVIDER_ACTIVE_SILENCE_SECONDS.get(
+        provider_id or "", ACTIVE_SILENCE_SECONDS
+    )
+
 
 def active_work_went_silent(work, now_epoch: float | None) -> bool:
-    """True when an ACTIVE work has been unheard past the silence line."""
+    """True when an ACTIVE work has been unheard past its provider's line."""
+    if work.lifecycle is not WorkLifecycle.ACTIVE or now_epoch is None:
+        return False
+    provider_id = getattr(
+        getattr(work.key, "source_key", None), "provider_id", None
+    )
     return (
-        work.lifecycle is WorkLifecycle.ACTIVE
-        and now_epoch is not None
-        and now_epoch - work.watermark.occurred_at_epoch > ACTIVE_SILENCE_SECONDS
+        now_epoch - work.watermark.occurred_at_epoch
+        > active_silence_seconds_for(provider_id)
     )
 
 

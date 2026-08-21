@@ -710,6 +710,27 @@ def _build_profile_pane(target: StatusBarController):
     )
     fields["usage_graph_legend"] = legend
     today_inner.addArrangedSubview_(legend)
+    hook_field = native_ui.make_field(
+        getattr(target.settings, "usage_event_hook_path", ""),
+        target=target,
+        action="applyUsageEventHook:",
+    )
+    native_ui.constrain_width(hook_field, 280.0)
+    today_inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Event hook",
+            hook_field,
+            help_text=(
+                "Optional: an executable run on usage edges — quota_low, "
+                "quota_reached, quota_reset, provider_unavailable, "
+                "provider_recovered. Called as: script EVENT PROVIDER LANE "
+                "DETAIL. Edge-triggered — each crossing fires exactly once, "
+                "so a chime or webhook script needs no rate limiting. "
+                "Blank = off."
+            ),
+        )
+    )
+    fields["usage_event_hook_field"] = hook_field
     fields["profile_usage_legend"] = legend
     provider_row = native_ui.make_stack(
         orientation="horizontal",

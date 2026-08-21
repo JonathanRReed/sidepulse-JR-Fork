@@ -28,11 +28,9 @@ from .settings_category_runtime import (
     select_page,
     show_category,
 )
-from .usage_percent_history import (
-    append_percent_observations,
-    default_percent_history_path,
-    filter_new_observations,
-)
+from .status_feeds import incident_row_title, shared_status_feed_poller
+from .usage_event_hooks import detect_usage_hook_events, run_usage_hooks
+from .usage_percent_history import record_state_observations
 
 _legacy = getattr(_host, "_legacy", _host)
 install_settings_navigation(_legacy, _settings_window)
@@ -143,6 +141,21 @@ def _native_usage_menu_item(target):
     )
     submenu = _legacy.NSMenu.alloc().init()
     submenu.setAutoenablesItems_(False)
+    # Vendor incidents outrank everything below: "the provider is down"
+    # must never read as "your quota fetch broke".
+    poller = shared_status_feed_poller()
+    poller.start()
+    incidents = poller.current()
+    for provider_id in sorted(incidents):
+        incident = incidents[provider_id]
+        row = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            incident_row_title(incident), "openProviderStatusPage:", ""
+        )
+        row.setTarget_(target)
+        row.setRepresentedObject_(incident.page_url)
+        submenu.addItem_(row)
+    if incidents:
+        submenu.addItem_(_legacy.NSMenuItem.separatorItem())
     if not projection.rows:
         # An empty submenu has two very different causes: nothing is
         # connected, or everything is curated out. Diagnosing the wrong
@@ -159,8 +172,11 @@ def _native_usage_menu_item(target):
                 _disabled_item("Open Usage Center to connect provider sources")
             )
     for row in projection.rows:
+        row_title = row.title
+        if row.provider_id in incidents:
+            row_title = f"{row_title} · ⚠ vendor incident"
         provider_item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            row.title,
+            row_title,
             None,
             "",
         )
@@ -430,6 +446,26 @@ else:
                 return
 
         @_legacy.objc.IBAction
+        def openProviderStatusPage_(self, sender) -> None:
+            url = str(sender.representedObject() or "")
+            if url.startswith("https://"):
+                from AppKit import NSURL, NSWorkspace
+
+                NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(url))
+
+        @_legacy.objc.IBAction
+        def applyUsageEventHook_(self, sender) -> None:
+            self.settings = self.settings.with_usage_event_hook_path(
+                str(sender.stringValue() or "")
+            )
+            _legacy.save_settings(self.settings)
+            self.set_settings_message(
+                "Usage event hook off."
+                if not self.settings.usage_event_hook_path
+                else "Usage event hook saved."
+            )
+
+        @_legacy.objc.IBAction
         def applyProviderUsageState_(self, state) -> None:
             if type(state) is not ProviderUsageState:
                 return
@@ -439,30 +475,9 @@ else:
                 ProviderUsageState((), None, None, False),
             )
             self._sidepulse_provider_usage_state = state
-            # Percent history: remember every provider's "how much is left"
-            # so the settings chart can show ALL of them, not only the two
-            # with local token transcripts.
-            observations = [
-                (snapshot.provider_id, lane.lane_id, lane.remaining_percent)
-                for snapshot in state.snapshots
-                for lane in snapshot.lanes
-                if lane.remaining_percent is not None
-            ]
-            if observations:
-                fresh, updated = filter_new_observations(
-                    getattr(self, "_sidepulse_percent_history_last", {}),
-                    observations,
-                    now_epoch=time.time(),
-                )
-                self._sidepulse_percent_history_last = updated
-                if fresh:
-                    threading.Thread(
-                        target=lambda: append_percent_observations(
-                            default_percent_history_path(), fresh
-                        ),
-                        name="SidePulsePercentHistory",
-                        daemon=True,
-                    ).start()
+            # Percent history: every provider's "how much is left", so the
+            # settings chart can show ALL of them.
+            record_state_observations(self, state.snapshots)
             seen = set(getattr(self, "_sidepulse_seen_reset_events", ()))
             reset_events = detect_reset_events(
                 previous_state.snapshots,
@@ -500,6 +515,20 @@ else:
                 state.snapshots,
                 thresholds,
             )
+            # Edge-triggered user hooks: transitions only, never states,
+            # so a chime/webhook script needs no rate limiting of its own.
+            hook_path = str(
+                getattr(self.settings, "usage_event_hook_path", "") or ""
+            )
+            if hook_path:
+                run_usage_hooks(
+                    hook_path,
+                    detect_usage_hook_events(
+                        previous_state.snapshots,
+                        state.snapshots,
+                        thresholds=thresholds,
+                    ),
+                )
             # Pace as an interruption, not just a color: a lane that
             # JUST became projected-to-run-dry-before-reset earns one
             # content-free banner per window, through the same gates as

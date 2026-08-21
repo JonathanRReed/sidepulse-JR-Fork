@@ -282,3 +282,85 @@ def test_completed_settles_to_idle_after_the_recent_window() -> None:
     assert completed_work_no_longer_recent(
         stale.works[0], stale.last_clock.wall_epoch
     )
+
+
+def test_sparse_cadence_providers_get_a_longer_silence_line() -> None:
+    """Hermes fires one hook per turn with no transcript heartbeats: a
+    flat four-minute silence window flipped it to invisible mid-thought
+    on any long turn (upstream PR #20's false-Completed). Sparse
+    providers carry their own line; everyone else keeps the default."""
+    from sidepulse.capacity_types import SourceKey
+    from sidepulse.operator_state import (
+        ACTIVE_SILENCE_SECONDS,
+        BootIdentifier,
+        ClockSample,
+        active_silence_seconds_for,
+        active_work_went_silent,
+        empty_operator_state,
+        reduce_operator_state,
+    )
+    from sidepulse.provider_facts import (
+        EventToken,
+        NextActor,
+        ObservationAuthority,
+        ProviderFactBatch,
+        ProviderWatermark,
+        ProviderWorkFact,
+        SourceFreshness,
+        SourceHealth,
+        WatermarkBasis,
+        WorkIdentifier,
+        WorkKey,
+        WorkLifecycle,
+    )
+
+    assert active_silence_seconds_for("hermes") > ACTIVE_SILENCE_SECONDS
+    assert active_silence_seconds_for("codex") == ACTIVE_SILENCE_SECONDS
+    assert active_silence_seconds_for(None) == ACTIVE_SILENCE_SECONDS
+
+    source = SourceKey("hermes", "hooks", "global", "live_agent_events")
+    watermark = ProviderWatermark(
+        source_key=source,
+        basis=WatermarkBasis.PROVIDER_EVENT_ID,
+        occurred_at_epoch=1_800_000_000.0,
+        event_token=EventToken("tok"),
+        sequence=None,
+        tie_break_rank=10,
+    )
+    batch = ProviderFactBatch(
+        source_key=source,
+        observation_authority=ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        source_health=SourceHealth.HEALTHY,
+        source_freshness=SourceFreshness.FRESH,
+        observed_at_epoch=1_800_000_000.0,
+        watermark=watermark,
+        work_facts=(
+            ProviderWorkFact(
+                key=WorkKey(source, WorkIdentifier("session:h")),
+                lifecycle=WorkLifecycle.ACTIVE,
+                watermark=watermark,
+                safe_label="Hermes session:h",
+                parent_key=None,
+                next_actor=NextActor.PROVIDER,
+            ),
+        ),
+        request_facts=(),
+        diagnostics=(),
+    )
+    past_default = ACTIVE_SILENCE_SECONDS + 60.0
+    state = reduce_operator_state(
+        empty_operator_state(),
+        batch,
+        clock=ClockSample(
+            1_800_000_000.0 + past_default,
+            100.0 + past_default,
+            BootIdentifier("boot:01"),
+        ),
+    ).state
+    # Past the default line but inside hermes's own: still heard.
+    assert not active_work_went_silent(state.works[0], state.last_clock.wall_epoch)
+    # Past hermes's own line: silent like anyone else.
+    assert active_work_went_silent(
+        state.works[0],
+        1_800_000_000.0 + active_silence_seconds_for("hermes") + 1.0,
+    )
