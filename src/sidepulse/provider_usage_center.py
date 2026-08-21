@@ -9,12 +9,18 @@ from .provider_usage_qol import format_lane_meter, format_reset_countdown, usage
 from .provider_usage_runtime import ProviderUsageState
 from .provider_usage_sync import MergedProviderSync
 from .provider_usage_sync_projection import apply_merged_sync_to_state
+from .usage_pace import PACE_CRITICAL, PACE_OUT, lane_pace, pace_phrase
 
 
 @dataclass(frozen=True, slots=True)
 class UsageCenterLane:
     title: str
     subtitle: str
+    #: Visual-layer fields for the card renderer; the text projection
+    #: (usage_center_text, why panel) ignores them.
+    provider_id: str = ""
+    fraction: float | None = None
+    alert: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,10 +85,29 @@ def project_usage_center(
                 if lane.remaining_percent is None
                 else f"{format_lane_meter(lane.remaining_percent)}  "
             )
+            pace = lane_pace(
+                remaining_percent=lane.remaining_percent,
+                reset_at=lane.reset_at,
+                lane_id=lane.lane_id,
+                now=now,
+            )
+            phrase = pace_phrase(pace, now=now)
+            if phrase:
+                subtitle_parts.append(phrase)
             lanes.append(
                 UsageCenterLane(
                     f"{meter}{lane.label} · {remaining}",
                     " · ".join(subtitle_parts),
+                    provider_id=snapshot.provider_id,
+                    fraction=(
+                        None
+                        if lane.remaining_percent is None
+                        else max(0.0, min(1.0, lane.remaining_percent / 100.0))
+                    ),
+                    alert=bool(
+                        pace is not None
+                        and pace.verdict in {PACE_CRITICAL, PACE_OUT}
+                    ),
                 )
             )
         token_total = (

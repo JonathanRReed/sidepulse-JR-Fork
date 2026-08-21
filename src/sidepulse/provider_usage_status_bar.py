@@ -693,9 +693,18 @@ else:
 
             controller = getattr(self, "_sidepulse_provider_usage_window", None)
             if controller is None:
-                controller = ProviderUsageWindowController()
+                controller = ProviderUsageWindowController(action_target=self)
                 self._sidepulse_provider_usage_window = controller
             controller.show(self.provider_usage_state)
+
+        @_legacy.objc.IBAction
+        def usageCenterAction_(self, sender) -> None:
+            """A card's action button: identifier carries the provider."""
+            provider_id = str(sender.identifier() or "")
+            if provider_id == "claude":
+                self._connect_claude_usage()
+                return
+            self._request_provider_usage(force=True)
 
         @_legacy.objc.IBAction
         def performProviderUsageAction_(self, sender) -> None:
