@@ -1377,3 +1377,48 @@ def test_deterministic_scale_fixture_retains_one_bounded_latest_truth() -> None:
     assert result.resolved_edge_count == 200
     assert result.final_sequence == 10_001
     assert result.final_lifecycle == WorkLifecycle.COMPLETED.value
+
+
+def test_reconcile_reads_the_tail_of_an_over_cap_log(tmp_path: Path) -> None:
+    """An events log larger than LATEST_STATE_MAX_BYTES must yield its
+    NEWEST records, never raise.
+
+    The raising head-read silenced claude for a day (2026-08-21): the log
+    crossed the collector's cap while the audit trim threshold sat above
+    it, every reconcile aborted on OSError, and the menu said "writing to
+    the log, nothing arriving" while the hook side was perfectly healthy."""
+    from sidepulse import _collector_legacy
+    from sidepulse.hook import _normalized_hook_record, routed_hook_payload
+
+    log_path = tmp_path / "claude.jsonl"
+    payload = json.dumps(
+        {
+            "session_id": "tail-probe",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+        }
+    )
+    provider, _, line = routed_hook_payload("claude", log_path, payload)
+    record = _normalized_hook_record(provider, line)
+    assert record is not None
+
+    log_path.write_text('{"junk": true}\n' * 2_000, encoding="utf-8")
+    os.chmod(log_path, 0o600)
+    write_normalized_hook_record(log_path, record)
+    assert log_path.stat().st_size > 4_096
+
+    monitor = LiveAgentMonitor(
+        latest_state_path=tmp_path / "latest.json",
+        clock_sampler=lambda: _clock(6.0, 106.0),
+    )
+    before = monitor.operator_state
+    with patch.object(_collector_legacy, "LATEST_STATE_MAX_BYTES", 4_096):
+        monitor.reconcile_refresh_hint(
+            ProviderRefreshHint(_CLAUDE, EventToken("event:claude:tail")),
+            log_path=log_path,
+        )
+    # The tail read reached ingest: the reducer advanced past the seeded
+    # state instead of aborting on OSError as the head-read used to. (A
+    # lone pre_tool_use is watermark-only, so `works` may stay empty --
+    # the state delta is the receipt that the record was consumed.)
+    assert monitor.operator_state != before

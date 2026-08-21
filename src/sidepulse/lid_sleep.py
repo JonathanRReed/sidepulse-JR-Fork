@@ -277,6 +277,7 @@ class ClosedLidAwakeController:
         self.process = None
         self.changed_system_disable = False
         self.system_disable_attempted = False
+        self.orphan_reclaim_attempted = False
         self.last_error: str | None = None
         self.last_policy = CLOSED_LID_AWAKE_NEVER
         self.last_requested = False
@@ -287,6 +288,7 @@ class ClosedLidAwakeController:
             return
         self.use_system_disable = enabled
         self.system_disable_attempted = False
+        self.orphan_reclaim_attempted = False
         if not enabled:
             self.release_system_disable()
 
@@ -361,6 +363,22 @@ class ClosedLidAwakeController:
                 active_errors.append(f"disablesleep: {exc}")
         else:
             self.system_disable_attempted = False
+            # Orphan reclaim: a previous instance that set disablesleep and
+            # was then killed (launchctl bootout, crash) never ran release,
+            # and this instance's changed_system_disable knows nothing of
+            # it -- the Mac stayed sleepless for a full day exactly this
+            # way. With the helper installed, the flag belongs to this
+            # feature: when we are NOT holding and the system still says
+            # sleep is disabled, clear it. Checked once per process (and
+            # again if the helper toggles) -- ioreg is a subprocess and
+            # this runs on every sync.
+            if self.use_system_disable and not self.orphan_reclaim_attempted:
+                self.orphan_reclaim_attempted = True
+                try:
+                    if self.sleep_disabled_reader() is True:
+                        self.sleep_disabled_setter(False)
+                except Exception as exc:
+                    active_errors.append(f"disablesleep: {exc}")
 
         if errors is None:
             self.last_error = "; ".join(active_errors) if active_errors else None

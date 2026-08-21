@@ -573,3 +573,27 @@ def test_retention_refuses_symlink_root(tmp_path: Path) -> None:
         enforce_retention(linked_root, RetentionPolicy(max_files=0))
 
     assert (outside / "keep.txt").read_text() == "keep"
+
+
+def test_tail_read_returns_newest_bytes_of_an_over_cap_file(tmp_path: Path) -> None:
+    """tail=True on an over-cap file yields its newest max_bytes.
+
+    The raising default silenced a provider for a day (2026-08-21): its
+    events log crossed the collector's cap, every reconcile read raised,
+    and the freshest events -- the only ones the collector wanted -- were
+    exactly the bytes the head-read could never reach."""
+    target = tmp_path / "log.jsonl"
+    lines = [f"line-{index:04d}\n" for index in range(200)]
+    atomic_private_write(target, "".join(lines))
+
+    text = read_private_text(target, max_bytes=64, tail=True)
+    assert len(text.encode("utf-8")) == 64
+    assert text.endswith("line-0199\n")
+
+    # The raising contract stays the default for callers that treat an
+    # oversized file as corruption rather than history.
+    with pytest.raises(OSError):
+        read_private_text(target, max_bytes=64)
+
+    # A file under the cap is returned whole in both modes.
+    assert read_private_text(target, max_bytes=1_000_000, tail=True) == "".join(lines)

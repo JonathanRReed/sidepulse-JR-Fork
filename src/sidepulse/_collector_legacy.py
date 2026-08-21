@@ -1124,9 +1124,13 @@ class LiveAgentMonitor:
         if source is None:
             return
         try:
+            # tail=True is load-bearing: an over-cap log must yield its
+            # NEWEST bytes, never raise -- the raising read silenced
+            # claude for a day (2026-08-21).
             lines = read_private_text(
                 Path(log_path),
                 max_bytes=LATEST_STATE_MAX_BYTES,
+                tail=True,
             ).splitlines()
         except OSError:
             return

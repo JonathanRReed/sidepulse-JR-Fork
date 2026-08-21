@@ -895,8 +895,10 @@ class AgentMonitorSettings:
         return replace(self, escalation_webhook_url=str(url).strip())
 
     def with_usage_display_mode(self, mode: str) -> AgentMonitorSettings:
-        if mode not in ("tokens", "cost", "sessions"):
-            raise ValueError("usage display mode is tokens, cost, or sessions")
+        if mode not in ("tokens", "cost", "sessions", "percent"):
+            raise ValueError(
+                "usage display mode is tokens, cost, sessions, or percent"
+            )
         return replace(self, usage_display_mode=mode)
 
     def with_usage_graph_providers(

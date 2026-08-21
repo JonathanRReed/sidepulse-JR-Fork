@@ -28,6 +28,11 @@ from .settings_category_runtime import (
     select_page,
     show_category,
 )
+from .usage_percent_history import (
+    append_percent_observations,
+    default_percent_history_path,
+    filter_new_observations,
+)
 
 _legacy = getattr(_host, "_legacy", _host)
 install_settings_navigation(_legacy, _settings_window)
@@ -434,6 +439,30 @@ else:
                 ProviderUsageState((), None, None, False),
             )
             self._sidepulse_provider_usage_state = state
+            # Percent history: remember every provider's "how much is left"
+            # so the settings chart can show ALL of them, not only the two
+            # with local token transcripts.
+            observations = [
+                (snapshot.provider_id, lane.lane_id, lane.remaining_percent)
+                for snapshot in state.snapshots
+                for lane in snapshot.lanes
+                if lane.remaining_percent is not None
+            ]
+            if observations:
+                fresh, updated = filter_new_observations(
+                    getattr(self, "_sidepulse_percent_history_last", {}),
+                    observations,
+                    now_epoch=time.time(),
+                )
+                self._sidepulse_percent_history_last = updated
+                if fresh:
+                    threading.Thread(
+                        target=lambda: append_percent_observations(
+                            default_percent_history_path(), fresh
+                        ),
+                        name="SidePulsePercentHistory",
+                        daemon=True,
+                    ).start()
             seen = set(getattr(self, "_sidepulse_seen_reset_events", ()))
             reset_events = detect_reset_events(
                 previous_state.snapshots,

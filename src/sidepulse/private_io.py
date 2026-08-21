@@ -650,8 +650,18 @@ def read_private_bytes_with_identity(
     *,
     tighten: bool = True,
     max_bytes: int | None = None,
+    tail: bool = False,
 ) -> tuple[bytes, tuple[int, int]]:
-    """Read one private file and return bytes with its verified inode identity."""
+    """Read one private file and return bytes with its verified inode identity.
+
+    With ``tail=True`` an over-``max_bytes`` file yields its NEWEST
+    ``max_bytes`` instead of raising -- the mode for append-only logs
+    whose freshest lines are the ones that matter. The first returned
+    line may be a partial record; line-oriented callers skip it when it
+    fails to parse. (The raising default stayed the claude outage of
+    2026-08-21: the events log crossed the cap, every reconcile read
+    raised, and the provider went silent while its log kept growing.)
+    """
     if (
         max_bytes is not None
         and (
@@ -682,7 +692,9 @@ def read_private_bytes_with_identity(
             if tighten:
                 os.fchmod(descriptor, PRIVATE_FILE_MODE)
             if max_bytes is not None and opened.st_size > max_bytes:
-                raise OSError("private file exceeds maximum size")
+                if not tail:
+                    raise OSError("private file exceeds maximum size")
+                os.lseek(descriptor, opened.st_size - max_bytes, os.SEEK_SET)
             chunks: list[bytes] = []
             remaining = None if max_bytes is None else max_bytes + 1
             while remaining is None or remaining > 0:
@@ -712,11 +724,13 @@ def read_private_bytes(
     *,
     tighten: bool = True,
     max_bytes: int | None = None,
+    tail: bool = False,
 ) -> bytes:
     return read_private_bytes_with_identity(
         path,
         tighten=tighten,
         max_bytes=max_bytes,
+        tail=tail,
     )[0]
 
 
@@ -727,11 +741,13 @@ def read_private_text(
     errors: str = "strict",
     tighten: bool = True,
     max_bytes: int | None = None,
+    tail: bool = False,
 ) -> str:
     return read_private_bytes(
         path,
         tighten=tighten,
         max_bytes=max_bytes,
+        tail=tail,
     ).decode(encoding, errors)
 
 

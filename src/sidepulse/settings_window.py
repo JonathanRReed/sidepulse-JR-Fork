@@ -661,6 +661,10 @@ def _build_profile_pane(target: StatusBarController):
         ("Processed tokens", "tokens"),
         ("Estimated cost", "cost"),
         ("Sessions", "sessions"),
+        # The one metric EVERY provider can answer: remaining percent,
+        # remembered per refresh -- tokens/cost only exist for the two
+        # providers with local transcripts.
+        ("Percent left", "percent"),
     ):
         mode_popup.addItemWithTitle_(mode_label)
         item = mode_popup.lastItem()

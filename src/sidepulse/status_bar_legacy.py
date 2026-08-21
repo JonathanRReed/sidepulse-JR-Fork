@@ -91,6 +91,7 @@ from . import (
     native_ui,
     reminders_watch,
     usage_card,
+    usage_percent_history,
     usage_stats,
     weather_watch,
 )
@@ -1375,6 +1376,12 @@ DEVICE_DISCOVERY_CACHE_SECONDS = 1.0
 # seconds; a CLOSED menu tolerates this much staleness before the next
 # rebuild (session-row copy still patches live in between).
 MENU_REBUILD_MIN_INTERVAL_SECONDS = 12.0
+# The Screen Bar's green unseen-done tip holds this long per completion.
+# Deliberately far shorter than COMPLETED_VISIBLE_SECONDS (the menu
+# badge's window): the tip is peripheral and always visible, and an
+# all-day agent fleet re-arming 20 minutes of green per finish made it
+# read as a stuck green glow rather than news.
+GAUGE_UNSEEN_COMPLETION_SECONDS = 300.0
 SCREEN_BAR_FEATURE_ENABLED = True
 STATUS_BAR_MAX_LINES_PER_SOURCE = 500
 STATUS_BAR_STARTUP_REPLAY_LINES = 200
@@ -3801,15 +3808,30 @@ class StatusBarController(NSObject):
                 shared["hourly"] = usage_stats.hourly_session_counts(
                     totals.records
                 )
-                shared["usage_graph"] = usage_stats.usage_graph_model(
-                    totals.records,
-                    days=graph_days,
-                    metric=self.settings.usage_display_mode,
-                    provider_ids=self.settings.usage_graph_providers,
-                )
+                if self.settings.usage_display_mode != "percent":
+                    shared["usage_graph"] = usage_stats.usage_graph_model(
+                        totals.records,
+                        days=graph_days,
+                        metric=self.settings.usage_display_mode,
+                        provider_ids=self.settings.usage_graph_providers,
+                    )
             except Exception:
                 shared_error = "local_activity_unavailable"
                 log_status_bar("usage scan error: local_activity_unavailable")
+        if self.settings.usage_display_mode == "percent":
+            # Every provider, from remembered capacity observations --
+            # see usage_percent_history.shared_percent_graph_model.
+            try:
+                shared["usage_graph"] = (
+                    usage_percent_history.shared_percent_graph_model(
+                        days=self.settings.usage_graph_days,
+                        period_label=usage_stats.usage_period_label(
+                            self.settings.usage_graph_days
+                        ),
+                    )
+                )
+            except Exception:
+                log_status_bar("usage percent history error")
 
         for source_key, generation in requests.items():
             if (
@@ -11935,8 +11957,18 @@ class StatusBarController(NSObject):
         # Right tip: the independent unseen-completion gauge.
         if self.settings.screen_bar_gauges_enabled:
             snapshot = getattr(self, "last_snapshot", None)
+            # Five minutes of green per completion, not twenty: the menu
+            # badge keeps the full window, but a peripheral always-visible
+            # tip that re-arms on every completion of an all-day agent
+            # fleet read as "the bar is stuck green".
             right_on = (
-                bool(unseen_completions(snapshot, self))
+                bool(
+                    unseen_completions(
+                        snapshot,
+                        self,
+                        within_seconds=GAUGE_UNSEEN_COMPLETION_SECONDS,
+                    )
+                )
                 if snapshot is not None
                 else False
             )
@@ -17519,11 +17551,13 @@ def _finite_graph_value(value, fallback: float) -> float:
 class UsageGraphView(NSView):
     """One calm shared-axis chart for the selected period and metric."""
 
+    # The complete brand palette, not a stale four-entry copy: with all
+    # ten providers chartable in percent mode, a partial map painted six
+    # of them the same anonymous gray.
     PROVIDER_COLORS: ClassVar[dict[str, str]] = {
-        "claude": "#D97757",
-        "codex": "#10A37F",
-        "opencode": "#7C6CF2",
+        "opencode": "#AF52DE",
         "google": "#4285F4",
+        **colors_module.PROVIDER_BRAND_COLORS,
     }
 
     def initWithFrame_(self, frame):
@@ -17650,6 +17684,8 @@ def _format_usage_axis_value(value: float, metric: str) -> str:
         return f"${value:,.0f}" if value >= 1.0 else f"${value:.2f}"
     if metric == "sessions":
         return f"{value:,.0f}"
+    if metric == "percent":
+        return f"{value:,.0f}%"
     return usage_stats.compact_token_count(round(value))
 
 
@@ -18722,10 +18758,20 @@ def build_error_menu(exc: Exception) -> NSMenu:
     return menu
 
 
-def unseen_completions(snapshot, target) -> list[AgentStatus]:
+def unseen_completions(
+    snapshot,
+    target,
+    *,
+    within_seconds: float = COMPLETED_VISIBLE_SECONDS,
+) -> list[AgentStatus]:
     """Main-session completions the user has NOT seen: newer than the
     last time the dropdown was opened. Opening the menu is the visit
-    that clears them -- modeled, not guessed (T3's lastVisitedAt)."""
+    that clears them -- modeled, not guessed (T3's lastVisitedAt).
+
+    ``within_seconds`` narrows the window for surfaces with less
+    patience than the menu badge: the Screen Bar's green tip re-armed
+    for 20 minutes on EVERY completion, and with agents finishing all
+    day that read as "the bar is stuck green", not as news."""
     opened_at = getattr(target, "menu_last_opened_at", None)
     cleared = getattr(target, "cleared_session_ids", set())
     unseen = []
@@ -18743,7 +18789,7 @@ def unseen_completions(snapshot, target) -> list[AgentStatus]:
         if not is_recent(
             snapshot.collected_at,
             status.updated_at,
-            COMPLETED_VISIBLE_SECONDS,
+            within_seconds,
         ):
             continue
         if status.agent_id in cleared:

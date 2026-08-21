@@ -4453,7 +4453,14 @@ for (const event of [
         self.assertTrue(controller.process_running())
         self.assertFalse(controller.changed_system_disable)
 
-    def test_closed_lid_awake_controller_preserves_existing_system_disable(self) -> None:
+    def test_closed_lid_awake_controller_reclaims_orphaned_system_disable(self) -> None:
+        """A disablesleep=1 left by a killed instance is cleared on release.
+
+        The old contract preserved any pre-existing system disable, which
+        stranded the Mac sleepless for a full day after launchctl bootout
+        killed the instance that had set it. With the helper installed the
+        feature owns the flag: not holding while the system still says
+        sleep is disabled means CLEAR it -- once per process."""
         disabled_calls: list[bool] = []
         controller = ClosedLidAwakeController(
             process_factory=lambda *_args, **_kwargs: FakeProcess(),
@@ -4463,9 +4470,15 @@ for (const event of [
         )
 
         controller.update(CLOSED_LID_AWAKE_ALWAYS, agents_active=False)
-        controller.update(CLOSED_LID_AWAKE_NEVER, agents_active=False)
-
+        # Already disabled while holding: never re-set it.
         self.assertEqual(disabled_calls, [])
+
+        controller.update(CLOSED_LID_AWAKE_NEVER, agents_active=False)
+        self.assertEqual(disabled_calls, [False])
+
+        controller.update(CLOSED_LID_AWAKE_NEVER, agents_active=False)
+        # The reclaim probe runs once per process, not per sync.
+        self.assertEqual(disabled_calls, [False])
 
     def test_sleep_override_uses_noninteractive_sudo(self) -> None:
         calls = []

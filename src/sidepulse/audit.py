@@ -188,7 +188,10 @@ def table_row(record: dict[str, str]) -> str:
     return "<tr>" + "".join(cells) + "</tr>"
 
 
-TRIM_THRESHOLD_BYTES = 5 * 1024 * 1024
+# Must stay BELOW the collector's LATEST_STATE_MAX_BYTES (4 MiB): with the
+# trim threshold above the read cap, a log between the two was writable but
+# unreadable and its provider went silent (the 2026-08-21 claude outage).
+TRIM_THRESHOLD_BYTES = 3 * 1024 * 1024
 TRIM_KEEP_LINES = 4000
 # A line COUNT alone cannot bound a file: records vary from ~500 bytes
 # (claude) to ~5,800 (codex), so 4,000 lines is anywhere from 1 MB to 22 MB.
