@@ -312,11 +312,14 @@ class _ParseResult:
     malformed_lines: int
     read_ok: bool
     rate_limit_windows: tuple[dict, ...] = ()
-    #: True when the file ended on a newline -- the incremental-tail
-    #: precondition. A file ending mid-line may still be mid-write; the
-    #: cached byte position would then split that line, so such entries
-    #: fall back to a full reparse on growth.
+    #: True when the parse ended exactly on a newline boundary -- the
+    #: incremental-tail precondition. Prefix-bounded reads always trim
+    #: to the last newline, so this is False only for degenerate files.
     eof_newline: bool = True
+    #: Absolute byte offset this parse covered (the resume point for the
+    #: next incremental tail). -1 means "the whole stat'd file" for
+    #: paths that never learned to report it.
+    parsed_size: int = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,6 +511,71 @@ def _record_from_line(line: str, session_id: str, dedupe_secret: bytes) -> tuple
     )
 
 
+def _read_verified_prefix(
+    path: Path,
+    expected_stat: os.stat_result,
+    resume_offset: int = 0,
+) -> tuple[str, int] | None:
+    """The snapshot's bytes of a possibly still-growing file, or None.
+
+    The scan works from a FROZEN inventory: every candidate is stat'd
+    first, then parsed. A live agent transcript appends every few
+    seconds, so by the time the loop reached the busiest file its size
+    no longer matched the stat and the strict open refused it -- the
+    hottest file was skipped as "unreadable" on EVERY scan, and codex's
+    rate windows froze at whatever an older file last said (observed
+    live 2026-08-20: weekly pinned at 99% while the active rollout said
+    95%). Growth is not corruption: same device and inode, size and
+    mtime at or past the snapshot, is the same file with more history.
+    This reads exactly the snapshot's bytes, trimmed back to the last
+    newline so no line is ever split mid-write, and reports the
+    absolute offset covered.
+    """
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        current = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_dev != expected_stat.st_dev
+            or current.st_ino != expected_stat.st_ino
+            or current.st_size < expected_stat.st_size
+            or current.st_mtime_ns < expected_stat.st_mtime_ns
+            or resume_offset < 0
+            or resume_offset > expected_stat.st_size
+        ):
+            return None
+        target = expected_stat.st_size - resume_offset
+        chunks: list[bytes] = []
+        os.lseek(descriptor, resume_offset, os.SEEK_SET)
+        while target > 0:
+            chunk = os.read(descriptor, min(target, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            target -= len(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    payload = b"".join(chunks)
+    cut = payload.rfind(b"\n")
+    if cut < 0:
+        return "", resume_offset
+    payload = payload[: cut + 1]
+    return (
+        payload.decode("utf-8", errors="replace"),
+        resume_offset + len(payload),
+    )
+
+
 def _open_verified_text(path: Path, expected_stat: os.stat_result):
     flags = (
         os.O_RDONLY
@@ -593,19 +661,21 @@ def _parse_codex_file(path: Path, expected_stat: os.stat_result) -> _ParseResult
     """One record per rollout: total_token_usage is CUMULATIVE per
     session, so the LAST token_count event is the exact session total --
     no dedupe gymnastics needed (CodexBar's reading of the format)."""
-    try:
-        with _open_verified_text(path, expected_stat) as handle:
-            (
-                last_counts,
-                last_epoch,
-                rate_limit_windows,
-                malformed_lines,
-                eof_newline,
-            ) = _scan_codex_lines(handle)
-    except OSError:
+    snapshot = _read_verified_prefix(path, expected_stat)
+    if snapshot is None:
         return _ParseResult([], 0, False)
+    text, parsed_size = snapshot
+    (
+        last_counts,
+        last_epoch,
+        rate_limit_windows,
+        malformed_lines,
+        _eof,
+    ) = _scan_codex_lines(text.splitlines(keepends=True))
     if last_counts is None or last_epoch is None:
-        return _ParseResult([], malformed_lines, True, rate_limit_windows, eof_newline)
+        return _ParseResult(
+            [], malformed_lines, True, rate_limit_windows, True, parsed_size
+        )
 
     physical_id = f"codex:{expected_stat.st_dev}:{expected_stat.st_ino}"
 
@@ -626,7 +696,8 @@ def _parse_codex_file(path: Path, expected_stat: os.stat_result) -> _ParseResult
         malformed_lines,
         True,
         rate_limit_windows,
-        eof_newline,
+        True,
+        parsed_size,
     )
 
 
@@ -999,24 +1070,22 @@ def _parse_file(
     dedupe_secret: bytes,
 ) -> _ParseResult:
     session_id = f"claude:{expected_stat.st_dev}:{expected_stat.st_ino}"
+    snapshot = _read_verified_prefix(path, expected_stat)
+    if snapshot is None:
+        return _ParseResult([], 0, False)
+    text, parsed_size = snapshot
     records: list[tuple] = []
     malformed_lines = 0
-    eof_newline = True
-    try:
-        with _open_verified_text(path, expected_stat) as handle:
-            for line in handle:
-                eof_newline = line.endswith("\n")
-                # T3's mightCarryUsage: skip before parsing.
-                if USAGE_MARKER not in line:
-                    continue
-                record = _record_from_line(line, session_id, dedupe_secret)
-                if record is not None:
-                    records.append(record)
-                else:
-                    malformed_lines += 1
-    except OSError:
-        return _ParseResult([], 0, False)
-    return _ParseResult(records, malformed_lines, True, (), eof_newline)
+    for line in text.splitlines(keepends=True):
+        # T3's mightCarryUsage: skip before parsing.
+        if USAGE_MARKER not in line:
+            continue
+        record = _record_from_line(line, session_id, dedupe_secret)
+        if record is not None:
+            records.append(record)
+        else:
+            malformed_lines += 1
+    return _ParseResult(records, malformed_lines, True, (), True, parsed_size)
 
 
 def _parse_file_tail(
@@ -1030,88 +1099,61 @@ def _parse_file_tail(
 
     Live transcripts grow every few seconds; re-reading a 10MB session
     file in full on each poll was a measured ~15-20% of a core in
-    bursts. The offset is the cached entry's own size, valid only when
-    that parse ended on a newline (``eof_newline``) -- verified by the
-    caller. The same no-follow/identity verification as
-    ``_open_verified_text`` applies before seeking.
+    bursts. The offset is the cached entry's own parsed size. Reads are
+    growth-tolerant (_read_verified_prefix): the file may keep growing
+    while we read -- we parse exactly the inventory snapshot's bytes,
+    trimmed to the last newline.
     """
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
+    snapshot = _read_verified_prefix(path, expected_stat, resume_offset)
+    if snapshot is None:
         return _ParseResult([], 0, False)
-    try:
-        current = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(current.st_mode)
-            or current.st_dev != expected_stat.st_dev
-            or current.st_ino != expected_stat.st_ino
-            or current.st_size != expected_stat.st_size
-            or current.st_mtime_ns != expected_stat.st_mtime_ns
-            or resume_offset < 0
-            or resume_offset > current.st_size
-        ):
-            os.close(descriptor)
-            return _ParseResult([], 0, False)
-        handle = os.fdopen(descriptor, "r", encoding="utf-8", errors="replace")
-    except OSError:
-        os.close(descriptor)
-        return _ParseResult([], 0, False)
-    try:
-        with handle:
-            handle.seek(resume_offset)
-            if provider_id == "codex":
+    text, parsed_size = snapshot
+    lines = text.splitlines(keepends=True)
+    if provider_id == "codex":
+        (
+            last_counts,
+            last_epoch,
+            rate_limit_windows,
+            malformed_lines,
+            _eof,
+        ) = _scan_codex_lines(lines)
+        if last_counts is None or last_epoch is None:
+            return _ParseResult(
+                [], malformed_lines, True, rate_limit_windows, True, parsed_size
+            )
+        physical_id = f"codex:{expected_stat.st_dev}:{expected_stat.st_ino}"
+        return _ParseResult(
+            [
                 (
-                    last_counts,
+                    "codex",
+                    physical_id,
+                    "codex",
                     last_epoch,
-                    rate_limit_windows,
-                    malformed_lines,
-                    eof_newline,
-                ) = _scan_codex_lines(handle)
-                if last_counts is None or last_epoch is None:
-                    return _ParseResult(
-                        [], malformed_lines, True, rate_limit_windows, eof_newline
-                    )
-                physical_id = f"codex:{expected_stat.st_dev}:{expected_stat.st_ino}"
-                return _ParseResult(
-                    [
-                        (
-                            "codex",
-                            physical_id,
-                            "codex",
-                            last_epoch,
-                            last_counts[0],
-                            last_counts[1],
-                            last_counts[2],
-                            last_counts[3],
-                            physical_id,
-                        )
-                    ],
-                    malformed_lines,
-                    True,
-                    rate_limit_windows,
-                    eof_newline,
+                    last_counts[0],
+                    last_counts[1],
+                    last_counts[2],
+                    last_counts[3],
+                    physical_id,
                 )
-            session_id = f"claude:{expected_stat.st_dev}:{expected_stat.st_ino}"
-            records: list[tuple] = []
-            malformed_lines = 0
-            eof_newline = True
-            for line in handle:
-                eof_newline = line.endswith("\n")
-                if USAGE_MARKER not in line:
-                    continue
-                record = _record_from_line(line, session_id, dedupe_secret)
-                if record is not None:
-                    records.append(record)
-                else:
-                    malformed_lines += 1
-            return _ParseResult(records, malformed_lines, True, (), eof_newline)
-    except OSError:
-        return _ParseResult([], 0, False)
+            ],
+            malformed_lines,
+            True,
+            rate_limit_windows,
+            True,
+            parsed_size,
+        )
+    session_id = f"claude:{expected_stat.st_dev}:{expected_stat.st_ino}"
+    records: list[tuple] = []
+    malformed_lines = 0
+    for line in lines:
+        if USAGE_MARKER not in line:
+            continue
+        record = _record_from_line(line, session_id, dedupe_secret)
+        if record is not None:
+            records.append(record)
+        else:
+            malformed_lines += 1
+    return _ParseResult(records, malformed_lines, True, (), True, parsed_size)
 
 
 def _incremental_resume_offset(entry: object, candidate_stat: os.stat_result) -> int | None:
@@ -1130,7 +1172,7 @@ def _incremental_resume_offset(entry: object, candidate_stat: os.stat_result) ->
             int(entry["device"]) != candidate_stat.st_dev
             or int(entry["inode"]) != candidate_stat.st_ino
             or entry.get("eof_newline") is not True
-            or cached_size <= 0
+            or cached_size < 0
             or cached_size >= candidate_stat.st_size
         ):
             return None
@@ -1542,7 +1584,7 @@ def _scan_inventory_usage(
     dedupes_index: dict[str, int] = {}
     scanned_files: dict[
         str,
-        tuple[os.stat_result, str, str | None, int, list[tuple], tuple[dict, ...], bool],
+        tuple[os.stat_result, str, str | None, int, list[tuple], tuple[dict, ...], bool, int],
     ] = {}
     coverage_states: dict[str, _CoverageState] = {}
 
@@ -1591,6 +1633,9 @@ def _scan_inventory_usage(
                     raw_cached_entry.get("eof_newline") is True
                     if isinstance(raw_cached_entry, dict)
                     else False,
+                    int(raw_cached_entry.get("size", candidate.info.st_size))
+                    if isinstance(raw_cached_entry, dict)
+                    else candidate.info.st_size,
                 )
                 continue
 
@@ -1650,6 +1695,9 @@ def _scan_inventory_usage(
                             merged_records,
                             merged_windows,
                             tail.eof_newline,
+                            tail.parsed_size
+                            if tail.parsed_size >= 0
+                            else candidate.info.st_size,
                         )
                         continue
 
@@ -1674,6 +1722,9 @@ def _scan_inventory_usage(
                 result.records,
                 result.rate_limit_windows,
                 result.eof_newline,
+                result.parsed_size
+                if result.parsed_size >= 0
+                else candidate.info.st_size,
             )
 
     retained_cached_files: dict[
@@ -1738,7 +1789,7 @@ def _scan_inventory_usage(
         (
             key,
             file_info.st_mtime,
-            file_info.st_size,
+            parsed_size,
             file_info.st_dev,
             file_info.st_ino,
             provider_id,
@@ -1756,6 +1807,7 @@ def _scan_inventory_usage(
             records,
             rate_windows,
             eof_newline,
+            parsed_size,
         ) in scanned_files.items()
     ]
     cache_candidates.extend(

@@ -296,6 +296,17 @@ def test_replaced_candidate_is_not_opened_as_discovered_and_valid_sibling_surviv
 def test_in_place_candidate_mutation_after_discovery_is_a_bounded_failure(
     tmp_path: Path,
 ) -> None:
+    """Mutation between stat and open is BOUNDED, no longer refused.
+
+    2026-08-20: the strict refusal starved the HOT file -- a live agent
+    transcript grew between the frozen inventory's stat and its open on
+    EVERY scan, so the busiest file was skipped as unreadable forever
+    and codex's weekly froze at an older file's number. Reads are now
+    growth-tolerant snapshots: exactly the stat'd bytes, trimmed to the
+    last newline. A mid-scan REWRITE therefore yields at most the new
+    content's prefix (usually nothing), and the very next scan
+    converges on the file's real content.
+    """
     root = tmp_path / "claude"
     changing = _write_rows(root / "changing.jsonl", _claude_row("old", tokens=101))
     _write_rows(root / "valid.jsonl", _claude_row("valid", tokens=31))
@@ -312,11 +323,13 @@ def test_in_place_candidate_mutation_after_discovery_is_a_bounded_failure(
     with patch("sidepulse.usage_stats.os.open", side_effect=mutating_open):
         totals = scan_usage(root)
 
-    coverage = _coverage(totals, "claude")
+    # The snapshot prefix of the replacement holds no complete line, so
+    # only the untouched sibling counts -- bounded, never invented.
     assert totals.input_tokens == 31
-    assert coverage.status is UsageSourceStatus.PARTIAL
-    assert coverage.files_read == 1
-    assert coverage.unreadable_files == 1
+
+    # And the next scan (no mutation) converges on the real content.
+    settled = scan_usage(root)
+    assert settled.input_tokens == 31 + 999
 
 
 def test_root_walk_failure_and_all_file_read_failure_are_failed(

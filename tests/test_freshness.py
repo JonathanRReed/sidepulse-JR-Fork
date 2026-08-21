@@ -646,8 +646,8 @@ def test_failed_usage_read_does_not_cache_a_durable_empty_result() -> None:
         )
 
         with patch(
-            "sidepulse.usage_stats._open_verified_text",
-            side_effect=OSError("read failed"),
+            "sidepulse.usage_stats._read_verified_prefix",
+            return_value=None,
         ):
             failed = usage_stats.scan_usage(root, cache)
 

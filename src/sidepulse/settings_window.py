@@ -4476,10 +4476,25 @@ def _build_studio_animations_section(target, actions, hex_labels):
 
     fade_outer, fade_inner = native_ui.make_card("Fade Intensity")
     fade_inner.addArrangedSubview_(
-        native_ui.make_label(
-            "How far each pulsing mode dims down and brightens up, as % of its color",
+        native_ui.make_wrapping_label(
+            "Each animation breathes between these two levels: Floor is its "
+            "dimmest moment, Ceiling its brightest, as % of the mode's color. "
+            "Final light = this range x the device's Brightness x the menu-bar "
+            "Global Brightness.",
             secondary=True,
             size=11.0,
+            max_width=560.0,
+        )
+    )
+    fade_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "On the LED strip, levels too dim to hold their color show as OFF "
+            "(very low drive turns every color green, so the strip goes "
+            "honestly dark instead). A floor under ~10% means the breath's "
+            "low point is darkness — that's the intended look, not a fault.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
         )
     )
     fade_preset_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
