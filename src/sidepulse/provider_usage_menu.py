@@ -192,9 +192,18 @@ def project_usage_menu(
     if state.refreshing and not state.snapshots:
         title = "Usage · refreshing…"
     elif constrained:
+        # EVERY provider with a number, tightest first -- the cap at two
+        # made a five-provider setup look like a two-provider app. Past
+        # four the labels drop to compact form so the row still fits.
+        shown = constrained if len(constrained) <= 6 else constrained[:6]
+        compact = len(shown) > 4
         labels = [
-            f"{provider_descriptor(provider_id).label} {remaining:.0f}%"
-            for remaining, provider_id in constrained[:2]
+            (
+                f"{provider_descriptor(provider_id).label[:2]} {remaining:.0f}"
+                if compact
+                else f"{provider_descriptor(provider_id).label} {remaining:.0f}%"
+            )
+            for remaining, provider_id in shown
         ]
         # The tightest lane's meter rides in the row itself: the
         # at-a-glance answer with zero hovering. Curated off with the

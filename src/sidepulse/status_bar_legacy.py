@@ -2707,9 +2707,13 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def refresh_(self, _sender):
+        _t_start = time.monotonic()
+        _t_ingest = _t_snapshot = _t_start
         try:
             self.ingest_transcript_fallback()
+            _t_ingest = time.monotonic()
             snapshot = self.monitor.snapshot()
+            _t_snapshot = time.monotonic()
         except Exception as exc:
             log_status_bar(f"refresh error: {exc}")
             # No confirmable agent state: clear any escalation episode
@@ -2812,6 +2816,7 @@ class StatusBarController(NSObject):
             done_badge=bool(unseen_completions(snapshot, self)),
         )
         self.sync_keep_awake(display_mode)
+        _t_pipeline = time.monotonic()
         self.sync_leds(
             display_mode,
             battery_snapshot,
@@ -2823,12 +2828,28 @@ class StatusBarController(NSObject):
             presentation_time=presentation_time,
             resolved_glance=resolved_glance,
         )
+        _t_leds = time.monotonic()
         # A panel explaining the current light must follow the current
         # light. Left alone it would answer for whichever light was on
         # when it opened, which is the exact failure it exists to end.
         self.refresh_why_panel()
         if self.status_item is not None:
             self.update_status_menu(snapshot, state)
+        # The settings-lag flight recorder: every refresh_ runs on the
+        # MAIN thread, and settings toggles call it synchronously -- so
+        # whichever stage is slow here IS the lag under the pointer.
+        # One compact line, only when a tick is slow enough to feel.
+        _t_end = time.monotonic()
+        if _t_end - _t_start > 0.12:
+            log_status_bar(
+                "refresh timing: "
+                f"total={int((_t_end - _t_start) * 1000)}ms "
+                f"ingest={int((_t_ingest - _t_start) * 1000)} "
+                f"snapshot={int((_t_snapshot - _t_ingest) * 1000)} "
+                f"pipeline={int((_t_pipeline - _t_snapshot) * 1000)} "
+                f"leds={int((_t_leds - _t_pipeline) * 1000)} "
+                f"menu={int((_t_end - _t_leds) * 1000)}"
+            )
 
     # --- The second Mac -------------------------------------------------
 

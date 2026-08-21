@@ -28,6 +28,12 @@ WINDOW_MINUTES_BY_LANE_ID: Final = {
 
 #: Below this much of the window elapsed, usage says nothing about pace.
 MIN_ELAPSED_FRACTION: Final = 0.04
+#: A CRITICAL verdict needs a baseline: one heavy evening extrapolated
+#: across a seven-day window projected "runs dry before reset" at 93%
+#: left and painted the menu-bar percent red ("why is it red for
+#: codex", 2026-08-21). Before this much of the window has elapsed, the
+#: worst pace may say is "spending fast".
+CRITICAL_MIN_ELAPSED_FRACTION: Final = 0.15
 #: Ratio bounds for the verdicts. Between them is "on pace".
 SURPLUS_RATIO: Final = 0.6
 FAST_RATIO: Final = 1.25
@@ -80,6 +86,8 @@ def lane_pace(
     rate = used / elapsed  # percent per second
     exhaustion = now + (100.0 - used) / rate if rate > 0.0 else None
     if exhaustion is not None and exhaustion < reset_at:
+        if elapsed_fraction < CRITICAL_MIN_ELAPSED_FRACTION:
+            return PaceReading(PACE_FAST, ratio, exhaustion)
         return PaceReading(PACE_CRITICAL, ratio, exhaustion)
     if ratio >= FAST_RATIO:
         return PaceReading(PACE_FAST, ratio, exhaustion)
@@ -108,6 +116,7 @@ def pace_phrase(reading: PaceReading | None, *, now: float) -> str | None:
 
 
 __all__ = [
+    "CRITICAL_MIN_ELAPSED_FRACTION",
     "FAST_RATIO",
     "MIN_ELAPSED_FRACTION",
     "PACE_CRITICAL",

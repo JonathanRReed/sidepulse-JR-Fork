@@ -60,7 +60,7 @@ def test_summary_shows_two_tightest_trustworthy_providers():
         False,
     )
     projection = project_usage_menu(state, now=1000)
-    assert projection.title == "Usage · ▰▰▰▱▱▱▱▱  Claude 36% · Codex 71%"
+    assert projection.title == "Usage · ▰▰▰▱▱▱▱▱  Claude 36% · Codex 71% · Grok 90%"
     assert projection.rows[0].title.startswith("Codex")
     assert projection.rows[1].title.startswith("Claude")
 
@@ -344,3 +344,32 @@ def test_a_lane_alerts_once_per_reset_window_when_it_turns_critical():
     assert critical_pace_transitions(
         healthy, critical, now=base, seen_keys=frozenset({key})
     ) == ()
+
+
+def test_one_heavy_evening_cannot_condemn_a_fresh_weekly_window():
+    """'Why is it red for codex' (2026-08-21): ~5% into a 7-day window,
+    one heavy session extrapolated to runs-dry-before-reset and painted
+    93%-left RED. A critical verdict needs a baseline: before 15% of
+    the window has elapsed the worst pace may say is 'spending fast'."""
+    from sidepulse.usage_pace import lane_pace
+
+    day = 86_400.0
+    now = 1_000_000.0
+    # 8 hours into a 7-day window, 7% already used -- burns dry in ~4
+    # days at that rate, well before the reset 6.7 days away.
+    early = lane_pace(
+        remaining_percent=93.0,
+        reset_at=now + 7 * day - 8 * 3600.0,
+        lane_id="weekly",
+        now=now,
+    )
+    assert early is not None and early.verdict == "fast"
+
+    # The same projection PAST the baseline is honestly critical.
+    seasoned = lane_pace(
+        remaining_percent=50.0,
+        reset_at=now + 4 * day,  # 3 of 7 days elapsed (43%)
+        lane_id="weekly",
+        now=now,
+    )
+    assert seasoned is not None and seasoned.verdict == "critical"
