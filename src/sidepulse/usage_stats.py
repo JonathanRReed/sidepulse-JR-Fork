@@ -57,7 +57,7 @@ from .private_io import atomic_private_write, ensure_private_directory, read_pri
 from .providers import NegotiatedProviderSource, negotiated_provider_sources
 from .reset_policy import parse_reset_epoch
 
-CACHE_VERSION = 6
+CACHE_VERSION = 7
 # The byte budget below is the real bound; this one only stops the candidate
 # list itself from growing without limit. At 4096 it bound FIRST on the owner's
 # corpus -- 5,605 transcripts across ~/.claude and ~/.codex -- so ~1,500 files
@@ -312,6 +312,11 @@ class _ParseResult:
     malformed_lines: int
     read_ok: bool
     rate_limit_windows: tuple[dict, ...] = ()
+    #: True when the file ended on a newline -- the incremental-tail
+    #: precondition. A file ending mid-line may still be mid-write; the
+    #: cached byte position would then split that line, so such entries
+    #: fall back to a full reparse on growth.
+    eof_newline: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,67 +531,81 @@ def _open_verified_text(path: Path, expected_stat: os.stat_result):
         raise
 
 
-def _parse_codex_file(path: Path, expected_stat: os.stat_result) -> _ParseResult:
-    """One record per rollout: total_token_usage is CUMULATIVE per
-    session, so the LAST token_count event is the exact session total --
-    no dedupe gymnastics needed (CodexBar's reading of the format)."""
+def _scan_codex_lines(handle):
+    """The shared per-line codex scan for full and tail parses."""
     last_counts = None
     last_epoch = None
     rate_limit_windows: tuple[dict, ...] = ()
     malformed_lines = 0
+    eof_newline = True
+    for line in handle:
+        eof_newline = line.endswith("\n")
+        if CODEX_MARKER not in line:
+            continue
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            malformed_lines += 1
+            continue
+        payload = row.get("payload") if isinstance(row, dict) else None
+        limits = payload.get("rate_limits") if isinstance(payload, dict) else None
+        if isinstance(limits, dict):
+            rate_limit_windows = tuple(codex_windows_from_limits(limits))
+        if (
+            not isinstance(payload, dict)
+            or payload.get("type") != "token_count"
+        ):
+            malformed_lines += 1
+            continue
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            malformed_lines += 1
+            continue
+        totals = info.get("total_token_usage")
+        if not isinstance(totals, dict):
+            malformed_lines += 1
+            continue
+        counts = _token_counts(
+            totals,
+            (
+                "input_tokens",
+                "cached_input_tokens",
+                "cache_write_input_tokens",
+                "output_tokens",
+            ),
+        )
+        if counts is None:
+            malformed_lines += 1
+            continue
+        timestamp = row.get("timestamp")
+        try:
+            last_epoch = datetime.fromisoformat(
+                str(timestamp).replace("Z", "+00:00")
+            ).timestamp()
+        except (TypeError, ValueError):
+            malformed_lines += 1
+            continue
+        last_counts = counts
+    return last_counts, last_epoch, rate_limit_windows, malformed_lines, eof_newline
+
+
+def _parse_codex_file(path: Path, expected_stat: os.stat_result) -> _ParseResult:
+    """One record per rollout: total_token_usage is CUMULATIVE per
+    session, so the LAST token_count event is the exact session total --
+    no dedupe gymnastics needed (CodexBar's reading of the format)."""
     try:
         with _open_verified_text(path, expected_stat) as handle:
-            for line in handle:
-                if CODEX_MARKER not in line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    malformed_lines += 1
-                    continue
-                payload = row.get("payload") if isinstance(row, dict) else None
-                limits = payload.get("rate_limits") if isinstance(payload, dict) else None
-                if isinstance(limits, dict):
-                    rate_limit_windows = tuple(codex_windows_from_limits(limits))
-                if (
-                    not isinstance(payload, dict)
-                    or payload.get("type") != "token_count"
-                ):
-                    malformed_lines += 1
-                    continue
-                info = payload.get("info")
-                if not isinstance(info, dict):
-                    malformed_lines += 1
-                    continue
-                totals = info.get("total_token_usage")
-                if not isinstance(totals, dict):
-                    malformed_lines += 1
-                    continue
-                counts = _token_counts(
-                    totals,
-                    (
-                        "input_tokens",
-                        "cached_input_tokens",
-                        "cache_write_input_tokens",
-                        "output_tokens",
-                    ),
-                )
-                if counts is None:
-                    malformed_lines += 1
-                    continue
-                timestamp = row.get("timestamp")
-                try:
-                    last_epoch = datetime.fromisoformat(
-                        str(timestamp).replace("Z", "+00:00")
-                    ).timestamp()
-                except (TypeError, ValueError):
-                    malformed_lines += 1
-                    continue
-                last_counts = counts
+            (
+                last_counts,
+                last_epoch,
+                rate_limit_windows,
+                malformed_lines,
+                eof_newline,
+            ) = _scan_codex_lines(handle)
     except OSError:
         return _ParseResult([], 0, False)
     if last_counts is None or last_epoch is None:
-        return _ParseResult([], malformed_lines, True, rate_limit_windows)
+        return _ParseResult([], malformed_lines, True, rate_limit_windows, eof_newline)
 
     physical_id = f"codex:{expected_stat.st_dev}:{expected_stat.st_ino}"
 
@@ -607,6 +626,7 @@ def _parse_codex_file(path: Path, expected_stat: os.stat_result) -> _ParseResult
         malformed_lines,
         True,
         rate_limit_windows,
+        eof_newline,
     )
 
 
@@ -981,9 +1001,11 @@ def _parse_file(
     session_id = f"claude:{expected_stat.st_dev}:{expected_stat.st_ino}"
     records: list[tuple] = []
     malformed_lines = 0
+    eof_newline = True
     try:
         with _open_verified_text(path, expected_stat) as handle:
             for line in handle:
+                eof_newline = line.endswith("\n")
                 # T3's mightCarryUsage: skip before parsing.
                 if USAGE_MARKER not in line:
                     continue
@@ -994,7 +1016,127 @@ def _parse_file(
                     malformed_lines += 1
     except OSError:
         return _ParseResult([], 0, False)
-    return _ParseResult(records, malformed_lines, True)
+    return _ParseResult(records, malformed_lines, True, (), eof_newline)
+
+
+def _parse_file_tail(
+    path: Path,
+    expected_stat: os.stat_result,
+    resume_offset: int,
+    provider_id: str,
+    dedupe_secret: bytes,
+) -> _ParseResult:
+    """Parse only the bytes appended past ``resume_offset``.
+
+    Live transcripts grow every few seconds; re-reading a 10MB session
+    file in full on each poll was a measured ~15-20% of a core in
+    bursts. The offset is the cached entry's own size, valid only when
+    that parse ended on a newline (``eof_newline``) -- verified by the
+    caller. The same no-follow/identity verification as
+    ``_open_verified_text`` applies before seeking.
+    """
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return _ParseResult([], 0, False)
+    try:
+        current = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_dev != expected_stat.st_dev
+            or current.st_ino != expected_stat.st_ino
+            or current.st_size != expected_stat.st_size
+            or current.st_mtime_ns != expected_stat.st_mtime_ns
+            or resume_offset < 0
+            or resume_offset > current.st_size
+        ):
+            os.close(descriptor)
+            return _ParseResult([], 0, False)
+        handle = os.fdopen(descriptor, "r", encoding="utf-8", errors="replace")
+    except OSError:
+        os.close(descriptor)
+        return _ParseResult([], 0, False)
+    try:
+        with handle:
+            handle.seek(resume_offset)
+            if provider_id == "codex":
+                (
+                    last_counts,
+                    last_epoch,
+                    rate_limit_windows,
+                    malformed_lines,
+                    eof_newline,
+                ) = _scan_codex_lines(handle)
+                if last_counts is None or last_epoch is None:
+                    return _ParseResult(
+                        [], malformed_lines, True, rate_limit_windows, eof_newline
+                    )
+                physical_id = f"codex:{expected_stat.st_dev}:{expected_stat.st_ino}"
+                return _ParseResult(
+                    [
+                        (
+                            "codex",
+                            physical_id,
+                            "codex",
+                            last_epoch,
+                            last_counts[0],
+                            last_counts[1],
+                            last_counts[2],
+                            last_counts[3],
+                            physical_id,
+                        )
+                    ],
+                    malformed_lines,
+                    True,
+                    rate_limit_windows,
+                    eof_newline,
+                )
+            session_id = f"claude:{expected_stat.st_dev}:{expected_stat.st_ino}"
+            records: list[tuple] = []
+            malformed_lines = 0
+            eof_newline = True
+            for line in handle:
+                eof_newline = line.endswith("\n")
+                if USAGE_MARKER not in line:
+                    continue
+                record = _record_from_line(line, session_id, dedupe_secret)
+                if record is not None:
+                    records.append(record)
+                else:
+                    malformed_lines += 1
+            return _ParseResult(records, malformed_lines, True, (), eof_newline)
+    except OSError:
+        return _ParseResult([], 0, False)
+
+
+def _incremental_resume_offset(entry: object, candidate_stat: os.stat_result) -> int | None:
+    """The byte offset a grown file may resume from, or None.
+
+    Requires: same physical file (device+inode), strictly larger size,
+    and a cached parse that ended on a newline. Shrunk files, replaced
+    inodes, and mid-line tails all return None -- the caller falls back
+    to the existing full reparse.
+    """
+    if not isinstance(entry, dict):
+        return None
+    try:
+        cached_size = int(entry["size"])
+        if (
+            int(entry["device"]) != candidate_stat.st_dev
+            or int(entry["inode"]) != candidate_stat.st_ino
+            or entry.get("eof_newline") is not True
+            or cached_size <= 0
+            or cached_size >= candidate_stat.st_size
+        ):
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return cached_size
 
 
 def _source_key_payload(source_key: SourceKey) -> dict[str, str]:
@@ -1118,17 +1260,20 @@ def _decode_cached_records(
     sessions: list,
     models: list,
     dedupes: list,
+    *,
+    require_stat_match: bool = True,
 ) -> tuple[list[tuple], int, tuple[dict, ...]] | None:
     if not isinstance(entry, dict):
         return None
     try:
-        if (
+        if require_stat_match and (
             int(entry["size"]) != expected_stat.st_size
             or float(entry["mtime"]) != expected_stat.st_mtime
             or int(entry["device"]) != expected_stat.st_dev
             or int(entry["inode"]) != expected_stat.st_ino
-            or entry["provider"] != provider_id
         ):
+            return None
+        if entry["provider"] != provider_id:
             return None
         malformed_lines = int(entry.get("malformed_lines", 0))
         if malformed_lines < 0:
@@ -1397,7 +1542,7 @@ def _scan_inventory_usage(
     dedupes_index: dict[str, int] = {}
     scanned_files: dict[
         str,
-        tuple[os.stat_result, str, str | None, int, list[tuple], tuple[dict, ...]],
+        tuple[os.stat_result, str, str | None, int, list[tuple], tuple[dict, ...], bool],
     ] = {}
     coverage_states: dict[str, _CoverageState] = {}
 
@@ -1443,8 +1588,70 @@ def _scan_inventory_usage(
                     cached_malformed_lines,
                     cached_records,
                     cached_rate_windows,
+                    raw_cached_entry.get("eof_newline") is True
+                    if isinstance(raw_cached_entry, dict)
+                    else False,
                 )
                 continue
+
+            # Incremental tail: the file GREW in place (same device and
+            # inode, cached parse ended on a newline). Read only the
+            # appended bytes instead of re-parsing a 10MB live
+            # transcript on every poll. Claude records append; a codex
+            # tail's token_count is the session's new CUMULATIVE total
+            # and REPLACES the cached record. Any anomaly falls through
+            # to the full reparse below.
+            resume_offset = (
+                _incremental_resume_offset(raw_cached_entry, candidate.info)
+                if _cached_entry_covers(raw_cached_entry, since_epoch)
+                else None
+            )
+            if resume_offset is not None:
+                base = _decode_cached_records(
+                    raw_cached_entry,
+                    coverage.provider_id,
+                    candidate.info,
+                    cached_sessions,
+                    cached_models,
+                    cached_dedupes,
+                    require_stat_match=False,
+                )
+                if base is not None:
+                    base_records, base_malformed, base_windows = base
+                    tail = _parse_file_tail(
+                        candidate.path,
+                        candidate.info,
+                        resume_offset,
+                        source.provider_id,
+                        dedupe_secret,
+                    )
+                    if tail.read_ok:
+                        coverage.files_read += 1
+                        merged_malformed = base_malformed + tail.malformed_lines
+                        coverage.malformed_lines += merged_malformed
+                        if source.provider_id == "codex":
+                            merged_records = list(
+                                tail.records if tail.records else base_records
+                            )
+                            merged_windows = tail.rate_limit_windows or base_windows
+                        else:
+                            merged_records = [*base_records, *tail.records]
+                            merged_windows = ()
+                        all_records.extend(merged_records)
+                        if source.provider_id == "codex" and merged_windows:
+                            rate_candidates.append(
+                                (candidate.info.st_mtime_ns, merged_windows)
+                            )
+                        scanned_files[key] = (
+                            candidate.info,
+                            source.provider_id,
+                            source.root_key,
+                            merged_malformed,
+                            merged_records,
+                            merged_windows,
+                            tail.eof_newline,
+                        )
+                        continue
 
             result = (
                 parser(candidate.path, candidate.info)
@@ -1466,11 +1673,12 @@ def _scan_inventory_usage(
                 result.malformed_lines,
                 result.records,
                 result.rate_limit_windows,
+                result.eof_newline,
             )
 
     retained_cached_files: dict[
         str,
-        tuple[float, int, int, int, str, str | None, int, list[tuple], tuple[dict, ...]],
+        tuple[float, int, int, int, str, str | None, int, list[tuple], tuple[dict, ...], bool],
     ] = {}
     for key, entry in cached_files.items():
         if key in scanned_files or not isinstance(entry, dict):
@@ -1523,6 +1731,7 @@ def _scan_inventory_usage(
             cached_malformed_lines,
             cached_records,
             cached_rate_windows,
+            entry.get("eof_newline") is True,
         )
 
     cache_candidates = [
@@ -1537,6 +1746,7 @@ def _scan_inventory_usage(
             malformed_lines,
             records,
             rate_windows,
+            eof_newline,
         )
         for key, (
             file_info,
@@ -1545,10 +1755,11 @@ def _scan_inventory_usage(
             malformed_lines,
             records,
             rate_windows,
+            eof_newline,
         ) in scanned_files.items()
     ]
     cache_candidates.extend(
-        (key, mtime, size, device, inode, provider, root_key, malformed_lines, records, rate_windows)
+        (key, mtime, size, device, inode, provider, root_key, malformed_lines, records, rate_windows, eof_newline)
         for key, (
             mtime,
             size,
@@ -1559,6 +1770,7 @@ def _scan_inventory_usage(
             malformed_lines,
             records,
             rate_windows,
+            eof_newline,
         ) in retained_cached_files.items()
     )
     cache_candidates.sort(key=lambda item: (-item[1], item[0]))
@@ -1577,6 +1789,7 @@ def _scan_inventory_usage(
         malformed_lines,
         records,
         rate_windows,
+        eof_newline,
     ) in selected_cache_candidates:
         if retention_epoch > 0.0:
             records = [record for record in records if record[3] >= retention_epoch]
@@ -1611,6 +1824,7 @@ def _scan_inventory_usage(
             "inode": inode,
             "provider": provider,
             "root_key": root_key,
+            "eof_newline": bool(eof_newline),
             "malformed_lines": malformed_lines,
             "rate_limit_windows": [dict(window) for window in rate_windows],
             "records": [
