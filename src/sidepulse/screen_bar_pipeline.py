@@ -303,6 +303,23 @@ def _default_controller_factory(*, led_count: int) -> _SamplerController:
 _EMPTY = object()
 
 
+def _drop_current_thread_to_utility_qos() -> None:
+    """Best-effort QoS drop: a render thread must never outrank the UI.
+
+    macOS schedules threads by QoS class; a default-QoS Python render
+    loop competes head-on with the main thread for cores. Utility is
+    the documented class for continuous, user-visible-but-not-blocking
+    work, which is exactly what a 30fps bar render is.
+    """
+    try:
+        import ctypes
+
+        QOS_CLASS_UTILITY = 0x11
+        ctypes.CDLL(None).pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0)
+    except Exception:
+        pass
+
+
 class ScreenBarSampler:
     """One serial worker with a capacity-one latest-wins command mailbox."""
 
@@ -413,6 +430,7 @@ class ScreenBarSampler:
 
     def _run(self) -> None:
         self._worker_ident = threading.get_ident()
+        _drop_current_thread_to_utility_qos()
         try:
             controller = self._controller_factory()
         except Exception:

@@ -2342,6 +2342,14 @@ class StatusBarController(NSObject):
         log_status_bar("status item created")
 
         self._runtime_started = True
+        # CPU-bound worker threads (the Screen Bar sampler above all)
+        # hold the GIL for the interpreter's default 5ms switch interval,
+        # so every main-thread Python step can wait a full slice behind
+        # them -- measured as UNIFORM slowness across menu construction
+        # (~300ms for a dozen plain NSMenuItems). 1ms caps that wait;
+        # background renders trade a little throughput for a UI thread
+        # that stops losing whole frames.
+        sys.setswitchinterval(0.001)
         self.refresh_installed_agent_inventory()
         self._install_accessibility_display_observer()
         self.reconcile_lid_observation()
