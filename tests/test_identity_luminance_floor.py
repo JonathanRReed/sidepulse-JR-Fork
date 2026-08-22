@@ -129,3 +129,26 @@ def test_solo_active_glyph_floors_a_dark_identity_but_rest_stays_dim() -> None:
     )
     # REST must not inherit the floor -- idle dim is deliberate.
     assert readable_identity_hex("#1D3461") not in rest.dsl
+
+
+def test_a_persisted_snapshot_of_a_retired_default_tracks_the_repair() -> None:
+    """The live install held devin: #1D3461 in settings -- written by an
+    earlier default-snapshotting path, never chosen -- so fixing the
+    brand table alone changed nothing there: agent_color reads settings
+    before brands. Stored copies of RETIRED defaults migrate to the
+    current default on load; anything else stays."""
+    loaded = ColorSettings.from_dict(
+        {
+            "agent_colors": {
+                "devin": "#1D3461",
+                "cursor": "#FF2D55",
+                "hermes": "#FFCC00",
+                "claude": "#123456",
+            }
+        }
+    )
+    assert loaded.agent_color("devin") == default_agent_color("devin")
+    assert loaded.agent_color("cursor") == default_agent_color("cursor")
+    assert loaded.agent_color("hermes") == default_agent_color("hermes")
+    # A hand-picked colour that never shipped as a default is untouched.
+    assert loaded.agent_color("claude") == "#123456"

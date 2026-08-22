@@ -1187,6 +1187,7 @@ class ColorSettings:
                 if isinstance(provider, str):
                     agent_colors[provider] = normalize_hex(value, default_agent_color(provider))
         agent_colors = _brand_colors_repainted_by_a_palette(agent_colors)
+        agent_colors = _retired_default_agent_colors_dropped(agent_colors)
 
         session_colors: dict[str, str] = {}
         raw_sessions = data.get("session_colors")
@@ -1364,6 +1365,46 @@ def _brand_colors_repainted_by_a_palette(agent_colors: dict[str, str]) -> dict[s
             continue
         if normalized in written.get(provider, frozenset()):
             repaired[provider] = brand
+    return repaired
+
+
+# Hexes that WERE a provider's shipped default in some earlier build and
+# have since been replaced. A stored entry exactly equal to one of these
+# is a snapshot of a default the user never chose (or a pick of a colour
+# that is objectively broken -- the first three drove an unlit LED, and
+# cursor's #FF2D55 / hermes' #FFCC00 are the pre-pinning positional
+# fallbacks, cursor's being a recorded dichromacy collapse). Dropping it
+# lets the install track the repaired palette; a hand-picked colour that
+# never shipped as a default is not in this table and is left alone.
+#
+# MAINTENANCE: to_dict serializes the FULL merged agent_colors dict, so
+# every save snapshots the current defaults into settings. Whenever a
+# provider's default changes, its old hex MUST be added here or every
+# existing install silently keeps the old colour forever.
+RETIRED_DEFAULT_AGENT_COLORS: dict[str, frozenset[str]] = {
+    "devin": frozenset({"#1D3461", "#395FAA"}),
+    "kiro": frozenset({"#4B1E3C", "#96437B"}),
+    "openclaw": frozenset({"#601800", "#FF2D55"}),
+    "cursor": frozenset({"#FF2D55"}),
+    "hermes": frozenset({"#FFCC00"}),
+}
+
+
+def _retired_default_agent_colors_dropped(agent_colors: dict[str, str]) -> dict[str, str]:
+    """Migrate stored snapshots of defaults that no longer exist.
+
+    The live install held ``devin: #1D3461`` -- the navy confirmed as an
+    unlit LED -- persisted by an earlier default-snapshotting path, so
+    the brand-table fix was invisible there: ``agent_color`` reads
+    settings before brands, exactly the shadowing _brand_colors_
+    repainted_by_a_palette repairs for palettes."""
+    repaired = dict(agent_colors)
+    for provider, retired in RETIRED_DEFAULT_AGENT_COLORS.items():
+        stored = repaired.get(provider)
+        if stored is None:
+            continue
+        if normalize_hex(stored, "#000000").upper() in retired:
+            repaired[provider] = default_agent_color(provider)
     return repaired
 
 
