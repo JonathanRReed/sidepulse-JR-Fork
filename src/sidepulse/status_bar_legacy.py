@@ -2372,14 +2372,10 @@ class StatusBarController(NSObject):
                 None,
                 True,
             )
-        # NSTimer's FIRST fire is one full interval out -- an active
-        # Tornado Warning must not stay dark for 10 minutes after launch.
+        # NSTimer's first fire is one interval out; warn NOW.
         if self.settings.weather_alerts_enabled:
             self._weather_observation_timer_fired()
-        # The second Mac: its own minute timer, never the UI tick. The
-        # timer is armed unconditionally and the fetch is the thing that
-        # checks the setting, so turning peers on in Settings needs no
-        # timer surgery -- and turning them off clears what they left.
+        # Remote peers: own minute timer; the fetch checks the setting.
         self.start_remote_peer_timer()
         if self.settings.remote_peers.enabled:
             self.start_remote_peer_refresh()
@@ -13833,6 +13829,12 @@ class StatusBarController(NSObject):
         self._hardware_write_active = desired
         self._hardware_write_generation += 1
         self._hardware_write_worker.cancel_generation(previous_generation)
+
+    @objc.IBAction
+    def pollLid_(self, _timer):
+        # The fallback lid timer's selector -- it was armed with no
+        # handler, a latent crash on its first fire.
+        self.reconcile_lid_observation()
 
     def reconcile_lid_observation(self) -> None:
         if not hasattr(self.virtual_status_device, "presentation_scheduler_inputs"):
