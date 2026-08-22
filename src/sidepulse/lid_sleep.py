@@ -16,7 +16,21 @@ from .settings import (
     CLOSED_LID_AWAKE_NEVER,
 )
 
-CAFFEINATE_CLOSED_LID_COMMAND = ("/usr/bin/caffeinate", "-dimsu")
+# -t bounds the assertion by TIME as well as by process life: the hold
+# is renewed by the app's sync tick, and a hold whose renewals stopped
+# (App Nap with the display asleep, a wedge, a bootout) must die on its
+# own instead of burning a closed laptop all night.
+CAFFEINATE_SELF_EXPIRE_SECONDS = 1800
+CAFFEINATE_CLOSED_LID_COMMAND = (
+    "/usr/bin/caffeinate",
+    "-dimsu",
+    "-t",
+    str(CAFFEINATE_SELF_EXPIRE_SECONDS),
+)
+#: The watchdog clears disablesleep when the renewal file goes stale.
+RENEWAL_FILE_NAME = "lid-hold-renewal"
+RENEWAL_STALE_SECONDS = 900
+WATCHDOG_POLL_SECONDS = 300
 IOREG_CLAMSHELL_COMMAND = ("/usr/sbin/ioreg", "-r", "-k", "AppleClamshellState", "-d", "4")
 IOREG_SLEEP_DISABLED_COMMAND = ("/usr/sbin/ioreg", "-r", "-k", "SleepDisabled", "-d", "4")
 SUDO_PMSET_DISABLE_SLEEP_COMMAND = (
@@ -257,6 +271,32 @@ def require_root_for_sleep_helper() -> None:
         raise PermissionError(f"run once with sudo: {sleep_helper_install_command()}")
 
 
+def _default_renewal_path() -> Path:
+    from .providers import default_state_dir
+
+    return default_state_dir() / RENEWAL_FILE_NAME
+
+
+def watchdog_script(renewal_path: Path) -> str:
+    """The detached fail-safe. Survives the app (new session), needs no
+    Python, and has exactly one job: when the renewal heartbeat goes
+    stale or vanishes, put the system back to sleepable and exit."""
+    quoted = shlex.quote(str(renewal_path))
+    return (
+        f"while true; do\n"
+        f"  sleep {WATCHDOG_POLL_SECONDS}\n"
+        f"  if [ ! -f {quoted} ]; then exit 0; fi\n"
+        f"  now=$(date +%s)\n"
+        f"  mt=$(stat -f %m {quoted} 2>/dev/null || echo 0)\n"
+        f"  if [ $((now - mt)) -gt {RENEWAL_STALE_SECONDS} ]; then\n"
+        f"    /usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0 2>/dev/null\n"
+        f"    rm -f {quoted}\n"
+        f"    exit 0\n"
+        f"  fi\n"
+        f"done\n"
+    )
+
+
 class ClosedLidAwakeController:
     def __init__(
         self,
@@ -267,6 +307,7 @@ class ClosedLidAwakeController:
         sleep_disabled_setter: Callable[[bool], None] = run_sudo_pmset_disablesleep,
         watch_current_process: bool = True,
         use_system_disable: bool = False,
+        renewal_path: Path | None = None,
     ) -> None:
         self.command = tuple(command)
         self.process_factory = process_factory or subprocess.Popen
@@ -281,6 +322,8 @@ class ClosedLidAwakeController:
         self.last_error: str | None = None
         self.last_policy = CLOSED_LID_AWAKE_NEVER
         self.last_requested = False
+        self.renewal_path = renewal_path or _default_renewal_path()
+        self.watchdog_process = None
 
     def set_use_system_disable(self, enabled: bool) -> None:
         enabled = bool(enabled)
@@ -304,8 +347,35 @@ class ClosedLidAwakeController:
             self.release()
         return self.active()
 
+    def _renew_heartbeat(self, errors: list[str]) -> None:
+        """Touch the renewal file and keep the fail-safe watchdog alive."""
+        try:
+            self.renewal_path.parent.mkdir(parents=True, exist_ok=True)
+            self.renewal_path.touch()
+        except OSError as exc:
+            errors.append(f"renewal: {exc}")
+            return
+        watchdog = self.watchdog_process
+        if watchdog is not None and watchdog.poll() is None:
+            return
+        try:
+            self.watchdog_process = self.process_factory(
+                ["/bin/sh", "-c", watchdog_script(self.renewal_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            self.watchdog_process = None
+            errors.append(f"watchdog: {exc}")
+
     def ensure_awake(self) -> None:
         errors: list[str] = []
+        # The heartbeat comes FIRST: even if everything below fails, a
+        # running watchdog with a fresh renewal is what guarantees the
+        # system can always fall back asleep on its own.
+        self._renew_heartbeat(errors)
         if (
             self.use_system_disable
             and not self.changed_system_disable
@@ -337,6 +407,12 @@ class ClosedLidAwakeController:
         process = self.process
         self.process = None
         errors: list[str] = []
+        # Clean release retires the heartbeat; the watchdog sees the file
+        # gone on its next poll and exits without touching anything.
+        try:
+            self.renewal_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         if process is not None:
             try:
                 if process.poll() is None:

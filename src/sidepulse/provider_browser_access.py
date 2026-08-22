@@ -108,6 +108,13 @@ def handle_provider_usage_action(
             + f", then click 'Import {title} browser session' again — "
             "SidePulse reads it from the clipboard only when you click."
         )
+    if label in ("Run grok login", "Reconnect Grok"):
+        # Grok's sign-in belongs to the grok CLI; SidePulse reads the
+        # CLI's own auth file. Saying so beats a silent refresh.
+        return (
+            "Run `grok login` in a terminal — SidePulse reads the CLI's "
+            "sign-in automatically on the next refresh."
+        )
     if label.startswith("Choose ") and "organization" in label:
         clipboard = clipboard_reader().strip()
         if clipboard and "\n" not in clipboard and len(clipboard) <= 120:

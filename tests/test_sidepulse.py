@@ -4406,6 +4406,9 @@ for (const event of [
         )
 
     def test_closed_lid_awake_controller_sets_and_restores_system_disable(self) -> None:
+        import tempfile
+        from pathlib import Path as _Path
+
         processes: list[FakeProcess] = []
         disabled_calls: list[bool] = []
 
@@ -4414,28 +4417,31 @@ for (const event of [
             processes.append(process)
             return process
 
-        controller = ClosedLidAwakeController(
-            process_factory=factory,
-            sleep_disabled_reader=lambda: False,
-            sleep_disabled_setter=disabled_calls.append,
-            use_system_disable=True,
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = ClosedLidAwakeController(
+                process_factory=factory,
+                sleep_disabled_reader=lambda: False,
+                sleep_disabled_setter=disabled_calls.append,
+                use_system_disable=True,
+                renewal_path=_Path(tmp) / "lid-hold-renewal",
+            )
 
-        self.assertTrue(
+            self.assertTrue(
+                controller.update(CLOSED_LID_AWAKE_ALWAYS, agents_active=False)
+            )
+            self.assertEqual(disabled_calls, [True])
+            self.assertTrue(controller.changed_system_disable)
+            # The hold plus its fail-safe watchdog (see lid_sleep).
+            self.assertEqual(len(processes), 2)
+
             controller.update(CLOSED_LID_AWAKE_ALWAYS, agents_active=False)
-        )
-        self.assertEqual(disabled_calls, [True])
-        self.assertTrue(controller.changed_system_disable)
-        self.assertEqual(len(processes), 1)
+            self.assertEqual(disabled_calls, [True])
 
-        controller.update(CLOSED_LID_AWAKE_ALWAYS, agents_active=False)
-        self.assertEqual(disabled_calls, [True])
-
-        self.assertFalse(
-            controller.update(CLOSED_LID_AWAKE_NEVER, agents_active=False)
-        )
-        self.assertEqual(disabled_calls, [True, False])
-        self.assertTrue(processes[0].terminated)
+            self.assertFalse(
+                controller.update(CLOSED_LID_AWAKE_NEVER, agents_active=False)
+            )
+            self.assertEqual(disabled_calls, [True, False])
+            self.assertTrue(any(process.terminated for process in processes))
 
     def test_closed_lid_awake_controller_defaults_to_user_mode_only(self) -> None:
         disabled_calls: list[bool] = []

@@ -59,3 +59,11 @@ def test_plausible_token_rejects_prose_and_fragments() -> None:
     assert not plausible_token("short")
     assert not plausible_token("two words here padding padding")
     assert not plausible_token("line\nbreak" + "x" * 30)
+
+
+def test_grok_reconnect_names_the_real_fix() -> None:
+    message = handle_provider_usage_action(
+        "grok", "Run grok login", credential_store=FakeStore(),
+        clipboard_reader=lambda: "", url_opener=lambda _u: None,
+    )
+    assert "grok login" in message
