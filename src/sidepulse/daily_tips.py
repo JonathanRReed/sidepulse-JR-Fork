@@ -11,7 +11,7 @@ DAILY_TIPS: tuple[tuple[str, str | None, str | None], ...] = (
     ("Give a session a permanent color from its row's Identity Color menu", None, None),
     ("The Screen Bar hugs your notch -- style it under Screen Bar", "colors_screen_bar", None),
     ("Timer fills your lights as working time passes -- try it below", None, None),
-    ("Write your own light animation under Animations", "animations", None),
+    ("Write your own light animation under Lid Animations", "animations", None),
     ("Whites looking off? Calibrate each device under Devices", "devices", None),
     ("Day, Night, and Travel calibration profiles live under Profiles", None, None),
     ("Ignored asks can escalate: light, menu bar, chime, takeover", "led_behavior", None),
@@ -20,7 +20,7 @@ DAILY_TIPS: tuple[tuple[str, str | None, str | None], ...] = (
     ("Every signal card in Signals has a Test button -- try one", "led_behavior", None),
     ("Agents on your other Macs can show up in this menu", "agents", None),
     ("A cloud code review can post its own status to SidePulse", "agents", None),
-    ("Choose how each provider's light moves under Agents", "agents", None),
+    ("Choose how each provider's light moves under Agents & Providers", "agents", None),
     ("A macOS Focus can dim or silence your lights automatically", "focus", None),
     ("A device can show Agent status, Battery, Timer, or your Studio program", "devices", None),
     (

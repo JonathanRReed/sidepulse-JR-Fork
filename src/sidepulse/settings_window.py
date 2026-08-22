@@ -1031,7 +1031,7 @@ def _build_devices_pane(target: StatusBarController):
             item.setRepresentedObject_(mode)
             if mode == current_blend:
                 blend_popup.selectItem_(item)
-        inner.addArrangedSubview_(native_ui.make_row("Blend Mode", blend_popup))
+        inner.addArrangedSubview_(native_ui.make_row("When several run at once", blend_popup))
 
         # Story #16: pin this device to one provider — "the Dot is
         # Codex's" — while other devices keep the aggregate.
@@ -1244,7 +1244,15 @@ def build_calibration_popover_content(device: StatusBarDevice, target: StatusBar
     stack.addArrangedSubview_(auto_checkbox)
 
     native_ui.add_separator(stack)
-    stack.addArrangedSubview_(native_ui.make_label("Color Calibration", bold=True, size=13.0))
+    stack.addArrangedSubview_(
+        native_ui.make_label(
+            # Named, because two calibratable surfaces exist and an
+            # anonymous header is a mis-click trap (adversarial review).
+            f"Color Calibration — {device.name}",
+            bold=True,
+            size=13.0,
+        )
+    )
 
     controls: dict[str, object] = {"auto_brightness_checkbox": auto_checkbox}
     red, green, blue = device.channel_gains
@@ -1809,6 +1817,7 @@ def _build_power_pane(target: StatusBarController):
         "battery_leds": battery_leds,
         "battery_power_preview": battery_power_preview,
         "low_battery_alert": low_battery_switch,
+        "keep_awake_on_battery": battery_hold_switch,
     }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
@@ -3003,7 +3012,9 @@ def _build_remote_peers_card(target: StatusBarController):
         "toggleRemotePeers:",
         help_text=(
             "Discovers peers with the Tailscale CLI and fetches each one's "
-            "published ledger once a minute, bounded at eight seconds total."
+            "published ledger once a minute, bounded at eight seconds total. "
+            "Needs Tailscale on both Macs and working KEY-BASED SSH to the "
+            "peer (e.g. ssh-copy-id) — passwords are never used or asked for."
         ),
     )
     inner.addArrangedSubview_(enabled_row)
@@ -4733,7 +4744,7 @@ def _build_studio_animations_section(target, actions, hex_labels):
     )
 
     round_robin_use_global = native_ui.make_checkbox(
-        "Round-Robin: use global", target, "toggleRoundRobinUseGlobalSpeed:"
+        "Everyone: use global", target, "toggleRoundRobinUseGlobalSpeed:"
     )
     round_robin_speed_field = native_ui.make_field("", target=target, action="applyRoundRobinSpeed:")
     native_ui.constrain_width(round_robin_speed_field, 56.0)
@@ -4743,7 +4754,7 @@ def _build_studio_animations_section(target, actions, hex_labels):
     round_robin_row.addArrangedSubview_(round_robin_speed_field)
     behavior_inner.addArrangedSubview_(round_robin_row)
 
-    cycle_use_global = native_ui.make_checkbox("Cycle: use global", target, "toggleCycleUseGlobalSpeed:")
+    cycle_use_global = native_ui.make_checkbox("One at a Time: use global", target, "toggleCycleUseGlobalSpeed:")
     cycle_speed_field = native_ui.make_field("", target=target, action="applyCycleModeSpeed:")
     native_ui.constrain_width(cycle_speed_field, 56.0)
     cycle_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)

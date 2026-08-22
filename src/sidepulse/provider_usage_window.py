@@ -187,6 +187,9 @@ class ProviderUsageWindowController:
         )
         self.window.setContentView_(scroll)
         self._last_state = ProviderUsageState((), None, None, False)
+        self._message = ""
+        self._message_until = 0.0
+        self._refresh_timer = None
 
     def _clear(self) -> None:
         for view in list(self.stack.arrangedSubviews()):
@@ -233,6 +236,12 @@ class ProviderUsageWindowController:
 
         header = _label(projection.subtitle, secondary=True, size=12.0)
         self.stack.addArrangedSubview_(header)
+        # Action feedback lands HERE, in the window the user is looking
+        # at -- set_settings_message's only sink used to be the Settings
+        # window, so Connect/Import feedback vanished when it was closed.
+        if self._message and time.monotonic() < self._message_until:
+            banner = _label(self._message, secondary=False, size=12.0)
+            self.stack.addArrangedSubview_(banner)
         for line in projection.aggregate_metrics:
             self.stack.addArrangedSubview_(_label(line, secondary=True, size=11.0))
 
@@ -281,8 +290,40 @@ class ProviderUsageWindowController:
             title += " — Refreshing"
         self.window.setTitle_(title)
 
+    def show_message(self, text: str) -> None:
+        self._message = str(text or "")
+        self._message_until = time.monotonic() + 12.0
+        try:
+            self.refresh(self._last_state)
+        except Exception:
+            pass
+
+    def _start_refresh_pulse(self) -> None:
+        """A gentle pulse while the window is open, so the cards can't
+        sit stale for hours; the tick self-invalidates once hidden."""
+        if self._refresh_timer is not None or self.action_target is None:
+            return
+        try:
+            from Foundation import NSTimer
+
+            responds = getattr(self.action_target, "respondsToSelector_", None)
+            if callable(responds) and not responds("refreshUsageCenterTick:"):
+                return
+            self._refresh_timer = (
+                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    60.0,
+                    self.action_target,
+                    "refreshUsageCenterTick:",
+                    self.window,
+                    True,
+                )
+            )
+        except Exception:
+            self._refresh_timer = None
+
     def show(self, state: ProviderUsageState) -> None:
         self.refresh(state)
+        self._start_refresh_pulse()
         self.window.makeKeyAndOrderFront_(None)
         try:
             NSApp.activateIgnoringOtherApps_(True)
@@ -295,6 +336,13 @@ class ProviderUsageWindowController:
                 pass
 
     def close(self) -> None:
+        timer = self._refresh_timer
+        self._refresh_timer = None
+        if timer is not None:
+            try:
+                timer.invalidate()
+            except Exception:
+                pass
         self.window.orderOut_(None)
 
 

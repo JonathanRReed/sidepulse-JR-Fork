@@ -323,7 +323,7 @@ from .ipc import (
     default_event_socket_path,
     default_latest_state_path,
 )
-from .keep_awake import KEEPALIVE_FILE_NAME, KeepAwakeController
+from .keep_awake import battery_yields_hold, KEEPALIVE_FILE_NAME, KeepAwakeController
 from .led_status import (
     MAX_CHANNEL_GAIN,
     MIN_CHANNEL_GAIN,
@@ -6392,6 +6392,16 @@ class StatusBarController(NSObject):
         self.set_battery_power_preview(sender.state() == NSOnState)
 
     @objc.IBAction
+    def refreshUsageCenterTick_(self, timer):
+        window = timer.userInfo()
+        if window is None or not window.isVisible():
+            timer.invalidate()
+            return
+        refresh = getattr(self, "_request_provider_usage", None)
+        if callable(refresh):
+            refresh(force=False)
+
+    @objc.IBAction
     def toggleKeepAwakeOnBattery_(self, sender):
         self.settings = self.settings.with_keep_awake_on_battery(
             checkbox_is_on(sender)
@@ -6629,6 +6639,13 @@ class StatusBarController(NSObject):
         # login or explicit start. Anywhere else (dev --foreground run),
         # a normal terminate is correct.
         if os.getppid() == 1:
+            # bootout kills by signal, so applicationWillTerminate_ never
+            # runs on THIS path -- state flush, ledger publish and server
+            # teardown were silently skipped on every production quit.
+            try:
+                self.applicationWillTerminate_(None)
+            except Exception:
+                pass
             subprocess.Popen(
                 [
                     str(trusted_system_tool("launchctl")),
@@ -10620,6 +10637,15 @@ class StatusBarController(NSObject):
     def set_settings_message(self, message: str) -> None:
         label = self.settings_fields.get("message")
         set_field_value(label, message)
+        # Mirror into the Usage Center when it's the window in front of
+        # the user -- its buttons' feedback used to vanish otherwise.
+        center = getattr(self, "_sidepulse_provider_usage_window", None)
+        if center is not None:
+            try:
+                if center.window.isVisible():
+                    center.show_message(message)
+            except Exception:
+                pass
         # First run has only the Welcome window (settings_fields is
         # empty until Settings first opens): mirror there whenever it's
         # up, so hook install progress -- and especially failures --
@@ -15129,11 +15155,11 @@ class StatusBarController(NSObject):
         self.keep_awake.update(
             mode,
             on_battery=on_battery,
-            # Below the low-battery line the hold ALWAYS yields: keeping
-            # a dying Mac awake for an agent risks a forced shutdown.
+            # Below the low-battery line the hold ALWAYS yields --
+            # judged directly, independent of the reminder toggle.
             hold_on_battery=(
                 getattr(self.settings, "keep_awake_on_battery", True)
-                and not self.low_power_active(battery_snapshot)
+                and not battery_yields_hold(battery_snapshot, self.settings)
             ),
         )
         is_running = self.keep_awake.process_running()

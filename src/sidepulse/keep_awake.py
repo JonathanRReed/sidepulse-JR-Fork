@@ -26,6 +26,20 @@ WORK_MODES = frozenset(
 )
 
 
+def battery_yields_hold(snapshot, settings) -> bool:
+    """True when the battery is low enough that the hold must yield --
+    judged DIRECTLY from the snapshot and threshold, never through
+    low_power_active, which is gated on the charge-reminder DISPLAY
+    toggle (regression review: disabling that cosmetic reminder used to
+    disable the safety yield with it)."""
+    if snapshot is None or not getattr(snapshot, "battery_present", False):
+        return False
+    if getattr(snapshot, "is_plugged", True):
+        return False
+    threshold = float(getattr(settings, "low_battery_threshold_percent", 5.0))
+    return float(getattr(snapshot, "percent", 100.0)) <= threshold
+
+
 class KeepAwakeController:
     def __init__(
         self,

@@ -53,3 +53,25 @@ def test_settings_round_trip_keep_awake_on_battery(tmp_path) -> None:
     saved = AgentMonitorSettings().with_keep_awake_on_battery(False)
     save_settings(saved, path)
     assert load_settings(path).keep_awake_on_battery is False
+
+
+def test_battery_yield_is_independent_of_the_reminder_toggle() -> None:
+    """The safety yield judges the battery DIRECTLY: routing it through
+    low_power_active silently disabled it whenever the cosmetic charge
+    reminder was off (regression review, round two)."""
+    from types import SimpleNamespace
+
+    from sidepulse.keep_awake import battery_yields_hold
+
+    settings = SimpleNamespace(
+        low_battery_alert_enabled=False,  # reminder OFF — must not matter
+        low_battery_threshold_percent=5.0,
+    )
+    dying = SimpleNamespace(battery_present=True, is_plugged=False, percent=4.0)
+    healthy = SimpleNamespace(battery_present=True, is_plugged=False, percent=60.0)
+    plugged = SimpleNamespace(battery_present=True, is_plugged=True, percent=4.0)
+
+    assert battery_yields_hold(dying, settings)
+    assert not battery_yields_hold(healthy, settings)
+    assert not battery_yields_hold(plugged, settings)
+    assert not battery_yields_hold(None, settings)

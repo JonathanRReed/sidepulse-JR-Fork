@@ -128,3 +128,14 @@ def test_runner_invokes_the_executable_with_event_argv(tmp_path) -> None:
     while time.time() < deadline and not record.exists():
         time.sleep(0.05)
     assert record.read_text().strip() == "quota_low claude weekly 18"
+
+
+def test_hook_path_message_expands_home(tmp_path, monkeypatch) -> None:
+    from sidepulse.usage_event_hooks import hook_path_message
+
+    script = tmp_path / "hook.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert hook_path_message("~/hook.sh") == "Usage event hook saved."
+    assert "does not exist" in hook_path_message("~/missing.sh")
