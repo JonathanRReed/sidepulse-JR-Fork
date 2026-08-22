@@ -1611,9 +1611,11 @@ class VirtualLedView(NSView):
                 self.setNeedsDisplay_(True)
 
             try:
-                from Foundation import NSOperationQueue
+                # Same fix as usage_graph_worker: Python callables passed to
+                # addOperationWithBlock_ never fire; callAfter is the way.
+                from PyObjCTools import AppHelper
 
-                NSOperationQueue.mainQueue().addOperationWithBlock_(_adopt)
+                AppHelper.callAfter(_adopt)
             except Exception:
                 _adopt()
 

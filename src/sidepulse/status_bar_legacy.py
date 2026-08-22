@@ -17645,7 +17645,9 @@ class UsageGraphView(NSView):
             )
 
         if not series:
-            empty = NSString.stringWithString_("No activity in this range")
+            empty = NSString.stringWithString_(
+                str(model.get("empty_text") or "No activity in this range")
+            )
             empty_size = empty.sizeWithAttributes_(label_attrs)
             empty.drawAtPoint_withAttributes_(
                 (
@@ -18456,8 +18458,7 @@ def native_session_menu_title(status: AgentStatus) -> str:
     parts = [title]
     if project:
         parts.append(project)
-    # An em dash, not a run of spaces -- "title — project" reads as two
-    # deliberate fields instead of accidental whitespace.
+    # Em dash: two deliberate fields, not accidental whitespace.
     return " — ".join(parts)
 
 

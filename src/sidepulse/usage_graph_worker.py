@@ -22,14 +22,17 @@ from .providers import default_state_dir
 _IN_FLIGHT_ATTR = "_usage_graph_worker_in_flight"
 
 
-def build_usage_graph_model(settings) -> dict:
-    """The chart model for the CURRENT metric, straight from the sources."""
+def _build_payload(settings) -> tuple[dict, str | None]:
+    """(chart model, scan summary line) for the CURRENT metric."""
     days = int(getattr(settings, "usage_graph_days", 7) or 7)
     mode = str(getattr(settings, "usage_display_mode", "tokens") or "tokens")
     if mode == "percent":
-        return usage_percent_history.shared_percent_graph_model(
-            days=days,
-            period_label=usage_stats.usage_period_label(days),
+        return (
+            usage_percent_history.shared_percent_graph_model(
+                days=days,
+                period_label=usage_stats.usage_period_label(days),
+            ),
+            None,
         )
     period_start = (datetime.now() - timedelta(days=days - 1)).replace(
         hour=0, minute=0, second=0, microsecond=0
@@ -40,12 +43,40 @@ def build_usage_graph_model(settings) -> dict:
         since_epoch=period_start.timestamp(),
         codex_root=Path.home() / ".codex" / "sessions",
     )
-    return usage_stats.usage_graph_model(
+    model = usage_stats.usage_graph_model(
         totals.records,
         days=days,
         metric=mode,
         provider_ids=settings.usage_graph_providers,
     )
+    claude_tokens = (
+        totals.input_tokens + totals.cached_input_tokens + totals.output_tokens
+    )
+    summary = (
+        f"{usage_stats.usage_period_label(days)}: Claude "
+        f"{usage_stats.compact_token_count(claude_tokens)} tokens · Codex "
+        f"{usage_stats.compact_token_count(totals.codex_tokens)} tokens · "
+        f"{len(totals.sessions)} sessions"
+    )
+    return model, summary
+
+
+def build_usage_graph_model(settings) -> dict:
+    """The chart model for the CURRENT metric, straight from the sources."""
+    return _build_payload(settings)[0]
+
+
+def _scanning_placeholder(settings) -> dict:
+    days = int(getattr(settings, "usage_graph_days", 7) or 7)
+    return {
+        "days": days,
+        "period_label": usage_stats.usage_period_label(days),
+        "metric": str(getattr(settings, "usage_display_mode", "tokens")),
+        "labels": (),
+        "series": (),
+        "scale_max": 1.0,
+        "empty_text": "Scanning local activity…",
+    }
 
 
 def refresh_usage_graph(target) -> None:
@@ -54,10 +85,20 @@ def refresh_usage_graph(target) -> None:
         return
     setattr(target, _IN_FLIGHT_ATTR, True)
 
+    # A year-deep cold scan takes tens of seconds; until it lands the
+    # chart must say SCANNING, never "No activity in this range".
+    graph = getattr(target, "settings_fields", {}).get("profile_usage_graph")
+    if graph is not None and getattr(target, "usage_graph_model", None) is None:
+        try:
+            graph.setModel_(_scanning_placeholder(target.settings))
+        except Exception:
+            pass
+
     def _work() -> None:
         model = None
+        summary = None
         try:
-            model = build_usage_graph_model(target.settings)
+            model, summary = _build_payload(target.settings)
         except Exception:
             model = None
         finally:
@@ -66,19 +107,33 @@ def refresh_usage_graph(target) -> None:
                 if model is None:
                     return
                 target.usage_graph_model = model
-                graph = getattr(target, "settings_fields", {}).get(
-                    "profile_usage_graph"
-                )
-                if graph is not None:
+                target._usage_local_scan_complete = True
+                fields = getattr(target, "settings_fields", {}) or {}
+                view = fields.get("profile_usage_graph")
+                if view is not None:
                     try:
-                        graph.setModel_(model)
+                        view.setModel_(model)
                     except Exception:
                         pass
+                # The old acceptance-gated path could leave "Loading local
+                # usage history…" forever; scan-derived truth resolves it
+                # whenever that path has said nothing.
+                if summary and not getattr(target, "usage_summary_text", None):
+                    label = fields.get("profile_usage_label")
+                    if label is not None:
+                        try:
+                            label.setStringValue_(summary)
+                        except Exception:
+                            pass
 
             try:
-                from Foundation import NSOperationQueue
+                # AppHelper.callAfter is the PyObjC-blessed main-thread
+                # dispatch; NSOperationQueue.addOperationWithBlock_ accepted
+                # the Python callable but the block NEVER FIRED in-app --
+                # the stuck "Loading local usage history…" card was this.
+                from PyObjCTools import AppHelper
 
-                NSOperationQueue.mainQueue().addOperationWithBlock_(_apply)
+                AppHelper.callAfter(_apply)
             except Exception:
                 _apply()
 
