@@ -349,3 +349,39 @@ def test_the_strip_transform_is_monotonic_and_bounded(code: int) -> None:
     drive = strip_drive_code(code)
     assert 0 <= drive <= code  # linear PWM of an sRGB code can only go down
     assert drive >= strip_drive_code(max(0, code - 1))
+
+
+# --- The hue-fidelity floor -------------------------------------------------
+# A color MEANT to be seen never renders below the drive level where its
+# ratio survives: dim multi-agent colors quantized to garbage (or black)
+# on hardware while the Screen Bar rendered them faithfully -- "why is
+# the color on the sidepulse different from the screenbar" (2026-08-21).
+
+_FIDELITY_GAINS = (0.44, 0.3, 0.874)
+
+
+def test_a_dim_saturated_color_is_lifted_with_its_ratio_held() -> None:
+    from sidepulse.led_status import apply_strip_transfer_to_hex
+
+    lifted = apply_strip_transfer_to_hex("#031A14", _FIDELITY_GAINS)
+    assert lifted != "#000000"
+    assert max(_codes(lifted)) == 14
+
+
+def test_whispers_still_crush_to_honest_black() -> None:
+    from sidepulse.led_status import apply_strip_transfer_to_hex
+
+    assert apply_strip_transfer_to_hex("#010101", _FIDELITY_GAINS) == "#000000"
+    assert apply_strip_transfer_to_hex("#010806", _FIDELITY_GAINS) == "#000000"
+
+
+def test_grays_are_never_lifted() -> None:
+    from sidepulse.led_status import apply_strip_transfer_to_hex
+
+    assert max(_codes(apply_strip_transfer_to_hex("#404040", _FIDELITY_GAINS))) < 14
+
+
+def test_bright_colors_are_untouched_by_the_floor() -> None:
+    from sidepulse.led_status import apply_strip_transfer_to_hex
+
+    assert max(_codes(apply_strip_transfer_to_hex("#10A37F", _FIDELITY_GAINS))) >= 14

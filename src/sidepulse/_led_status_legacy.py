@@ -173,6 +173,19 @@ STRIP_MIN_LIT_DRIVE = 1
 # honestly dark instead of lying in green. Colors with at least one
 # channel at or above it keep the classic floor behavior.
 STRIP_HUE_HOLDING_DRIVE = 3
+# The fidelity floor for colors that are MEANT to be seen. Between
+# drives 3 and ~13 the strip has so few PWM steps that a ratio like
+# teal's collapses into whatever the rounding leaves (measured live:
+# nominal #085240 -- clearly green-dominant -- landed at drives
+# (1, 6, 11) and read blue beside the Screen Bar's faithful render;
+# "why is the color on the sidepulse different from the screenbar",
+# 2026-08-21). A color whose NOMINAL intent carries real chroma is
+# lifted, in the light domain so the calibrated ratio holds exactly,
+# until its peak drive reaches this level. Whisper intents (nominal
+# peak below STRIP_CHROMA_INTENT_CODE) keep the honest-black crush --
+# the fix for the green-glow arc stays intact.
+STRIP_HUE_READABLE_DRIVE = 14
+STRIP_CHROMA_INTENT_CODE = 24
 
 MIN_CHANNEL_GAIN = 0.3
 MAX_CHANNEL_GAIN = 1.5
@@ -214,8 +227,19 @@ def strip_drive_code(code: int, gain: float = 1.0) -> int:
     return max(STRIP_MIN_LIT_DRIVE, min(255, round(drive)))
 
 
+def _strip_drive_float(code: int, gain: float) -> float:
+    """strip_drive_code before rounding/clamping -- the true ratio."""
+    code = max(0, min(255, int(code)))
+    if code <= 0:
+        return 0.0
+    light = srgb_to_linear(code / 255.0) * max(0.0, float(gain))
+    if light <= 0.0:
+        return 0.0
+    return 255.0 * (light ** (1.0 / STRIP_CODE_TO_LIGHT_EXPONENT))
+
+
 def apply_strip_transfer_to_hex(hex_color: str, gains: tuple[float, float, float]) -> str:
-    """``strip_drive_code`` over one hex literal."""
+    """``strip_drive_code`` over one hex literal, with the fidelity floor."""
     cleaned = hex_color.lstrip("#")
     try:
         channels = (
@@ -225,12 +249,33 @@ def apply_strip_transfer_to_hex(hex_color: str, gains: tuple[float, float, float
         )
     except (ValueError, IndexError):
         return hex_color
-    red, green, blue = (
-        strip_drive_code(value, gain) for value, gain in zip(channels, gains)
-    )
-    if 0 < max(red, green, blue) < STRIP_HUE_HOLDING_DRIVE:
-        # Too dim to hold a hue: the die imbalance would paint it green.
+    floats = [
+        _strip_drive_float(value, gain) for value, gain in zip(channels, gains)
+    ]
+    peak = max(floats)
+    if peak <= 0.0:
         return "#000000"
+    nominal_peak = max(channels)
+    saturated = (
+        nominal_peak > 0
+        and (nominal_peak - min(channels)) >= nominal_peak * 0.25
+    )
+    if nominal_peak >= STRIP_CHROMA_INTENT_CODE and saturated:
+        # A COLOR meant to be seen: lift the whole triplet, ratio intact,
+        # until its hue survives 8-bit PWM quantization. Grays are
+        # exempt -- they have no hue to protect, and the white-balance
+        # ratio is finest at the unlifted drive.
+        if peak < STRIP_HUE_READABLE_DRIVE:
+            scale = STRIP_HUE_READABLE_DRIVE / peak
+            floats = [value * scale for value in floats]
+    elif peak < STRIP_HUE_HOLDING_DRIVE:
+        # A whisper: too dim to hold a hue, and not worth lifting -- the
+        # die imbalance would paint it green.
+        return "#000000"
+    red, green, blue = (
+        max(STRIP_MIN_LIT_DRIVE, min(255, round(value))) if value > 0.0 else 0
+        for value in floats
+    )
     return f"#{red:02X}{green:02X}{blue:02X}"
 
 
