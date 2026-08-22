@@ -1564,13 +1564,62 @@ class VirtualLedView(NSView):
         # behaves exactly as before: phase-zero is the moment this method
         # runs.
         self.started_at = started_at if started_at is not None else time.monotonic()
-        if self._ensure_wasm_controller():
+        self._parse_or_warm_wasm()
+        self.setNeedsDisplay_(True)
+
+    def _parse_or_warm_wasm(self) -> None:
+        """Parse inline when the engine exists; otherwise warm it OFF-MAIN.
+
+        Constructing SdLedWasmController costs ~1.1s cold (JavaScriptCore
+        first load) and ~25ms per extra context, and the animation panes
+        build a dozen-plus preview thumbs, each of which paid that price
+        synchronously at pane open -- "when I open certain animation
+        windows, it's super laggy" was exactly this. The thumb now draws
+        its static first frame immediately and animates in when the
+        warmed engine adopts the latest program."""
+        if self.wasm_controller is not None:
             try:
-                parse_epoch_ms = int(self.started_at * 1000.0)
-                self.wasm_controller.parse(self.current_program, parse_epoch_ms)
+                self.wasm_controller.parse(
+                    self.current_program, int(self.started_at * 1000.0)
+                )
             except Exception as exc:
                 self.wasm_error = str(exc)
-        self.setNeedsDisplay_(True)
+            return
+        if getattr(self, "_wasm_warming", False):
+            return
+        self._wasm_warming = True
+
+        def _warm() -> None:
+            try:
+                controller = SdLedWasmController(LED_COUNT)
+            except LedWasmUnavailableError as exc:
+                self.wasm_error = str(exc)
+                self._wasm_warming = False
+                return
+
+            def _adopt() -> None:
+                self._wasm_warming = False
+                self.wasm_controller = controller
+                if self.current_program is not None:
+                    try:
+                        controller.parse(
+                            self.current_program,
+                            int(self.started_at * 1000.0),
+                        )
+                    except Exception as exc:
+                        self.wasm_error = str(exc)
+                self.setNeedsDisplay_(True)
+
+            try:
+                from Foundation import NSOperationQueue
+
+                NSOperationQueue.mainQueue().addOperationWithBlock_(_adopt)
+            except Exception:
+                _adopt()
+
+        threading.Thread(
+            target=_warm, name="SidePulseLedWarm", daemon=True
+        ).start()
 
     def setPresentationProgram_startedAt_(self, program, started_at):
         """Record Screen Bar program identity without parsing it on AppKit's thread."""
@@ -1697,7 +1746,11 @@ class VirtualLedView(NSView):
     def _compute_target_colors(self):
         if self.fixed_colors is not None:
             return self.fixed_colors
-        if self.current_program is not None and self._ensure_wasm_controller():
+        if self.current_program is not None and self.wasm_controller is None:
+            # Never construct the engine on the DRAW path -- warming is
+            # the program setter's job, off-main (see _parse_or_warm_wasm).
+            self._parse_or_warm_wasm()
+        if self.current_program is not None and self.wasm_controller is not None:
             try:
                 pixels = self.wasm_controller.step(monotonic_ms())
                 self.wasm_error = None
@@ -3322,9 +3375,13 @@ class VirtualStatusDevice(NSObject):
                 )
             except Exception:
                 pass
-        self.window.orderFrontRegardless()
         self._install_space_observer()
-        self._fullscreen_hidden = False
+        # Decide visibility BEFORE fronting: every reassert used to
+        # orderFront first and reconcile second, which popped the bar
+        # back over full-screen video once per sync tick -- "the screen
+        # bar is still there inside full-screen video" was this exact
+        # ordering, not the detection. None forces a fresh verdict.
+        self._fullscreen_hidden = None
         self._reconcile_fullscreen_visibility()
         if not was_visible:
             self._display_link_setup_failed = False

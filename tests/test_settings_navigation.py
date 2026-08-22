@@ -12,7 +12,7 @@ from sidepulse.settings_navigation import (
 )
 
 
-def test_settings_navigation_has_seven_stable_categories() -> None:
+def test_settings_navigation_has_eight_stable_categories() -> None:
     assert [category.label for category in SETTINGS_CATEGORIES] == [
         "Overview",
         "Agents & Providers",
@@ -20,10 +20,13 @@ def test_settings_navigation_has_seven_stable_categories() -> None:
         "Devices & Screen Bar",
         "Appearance & Motion",
         "Notifications & Focus",
+        # The ambient half got its own front door -- filing calendar,
+        # Reminders and weather under "Advanced" hid them (2026-08-21).
+        "Today",
         "Advanced & Diagnostics",
     ]
-    assert len(sidebar_items()) == 7
-    assert len({category.key for category in SETTINGS_CATEGORIES}) == 7
+    assert len(sidebar_items()) == 8
+    assert len({category.key for category in SETTINGS_CATEGORIES}) == 8
 
 
 def test_every_retained_pane_has_exactly_one_visible_home() -> None:

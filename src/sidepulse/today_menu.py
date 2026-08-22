@@ -223,7 +223,7 @@ def build_today_menu_item(target):
     submenu.setAutoenablesItems_(False)
     if not enabled:
         setup = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Show calendar, reminders and weather here — Settings → Extras…",
+            "Show calendar, reminders and weather here — Settings → Today…",
             "openSetup:",
             "",
         )

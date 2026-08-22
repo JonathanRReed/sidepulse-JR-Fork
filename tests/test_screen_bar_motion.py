@@ -1695,3 +1695,53 @@ def test_a_full_screen_space_hides_the_bar_unless_opted_in():
     window.orderOut_.reset_mock()
     device._reconcile_fullscreen_visibility()
     window.orderOut_.assert_not_called()
+
+
+def test_show_never_fronts_the_bar_over_a_full_screen_space():
+    """The regression behind 'still there inside full-screen video':
+    show() fronted the window BEFORE reconciling, so every program
+    reassert popped the bar back over the movie. The verdict now comes
+    first; a hidden space never sees orderFrontRegardless from show()."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from sidepulse.virtual_device import VirtualStatusDevice
+
+    def screen(top_inset: float):
+        return SimpleNamespace(
+            frame=lambda: SimpleNamespace(
+                origin=SimpleNamespace(x=0.0, y=0.0),
+                size=SimpleNamespace(width=1512.0, height=982.0),
+            ),
+            visibleFrame=lambda: SimpleNamespace(
+                origin=SimpleNamespace(x=0.0, y=0.0),
+                size=SimpleNamespace(width=1512.0, height=982.0 - top_inset),
+            ),
+        )
+
+    device = VirtualStatusDevice.alloc().init()
+    window = MagicMock()
+    window.screen.return_value = screen(0.0)  # full-screen space
+    window.isVisible.return_value = False
+    device.window = window
+    device._enabled = True
+    # Geometry, cadence and samplers are not under test.
+    device.reposition = lambda: None
+    device._install_space_observer = lambda: None
+    device._install_power_observers = lambda: None
+    device._refresh_render_cadence = lambda *_a, **_k: None
+    device._resume_sampler = lambda: None
+    device._resume_alcove_observer = lambda: None
+    device._publish_presentation_schedule = lambda: None
+
+    device.show()
+
+    window.orderFrontRegardless.assert_not_called()
+    window.orderOut_.assert_called()
+
+    # Back on a normal space, the same show() fronts it again.
+    window.screen.return_value = screen(24.0)
+    window.orderOut_.reset_mock()
+    device.show()
+    window.orderFrontRegardless.assert_called()
+    window.orderOut_.assert_not_called()
