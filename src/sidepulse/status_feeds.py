@@ -136,7 +136,20 @@ class StatusFeedPoller:
                     continue
             fresh = incidents_from_documents(documents)
             with self._lock:
-                self._incidents = fresh
+                # Merge per provider: a fetch hiccup (absent from
+                # documents) KEEPS the prior incident -- a network blip
+                # must never read as "incident resolved". Only a
+                # successful healthy fetch clears a provider's entry.
+                merged = dict(self._incidents)
+                for provider_id, payload in documents.items():
+                    parsed = parse_statuspage_indicator(payload)
+                    if parsed is None:
+                        continue
+                    if provider_id in fresh:
+                        merged[provider_id] = fresh[provider_id]
+                    else:
+                        merged.pop(provider_id, None)
+                self._incidents = merged
             time.sleep(POLL_SECONDS)
 
 

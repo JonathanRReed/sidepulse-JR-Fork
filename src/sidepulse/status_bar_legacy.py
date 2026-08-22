@@ -2405,36 +2405,6 @@ class StatusBarController(NSObject):
         # exact end of the second visible pulse.
         self.refresh_(None)
 
-    def snooze_filtered(self, statuses):
-        """Drop held snoozes; prune broken ones so rows wake exactly once."""
-        snoozes = getattr(self, "session_snoozes", None)
-        if not snoozes:
-            return statuses
-        from .session_snooze import filter_snoozed
-
-        visible, kept = filter_snoozed(statuses, snoozes, time.time())
-        self.session_snoozes = kept
-        return visible
-
-    @objc.IBAction
-    def snoozeSession_(self, sender):
-        from .session_snooze import can_snooze
-
-        status = sender.representedObject()
-        if status is None or not can_snooze(status):
-            return
-        snoozes = dict(getattr(self, "session_snoozes", {}) or {})
-        snoozes[status.agent_id] = time.time()
-        self.session_snoozes = snoozes
-        self._menu_signature = None
-        self.refresh_(None)
-
-    @objc.IBAction
-    def wakeSnoozedSessions_(self, _sender):
-        self.session_snoozes = {}
-        self._menu_signature = None
-        self.refresh_(None)
-
     def update_attention_projection(
         self,
         snapshot,
@@ -2443,7 +2413,7 @@ class StatusBarController(NSObject):
     ) -> AttentionProjection:
         observed_at = time.monotonic() if now is None else float(now)
         attention_snapshot = SimpleNamespace(
-            statuses=self.snooze_filtered(mailbox_attention_statuses(snapshot)),
+            statuses=mailbox_attention_statuses(snapshot),
             collected_at=snapshot.collected_at,
         )
         projection = project_attention(attention_snapshot, self.settings)
@@ -6164,6 +6134,9 @@ class StatusBarController(NSObject):
             return
         save_settings(self.settings)
         # Rescan now -- the warm cache makes a year-range rebuild cheap.
+        from .settings_window import refresh_usage_graph_legend
+
+        refresh_usage_graph_legend(self)
         self.invalidate_usage_providers(("codex", "claude"))
         self.maybe_refresh_usage_summary()
 
@@ -6187,6 +6160,9 @@ class StatusBarController(NSObject):
         )
         self.settings = self.settings.with_usage_graph_providers(ordered)
         save_settings(self.settings)
+        from .settings_window import refresh_usage_graph_legend
+
+        refresh_usage_graph_legend(self)
         self.invalidate_usage_providers(("codex", "claude"))
         self.maybe_refresh_usage_summary()
 
@@ -6414,6 +6390,18 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def setBatteryPowerPreviewFromCheckbox_(self, sender):
         self.set_battery_power_preview(sender.state() == NSOnState)
+
+    @objc.IBAction
+    def toggleKeepAwakeOnBattery_(self, sender):
+        self.settings = self.settings.with_keep_awake_on_battery(
+            checkbox_is_on(sender)
+        )
+        save_settings(self.settings)
+        self.set_settings_message(
+            "Agents hold the Mac awake on battery too."
+            if self.settings.keep_awake_on_battery
+            else "On battery, agents no longer hold the Mac awake."
+        )
 
     @objc.IBAction
     def toggleLowBatteryAlert_(self, sender):
@@ -15141,8 +15129,11 @@ class StatusBarController(NSObject):
         self.keep_awake.update(
             mode,
             on_battery=on_battery,
-            hold_on_battery=getattr(
-                self.settings, "keep_awake_on_battery", True
+            # Below the low-battery line the hold ALWAYS yields: keeping
+            # a dying Mac awake for an agent risks a forced shutdown.
+            hold_on_battery=(
+                getattr(self.settings, "keep_awake_on_battery", True)
+                and not self.low_power_active(battery_snapshot)
             ),
         )
         is_running = self.keep_awake.process_running()
@@ -15713,11 +15704,9 @@ def mailbox_projection_for_menu(snapshot, target) -> AgentMailboxProjection:
         return current
     attention = getattr(target, "current_attention_projection", None)
     if not isinstance(attention, AttentionProjection):
-        snooze = getattr(target, "snooze_filtered", None)
-        statuses = mailbox_attention_statuses(snapshot)
         attention = project_attention(
             SimpleNamespace(
-                statuses=snooze(statuses) if callable(snooze) else statuses,
+                statuses=mailbox_attention_statuses(snapshot),
                 collected_at=snapshot.collected_at,
             ),
             target.settings,
@@ -15801,7 +15790,6 @@ def menu_content_signature(snapshot, state, target) -> tuple:
             else None
         ),
         tuple(sorted(getattr(target, "cleared_session_ids", set()))),
-        tuple(sorted(getattr(target, "session_snoozes", {}) or {})),
         tuple(sorted(u.agent_id for u in unseen_completions(snapshot, target))),
         # Both halves, not just the revision: closing the menu changes only
         # the seen watermark, and without it the "Since you left" heading
@@ -16693,13 +16681,6 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     # First-run honesty: an empty mailbox means one of three completely
     # different things, and only one of them is "nothing to do". The other
     # two get the same one click that fixes them.
-    snoozed_count = len(getattr(target, "session_snoozes", {}) or {})
-    if snoozed_count:
-        wake = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            f"{snoozed_count} snoozed — wake", "wakeSnoozedSessions:", ""
-        )
-        wake.setTarget_(target)
-        menu.addItem_(wake)
     _mark("sessions")
     add_intake_menu_items(menu, target)
     # An out-of-date hook cannot deliver live events. Say so where the
@@ -18524,16 +18505,6 @@ def build_session_options_menu(
         identity_menu.addItem_(choice)
     identity_item.setSubmenu_(identity_menu)
     menu.addItem_(identity_item)
-    from .session_snooze import can_snooze
-
-    if can_snooze(status):
-        menu.addItem_(NSMenuItem.separatorItem())
-        snooze_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Snooze until it needs you", "snoozeSession:", ""
-        )
-        snooze_item.setTarget_(target)
-        snooze_item.setRepresentedObject_(status)
-        menu.addItem_(snooze_item)
     return menu
 
 

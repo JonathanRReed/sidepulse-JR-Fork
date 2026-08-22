@@ -108,6 +108,23 @@ def handle_provider_usage_action(
             + f", then click 'Import {title} browser session' again — "
             "SidePulse reads it from the clipboard only when you click."
         )
+    if label == f"Reconnect {title}" and provider_id in PROVIDER_TOKEN_PAGES:
+        # A wrong-but-plausible token wedged here forever: the label
+        # matched nothing, fell through to a bare refresh, and the same
+        # 401 came back -- the dead-button pattern all over again.
+        # Clear the bad credential and re-enter the import stage.
+        try:
+            credential_store.delete(provider_id, "token")
+        except Exception:
+            pass
+        url = PROVIDER_TOKEN_PAGES.get(provider_id)
+        if url is not None:
+            url_opener(url)
+        return (
+            f"The stored {title} session was rejected and has been "
+            f"cleared. Copy a fresh API key (page opened), then click "
+            f"'Import {title} browser session'."
+        )
     if label in ("Run grok login", "Reconnect Grok"):
         # Grok's sign-in belongs to the grok CLI; SidePulse reads the
         # CLI's own auth file. Saying so beats a silent refresh.

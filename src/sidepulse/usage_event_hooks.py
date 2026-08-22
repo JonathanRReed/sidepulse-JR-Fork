@@ -124,6 +124,19 @@ def detect_usage_hook_events(
     return tuple(events)
 
 
+def hook_path_message(hook_path: str) -> str:
+    """Save confirmation that never lies about a path that can't run."""
+    import os
+
+    if not hook_path:
+        return "Usage event hook off."
+    if not os.path.exists(hook_path):
+        return "Saved, but that path does not exist — the hook will never fire."
+    if not os.access(hook_path, os.X_OK):
+        return "Saved, but that file is not executable (chmod +x it)."
+    return "Usage event hook saved."
+
+
 def run_usage_hooks(executable: str, events: tuple[UsageHookEvent, ...]) -> None:
     """Fire-and-forget: one background thread runs the batch serially."""
     if not executable or not events:
@@ -146,7 +159,15 @@ def run_usage_hooks(executable: str, events: tuple[UsageHookEvent, ...]) -> None
                     timeout=HOOK_TIMEOUT_SECONDS,
                     check=False,
                 )
-            except Exception:
+            except Exception as exc:
+                # A typo'd path failed forever in total silence; the log
+                # is the minimum honesty a fire-and-forget hook owes.
+                try:
+                    from .status_bar import log_status_bar
+
+                    log_status_bar(f"usage hook failed: {exc}")
+                except Exception:
+                    pass
                 continue
 
     threading.Thread(
@@ -158,5 +179,6 @@ __all__ = [
     "HOOK_TIMEOUT_SECONDS",
     "UsageHookEvent",
     "detect_usage_hook_events",
+    "hook_path_message",
     "run_usage_hooks",
 ]

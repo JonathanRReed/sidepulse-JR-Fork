@@ -214,15 +214,15 @@ PROVIDER_ANIMATION_DESCRIPTIONS: dict[str, str] = {
     MOTION_BREATHE: "One slow swell, every LED together.",
     MOTION_CHASE: "The same swell, staggered into a travelling wave.",
     MOTION_HEARTBEAT: "Two quick swells, then a long rest — a lub-dub.",
-    MOTION_SCANNER: "A bright dot sweeps end to end and bounces back.",
-    MOTION_COMET: "A bright head sweeps one way, trailing off behind.",
+    MOTION_SCANNER: "A bright dot sweeps end to end and bounces back. Solo shape — becomes the wave when agents share the strip.",
+    MOTION_COMET: "A bright head sweeps one way, trailing off behind. Solo shape — becomes the wave when agents share the strip.",
     MOTION_FLICKER: "A warm candle-like shimmer that never quite repeats.",
-    MOTION_STACK: "LEDs pile on one by one until full, then it all lets go.",
+    MOTION_STACK: "LEDs pile on one by one until full, then it all lets go. Solo shape — becomes the wave when agents share the strip.",
     MOTION_TWINKLE: "A dim base with single LEDs briefly sparking, scattered.",
     MOTION_DRIFT: "Glacial detuned swells, like light on slow water.",
-    MOTION_CONVERGE: "Two dots leave the ends and meet in the middle.",
+    MOTION_CONVERGE: "Two dots leave the ends and meet in the middle. Solo shape — becomes the wave when agents share the strip.",
     MOTION_AURORA: "Rolling waves of light over a luminous base.",
-    MOTION_TIDE: "The bar rises to full, then the water pulls back.",
+    MOTION_TIDE: "The bar rises to full, then the water pulls back. Solo shape — becomes the wave when agents share the strip.",
     MOTION_STEADY: "Holds its color. Never moves.",
     MOTION_BLINK: "Hard-edged on/off, no easing.",
 }
@@ -1881,6 +1881,20 @@ def _cycle_program(
     return apply_brightness("\n".join(lines), brightness)
 
 
+def _agents_that_fit(agents: list[_ActiveAgent], led_count: int) -> list[_ActiveAgent]:
+    """Everyone, or the most urgent: with more agents than LEDs the
+    modulo layouts silently dropped whoever sorted LAST in registry
+    order -- an ASKING agent could be invisible while an idle one kept
+    its slot. Past the strip's capacity, keep the led_count highest-
+    weight agents, preserving stable order among the kept."""
+    if len(agents) <= led_count:
+        return agents
+    kept_indexes = sorted(
+        sorted(range(len(agents)), key=lambda index: -agents[index].weight)[:led_count]
+    )
+    return [agents[index] for index in kept_indexes]
+
+
 def _round_robin_program(
     agents: list[_ActiveAgent],
     *,
@@ -1905,6 +1919,7 @@ def _round_robin_program(
             provider=agent.provider,
         )
 
+    agents = _agents_that_fit(agents, led_count)
     duration_ms = max(1, int(settings.effective_speed_seconds(BLEND_MODE_ROUND_ROBIN) * 1000))
     stagger_ms = max(0, int(duration_ms * ROUND_ROBIN_STAGGER_FRACTION))
     # Scaled to this program's own speed rather than a flat 160ms -- at the
@@ -1963,6 +1978,7 @@ def _relay_program(
         )
 
     traversal_seconds = settings.effective_speed_seconds(BLEND_MODE_RELAY)
+    agents = _agents_that_fit(agents, led_count)
     step_ms = relay_step_ms(traversal_seconds, led_count)
     start_index = relay_phase_index(
         relay_elapsed_seconds,

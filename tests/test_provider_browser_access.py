@@ -67,3 +67,26 @@ def test_grok_reconnect_names_the_real_fix() -> None:
         clipboard_reader=lambda: "", url_opener=lambda _u: None,
     )
     assert "grok login" in message
+
+
+def test_reconnect_clears_the_bad_token_and_reopens_import() -> None:
+    """A wrong-but-plausible token must not wedge the provider forever:
+    Reconnect clears the credential and re-enters the import stage."""
+    opened = []
+
+    class DeletingStore(FakeStore):
+        def __init__(self):
+            super().__init__()
+            self.deleted = []
+
+        def delete(self, provider_id, account):
+            self.deleted.append((provider_id, account))
+
+    store = DeletingStore()
+    message = handle_provider_usage_action(
+        "devin", "Reconnect Devin", credential_store=store,
+        clipboard_reader=lambda: "", url_opener=opened.append,
+    )
+    assert store.deleted == [("devin", "token")]
+    assert opened and "devin" in opened[0]
+    assert "cleared" in message and "Import Devin" in message

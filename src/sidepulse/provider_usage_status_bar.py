@@ -30,7 +30,11 @@ from .settings_category_runtime import (
     show_category,
 )
 from .status_feeds import incident_row_title, shared_status_feed_poller
-from .usage_event_hooks import detect_usage_hook_events, run_usage_hooks
+from .usage_event_hooks import (
+    detect_usage_hook_events,
+    hook_path_message,
+    run_usage_hooks,
+)
 from .usage_percent_history import record_state_observations
 
 _legacy = getattr(_host, "_legacy", _host)
@@ -467,9 +471,7 @@ else:
             )
             _legacy.save_settings(self.settings)
             self.set_settings_message(
-                "Usage event hook off."
-                if not self.settings.usage_event_hook_path
-                else "Usage event hook saved."
+                hook_path_message(self.settings.usage_event_hook_path)
             )
 
         @_legacy.objc.IBAction

@@ -1751,6 +1751,21 @@ def _build_power_pane(target: StatusBarController):
             ),
         )
     )
+    battery_hold_row, battery_hold_switch = native_ui.make_switch_row(
+        "Hold awake on battery too",
+        target,
+        "toggleKeepAwakeOnBattery:",
+        help_text=(
+            "On (the default), agents keep the Mac awake even unplugged — "
+            "but never once the battery crosses the low-battery line "
+            "below; a dying Mac always gets to sleep. Off, the hold "
+            "applies only on power."
+        ),
+    )
+    battery_hold_switch.setState_(
+        1 if getattr(target.settings, "keep_awake_on_battery", True) else 0
+    )
+    awake_inner.addArrangedSubview_(battery_hold_row)
     stack.addArrangedSubview_(awake_outer)
 
     battery_outer, battery_inner = native_ui.make_card("Battery")
@@ -1832,6 +1847,14 @@ ESCALATION_TIER_LABELS: tuple[tuple[str, str], ...] = (
     ("Ramp + flash + one chime", "chime"),
     ("Full takeover", "takeover"),
 )
+
+
+def _reduce_motion_active(target) -> bool:
+    """The live pipeline pins to STATIC under Reduce Motion; preview
+    thumbs and hover try-outs must not be the one place that still
+    animates (adversarial review, story G)."""
+    preferences = getattr(target, "_accessibility_display_preferences", None)
+    return bool(getattr(preferences, "reduce_motion", False))
 
 
 def _mini_led_view(width: float, height: float):
@@ -3884,13 +3907,16 @@ class SidePulseStudioActions(NSObject):
         )
 
     @objc.python_method
+    def _hover_previews_allowed(self) -> bool:
+        return not _reduce_motion_active(self.controller)
+
     def hover_provider_animation(self, view) -> None:
         """Hovering a provider's rhythm thumb plays that rhythm, in that
         provider's colour, alone on the Screen Bar — the same bargain
         hovering a colour makes. Without this the pane's own body copy
         ("hover any color or animation") was simply untrue."""
         provider = (getattr(view, "hover_payload", None) or {}).get("provider")
-        if not provider:
+        if not provider or not self._hover_previews_allowed():
             return
         colors = self.controller.settings.colors
         row = colors_module.provider_color_row(provider, colors)
@@ -4289,7 +4315,10 @@ def _build_provider_animation_row(row, target, actions, hex_labels):
     controls.addArrangedSubview_(popup)
 
     thumb = _mini_led_view(*SIGNAL_THUMB_SIZE)
-    thumb.setProgram_(_provider_animation_thumb_program(target, row))
+    if _reduce_motion_active(target):
+        thumb.setProgram_(row.current_hex)
+    else:
+        thumb.setProgram_(_provider_animation_thumb_program(target, row))
     thumb.setToolTip_(row.animation_description)
     actions.animation_thumbs[row.provider] = thumb
     # Hovering the rhythm plays it on the Screen Bar, exactly as hovering a
@@ -4690,7 +4719,18 @@ def _build_studio_animations_section(target, actions, hex_labels):
     speed_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
     speed_controls.addArrangedSubview_(speed_field)
     speed_controls.addArrangedSubview_(native_ui.make_label("sec/breath", secondary=True))
-    behavior_inner.addArrangedSubview_(native_ui.make_row("Global Speed", speed_controls))
+    behavior_inner.addArrangedSubview_(
+        native_ui.make_row(
+            "Global Speed",
+            speed_controls,
+            help_text=(
+                "0.3–10 seconds per cycle. Below half a second the hard "
+                "shapes soften for flash safety: Beat and Heartbeat "
+                "breathe, Blink holds steady, travelling shapes become "
+                "the wave — the dial is honest, the motion is safe."
+            ),
+        )
+    )
 
     round_robin_use_global = native_ui.make_checkbox(
         "Round-Robin: use global", target, "toggleRoundRobinUseGlobalSpeed:"

@@ -68,6 +68,13 @@ class TodayFeed:
         return current
 
     def _refresh(self, settings) -> None:
+        try:
+            self._refresh_inner(settings)
+        finally:
+            with self._lock:
+                self._refreshing = False
+
+    def _refresh_inner(self, settings) -> None:
         fresh = TodaySnapshot(fetched_at=time.monotonic())
         if getattr(settings, "calendar_alerts_enabled", False):
             fresh.enabled_count += 1
@@ -80,7 +87,6 @@ class TodayFeed:
             fresh.weather_lines = self._weather_lines(settings)
         with self._lock:
             self._snapshot = fresh
-            self._refreshing = False
 
     def _calendar_line(self) -> str | None:
         try:
@@ -112,9 +118,12 @@ class TodayFeed:
             from . import reminders_watch
 
             reminders_watch.fetch_due(REMINDER_LOOKBACK_SECONDS, _completion)
-            done.wait(timeout=10.0)
+            answered = done.wait(timeout=10.0)
         except Exception:
             return ("Reminders unavailable — check access in System Settings",)
+        if not answered:
+            # A hung EventKit query must never masquerade as an empty list.
+            return ("Reminders didn't answer — will retry",)
         if not collected:
             return ("Nothing due",)
         return tuple(collected)
@@ -191,7 +200,11 @@ def today_menu_title(snapshot: TodaySnapshot) -> str:
     alerts = sum(1 for line in snapshot.weather_lines if line.startswith("⚠"))
     if alerts:
         return f"Today · ⚠ {alerts} weather alert{'s' if alerts != 1 else ''}"
-    if snapshot.calendar_line and "No events" not in snapshot.calendar_line:
+    if (
+        snapshot.calendar_line
+        and "No events" not in snapshot.calendar_line
+        and "unavailable" not in snapshot.calendar_line
+    ):
         return f"Today · {snapshot.calendar_line}"
     return "Today"
 
@@ -224,10 +237,14 @@ def build_today_menu_item(target):
     if not enabled:
         setup = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Show calendar, reminders and weather here — Settings → Today…",
-            "openSetup:",
+            "openTipPane:",
             "",
         )
         setup.setTarget_(target)
+        # Deep-link straight to the Today pane -- openSetup: opened the
+        # first-run wizard, which has no calendar/weather content at all
+        # (adversarial review, story G).
+        setup.setRepresentedObject_({"pane": "extras"})
         submenu.addItem_(setup)
     else:
         rows = project_today_rows(snapshot)

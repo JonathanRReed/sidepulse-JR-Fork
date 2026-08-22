@@ -1123,8 +1123,7 @@ class LiveAgentMonitor:
         )
         if source is None:
             return
-        # Only bytes appended since this source's last reconcile -- the
-        # bounded-tail re-read pegged a core (see reconcile_cursors).
+        # Only newly appended bytes (see reconcile_cursors).
         from .reconcile_cursors import take_new_lines
 
         lines = take_new_lines(
@@ -2858,7 +2857,12 @@ def status_for_snapshot(
     *,
     post_tool_working_visible_seconds: float,
 ) -> AgentStatus:
-    working_shaped = status.mode in (AgentMode.WORKING, AgentMode.TOOL_RUNNING)
+    # LONG_TASK_PROGRESS included: else a hang there burned 1h awake.
+    working_shaped = status.mode in (
+        AgentMode.WORKING,
+        AgentMode.TOOL_RUNNING,
+        AgentMode.LONG_TASK_PROGRESS,
+    )
     if working_shaped and post_tool_working_visible_seconds >= 0:
         if status.event_name in ("PostToolUse", "PostToolUseFailure"):
             window = post_tool_working_visible_seconds

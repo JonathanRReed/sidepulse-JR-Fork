@@ -208,9 +208,16 @@ def collect_cursor(
     *,
     home: Path,
     observed_at: float,
+    credentials=None,
     http_json: Callable[..., object] = _default_http_json,
 ) -> ProviderUsageSnapshot:
     token = _read_cursor_token(_cursor_db_path(Path(home)))
+    if token is None and credentials is not None:
+        # The staged Import flow stores a pasted session here; without
+        # this read the import claimed success and changed nothing.
+        stored = _credential(credentials, "cursor", "token")
+        if stored.available and stored.secret:
+            token = stored.secret
     if token is None:
         return _failure(
             "cursor",

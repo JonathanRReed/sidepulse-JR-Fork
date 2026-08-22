@@ -86,6 +86,7 @@ def _default_collectors() -> dict[str, Collector]:
             preference,
             home=home,
             observed_at=observed,
+            credentials=credentials,
         ),
         "devin": lambda preference, home, observed, credentials: collect_devin(
             preference,
