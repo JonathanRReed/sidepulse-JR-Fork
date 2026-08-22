@@ -173,6 +173,8 @@ MOTION_STACK = "stack"
 MOTION_TWINKLE = "twinkle"
 MOTION_DRIFT = "drift"
 MOTION_CONVERGE = "converge"
+MOTION_AURORA = "aurora"
+MOTION_TIDE = "tide"
 PROVIDER_ANIMATION_CHOICES: tuple[str, ...] = (
     PROVIDER_ANIMATION_AUTO,
     MOTION_BREATHE,
@@ -185,6 +187,8 @@ PROVIDER_ANIMATION_CHOICES: tuple[str, ...] = (
     MOTION_TWINKLE,
     MOTION_DRIFT,
     MOTION_CONVERGE,
+    MOTION_AURORA,
+    MOTION_TIDE,
     MOTION_STEADY,
     MOTION_BLINK,
 )
@@ -200,6 +204,8 @@ PROVIDER_ANIMATION_LABELS: dict[str, str] = {
     MOTION_TWINKLE: "Twinkle",
     MOTION_DRIFT: "Drift",
     MOTION_CONVERGE: "Converge",
+    MOTION_AURORA: "Aurora",
+    MOTION_TIDE: "Tide",
     MOTION_STEADY: "Steady",
     MOTION_BLINK: "Blink",
 }
@@ -215,6 +221,8 @@ PROVIDER_ANIMATION_DESCRIPTIONS: dict[str, str] = {
     MOTION_TWINKLE: "A dim base with single LEDs briefly sparking, scattered.",
     MOTION_DRIFT: "Glacial detuned swells, like light on slow water.",
     MOTION_CONVERGE: "Two dots leave the ends and meet in the middle.",
+    MOTION_AURORA: "Rolling waves of light over a luminous base.",
+    MOTION_TIDE: "The bar rises to full, then the water pulls back.",
     MOTION_STEADY: "Holds its color. Never moves.",
     MOTION_BLINK: "Hard-edged on/off, no easing.",
 }
@@ -1633,11 +1641,11 @@ def _speed_safe_motion(motion: str, *, cycle_ms: int) -> str:
     """
     if cycle_ms >= MIN_FLASH_CYCLE_MS:
         return motion
-    if motion in (MOTION_BEAT, MOTION_HEARTBEAT, MOTION_FLICKER, MOTION_TWINKLE, MOTION_DRIFT):
+    if motion in (MOTION_BEAT, MOTION_HEARTBEAT, MOTION_FLICKER, MOTION_TWINKLE, MOTION_DRIFT, MOTION_AURORA):
         return MOTION_BREATHE
     if motion == MOTION_BLINK:
         return MOTION_STEADY
-    if motion in (MOTION_SCANNER, MOTION_COMET, MOTION_STACK, MOTION_CONVERGE):
+    if motion in (MOTION_SCANNER, MOTION_COMET, MOTION_STACK, MOTION_CONVERGE, MOTION_TIDE):
         return MOTION_CHASE
     return motion
 
@@ -1808,19 +1816,19 @@ def _motion_segments(
             floor_segment,
             f"{led_index}:{peak} {spark_ms}ms pulse {delay_ms + offset}ms",
         )
-    if motion in (MOTION_FLICKER, MOTION_DRIFT):
+    if motion in (MOTION_FLICKER, MOTION_DRIFT, MOTION_AURORA):
         # Frozen per-LED detune: each LED swells on its own duration and
         # offset inside the shared cycle, so the strip shimmers instead
         # of breathing in lockstep. Deterministic -- same program bytes
         # every render, so the write dedupe still holds.
-        stretch = 2 if motion == MOTION_DRIFT else 1
+        stretch = 2 if motion in (MOTION_DRIFT, MOTION_AURORA) else 1
         duration = max(1, stretch * ((2 * cycle_ms) // 3) + (led_index * 137) % 331)
         offset = (led_index * 271) % max(1, cycle_ms // 3)
         return (
             floor_segment,
             f"{led_index}:{peak} {duration}ms pulse {delay_ms + offset}ms",
         )
-    if motion in (MOTION_CHASE, MOTION_SCANNER, MOTION_COMET, MOTION_STACK, MOTION_CONVERGE):
+    if motion in (MOTION_CHASE, MOTION_SCANNER, MOTION_COMET, MOTION_STACK, MOTION_CONVERGE, MOTION_TIDE):
         # In a MULTI-agent layout a provider owns interleaved LEDs, so a
         # positional sweep has no line to travel -- scanner and comet
         # degrade to the travelling wave here and keep their real shapes

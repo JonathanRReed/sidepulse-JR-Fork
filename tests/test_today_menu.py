@@ -41,12 +41,13 @@ def test_rows_read_in_order_and_flag_alerts() -> None:
         weather_lines=("No active weather alerts",),
     )
     rows = project_today_rows(snapshot)
-    assert rows[0] == ("Next event · Standup · in 12m", False)
+    assert rows[0] == ("Next event · Standup · in 12m", False, "calendar")
     assert rows[1][0].startswith("Reminders · Pay rent")
-    assert rows[-1] == ("No active weather alerts", False)
-    assert not any(alert for _text, alert in rows)
+    assert rows[1][2] == "reminders"
+    assert rows[-1] == ("No active weather alerts", False, "weather")
+    assert not any(alert for _text, alert, _kind in rows)
 
     alerting = project_today_rows(
         TodaySnapshot(weather_lines=("⚠ Flood Watch",))
     )
-    assert alerting == (("⚠ Flood Watch", True),)
+    assert alerting == (("⚠ Flood Watch", True, "weather"),)

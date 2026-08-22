@@ -264,6 +264,8 @@ def test_every_offered_animation_has_a_label_and_a_description() -> None:
         colors_module.MOTION_TWINKLE,
         colors_module.MOTION_DRIFT,
         colors_module.MOTION_CONVERGE,
+        colors_module.MOTION_AURORA,
+        colors_module.MOTION_TIDE,
         MOTION_STEADY,
         MOTION_BLINK,
     }

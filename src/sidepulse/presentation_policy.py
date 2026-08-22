@@ -313,6 +313,8 @@ def compose_presentation_program(
         "twinkle",
         "drift",
         "converge",
+        "aurora",
+        "tide",
     ):
         if motion_style == "steady":
             return _static_program(resolved, dsl=fallback)
@@ -425,6 +427,33 @@ def compose_presentation_program(
             cycle_seconds = 0.16 + (
                 (led_count // 2 - 1) * step_ms + width_ms + 500
             ) / 1000.0
+        elif motion_style == "aurora":
+            # Rolling waves over a LUMINOUS base: like drift, but resting
+            # on a visible quarter-bright bed instead of near-dark, with
+            # wider detune -- light moving on water at night.
+            bed_color = _scaled_color(normalized_color, 0.22)
+            segments = [
+                f"{index}:{peak_color} "
+                f"{2400 + index * 220}ms pulse {(index * 617) % 1600}ms"
+                for index in range(led_count)
+            ]
+            lines = (
+                f"{bed_color} 160ms cosine",
+                "; ".join(segments),
+                "repeat",
+            )
+            cycle_seconds = 0.16 + (2400 + (led_count - 1) * 220 + 1599) / 1000.0
+        elif motion_style == "tide":
+            # The bar rises to full and the water pulls back: LED 0 rises
+            # first and falls last, LED 7 crests briefly at the top.
+            step_ms = 200
+            segments = [
+                f"{index}:{peak_color} "
+                f"{2 * (led_count - index) * step_ms}ms pulse {index * step_ms}ms"
+                for index in range(led_count)
+            ]
+            lines = (settle_text, "; ".join(segments), "repeat")
+            cycle_seconds = 0.16 + (2 * led_count * step_ms) / 1000.0
         else:
             # Flicker: frozen per-LED detune -- deterministic shimmer.
             base_ms = 1800

@@ -149,17 +149,42 @@ def shared_today_feed() -> TodayFeed:
         return _shared_feed
 
 
-def project_today_rows(snapshot: TodaySnapshot) -> tuple[tuple[str, bool], ...]:
-    """(text, is_alert) rows for the submenu, in reading order."""
-    rows: list[tuple[str, bool]] = []
+def project_today_rows(
+    snapshot: TodaySnapshot,
+) -> tuple[tuple[str, bool, str], ...]:
+    """(text, is_alert, kind) rows for the submenu, in reading order.
+
+    ``kind`` names the app a click opens: calendar, reminders, weather.
+    """
+    rows: list[tuple[str, bool, str]] = []
     if snapshot.calendar_line is not None:
-        rows.append((f"Next event · {snapshot.calendar_line}", False))
+        rows.append((f"Next event · {snapshot.calendar_line}", False, "calendar"))
     for line in snapshot.reminder_lines:
         prefix = "Reminders · " if line == snapshot.reminder_lines[0] else "     "
-        rows.append((f"{prefix}{line}", False))
+        rows.append((f"{prefix}{line}", False, "reminders"))
     for line in snapshot.weather_lines:
-        rows.append((line, line.startswith("⚠")))
+        rows.append((line, line.startswith("⚠"), "weather"))
     return tuple(rows)
+
+
+def open_today_target(kind: str) -> None:
+    """One click, the right app: the row is a doorway, not a dead label."""
+    try:
+        from AppKit import NSURL, NSWorkspace
+
+        workspace = NSWorkspace.sharedWorkspace()
+        if kind == "calendar":
+            workspace.openURL_(NSURL.URLWithString_("calshow://"))
+        elif kind == "reminders":
+            workspace.openURL_(
+                NSURL.URLWithString_("x-apple-reminderkit://")
+            ) or workspace.launchApplication_("Reminders")
+        elif kind == "weather":
+            workspace.openURL_(
+                NSURL.URLWithString_("https://alerts.weather.gov")
+            )
+    except Exception:
+        pass
 
 
 def today_menu_title(snapshot: TodaySnapshot) -> str:
@@ -212,11 +237,12 @@ def build_today_menu_item(target):
             )
             placeholder.setEnabled_(False)
             submenu.addItem_(placeholder)
-        for text, _is_alert in rows:
+        for text, _is_alert, kind in rows:
             row_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                text, None, ""
+                text, "openTodayTarget:", ""
             )
-            row_item.setEnabled_(False)
+            row_item.setTarget_(target)
+            row_item.setRepresentedObject_(kind)
             submenu.addItem_(row_item)
     item.setSubmenu_(submenu)
     return item
@@ -226,6 +252,7 @@ __all__ = [
     "TodayFeed",
     "TodaySnapshot",
     "build_today_menu_item",
+    "open_today_target",
     "project_today_rows",
     "shared_today_feed",
     "today_menu_title",

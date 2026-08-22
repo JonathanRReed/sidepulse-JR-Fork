@@ -447,6 +447,12 @@ else:
                 return
 
         @_legacy.objc.IBAction
+        def openTodayTarget_(self, sender) -> None:
+            from .today_menu import open_today_target
+
+            open_today_target(str(sender.representedObject() or ""))
+
+        @_legacy.objc.IBAction
         def openProviderStatusPage_(self, sender) -> None:
             url = str(sender.representedObject() or "")
             if url.startswith("https://"):
