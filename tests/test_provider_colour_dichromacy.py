@@ -47,11 +47,10 @@ KNOWN_COLLAPSES: frozenset[tuple[str, str]] = frozenset(
     {
         ("codex", "Working"),
         # 2026-08-20: openclaw's two collapses were FIXED -- it moved
-        # off the fallback #FF2D55 onto a deliberate deep rust (worst
-        # -case dE 40.2). The claude/devin mutual pair remains, recorded
-        # as a real defect awaiting an owner call on brand fidelity.
-        ("claude", "brand:devin"),
-        ("devin", "brand:claude"),
+        # off the fallback #FF2D55 onto a deliberate deep rust.
+        # 2026-08-22: the claude/devin mutual pair was FIXED as a side
+        # effect of lifting devin's unlit navy to #3C5480 (see the
+        # identity luminance floor); the pair now clears dE 14.9.
     }
 )
 

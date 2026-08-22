@@ -286,6 +286,25 @@ def luminance_matched_hex(hex_color: str, target_luminance: float) -> str:
     )
 
 
+# The dimmest an agent's IDENTITY color may render on the strip. Below this
+# a color is functionally unlit through the transfer's fade ceiling (devin's
+# former navy sat at 0.036 and read as "not interacting with the light bulbs
+# at all"), so a custom near-black identity would silently disable the very
+# feature it configures. 0.08 lifts those into visibility while leaving
+# every shipped brand and palette color untouched.
+IDENTITY_LUMINANCE_FLOOR = 0.08
+
+
+def readable_identity_hex(hex_color: str) -> str:
+    """An identity color the strip can actually show: hue and saturation
+    kept, luminance lifted to IDENTITY_LUMINANCE_FLOOR when it's darker
+    than that. Bright colors pass through byte-for-byte. Render-time only
+    -- the stored setting and its swatch keep the user's literal pick."""
+    if relative_luminance(hex_color) >= IDENTITY_LUMINANCE_FLOOR:
+        return normalize_hex(hex_color, "#000000")
+    return luminance_matched_hex(hex_color, IDENTITY_LUMINANCE_FLOOR)
+
+
 # --- Curated palette ---------------------------------------------------
 
 # Apple's own system semantic colors (systemRed/Orange/Yellow/Green/Blue/
@@ -520,7 +539,17 @@ def weighted_blend(entries: list[tuple[str, float]]) -> str:
 #     especially through the fade ceiling. These two are brightened to the
 #     same *character* (deep navy, neutral grey) rather than the literal
 #     hex, so they're still recognizable as "Devin" / "Grok" and not just
-#     unlit.
+#     unlit. Devin's first brightening (#1D3461) landed at luminance 0.036
+#     -- one eighth of claude/codex/grok (0.27-0.29) -- and drove a peak
+#     strip byte of 30/255: confirmed live as "Devin isn't interacting
+#     with the light bulbs at all" while it was in fact on the strip.
+#     Now #3C5480: same OKLCH hue (262), 2.5x the light (Y 0.089, peak
+#     drive 55). Y 0.089 is the CEILING for a saturated navy -- every
+#     brighter candidate in the hue band falls under dE 13 from grok's
+#     gray or codex's azure for a dichromat (grid-searched with the
+#     test_provider_colour_dichromacy metric), and adding a new collapse
+#     to that ratchet is not on the table. This lift also FIXED the
+#     recorded claude<->devin dichromat collapse (now dE >= 14.9).
 # Devin's navy and Codex's blue share a hue family on purpose (both are
 # genuinely "blue" brands) -- they're kept apart mainly by lightness/
 # saturation (bright azure vs. dark navy) rather than hue, which is a
@@ -529,7 +558,7 @@ def weighted_blend(entries: list[tuple[str, float]]) -> str:
 PROVIDER_BRAND_COLORS: dict[str, str] = {
     "codex": "#2B8FFF",
     "claude": "#D97757",
-    "devin": "#1D3461",
+    "devin": "#3C5480",
     "grok": "#8E8E93",
     # Not Antigravity's real brand colour, and deliberately so. Its icon's
     # dominant blue (~#3D8AFF) is 4.5 degrees from codex's #2B8FFF -- two
@@ -548,9 +577,15 @@ PROVIDER_BRAND_COLORS: dict[str, str] = {
     # hue does not. See test_provider_colour_dichromacy.py.
     "antigravity": "#ABE17E",
     # Kiro brand purple collapses onto Codex blue under deuteranopia, and
-    # warm tones crowd Hermes orange in hue. This mulberry clears every
-    # provider and state seed by dE >= 22 and every hue gap by > 20 deg.
-    "kiro": "#4B1E3C",
+    # warm tones crowd Hermes orange in hue. The first mulberry (#4B1E3C)
+    # cleared every dE gap but sat at luminance 0.0275 -- dimmer than the
+    # navy that was confirmed live as an unlit LED. Lifting it in place
+    # (#96437B) collapsed onto devin's own lifted navy for a deuteranope
+    # (dE 2.4 -- purple and blue are the same light without an M cone
+    # once they share lightness), so the hue walks to this deep raspberry
+    # instead: Y 0.081, worst-case dE 17.8 vs claude, grid-searched
+    # against the FINAL table including the other two lifts.
+    "kiro": "#A00848",
     # 2026-08-20: every registered provider now has a DELIBERATE entry --
     # the positional fallback is a mechanism, not a palette. cursor,
     # hermes, and opencode keep the exact colours the fallback had been
@@ -562,8 +597,10 @@ PROVIDER_BRAND_COLORS: dict[str, str] = {
     # openclaw's fallback #FF2D55 was a KNOWN_COLLAPSES defect (dE 4.9
     # from devin, 10.5 from claude for a dichromat). This deep rust --
     # a claw, as it happens -- was grid-searched under all three vision
-    # models against every provider and state seed: worst-case dE 40.2.
-    "openclaw": "#601800",
+    # models against every provider and state seed. The first pick
+    # (#601800, dE 40.2) was another unlit LED (luminance 0.031); this is
+    # the same rust luminance-matched to 0.12 (worst-case dE 24.0).
+    "openclaw": "#B23400",
 }
 
 
@@ -1583,7 +1620,7 @@ def _active_agents(statuses: tuple[AgentStatus, ...], colors: ColorSettings) -> 
         agents.append(
             _ActiveAgent(
                 provider=status.provider,
-                color=color,
+                color=readable_identity_hex(color),
                 state=display_state_for_mode(status.mode),
                 weight=urgency_weight(status.mode),
             )
@@ -2366,7 +2403,7 @@ def program_for_projection(
     agents = [
         _ActiveAgent(
             provider=row.provider,
-            color=(
+            color=readable_identity_hex(
                 settings.session_color(row.agent_id)
                 or identity.get(row.agent_id)
                 or settings.agent_color(row.provider)

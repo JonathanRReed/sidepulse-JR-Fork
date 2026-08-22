@@ -65,6 +65,19 @@ def _open_url(url: str) -> None:
         pass
 
 
+def _signed_out_hint(title: str, url: str) -> str:
+    """The token page opens in the DEFAULT browser, which is not
+    necessarily where the user is signed in to the provider (reported
+    live: page opened in Zen, Devin lives in Chrome, flow dead-ended at
+    a login wall). Name the literal address so it can be pasted into
+    whichever browser actually holds the session."""
+    bare = url.removeprefix("https://").removeprefix("http://")
+    return (
+        f" If that page isn't signed in, open {bare} in the browser "
+        f"you normally use for {title}."
+    )
+
+
 def handle_provider_usage_action(
     provider_id: str,
     action_label: str,
@@ -107,6 +120,7 @@ def handle_provider_usage_action(
             + (" (page opened)" if url is not None else "")
             + f", then click 'Import {title} browser session' again — "
             "SidePulse reads it from the clipboard only when you click."
+            + (_signed_out_hint(title, url) if url is not None else "")
         )
     if label == f"Reconnect {title}" and provider_id in PROVIDER_TOKEN_PAGES:
         # A wrong-but-plausible token wedged here forever: the label
@@ -124,6 +138,7 @@ def handle_provider_usage_action(
             f"The stored {title} session was rejected and has been "
             f"cleared. Copy a fresh API key (page opened), then click "
             f"'Import {title} browser session'."
+            + (_signed_out_hint(title, url) if url is not None else "")
         )
     if label in ("Run grok login", "Reconnect Grok"):
         # Grok's sign-in belongs to the grok CLI; SidePulse reads the

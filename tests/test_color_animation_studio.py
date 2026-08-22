@@ -152,18 +152,18 @@ def test_a_hand_picked_colour_stays_a_named_selected_swatch() -> None:
 
 
 def test_a_providers_own_shipped_colour_is_named_default_not_repeated() -> None:
-    """Devin ships #1D3461, which is in neither named set. It leads the row
+    """Devin ships #3C5480, which is in neither named set. It leads the row
     as "Default" -- and must not ALSO show up as an unnamed custom chip."""
     row = provider_color_row("devin", ColorSettings.defaults())
     brand = row.group(SWATCH_GROUP_BRAND)
     assert brand.swatches[0].name == "Default"
-    assert brand.swatches[0].hex == "#1D3461"
+    assert brand.swatches[0].hex == "#3C5480"
     assert brand.swatches[0].selected
     assert row.current_name == "Default"
     picker = row.group(SWATCH_GROUP_CUSTOM).swatches[0]
     assert picker.name == "Pick…"
     # The picker is a BUTTON here, not a second copy of the row's colour --
-    # otherwise #1D3461 appears twice on one row and reads as a duplicate.
+    # otherwise #3C5480 appears twice on one row and reads as a duplicate.
     assert picker.is_control
     assert not picker.selected
 

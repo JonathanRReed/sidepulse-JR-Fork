@@ -236,6 +236,13 @@ def compose_presentation_program(
             motion_style = chosen
 
     normalized_color = normalize_hex(color, ASK_AMBER)
+    if resolved.semantic is GlanceSemantic.ACTIVE:
+        # ACTIVE is the one semantic painted in an agent's IDENTITY color
+        # (color_for_resolved_glance) -- floor it so a dark brand or custom
+        # pick stays a lit LED. REST keeps its deliberate idle dim.
+        from .colors import readable_identity_hex
+
+        normalized_color = readable_identity_hex(normalized_color)
     intensities = _glyph_intensities(
         resolved.semantic,
         led_count=led_count,

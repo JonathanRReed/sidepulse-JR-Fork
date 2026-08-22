@@ -10722,12 +10722,12 @@ class IdentityColorTests(unittest.TestCase):
             _status("claude", AgentMode.WORKING),
         )
         agent_id = two[0].agent_id
-        settings = ColorSettings.defaults().with_session_color(agent_id, "112233")
+        settings = ColorSettings.defaults().with_session_color(agent_id, "7788AA")
         crowd = _active_agents(two, settings)
         colors = [agent.color for agent in crowd]
-        self.assertIn("#112233", colors)
+        self.assertIn("#7788AA", colors)
         reloaded = ColorSettings.from_dict(settings.to_dict())
-        self.assertEqual(reloaded.session_color(agent_id), "#112233")
+        self.assertEqual(reloaded.session_color(agent_id), "#7788AA")
         cleared = reloaded.with_session_color(agent_id, None)
         self.assertIsNone(cleared.session_color(agent_id))
 
@@ -15521,7 +15521,7 @@ class FailureSignalProjectionContractTests(unittest.TestCase):
             for led_count in (2, 8):
                 settings = (
                     self.controller.settings.colors.with_blend_mode(mode)
-                    .with_session_color(failed.agent_id, "#123456")
+                    .with_session_color(failed.agent_id, "#33AACC")
                 )
                 state, program = colors_module.program_for_projection(
                     projection,
@@ -15543,7 +15543,7 @@ class FailureSignalProjectionContractTests(unittest.TestCase):
                         segment
                         for line in program.splitlines()
                         for segment in line.split("; ")
-                        if "#123456" in segment
+                        if "#33AACC" in segment
                     ]
                     self.assertTrue(failure_segments, label)
                     self.assertTrue(

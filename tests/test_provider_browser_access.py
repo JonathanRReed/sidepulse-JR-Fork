@@ -42,6 +42,12 @@ def test_import_without_token_opens_the_page_and_explains() -> None:
     assert store.saved == {}
     assert opened and opened[0].startswith("https://app.devin.ai")
     assert "clipboard" in message and "click" in message
+    # The page opens in the DEFAULT browser, which may not hold the Devin
+    # session (reported live: opened in Zen, signed in only in Chrome).
+    # The message must name the literal address so it can be pasted into
+    # the browser that does.
+    assert "app.devin.ai/settings/api-keys" in message
+    assert "browser you normally use" in message
 
 
 def test_unrelated_actions_fall_through() -> None:
