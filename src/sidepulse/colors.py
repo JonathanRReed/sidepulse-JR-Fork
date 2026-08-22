@@ -169,6 +169,10 @@ MOTION_HEARTBEAT = "heartbeat"
 MOTION_SCANNER = "scanner"
 MOTION_COMET = "comet"
 MOTION_FLICKER = "flicker"
+MOTION_STACK = "stack"
+MOTION_TWINKLE = "twinkle"
+MOTION_DRIFT = "drift"
+MOTION_CONVERGE = "converge"
 PROVIDER_ANIMATION_CHOICES: tuple[str, ...] = (
     PROVIDER_ANIMATION_AUTO,
     MOTION_BREATHE,
@@ -177,6 +181,10 @@ PROVIDER_ANIMATION_CHOICES: tuple[str, ...] = (
     MOTION_SCANNER,
     MOTION_COMET,
     MOTION_FLICKER,
+    MOTION_STACK,
+    MOTION_TWINKLE,
+    MOTION_DRIFT,
+    MOTION_CONVERGE,
     MOTION_STEADY,
     MOTION_BLINK,
 )
@@ -188,6 +196,10 @@ PROVIDER_ANIMATION_LABELS: dict[str, str] = {
     MOTION_SCANNER: "Scanner",
     MOTION_COMET: "Comet",
     MOTION_FLICKER: "Flicker",
+    MOTION_STACK: "Stack",
+    MOTION_TWINKLE: "Twinkle",
+    MOTION_DRIFT: "Drift",
+    MOTION_CONVERGE: "Converge",
     MOTION_STEADY: "Steady",
     MOTION_BLINK: "Blink",
 }
@@ -199,6 +211,10 @@ PROVIDER_ANIMATION_DESCRIPTIONS: dict[str, str] = {
     MOTION_SCANNER: "A bright dot sweeps end to end and bounces back.",
     MOTION_COMET: "A bright head sweeps one way, trailing off behind.",
     MOTION_FLICKER: "A warm candle-like shimmer that never quite repeats.",
+    MOTION_STACK: "LEDs pile on one by one until full, then it all lets go.",
+    MOTION_TWINKLE: "A dim base with single LEDs briefly sparking, scattered.",
+    MOTION_DRIFT: "Glacial detuned swells, like light on slow water.",
+    MOTION_CONVERGE: "Two dots leave the ends and meet in the middle.",
     MOTION_STEADY: "Holds its color. Never moves.",
     MOTION_BLINK: "Hard-edged on/off, no easing.",
 }
@@ -1617,11 +1633,11 @@ def _speed_safe_motion(motion: str, *, cycle_ms: int) -> str:
     """
     if cycle_ms >= MIN_FLASH_CYCLE_MS:
         return motion
-    if motion in (MOTION_BEAT, MOTION_HEARTBEAT, MOTION_FLICKER):
+    if motion in (MOTION_BEAT, MOTION_HEARTBEAT, MOTION_FLICKER, MOTION_TWINKLE, MOTION_DRIFT):
         return MOTION_BREATHE
     if motion == MOTION_BLINK:
         return MOTION_STEADY
-    if motion in (MOTION_SCANNER, MOTION_COMET):
+    if motion in (MOTION_SCANNER, MOTION_COMET, MOTION_STACK, MOTION_CONVERGE):
         return MOTION_CHASE
     return motion
 
@@ -1784,18 +1800,27 @@ def _motion_segments(
             f"{led_index}:{peak} {beat_ms}ms pulse{tail}; "
             f"{led_index}:{peak} {beat_ms}ms pulse {delay_ms + beat_ms + gap_ms}ms"
         )
-    if motion == MOTION_FLICKER:
+    if motion == MOTION_TWINKLE:
+        # One brief spark per cycle at a frozen scattered offset.
+        spark_ms = max(1, cycle_ms // 5)
+        offset = (led_index * 613) % max(1, cycle_ms - spark_ms)
+        return (
+            floor_segment,
+            f"{led_index}:{peak} {spark_ms}ms pulse {delay_ms + offset}ms",
+        )
+    if motion in (MOTION_FLICKER, MOTION_DRIFT):
         # Frozen per-LED detune: each LED swells on its own duration and
         # offset inside the shared cycle, so the strip shimmers instead
         # of breathing in lockstep. Deterministic -- same program bytes
         # every render, so the write dedupe still holds.
-        duration = max(1, (2 * cycle_ms) // 3 + (led_index * 137) % 331)
+        stretch = 2 if motion == MOTION_DRIFT else 1
+        duration = max(1, stretch * ((2 * cycle_ms) // 3) + (led_index * 137) % 331)
         offset = (led_index * 271) % max(1, cycle_ms // 3)
         return (
             floor_segment,
             f"{led_index}:{peak} {duration}ms pulse {delay_ms + offset}ms",
         )
-    if motion in (MOTION_CHASE, MOTION_SCANNER, MOTION_COMET):
+    if motion in (MOTION_CHASE, MOTION_SCANNER, MOTION_COMET, MOTION_STACK, MOTION_CONVERGE):
         # In a MULTI-agent layout a provider owns interleaved LEDs, so a
         # positional sweep has no line to travel -- scanner and comet
         # degrade to the travelling wave here and keep their real shapes

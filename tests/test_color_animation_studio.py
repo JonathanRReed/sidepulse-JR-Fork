@@ -260,6 +260,10 @@ def test_every_offered_animation_has_a_label_and_a_description() -> None:
         colors_module.MOTION_SCANNER,
         colors_module.MOTION_COMET,
         colors_module.MOTION_FLICKER,
+        colors_module.MOTION_STACK,
+        colors_module.MOTION_TWINKLE,
+        colors_module.MOTION_DRIFT,
+        colors_module.MOTION_CONVERGE,
         MOTION_STEADY,
         MOTION_BLINK,
     }

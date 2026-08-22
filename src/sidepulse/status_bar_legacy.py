@@ -16662,7 +16662,6 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     know what menu you clicked), and one row per secondary concern --
     the keep-awake policy is a submenu, not four inline rows."""
     menu = NSMenu.alloc().init()
-    # Flight-recorder section stopwatch.
     _marks: list[tuple[str, int]] = []
     _mark_t = time.monotonic()
 
@@ -16759,6 +16758,11 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
     _mark("ledger")
     menu.addItem_(NSMenuItem.separatorItem())
     menu.addItem_(build_usage_menu_item(target))
+    from .today_menu import build_today_menu_item
+
+    today_item = build_today_menu_item(target)
+    if today_item is not None:
+        menu.addItem_(today_item)
     _mark("usage")
     menu.addItem_(NSMenuItem.separatorItem())
     menu.addItem_(disabled_menu_item("Devices"))

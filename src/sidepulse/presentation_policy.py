@@ -309,6 +309,10 @@ def compose_presentation_program(
         "scanner",
         "comet",
         "flicker",
+        "stack",
+        "twinkle",
+        "drift",
+        "converge",
     ):
         if motion_style == "steady":
             return _static_program(resolved, dsl=fallback)
@@ -367,6 +371,60 @@ def compose_presentation_program(
                 "repeat",
             )
             cycle_seconds = 0.16 + ((led_count - 1) * step_ms + width_ms + 600) / 1000.0
+        elif motion_style == "stack":
+            # LEDs pile on hard, one by one, hold the full bar, then the
+            # whole strip eases away together -- "adding on top of each
+            # other until it disappears".
+            step_ms, hold_ms = 250, 600
+            segments = [
+                f"{index}:{peak_color} "
+                f"{(led_count - index) * step_ms + hold_ms}ms none {index * step_ms}ms"
+                for index in range(led_count)
+            ]
+            lines = (
+                settle_text,
+                "; ".join(segments),
+                f"{floor_color} 900ms cosine",
+                "repeat",
+            )
+            cycle_seconds = 0.16 + (led_count * step_ms + hold_ms + 900) / 1000.0
+        elif motion_style == "twinkle":
+            # Scattered single sparks over a dim base; frozen offsets.
+            offsets = (0, 1300, 2700, 700, 3400, 2100, 500, 1800)
+            segments = [
+                f"{index}:{peak_color} 450ms pulse "
+                f"{offsets[index % len(offsets)]}ms"
+                for index in range(led_count)
+            ]
+            lines = (settle_text, "; ".join(segments), "repeat")
+            cycle_seconds = 0.16 + (3400 + 450) / 1000.0
+        elif motion_style == "drift":
+            # Glacial detuned swells -- slow water. Periods per LED are
+            # slightly different so the interference never visibly loops.
+            segments = [
+                f"{index}:{peak_color} "
+                f"{2600 + index * 140}ms pulse {(index * 530) % 1300}ms"
+                for index in range(led_count)
+            ]
+            lines = (settle_text, "; ".join(segments), "repeat")
+            cycle_seconds = 0.16 + (2600 + (led_count - 1) * 140 + 1299) / 1000.0
+        elif motion_style == "converge":
+            # Two dots leave the ends and meet at the center pair.
+            step_ms, width_ms = 240, 420
+            segments = [
+                f"{index}:{peak_color} {width_ms}ms pulse "
+                f"{min(index, led_count - 1 - index) * step_ms}ms"
+                for index in range(led_count)
+            ]
+            lines = (
+                settle_text,
+                "; ".join(segments),
+                f"{floor_color} 500ms none",
+                "repeat",
+            )
+            cycle_seconds = 0.16 + (
+                (led_count // 2 - 1) * step_ms + width_ms + 500
+            ) / 1000.0
         else:
             # Flicker: frozen per-LED detune -- deterministic shimmer.
             base_ms = 1800

@@ -9,6 +9,7 @@ from pathlib import Path
 from . import settings_navigation as _settings_navigation
 from . import settings_window as _settings_window
 from . import status_bar as _host
+from .provider_browser_access import run_provider_usage_action
 from .provider_credential_store import ProviderCredentialStore
 from .provider_usage_event_store import (
     load_seen_reset_events,
@@ -817,6 +818,10 @@ else:
             if provider_id == "claude":
                 self._connect_claude_usage()
                 return
+            # Staged browser-access flow (enable -> import -> organization);
+            # a plain refresh remains the fallback for other actions.
+            if provider_id and run_provider_usage_action(self, provider_id):
+                return
             self._request_provider_usage(force=True)
 
         @_legacy.objc.IBAction
@@ -825,6 +830,8 @@ else:
             provider_id = payload.get("provider_id") if isinstance(payload, dict) else None
             if provider_id == "claude":
                 self._connect_claude_usage()
+                return
+            if provider_id and run_provider_usage_action(self, provider_id):
                 return
             self.openProviderUsageCenter_(sender)
 

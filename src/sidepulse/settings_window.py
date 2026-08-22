@@ -136,14 +136,16 @@ def usage_graph_legend_text(settings) -> str:
 
 
 def refresh_usage_graph_legend(target) -> None:
-    """Repaint the chart legend after a metric change, if it is on screen."""
+    """Repaint the legend AND rebuild the chart after a metric change."""
     legend = target.settings_fields.get("usage_graph_legend")
-    if legend is None:
-        return
-    try:
-        legend.setStringValue_(usage_graph_legend_text(target.settings))
-    except Exception:
-        pass
+    if legend is not None:
+        try:
+            legend.setStringValue_(usage_graph_legend_text(target.settings))
+        except Exception:
+            pass
+    from .usage_graph_worker import refresh_usage_graph
+
+    refresh_usage_graph(target)
 
 
 def _make_history_radio_group(
@@ -669,6 +671,11 @@ def _build_profile_pane(target: StatusBarController):
     today_inner.addArrangedSubview_(graph)
     graph.setModel_(getattr(target, "usage_graph_model", None) or {})
     fields["profile_usage_graph"] = graph
+    # Populate immediately from the local scan -- never wait for (or ride)
+    # the capacity acceptance protocol; see usage_graph_worker.
+    from .usage_graph_worker import refresh_usage_graph
+
+    refresh_usage_graph(target)
     range_popup = native_ui.make_popup_button(target, "setUsageGraphRange:")
     for range_label, range_days in (
         ("7 days", 7),
@@ -2881,7 +2888,12 @@ def _build_agents_pane(target: StatusBarController):
             "Pick a provider, choose how it moves. Automatic follows the "
             "state (breathe when idle, chase while working). Whatever you "
             "choose, an agent that needs you keeps its urgent beat — that "
-            "one is not up for negotiation.",
+            "one is not up for negotiation.\n\n"
+            "Alone, an agent plays its rhythm across the whole strip. With "
+            "SEVERAL running, the light divides by the “When several run at "
+            "once” choice under Behavior, and each agent's rhythm rides its "
+            "own share — travelling shapes (Scanner, Comet, Stack, Converge) "
+            "need the whole strip, so they simplify to a wave when sharing.",
             secondary=True,
             size=11.0,
             max_width=560.0,
@@ -4638,7 +4650,9 @@ def _build_studio_animations_section(target, actions, hex_labels):
         )
     )
     blend_popup = make_blend_mode_popup(target)
-    behavior_inner.addArrangedSubview_(native_ui.make_row("Blend Mode", blend_popup))
+    behavior_inner.addArrangedSubview_(
+        native_ui.make_row("When several run at once", blend_popup)
+    )
     blend_description = native_ui.make_label("", secondary=True, size=12.0)
     behavior_inner.addArrangedSubview_(blend_description)
     urgency_row, urgency_alert_checkbox = native_ui.make_switch_row(
@@ -4646,8 +4660,8 @@ def _build_studio_animations_section(target, actions, hex_labels):
         target,
         "toggleUrgencyAlert:",
         help_text=(
-            "In Round-Robin/Cycle, a blocked or waiting agent shows the Ask "
-            "color instead of its own, so it stands out."
+            "In Everyone or One at a Time, a blocked or waiting agent "
+            "shows the Ask color instead of its own, so it stands out."
         ),
     )
     behavior_inner.addArrangedSubview_(urgency_row)
