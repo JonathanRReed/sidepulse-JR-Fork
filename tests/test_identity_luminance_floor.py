@@ -46,9 +46,9 @@ def test_every_shipped_brand_default_clears_the_floor() -> None:
 
 
 def test_devin_default_is_the_lifted_navy_not_the_invisible_one() -> None:
-    assert default_agent_color("devin") == "#3C5480"
+    assert default_agent_color("devin") == "#5C84B0"
     # Character preserved: still clearly darker than the bright brands.
-    assert relative_luminance("#3C5480") < relative_luminance(
+    assert relative_luminance("#5C84B0") < relative_luminance(
         default_agent_color("codex")
     )
 

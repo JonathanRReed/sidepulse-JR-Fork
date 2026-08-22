@@ -540,16 +540,16 @@ def weighted_blend(entries: list[tuple[str, float]]) -> str:
 #     same *character* (deep navy, neutral grey) rather than the literal
 #     hex, so they're still recognizable as "Devin" / "Grok" and not just
 #     unlit. Devin's first brightening (#1D3461) landed at luminance 0.036
-#     -- one eighth of claude/codex/grok (0.27-0.29) -- and drove a peak
-#     strip byte of 30/255: confirmed live as "Devin isn't interacting
-#     with the light bulbs at all" while it was in fact on the strip.
-#     Now #3C5480: same OKLCH hue (262), 2.5x the light (Y 0.089, peak
-#     drive 55). Y 0.089 is the CEILING for a saturated navy -- every
-#     brighter candidate in the hue band falls under dE 13 from grok's
-#     gray or codex's azure for a dichromat (grid-searched with the
-#     test_provider_colour_dichromacy metric), and adding a new collapse
-#     to that ratchet is not on the table. This lift also FIXED the
-#     recorded claude<->devin dichromat collapse (now dE >= 14.9).
+#     -- one eighth of claude/codex (0.27-0.29) -- and drove a peak strip
+#     byte of 30/255: confirmed live as "Devin isn't interacting with the
+#     light bulbs at all" while it was in fact on the strip. A saturated
+#     navy capped out near Y 0.09 while grok held the mid-gray #8E8E93 --
+#     anything brighter fell under dE 13 from that gray for a dichromat
+#     -- so grok moved DARKER (see below) and devin now sits at #5C84B0:
+#     same hue family, Y 0.219, finally in the same loudness class as
+#     claude/codex. Grid-searched JOINTLY with grok's move under the
+#     test_provider_colour_dichromacy metric (worst-case dE 21.1). This
+#     also FIXED the recorded claude<->devin dichromat collapse.
 # Devin's navy and Codex's blue share a hue family on purpose (both are
 # genuinely "blue" brands) -- they're kept apart mainly by lightness/
 # saturation (bright azure vs. dark navy) rather than hue, which is a
@@ -558,8 +558,13 @@ def weighted_blend(entries: list[tuple[str, float]]) -> str:
 PROVIDER_BRAND_COLORS: dict[str, str] = {
     "codex": "#2B8FFF",
     "claude": "#D97757",
-    "devin": "#3C5480",
-    "grok": "#8E8E93",
+    "devin": "#5C84B0",
+    # Darker than the old systemGray stand-in, and closer to xAI's literal
+    # "Mine Shaft" #313131. Moved deliberately: the mid-gray sat exactly in
+    # the lightness band a visible saturated navy needs under dichromacy,
+    # capping devin at an unlit Y 0.09 forever. Worst-case dE 12.7; the
+    # identity luminance floor keeps this renderable (Y 0.126).
+    "grok": "#636366",
     # Not Antigravity's real brand colour, and deliberately so. Its icon's
     # dominant blue (~#3D8AFF) is 4.5 degrees from codex's #2B8FFF -- two
     # near-identical blues on a strip is the grok/opencode systemGray clash
@@ -1382,7 +1387,8 @@ def _brand_colors_repainted_by_a_palette(agent_colors: dict[str, str]) -> dict[s
 # provider's default changes, its old hex MUST be added here or every
 # existing install silently keeps the old colour forever.
 RETIRED_DEFAULT_AGENT_COLORS: dict[str, frozenset[str]] = {
-    "devin": frozenset({"#1D3461", "#395FAA"}),
+    "devin": frozenset({"#1D3461", "#395FAA", "#3C5480"}),
+    "grok": frozenset({"#8E8E93"}),
     "kiro": frozenset({"#4B1E3C", "#96437B"}),
     "openclaw": frozenset({"#601800", "#FF2D55"}),
     "cursor": frozenset({"#FF2D55"}),
