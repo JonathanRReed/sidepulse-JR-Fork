@@ -311,11 +311,17 @@ def collect_devin(
     organization_id = preference.option("organization_id")
     secret = token.secret if token.available else None
 
-    if secret is None and preference.browser_sources:
+    if preference.browser_sources:
         # "Enable browser access" is the consent, so honour it: lift the
         # session Devin already wrote in the user's own browser instead
-        # of demanding an API key. Devin rotates these tokens, so this
-        # re-reads rather than depending on one frozen import.
+        # of demanding an API key.
+        #
+        # The browser wins over a stored copy on purpose. Devin rotates
+        # these tokens, and a frozen import that outranks the live one
+        # buys a 401 -> "Reconnect Devin" -> re-import cycle every time
+        # it turns over: the card would appear to break by itself on a
+        # schedule. Reading the one origin costs a small local SQLite
+        # read, and it makes rotation invisible.
         session = _import_devin_browser_session()
         if session is not None:
             secret = session.token

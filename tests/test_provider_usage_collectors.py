@@ -298,3 +298,50 @@ def test_devin_without_browser_access_still_asks_for_consent_first():
     )
     assert result.state.value == "needs_consent"
     assert result.action_label == "Enable Devin browser access"
+
+
+def test_devin_prefers_the_live_browser_session_over_a_stale_stored_one(monkeypatch):
+    """Devin rotates its web token. If a frozen copy outranked the live
+    one, every rotation would show up as a card that broke by itself and
+    demanded a reconnect."""
+    import sidepulse.provider_usage_collectors as module
+    from sidepulse.browser_session_import import BrowserSession
+
+    monkeypatch.setattr(
+        module,
+        "_import_devin_browser_session",
+        lambda: BrowserSession(
+            token="auth1_rotated_today",
+            organization="org/acme",
+            internal_organization_id="org-abc12345",
+            source_label="Zen default",
+        ),
+    )
+    http = FixtureHttp([{"daily_percentage": 10}])
+    result = collect_devin(
+        preference("devin", browser_sources=True),
+        observed_at=1000,
+        credentials=FixtureCredentials({("devin", "token"): "auth1_from_last_month"}),
+        http_json=http,
+    )
+    assert result.state.value == "ready"
+    assert http.calls[0][2]["Authorization"] == "Bearer auth1_rotated_today"
+
+
+def test_devin_falls_back_to_the_stored_token_when_no_browser_session_exists(monkeypatch):
+    import sidepulse.provider_usage_collectors as module
+
+    monkeypatch.setattr(module, "_import_devin_browser_session", lambda: None)
+    http = FixtureHttp([{"daily_percentage": 10}])
+    result = collect_devin(
+        preference(
+            "devin",
+            browser_sources=True,
+            options={"organization_id": "org-abc12345"},
+        ),
+        observed_at=1000,
+        credentials=FixtureCredentials({("devin", "token"): "pasted-key"}),
+        http_json=http,
+    )
+    assert result.state.value == "ready"
+    assert http.calls[0][2]["Authorization"] == "Bearer pasted-key"
