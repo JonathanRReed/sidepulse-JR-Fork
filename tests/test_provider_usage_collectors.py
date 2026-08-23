@@ -233,3 +233,68 @@ def test_http_unauthorized_maps_to_sign_in_required():
     )
     assert result.state.value == "needs_sign_in"
     assert result.reason_code == "authentication_required"
+
+
+def test_devin_sends_the_org_header_the_endpoint_actually_requires():
+    """A valid session token alone returns 401. Confirmed live against a
+    real account: the request only authenticates when it also carries
+    x-cog-org-id, which is why "Import" could appear to succeed and the
+    card still said reconnect."""
+    http = FixtureHttp([{"daily_percentage": 80, "weekly_percentage": 40}])
+    result = collect_devin(
+        preference(
+            "devin",
+            options={"organization": "org/acme", "organization_id": "org-abc12345"},
+        ),
+        observed_at=1000,
+        credentials=FixtureCredentials({("devin", "token"): "auth1_fixture"}),
+        http_json=http,
+    )
+    assert result.state.value == "ready"
+    _method, url, headers = http.calls[0][:3]
+    assert headers["x-cog-org-id"] == "org-abc12345"
+    # The internal id is the path segment the endpoint answers on, and
+    # the slash in an "org/<slug>" value must survive: quote(safe="")
+    # used to escape it to %2F, so no stored org shape could ever work.
+    assert "/api/org-abc12345/billing/quota/usage" in url
+    assert "%2F" not in url
+
+
+def test_devin_imports_the_browser_session_instead_of_demanding_a_key(monkeypatch):
+    """The whole point: browser access enabled and no stored credential
+    still produces usage, because the session Devin already wrote in the
+    user's browser is taken instead of an API key."""
+    import sidepulse.provider_usage_collectors as module
+    from sidepulse.browser_session_import import BrowserSession
+
+    monkeypatch.setattr(
+        module,
+        "_import_devin_browser_session",
+        lambda: BrowserSession(
+            token="auth1_from_browser",
+            organization="org/acme",
+            internal_organization_id="org-abc12345",
+            source_label="Zen default",
+        ),
+    )
+    http = FixtureHttp([{"daily_percentage": 80, "weekly_percentage": 40}])
+    result = collect_devin(
+        preference("devin", browser_sources=True),
+        observed_at=1000,
+        credentials=FixtureCredentials({}),
+        http_json=http,
+    )
+    assert result.state.value == "ready"
+    assert http.calls[0][2]["Authorization"] == "Bearer auth1_from_browser"
+    assert [lane.lane_id for lane in result.lanes] == ["daily", "weekly"]
+
+
+def test_devin_without_browser_access_still_asks_for_consent_first():
+    result = collect_devin(
+        preference("devin", browser_sources=False),
+        observed_at=1000,
+        credentials=FixtureCredentials({}),
+        http_json=FixtureHttp([]),
+    )
+    assert result.state.value == "needs_consent"
+    assert result.action_label == "Enable Devin browser access"

@@ -276,6 +276,29 @@ def collect_cursor(
         )
 
 
+#: Devin's web app is what issues these session tokens, and the API
+#: rejects a request that does not look like it came from that app.
+DEVIN_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+)
+
+
+def _import_devin_browser_session():
+    """The user's own Devin session, read from a Firefox-family profile.
+
+    Isolated behind a function so a failure to read a browser can never
+    take down a usage refresh -- worst case there is no session and the
+    caller falls back to asking for one.
+    """
+    try:
+        from .browser_session_import import import_devin_session
+
+        return import_devin_session(Path.home())
+    except Exception:
+        return None
+
+
 def collect_devin(
     preference: ProviderPreference,
     *,
@@ -285,7 +308,21 @@ def collect_devin(
 ) -> ProviderUsageSnapshot:
     token = _credential(credentials, "devin", "token")
     organization = preference.option("organization")
-    if not token.available:
+    organization_id = preference.option("organization_id")
+    secret = token.secret if token.available else None
+
+    if secret is None and preference.browser_sources:
+        # "Enable browser access" is the consent, so honour it: lift the
+        # session Devin already wrote in the user's own browser instead
+        # of demanding an API key. Devin rotates these tokens, so this
+        # re-reads rather than depending on one frozen import.
+        session = _import_devin_browser_session()
+        if session is not None:
+            secret = session.token
+            organization = session.organization or organization
+            organization_id = session.internal_organization_id or organization_id
+
+    if secret is None:
         return _failure(
             "devin",
             observed_at=observed_at,
@@ -305,7 +342,7 @@ def collect_devin(
                 else "Enable Devin browser access"
             ),
         )
-    if not organization:
+    if not organization and not organization_id:
         return _failure(
             "devin",
             observed_at=observed_at,
@@ -313,12 +350,30 @@ def collect_devin(
             reason="organization_required",
             action="Choose Devin organization",
         )
-    endpoint = f"https://app.devin.ai/api/{quote(organization, safe='')}/billing/quota/usage"
+    # The internal id is the path segment the endpoint actually answers
+    # on; the slug form is kept as a fallback. quote(safe="") used to
+    # escape the slash in "org/<slug>" into %2F, so the only org shape
+    # settings could hold was one this URL could never express.
+    endpoint = (
+        "https://app.devin.ai/api/"
+        f"{quote(organization_id or organization, safe='/')}"
+        "/billing/quota/usage"
+    )
+    headers = {
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": DEVIN_BROWSER_USER_AGENT,
+        "Authorization": f"Bearer {secret}",
+    }
+    if organization_id:
+        # Without this the endpoint answers 401 for a perfectly valid
+        # session token -- confirmed live against a real account.
+        headers["x-cog-org-id"] = organization_id
     try:
         payload = http_json(
             "GET",
             endpoint,
-            headers={"Authorization": f"Bearer {token.secret}"},
+            headers=headers,
             timeout=HTTP_TIMEOUT_SECONDS,
         )
     except ProviderHttpError as error:
@@ -332,7 +387,7 @@ def collect_devin(
             action="Retry",
         )
     document = dict(payload)
-    document.setdefault("organization", organization)
+    document.setdefault("organization", organization or organization_id)
     try:
         return parse_devin_usage(document, observed_at=observed_at)
     except ValueError:

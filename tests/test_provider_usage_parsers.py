@@ -250,3 +250,37 @@ def test_codex_merged_account_weekly_primary_is_labeled_weekly() -> None:
         observed_at=1000,
     )
     assert [lane.label for lane in classic.lanes] == ["5-hour", "Weekly"]
+
+
+def test_devin_reads_the_flat_shape_the_endpoint_actually_returns() -> None:
+    """The live payload is flat -- {"daily_percentage": 80, ...} -- not a
+    nested per-window object. Reading only the nested shape meant a
+    correctly authenticated card showed zero lanes, so completing the
+    API-key dance could not have paid off either."""
+    snapshot = parse_devin_usage(
+        {
+            "daily_percentage": 80,
+            "weekly_percentage": 40,
+            "daily_reset_at": "2026-08-23T00:00:00-08:00",
+            "weekly_reset_at": "2026-08-23T00:00:00-08:00",
+            "organization": "org/acme",
+        },
+        observed_at=1000,
+    )
+    lanes = {lane.lane_id: lane for lane in snapshot.lanes}
+    assert lanes["daily"].remaining_percent == 20.0
+    assert lanes["weekly"].remaining_percent == 60.0
+    assert lanes["daily"].reset_at is not None
+
+
+def test_devin_reads_a_fraction_as_a_share_not_a_percent() -> None:
+    # 0.8 means 80% used, not 0.8% -- matching the reference client.
+    snapshot = parse_devin_usage({"daily_percentage": 0.8}, observed_at=1000)
+    assert abs(snapshot.lanes[0].remaining_percent - 20.0) < 1e-9
+
+
+def test_devin_still_reads_the_nested_shape() -> None:
+    snapshot = parse_devin_usage(
+        {"daily": {"used_percent": 10, "resets_at": 2000}}, observed_at=1000
+    )
+    assert snapshot.lanes[0].remaining_percent == 90.0

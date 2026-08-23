@@ -273,6 +273,17 @@ def parse_cursor_usage(payload: object, *, observed_at: float) -> ProviderUsageS
     )
 
 
+def _devin_used_percent(value: object) -> float | None:
+    """Devin reports a window's USED share, either as 0-100 or as a 0-1
+    fraction. Below 1 is read as a fraction, matching the reference
+    client -- an account at "0.8" is at 80%, not at 0.8%."""
+    number = _number(value)
+    if number is None:
+        return None
+    scaled = number * 100.0 if 0.0 < number < 1.0 else number
+    return max(0.0, min(100.0, scaled))
+
+
 def parse_devin_usage(payload: object, *, observed_at: float) -> ProviderUsageSnapshot:
     if not isinstance(payload, dict):
         raise ValueError("invalid Devin usage payload")
@@ -282,7 +293,19 @@ def parse_devin_usage(payload: object, *, observed_at: float) -> ProviderUsageSn
         if not isinstance(entry, dict):
             entry = payload.get(f"{lane_id}Usage")
         if not isinstance(entry, dict):
-            continue
+            # The shape the endpoint actually returns is FLAT --
+            # {"daily_percentage": 80, "daily_reset_at": "..."} -- not a
+            # nested per-window object. Reading only the nested shape
+            # meant a correctly authenticated Devin card still showed
+            # zero lanes, so the API-key dance could not have paid off
+            # even when someone completed it.
+            flat_percent = payload.get(f"{lane_id}_percentage")
+            flat_reset = payload.get(f"{lane_id}_reset_at")
+            if flat_percent is None:
+                continue
+            entry = {"used_percent": _devin_used_percent(flat_percent), "resets_at": flat_reset}
+            if entry["used_percent"] is None:
+                continue
         lanes.append(
             UsageLane(
                 provider_id="devin",
@@ -300,11 +323,16 @@ def parse_devin_usage(payload: object, *, observed_at: float) -> ProviderUsageSn
             )
         )
     organization = payload.get("organization", payload.get("organization_id"))
+    label = str(organization).strip() if organization else None
+    if label:
+        # "org/acme" and "organizations/org-0a14..." are URL shapes, not
+        # names -- the card should read "acme", not a path fragment.
+        label = label.removeprefix("organizations/").removeprefix("org/")
     return _snapshot(
         "devin",
         observed_at=observed_at,
         lanes=tuple(lanes),
-        account_label=str(organization).strip() if organization else None,
+        account_label=label or None,
     )
 
 

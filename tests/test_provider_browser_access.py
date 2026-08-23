@@ -38,6 +38,7 @@ def test_import_without_token_opens_the_page_and_explains() -> None:
         credential_store=store,
         clipboard_reader=lambda: "some prose that is not a token",
         url_opener=opened.append,
+        session_importer=lambda provider: None,
     )
     assert store.saved == {}
     assert opened and opened[0].startswith("https://app.devin.ai")
@@ -92,7 +93,60 @@ def test_reconnect_clears_the_bad_token_and_reopens_import() -> None:
     message = handle_provider_usage_action(
         "devin", "Reconnect Devin", credential_store=store,
         clipboard_reader=lambda: "", url_opener=opened.append,
+        session_importer=lambda provider: None,
     )
     assert store.deleted == [("devin", "token")]
     assert opened and "devin" in opened[0]
     assert "cleared" in message and "Import Devin" in message
+
+
+def test_import_takes_the_browser_session_and_never_mentions_a_key() -> None:
+    """The reported defect: "Why do I need an API key? The
+    implementation inside of CodexBar doesn't require an API key." When
+    the browser holds a session, no key, no page and no clipboard are
+    involved."""
+    opened: list[str] = []
+    store = FakeStore()
+    message = handle_provider_usage_action(
+        "devin",
+        "Import Devin browser session",
+        credential_store=store,
+        clipboard_reader=lambda: "should never be read",
+        url_opener=opened.append,
+        session_importer=lambda provider: "Signed in as your Zen session — no API key needed.",
+    )
+    assert opened == []
+    assert "no API key needed" in message
+    assert "clipboard" not in message.lower()
+    assert store.saved == {}
+
+
+def test_import_falls_back_to_the_manual_route_when_no_session_exists() -> None:
+    opened: list[str] = []
+    message = handle_provider_usage_action(
+        "devin",
+        "Import Devin browser session",
+        credential_store=FakeStore(),
+        clipboard_reader=lambda: "prose, not a token",
+        url_opener=opened.append,
+        session_importer=lambda provider: None,
+    )
+    assert opened and opened[0].startswith("https://app.devin.ai")
+    assert "clipboard" in message
+
+
+def test_reconnect_reimports_a_rotated_session_before_asking_for_anything() -> None:
+    """Devin reissues its web token routinely, so the common cause of a
+    rejected session is rotation, not a wrong credential."""
+    opened: list[str] = []
+    store = FakeStore()
+    message = handle_provider_usage_action(
+        "devin",
+        "Reconnect Devin",
+        credential_store=store,
+        clipboard_reader=lambda: "",
+        url_opener=opened.append,
+        session_importer=lambda provider: "Signed in as your Zen session — no API key needed.",
+    )
+    assert opened == []
+    assert "Zen" in message

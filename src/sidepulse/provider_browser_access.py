@@ -7,14 +7,22 @@ one click, each saying exactly what happens next:
 
   1. "Enable <X> browser access"   -> flips the provider's
      browser_sources flag and says what the next click will do.
-  2. "Import <X> browser session"  -> first click opens the provider's
-     own token page and says "copy your key, then click Import again".
-  3. second Import click           -> reads the token FROM THE CLIPBOARD
-     (an explicit user action, never a background read), stores it in
-     the credential store, and forces a refresh.
+  2. "Import <X> browser session"  -> takes the session the user's own
+     browser already holds (browser_session_import), stores it, and
+     refreshes. No key, no page, no clipboard.
+  3. only if there is no such session -> falls back to the manual
+     route: open the provider's token page, then read a pasted key FROM
+     THE CLIPBOARD on an explicit second click.
 
-Organization-style options ("Choose Devin organization") use the same
-copy-then-click pattern.
+Stage 2 is the point. Asking for an API key was never the design, it
+was the absence of one -- "Enable browser access" flipped a flag and
+NOTHING in this app ever read a browser, so the manual paste was the
+only path that existed. Reported as "Why do I need an API key? The
+implementation inside of CodexBar doesn't require an API key."
+
+Organization-style options ("Choose Devin organization") keep the
+copy-then-click pattern, but an imported session fills the organization
+in on its own, so that stage is normally never reached.
 """
 
 from __future__ import annotations
@@ -65,6 +73,44 @@ def _open_url(url: str) -> None:
         pass
 
 
+def _import_browser_session(provider_id: str) -> str | None:
+    """Lift the provider's own session out of the user's browser.
+
+    This is what "browser access" was always supposed to mean. Returns
+    the success message, or None when there is no session to take -- in
+    which case the caller falls back to the manual paste. Devin only for
+    now: it is the provider whose session is a plain token in
+    Firefox-family local storage.
+    """
+    if provider_id != "devin":
+        return None
+    try:
+        from pathlib import Path
+
+        from .browser_session_import import import_devin_session
+        from .provider_credential_store import ProviderCredentialStore
+
+        session = import_devin_session(Path.home())
+        if session is None:
+            return None
+        ProviderCredentialStore().set(provider_id, "token", session.token)
+        loaded = load_provider_usage_settings()
+        settings = loaded.settings
+        if session.organization:
+            settings = settings.with_option(
+                provider_id, "organization", session.organization
+            )
+        if session.internal_organization_id:
+            settings = settings.with_option(
+                provider_id, "organization_id", session.internal_organization_id
+            )
+        save_provider_usage_settings(settings, loaded=loaded)
+    except Exception:
+        return None
+    where = session.source_label.split(" ")[0]
+    return f"Signed in as your {where} session — no API key needed. Refreshing usage now."
+
+
 def _signed_out_hint(title: str, url: str) -> str:
     """The token page opens in the DEFAULT browser, which is not
     necessarily where the user is signed in to the provider (reported
@@ -85,6 +131,7 @@ def handle_provider_usage_action(
     credential_store,
     clipboard_reader=_clipboard_text,
     url_opener=_open_url,
+    session_importer=None,
 ) -> str | None:
     """Perform one staged action. Returns the user-facing message, or
     None when this action is not part of the browser-access flow (the
@@ -105,6 +152,10 @@ def handle_provider_usage_action(
             f"'Import {title} browser session' on the same card."
         )
     if label.startswith("Import ") and "browser session" in label:
+        importer = session_importer or _import_browser_session
+        imported = importer(provider_id)
+        if imported is not None:
+            return imported
         clipboard = clipboard_reader()
         if plausible_token(clipboard):
             try:
@@ -131,6 +182,13 @@ def handle_provider_usage_action(
             credential_store.delete(provider_id, "token")
         except Exception:
             pass
+        # A rotated session is the COMMON case, not a wrong key: Devin
+        # reissues its web token routinely. Re-read the browser before
+        # sending the user off to hunt for a credential.
+        importer = session_importer or _import_browser_session
+        reimported = importer(provider_id)
+        if reimported is not None:
+            return reimported
         url = PROVIDER_TOKEN_PAGES.get(provider_id)
         if url is not None:
             url_opener(url)
