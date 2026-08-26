@@ -71,6 +71,7 @@ from .operator_accessibility import normalize_semantic_text_scale
 from .provider_capacity import CapacityPolicyState, provider_capacity_policies
 from .session_actions import provider_session_opener_providers
 from .settings import (
+    LED_DISPLAY_QUOTA_RUNWAY,
     LID_ANIMATION_CLOSED,
     LID_ANIMATION_CLOSED_ACTIVE,
     LID_ANIMATION_OPEN,
@@ -125,13 +126,20 @@ def usage_graph_legend_text(settings) -> str:
     observations; the token/cost/sessions modes chart the curated
     local-transcript providers. One legend claiming the other's
     provider set was a small lie every time the mode switched."""
-    if getattr(settings, "usage_display_mode", "tokens") == "percent":
+    mode = getattr(settings, "usage_display_mode", "tokens")
+    if mode == "percent":
         return "All providers · worst remaining % each day"
+    if mode == "sessions":
+        return (
+            "Every watched provider · sessions from transcripts "
+            "(Claude, Codex) and hook ledgers (the rest)"
+        )
     return (
         " · ".join(
             provider_id.title() for provider_id in settings.usage_graph_providers
         )
-        + " · every other provider charts under Percent left"
+        + " · tokens and cost exist only in local transcripts — other "
+        "providers chart under Sessions or Percent left"
     )
 
 
@@ -669,12 +677,19 @@ def _build_profile_pane(target: StatusBarController):
     native_ui.constrain_width(graph, 560.0)
     native_ui.constrain_height(graph, 180.0)
     today_inner.addArrangedSubview_(graph)
-    graph.setModel_(getattr(target, "usage_graph_model", None) or {})
+    from .usage_graph_worker import refresh_usage_graph, scanning_placeholder
+
+    # Seed with SCANNING, never an empty model: at first build the
+    # worker's own placeholder cannot reach this view (settings_fields
+    # is assigned only after this builder returns), so an empty seed
+    # showed "No activity in this range" for the entire cold scan.
+    graph.setModel_(
+        getattr(target, "usage_graph_model", None)
+        or scanning_placeholder(target.settings)
+    )
     fields["profile_usage_graph"] = graph
     # Populate immediately from the local scan -- never wait for (or ride)
     # the capacity acceptance protocol; see usage_graph_worker.
-    from .usage_graph_worker import refresh_usage_graph
-
     refresh_usage_graph(target)
     range_popup = native_ui.make_popup_button(target, "setUsageGraphRange:")
     for range_label, range_days in (
@@ -988,8 +1003,9 @@ def _build_devices_pane(target: StatusBarController):
         )
         native_ui.add_separator(inner)
 
-        # Per-device display choice: agent status, battery fill, or the
-        # honest working-timer fill.
+        # Per-device display choice: agent status, battery fill, the
+        # honest working-timer fill, a Studio look, or quota runway
+        # (fed by the JR usage plane since 2026-08-26).
         display_popup = native_ui.make_popup_button(target, "setDeviceDisplay:")
         display_popup.setIdentifier_(device.device_id)
         for label, display_key in (
@@ -997,6 +1013,7 @@ def _build_devices_pane(target: StatusBarController):
             ("Battery fill", LED_DISPLAY_BATTERY),
             ("Working timer fill", LED_DISPLAY_TIMER),
             ("Studio program", LED_DISPLAY_STUDIO),
+            ("Quota runway", LED_DISPLAY_QUOTA_RUNWAY),
         ):
             display_popup.addItemWithTitle_(label)
             item = display_popup.lastItem()
@@ -1785,6 +1802,18 @@ def _build_power_pane(target: StatusBarController):
         "Show battery for 7s on plug/unplug", target, "setBatteryPowerPreviewFromCheckbox:"
     )
     battery_inner.addArrangedSubview_(preview_row)
+    trickle_row, battery_charging_idle = native_ui.make_switch_row(
+        "Charging trickle while idle",
+        target,
+        "setBatteryChargingIdleFromCheckbox:",
+        help_text=(
+            "When nothing is running and the Mac is plugged in, the bar "
+            "fills to the charge level with a slow trickle pulse that "
+            "paces itself to how fast you're charging. Agents running, "
+            "done, or needing you always take the bar back."
+        ),
+    )
+    battery_inner.addArrangedSubview_(trickle_row)
     native_ui.add_separator(battery_inner)
     low_power_row, low_battery_switch = native_ui.make_switch_row(
         "Charge reminder when battery is low",
@@ -1816,6 +1845,7 @@ def _build_power_pane(target: StatusBarController):
     buttons = {
         "battery_leds": battery_leds,
         "battery_power_preview": battery_power_preview,
+        "battery_charging_idle": battery_charging_idle,
         "low_battery_alert": low_battery_switch,
         "keep_awake_on_battery": battery_hold_switch,
     }
@@ -2095,6 +2125,22 @@ def _build_focus_pane(target: StatusBarController):
     )
     warmth_inner.addArrangedSubview_(warmth_row)
     buttons["night_warmth_enabled"] = warmth_switch
+    native_ui.add_separator(warmth_inner)
+    night_dim_popup = native_ui.make_popup_button(target, "setNightDimFraction:")
+    for label, key in (
+        ("Don't dim at night", "1.0"),
+        ("Dim to 50%", "0.5"),
+        ("Dim to 30%", "0.3"),
+        ("Dim to 15%", "0.15"),
+    ):
+        night_dim_popup.addItemWithTitle_(label)
+        night_dim_popup.lastItem().setRepresentedObject_(key)
+        if f"{target.settings.night_dim_fraction:g}" == f"{float(key):g}":
+            night_dim_popup.selectItem_(night_dim_popup.lastItem())
+    warmth_inner.addArrangedSubview_(
+        native_ui.make_row("Night brightness (7 PM–7 AM)", night_dim_popup)
+    )
+    fields["night_dim_popup"] = night_dim_popup
     stack.addArrangedSubview_(warmth_outer)
 
     # Story #10: timebox presets can run a named Shortcut when they
@@ -2557,6 +2603,24 @@ def _build_extras_pane(target: StatusBarController):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
     fields: dict[str, object] = {}
 
+    # Quota effects: no longer withheld. The flag these gate spent its
+    # whole life hard-wired False with no switch; the sync path in
+    # refresh_settings_window was already waiting for this control.
+    quota_outer, quota_inner = native_ui.make_card("Quota Alerts")
+    quota_row, quota_switch = native_ui.make_switch_row(
+        "Blink and notify on quota events",
+        target,
+        "toggleQuotaAlerts:",
+        help_text=(
+            "A lane running low blinks the lights and posts one "
+            "notification per window; crossings still land in the "
+            "“Since you left” list either way. Reset confetti "
+            "plays regardless of this switch."
+        ),
+    )
+    quota_inner.addArrangedSubview_(quota_row)
+    stack.addArrangedSubview_(quota_outer)
+
     # Calendar & Reminders: warning lights, not a calendar app.
     cal_outer, cal_inner = native_ui.make_card("Calendar & Reminders")
     cal_row, cal_switch = native_ui.make_switch_row(
@@ -2718,6 +2782,7 @@ def _build_extras_pane(target: StatusBarController):
         "reminder_alerts_enabled": rem_switch,
         "weather_alerts_enabled": weather_switch,
         "capacity_history_enabled": history_switch,
+        "quota_alerts_enabled": quota_switch,
     }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
@@ -2954,6 +3019,9 @@ def _build_agents_pane(target: StatusBarController):
     fields.update(cloud_fields)
 
     buttons = {"codex_transcripts": codex_switch, "claude_transcripts": claude_switch}
+    # Registered so refresh_settings_window can re-sync it; it was
+    # omitted and went stale after any external change (audit).
+    buttons["menu_bar_label"] = label_switch
     buttons.update(peer_buttons)
     buttons.update(cloud_buttons)
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
@@ -4266,24 +4334,33 @@ def _build_provider_color_row(row, target, actions, swatches, hex_labels):
 
 def _provider_animation_thumb_program(target: StatusBarController, row) -> str:
     """This provider's chosen rhythm, played in this provider's own colour --
-    so "Chase" is a thing you watch, not a word you have to trust."""
+    so "Chase" is a thing you watch, not a word you have to trust.
+
+    Routed through the REAL solo renderer (owner decision, 2026-08-26):
+    the old 4-bucket style bridge collapsed 15 of 18 motions into two
+    generic thumbs, so hovering "Knight Rider" showed a plain roll."""
     colors = target.settings.colors
     motion = row.animation
     if motion == colors_module.PROVIDER_ANIMATION_AUTO:
         # Automatic means "whatever Working already does", so show that.
-        style = colors.animation_style(colors_module.MODE_WORKING)
-    else:
-        style = colors_module.PROVIDER_ANIMATION_STYLES.get(motion, ANIMATION_STYLE_CHOICES[0])
+        try:
+            return program_for_display_state(
+                LedDisplayState.WORKING,
+                led_count=8,
+                working_color=row.current_hex,
+                working_style=colors.animation_style(colors_module.MODE_WORKING),
+                working_floor=0.05,
+                working_ceiling=1.0,
+            )
+        except (TypeError, ValueError):
+            return row.current_hex
     try:
-        return program_for_display_state(
-            LedDisplayState.WORKING,
-            led_count=8,
-            working_color=row.current_hex,
-            working_style=style,
-            working_floor=0.05,
-            working_ceiling=1.0,
+        return colors_module.provider_motion_preview_program(
+            row.provider,
+            row.current_hex,
+            colors,
         )
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, AttributeError):
         return row.current_hex
 
 

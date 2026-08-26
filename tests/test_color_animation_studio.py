@@ -254,13 +254,17 @@ def test_every_offered_animation_has_a_label_and_a_description() -> None:
         assert colors_module.PROVIDER_ANIMATION_DESCRIPTIONS[motion].strip()
     assert PROVIDER_ANIMATION_LABELS[PROVIDER_ANIMATION_AUTO] == "Automatic"
     # The vocabulary the owner asked for -- expanded 2026-08-21 with the
-    # pattern-survey rhythms (heartbeat/scanner/comet/flicker), and still
-    # nothing invented alongside it.
+    # pattern-survey rhythms (heartbeat/scanner/comet/flicker), and again
+    # 2026-08-26 with the upstream-ecosystem shapes (KITT from PR #29,
+    # tlip's gradient wave, the roll marquee, the two-tone duotone).
+    # Still nothing invented BESIDE the list: every entry here was asked
+    # for by name or ported from a sourced program.
     assert set(PROVIDER_ANIMATION_CHOICES) - {PROVIDER_ANIMATION_AUTO} == {
         MOTION_BREATHE,
         MOTION_CHASE,
         colors_module.MOTION_HEARTBEAT,
         colors_module.MOTION_SCANNER,
+        colors_module.MOTION_KITT,
         colors_module.MOTION_COMET,
         colors_module.MOTION_FLICKER,
         colors_module.MOTION_STACK,
@@ -269,6 +273,9 @@ def test_every_offered_animation_has_a_label_and_a_description() -> None:
         colors_module.MOTION_CONVERGE,
         colors_module.MOTION_AURORA,
         colors_module.MOTION_TIDE,
+        colors_module.MOTION_GRADIENT,
+        colors_module.MOTION_MARQUEE,
+        colors_module.MOTION_DUOTONE,
         MOTION_STEADY,
         MOTION_BLINK,
     }

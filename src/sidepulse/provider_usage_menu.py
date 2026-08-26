@@ -340,10 +340,39 @@ def menu_bar_quota_glance(
     )
 
 
+def glance_summary(state, *, now: float | None = None) -> str:
+    """One honest sentence about the provider sources, for the Usage
+    settings pane's status line. That line imported this function for
+    weeks while it did not exist, so the except-arm's "temporarily
+    unavailable" fallback rendered permanently (audit, 2026-08-26)."""
+    import time as _time
+
+    projection = project_usage_menu(
+        state, now=_time.time() if now is None else float(now)
+    )
+    counts: dict[str, int] = {}
+    for snapshot in getattr(state, "snapshots", ()):
+        value = getattr(snapshot.state, "value", str(snapshot.state))
+        counts[value] = counts.get(value, 0) + 1
+    interesting = {
+        key: count
+        for key, count in counts.items()
+        if key not in ("disabled",)
+    }
+    if not interesting:
+        return projection.title
+    parts = ", ".join(
+        f"{count} {key.replace('_', ' ')}"
+        for key, count in sorted(interesting.items())
+    )
+    return f"{projection.title} — {parts}"
+
+
 __all__ = [
     "ProviderUsageMenuProjection",
     "ProviderUsageMenuRow",
     "QuotaGlance",
+    "glance_summary",
     "menu_bar_quota_glance",
     "project_usage_menu",
 ]

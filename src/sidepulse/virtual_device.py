@@ -2497,7 +2497,9 @@ class AnnouncerPill:
         # Words are worth a click: the pill itself jumps to the session.
         self.window.setIgnoresMouseEvents_(click_handler_source is None)
         if not self.window.isVisible():
-            self.window.orderFrontRegardless()
+            from .window_presentation import present_window
+
+            present_window(self.window, key=False)
 
     def close(self) -> None:
         if self.window is not None:
@@ -3356,7 +3358,9 @@ class VirtualStatusDevice(NSObject):
             if pill is not None:
                 pill.hide()
         elif self._enabled:
-            window.orderFrontRegardless()
+            from .window_presentation import present_window
+
+            present_window(window, key=False)
 
     def show(self):
         if self._terminating or not self._enabled:
@@ -3573,7 +3577,14 @@ class VirtualStatusDevice(NSObject):
             and now - self._program_applied_at < SCREEN_BAR_REASSERT_SECONDS
         ):
             return
-        if self._terminating or not self._enabled:
+        if self._terminating or not self._enabled or self._display_asleep:
+            # Display asleep: nothing to show, and the change-gate above
+            # cannot suppress repeats (sleep nulls the sampler, so
+            # sampler_is_running_the_motion is always False). Without
+            # this clause every lid-closed hardware write re-ran the
+            # full show()/reposition()/orderFront dance on the main
+            # thread -- newly load-bearing now that hardware writes
+            # continue through display sleep.
             return
         self.show()
         if self.view is None:

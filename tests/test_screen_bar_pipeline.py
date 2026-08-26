@@ -384,8 +384,15 @@ def test_sampler_caps_logical_samples_at_60_hz_and_publishes_rgba_pair() -> None
             1.0 / 60.0
         )
         assert len(controller.step_times) == 2
-        assert pair.previous.colors[0][3] == 1.0
+        # Alpha carries "how lit is this LED" (max of the channels) --
+        # the convention every downstream consumer expects. The old
+        # hard-coded 1.0 made dark LEDs opaque black (audit fix,
+        # 2026-08-26).
+        assert pair.previous.colors[0][3] == pytest.approx(
+            max(pair.previous.colors[0][:3])
+        )
         assert pair.following.colors[1][1] == 1.0
+        assert pair.following.colors[1][3] == 1.0
     finally:
         assert sampler.close(timeout_seconds=2.0)
 

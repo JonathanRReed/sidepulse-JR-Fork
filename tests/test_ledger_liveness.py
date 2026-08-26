@@ -435,7 +435,11 @@ def test_a_rebooted_strip_voids_the_write_dedupe(tmp_path):
 
     status = tmp_path / "STATUS.TXT"
     status.write_text("serial SPP-000067\nuptime_ms 5000000\nstate idle\n")
-    writer = AgentLedController(device_path=tmp_path)
+    # The FILE path, exactly as production constructs its controllers
+    # (device.target is <volume>/LEDS.LED). The old directory-path
+    # fixture passed while the shipped app resolved
+    # <volume>/LEDS.LED/STATUS.TXT and never detected a reboot at all.
+    writer = AgentLedController(device_path=tmp_path / "LEDS.LED")
     writer.UPTIME_CHECK_SECONDS = 0.0  # check on every call in this test
 
     import time as time_module

@@ -29,6 +29,17 @@ def test_usage_window_is_a_thin_appkit_projection_host():
         assert forbidden not in source
 
 
+def test_usage_window_passes_cached_merged_sync_and_never_fetches():
+    # The "across synced Macs" line renders from LOCAL cached documents
+    # only (2026-08-26): the window imports the TTL-memoized cache, not
+    # the SFTP runtime or transport.
+    source = MODULE.read_text(encoding="utf-8")
+    assert "merged_sync=cached_merged_sync(state)" in source
+    assert "provider_usage_sync_cache" in source
+    assert "provider_usage_sync_runtime" not in source
+    assert "provider_usage_sync_transport" not in source
+
+
 def test_usage_window_survives_its_own_close_button():
     # A code-created NSWindow defaults to released-when-closed; this
     # window is cached and refreshed forever, so closing it once made

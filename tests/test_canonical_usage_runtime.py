@@ -161,7 +161,7 @@ def test_provider_pricing_reports_covered_only_partial_and_complete_estimates(
     assert mixed.unpriced_record_count == 1
     assert mixed.covered_cost_estimate_usd == pytest.approx(3.0)
     assert mixed.covered_cache_savings_estimate_usd == pytest.approx(0.0)
-    assert mixed.pricing_as_of == "2026-08-12"
+    assert mixed.pricing_as_of == "2026-08-26"  # rates-v2: fable + GPT rows
 
     totals = scan_usage(mixed_root)
     copy = usage_summary_line(totals, "cost")
@@ -183,7 +183,7 @@ def test_provider_pricing_reports_covered_only_partial_and_complete_estimates(
     assert known.pricing_coverage is PricingCoverage.COMPLETE
     assert known.covered_cost_estimate_usd == pytest.approx(3.3)
     assert known.covered_cache_savings_estimate_usd == pytest.approx(2.7)
-    assert known.pricing_as_of == "2026-08-12"
+    assert known.pricing_as_of == "2026-08-26"
 
 
 def test_provider_local_failure_cache_and_health_never_cross_source_keys(

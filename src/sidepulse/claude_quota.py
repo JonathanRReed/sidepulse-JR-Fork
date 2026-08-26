@@ -52,7 +52,12 @@ CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN = "claude_remote_quota_needs_sign_in"
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_OAUTH_BETA_HEADER = "oauth-2025-04-20"
 CLAUDE_CODE_VERSION_FALLBACK = "2.1.0"
-CLAUDE_USAGE_TIMEOUT_SECONDS = 30.0
+# 10, not 30: this endpoint answers in well under a second when it
+# answers at all, and the one time it hung for the full window the user
+# was staring at "Last known value" for half a minute AFTER a reconnect
+# click had already said "refreshing now" (live, 2026-08-26). A hung
+# read that resolves 20 seconds sooner retries 20 seconds sooner.
+CLAUDE_USAGE_TIMEOUT_SECONDS = 10.0
 CLAUDE_USAGE_MAX_BYTES = 1024 * 1024
 CLAUDE_QUOTA_SOURCE = SourceKey(
     provider_id="claude",

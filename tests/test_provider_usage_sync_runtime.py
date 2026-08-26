@@ -135,9 +135,97 @@ def test_runtime_publishes_peer_specific_signed_packet_and_merges_remote(tmp_pat
     assert result.health[0].reachable is True
     assert result.remote_packets == (remote_packet,)
     assert "macbook.packet" in published
-    decoded = decode_signed_packet(published["macbook.packet"], secret)
+    decoded = decode_signed_packet(published["macbook.packet"], secret, now=1000.0)
     assert decoded.device_id == "mac-mini"
     assert decoded.machine_usage[0].input_tokens == 100
+    # The verified remote envelope is cached beside the published packet
+    # so the Usage Center can merge without fetching (2026-08-26).
+    assert "macbook.remote.packet" in published
+    cached = decode_signed_packet(published["macbook.remote.packet"], secret, now=1100.0)
+    assert cached == remote_packet
+
+
+def test_stale_remote_packet_is_reported_as_stale_not_merged(tmp_path: Path):
+    from sidepulse.provider_usage_sync import SYNC_PACKET_MAX_AGE_SECONDS
+
+    secret = b"x" * 32
+    stale_now = 1100.0 + SYNC_PACKET_MAX_AGE_SECONDS + 1.0
+    remote_packet = ProviderSyncPacket(
+        1,
+        "macbook",
+        1100,
+        (),
+        (),
+        ("quota", "token_usage"),
+    )
+    runtime = ProviderSyncRuntime(
+        settings_loader=lambda: settings(tmp_path),
+        credentials=Credentials(secret),
+        local_directory=tmp_path / "published",
+        fetcher=lambda peer: SftpFetchResult(
+            peer.peer_id,
+            True,
+            encode_signed_packet(remote_packet, secret),
+            None,
+        ),
+        publisher=lambda _packet, target: target,
+        clock=lambda: stale_now,
+    )
+    result = runtime.refresh(usage_state())
+    assert result.remote_packets == ()
+    assert result.health[0].reachable is False
+    assert result.health[0].reason == "packet_stale"
+
+
+def test_cached_merged_sync_reads_local_documents_without_fetching(tmp_path: Path):
+    from sidepulse.provider_usage_sync_runtime import load_cached_merged_sync
+    from sidepulse.provider_usage_sync_transport import publish_local_packet
+
+    secret = b"x" * 32
+    remote_packet = ProviderSyncPacket(
+        1,
+        "macbook",
+        1100,
+        (),
+        (),
+        ("quota", "token_usage"),
+    )
+    directory = tmp_path / "published"
+    publish_local_packet(
+        encode_signed_packet(remote_packet, secret),
+        directory / "macbook.remote.packet",
+    )
+    merged = load_cached_merged_sync(
+        usage_state(),
+        settings_loader=lambda: settings(tmp_path),
+        credentials=Credentials(secret),
+        local_directory=directory,
+        now=1200.0,
+    )
+    assert merged is not None
+    # Local machine usage still counts; no fetcher was ever involved.
+    assert merged.total_input_tokens == 100
+
+
+def test_cached_merged_sync_is_none_when_sync_is_disabled(tmp_path: Path):
+    from sidepulse.provider_usage_sync_runtime import load_cached_merged_sync
+
+    configured = settings(tmp_path)
+    disabled = ProviderSyncSettings(
+        configured.schema_version,
+        False,
+        configured.device_id,
+        configured.categories,
+        configured.peers,
+    )
+    merged = load_cached_merged_sync(
+        usage_state(),
+        settings_loader=lambda: disabled,
+        credentials=Credentials(b"x" * 32),
+        local_directory=tmp_path,
+        now=1200.0,
+    )
+    assert merged is None
 
 
 def test_missing_pairing_secret_is_actionable_and_does_not_fetch(tmp_path: Path):

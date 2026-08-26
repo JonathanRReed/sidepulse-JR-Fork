@@ -175,12 +175,23 @@ MOTION_DRIFT = "drift"
 MOTION_CONVERGE = "converge"
 MOTION_AURORA = "aurora"
 MOTION_TIDE = "tide"
+# The 2026-08-26 expansion, mined from the upstream ecosystem (PR #29's
+# KITT scanner, tlip's gradient wave, the iOS pattern library's two-tone
+# working breathe) plus the roll-based marquee the DSL gives us nearly
+# for free.
+MOTION_KITT = "kitt"
+MOTION_GRADIENT = "gradient"
+MOTION_MARQUEE = "marquee"
+MOTION_DUOTONE = "duotone"
 PROVIDER_ANIMATION_CHOICES: tuple[str, ...] = (
     PROVIDER_ANIMATION_AUTO,
     MOTION_BREATHE,
+    MOTION_DUOTONE,
     MOTION_CHASE,
+    MOTION_GRADIENT,
     MOTION_HEARTBEAT,
     MOTION_SCANNER,
+    MOTION_KITT,
     MOTION_COMET,
     MOTION_FLICKER,
     MOTION_STACK,
@@ -189,6 +200,7 @@ PROVIDER_ANIMATION_CHOICES: tuple[str, ...] = (
     MOTION_CONVERGE,
     MOTION_AURORA,
     MOTION_TIDE,
+    MOTION_MARQUEE,
     MOTION_STEADY,
     MOTION_BLINK,
 )
@@ -206,6 +218,10 @@ PROVIDER_ANIMATION_LABELS: dict[str, str] = {
     MOTION_CONVERGE: "Converge",
     MOTION_AURORA: "Aurora",
     MOTION_TIDE: "Tide",
+    MOTION_KITT: "Knight Rider",
+    MOTION_GRADIENT: "Gradient",
+    MOTION_MARQUEE: "Marquee",
+    MOTION_DUOTONE: "Duotone",
     MOTION_STEADY: "Steady",
     MOTION_BLINK: "Blink",
 }
@@ -214,15 +230,19 @@ PROVIDER_ANIMATION_DESCRIPTIONS: dict[str, str] = {
     MOTION_BREATHE: "One slow swell, every LED together.",
     MOTION_CHASE: "The same swell, staggered into a travelling wave.",
     MOTION_HEARTBEAT: "Two quick swells, then a long rest — a lub-dub.",
-    MOTION_SCANNER: "A bright dot sweeps end to end and bounces back. Solo shape — becomes the wave when agents share the strip.",
-    MOTION_COMET: "A bright head sweeps one way, trailing off behind. Solo shape — becomes the wave when agents share the strip.",
+    MOTION_SCANNER: "A bright dot sweeps end to end and bounces back. Shared strips ride it as a narrow travelling flare.",
+    MOTION_COMET: "A bright head sweeps one way, trailing off behind. Shared strips ride it as a narrow travelling flare.",
     MOTION_FLICKER: "A warm candle-like shimmer that never quite repeats.",
-    MOTION_STACK: "LEDs pile on one by one until full, then it all lets go. Solo shape — becomes the wave when agents share the strip.",
+    MOTION_STACK: "LEDs pile on one by one until full, then it all lets go. Keeps its hard pile-on in shared strips.",
     MOTION_TWINKLE: "A dim base with single LEDs briefly sparking, scattered.",
     MOTION_DRIFT: "Glacial detuned swells, like light on slow water.",
-    MOTION_CONVERGE: "Two dots leave the ends and meet in the middle. Solo shape — becomes the wave when agents share the strip.",
+    MOTION_CONVERGE: "Two dots leave the ends and meet in the middle. In a Split block the fronts meet mid-block.",
     MOTION_AURORA: "Rolling waves of light over a luminous base.",
-    MOTION_TIDE: "The bar rises to full, then the water pulls back. Solo shape — becomes the wave when agents share the strip.",
+    MOTION_TIDE: "The bar rises to full, then the water pulls back. Shared strips ride it as the full swell.",
+    MOTION_KITT: "The classic scanner: a wide bright eye sweeps end to end and back, overlapping as it goes. Shared strips ride it as a narrow travelling flare.",
+    MOTION_GRADIENT: "The travelling wave, but each LED carries its own shade of the color — a gradient rolling by. Shared strips keep the flare; Cycle turns keep the shades.",
+    MOTION_MARQUEE: "A palette seeded from the color, endlessly rotating around the bar. Shared strips ride it as a narrow travelling flare.",
+    MOTION_DUOTONE: "A slow swell that alternates between two tones of the color. Cycle turns keep both tones; interleaved strips breathe.",
     MOTION_STEADY: "Holds its color. Never moves.",
     MOTION_BLINK: "Hard-edged on/off, no easing.",
 }
@@ -1563,9 +1583,27 @@ def _fade_kwargs_for_all_modes(settings: ColorSettings) -> dict[str, float | str
 # The single-agent/aggregate renderer speaks in ANIMATION_STYLE_* rather
 # than the motion vocabulary; this is the bridge, so "Claude chases" means
 # the same thing whether Claude is alone on the strip or sharing it.
+# EVERY motion needs a row: an unmapped motion silently fell back to the
+# state's own style, which is why scanner/comet previewed (and aggregated)
+# as a plain pulse. Travelling shapes map to the roll, shimmer-family
+# shapes to the pulse.
 PROVIDER_ANIMATION_STYLES: dict[str, str] = {
     MOTION_BREATHE: ANIMATION_STYLE_PULSE,
+    MOTION_DUOTONE: ANIMATION_STYLE_PULSE,
     MOTION_CHASE: ANIMATION_STYLE_ROLL,
+    MOTION_GRADIENT: ANIMATION_STYLE_ROLL,
+    MOTION_HEARTBEAT: ANIMATION_STYLE_PULSE,
+    MOTION_SCANNER: ANIMATION_STYLE_ROLL,
+    MOTION_KITT: ANIMATION_STYLE_ROLL,
+    MOTION_COMET: ANIMATION_STYLE_ROLL,
+    MOTION_FLICKER: ANIMATION_STYLE_PULSE,
+    MOTION_STACK: ANIMATION_STYLE_ROLL,
+    MOTION_TWINKLE: ANIMATION_STYLE_PULSE,
+    MOTION_DRIFT: ANIMATION_STYLE_PULSE,
+    MOTION_CONVERGE: ANIMATION_STYLE_ROLL,
+    MOTION_AURORA: ANIMATION_STYLE_PULSE,
+    MOTION_TIDE: ANIMATION_STYLE_ROLL,
+    MOTION_MARQUEE: ANIMATION_STYLE_ROLL,
     MOTION_STEADY: ANIMATION_STYLE_SOLID,
     MOTION_BLINK: ANIMATION_STYLE_BLINK,
 }
@@ -1601,6 +1639,36 @@ def _single_agent_program(
     settings: ColorSettings,
     provider: str | None = None,
 ) -> str:
+    # A chosen motion renders its REAL whole-strip shape here (owner
+    # decision, 2026-08-26): this function feeds the hover try-outs,
+    # the hardware preview push, and Cycle's lone-agent case, and all
+    # of them used to collapse 15 of 18 motions through the 4-bucket
+    # style bridge -- what you previewed was not what the live solo
+    # render played. Automatic keeps the classic state pipeline exactly.
+    if (
+        provider is not None
+        and state not in URGENT_STATES
+        and not _is_static_agent_state(state)
+        and settings.agent_animation(provider) != PROVIDER_ANIMATION_AUTO
+    ):
+        duration_ms = max(
+            1, int(settings.effective_speed_seconds(BLEND_MODE_CYCLE) * 1000)
+        )
+        settle_ms = settle_duration_ms(duration_ms)
+        floor_color = _floor_for_state(color, state, settings)
+        lines = [
+            f"{floor_color} {settle_ms}ms cosine",
+            *_motion_turn_lines(
+                color,
+                state,
+                settings,
+                provider=provider,
+                led_count=led_count,
+                duration_ms=duration_ms,
+            ),
+            "repeat",
+        ]
+        return apply_brightness("\n".join(lines), brightness)
     fade_kwargs = _fade_kwargs_for_state(state, settings)
     style = _provider_style_override(state, settings, provider)
     if style is not None:
@@ -1613,6 +1681,27 @@ def _single_agent_program(
         done_celebrate=settings.done_celebration_enabled,
         **_color_kwargs_for_state(state, color),
         **fade_kwargs,
+    )
+
+
+def provider_motion_preview_program(
+    provider: str,
+    color: str,
+    settings: ColorSettings,
+    *,
+    led_count: int = 8,
+    brightness: float = 255,
+) -> str:
+    """The real Working-state shape for one provider's chosen motion --
+    the settings thumbnails' program source, so a thumb shows the thing
+    the strip will actually play."""
+    return _single_agent_program(
+        color,
+        LedDisplayState.WORKING,
+        led_count=led_count,
+        brightness=brightness,
+        settings=settings,
+        provider=provider,
     )
 
 
@@ -1725,11 +1814,28 @@ def _speed_safe_motion(motion: str, *, cycle_ms: int) -> str:
     """
     if cycle_ms >= MIN_FLASH_CYCLE_MS:
         return motion
-    if motion in (MOTION_BEAT, MOTION_HEARTBEAT, MOTION_FLICKER, MOTION_TWINKLE, MOTION_DRIFT, MOTION_AURORA):
+    if motion in (
+        MOTION_BEAT,
+        MOTION_HEARTBEAT,
+        MOTION_FLICKER,
+        MOTION_TWINKLE,
+        MOTION_DRIFT,
+        MOTION_AURORA,
+        MOTION_DUOTONE,
+    ):
         return MOTION_BREATHE
     if motion == MOTION_BLINK:
         return MOTION_STEADY
-    if motion in (MOTION_SCANNER, MOTION_COMET, MOTION_STACK, MOTION_CONVERGE, MOTION_TIDE):
+    if motion in (
+        MOTION_SCANNER,
+        MOTION_KITT,
+        MOTION_COMET,
+        MOTION_STACK,
+        MOTION_CONVERGE,
+        MOTION_TIDE,
+        MOTION_MARQUEE,
+        MOTION_GRADIENT,
+    ):
         return MOTION_CHASE
     return motion
 
@@ -1815,7 +1921,11 @@ def _floor_for_state(color: str, state: LedDisplayState, settings: ColorSettings
     if state in URGENT_STATES and floor > 0.0:
         # A floor of exactly zero is the user saying "go all the way dark".
         # The lift raises a resting glow; it does not invent one.
-        return color if ceiling >= 1.0 else scale_hex_brightness(color, ceiling)
+        # MINIMUM SWING (owner decision, 2026-08-26): an urgent state
+        # must always keep at least a quarter of the range between rest
+        # and peak -- at ceiling 1.0 the old lift made floor == peak and
+        # an Ask rendered as an unblinking steady light.
+        return scale_hex_brightness(color, min(ceiling, 0.75))
     return "#000000" if floor <= 0.0 else scale_hex_brightness(color, floor)
 
 
@@ -1908,21 +2018,180 @@ def _motion_segments(
         stretch = 2 if motion in (MOTION_DRIFT, MOTION_AURORA) else 1
         duration = max(1, stretch * ((2 * cycle_ms) // 3) + (led_index * 137) % 331)
         offset = (led_index * 271) % max(1, cycle_ms // 3)
+        if motion == MOTION_AURORA:
+            # Aurora rests on a LUMINOUS bed (its whole identity: light
+            # moving on water at night), where drift rests near-dark.
+            # In shared strips the two rendered byte-identical until
+            # 2026-08-26 -- a dead pair in an 18-choice picker.
+            bed = scale_hex_brightness(peak, 0.22)
+            floor_segment = f"{led_index}:{bed} {settle_ms}ms cosine"
+            offset = (led_index * 617) % max(1, cycle_ms // 2)
         return (
             floor_segment,
             f"{led_index}:{peak} {duration}ms pulse {delay_ms + offset}ms",
         )
-    if motion in (MOTION_CHASE, MOTION_SCANNER, MOTION_COMET, MOTION_STACK, MOTION_CONVERGE, MOTION_TIDE):
-        # In a MULTI-agent layout a provider owns interleaved LEDs, so a
-        # positional sweep has no line to travel -- scanner and comet
-        # degrade to the travelling wave here and keep their real shapes
-        # for the solo render (presentation_policy).
+    if motion in (
+        MOTION_CHASE,
+        MOTION_SCANNER,
+        MOTION_KITT,
+        MOTION_COMET,
+        MOTION_STACK,
+        MOTION_CONVERGE,
+        MOTION_TIDE,
+        MOTION_MARQUEE,
+        MOTION_GRADIENT,
+    ):
+        # In a MULTI-agent layout a provider's positional sweep rides
+        # the travelling-wave conversion (delay = its share of the
+        # stagger, contiguous in Spatial blocks, interleaved elsewhere)
+        # -- but the CLASSES stay distinguishable (owner decision,
+        # 2026-08-26; they used to collapse into one identical wave):
+        # scanner/kitt/comet/marquee/gradient travel as a NARROW flare,
+        # stack piles on hard with no easing, and chase/tide/converge
+        # keep the full swell. Real shapes remain the solo render's.
+        if motion in (
+            MOTION_SCANNER,
+            MOTION_KITT,
+            MOTION_COMET,
+            MOTION_MARQUEE,
+            MOTION_GRADIENT,
+        ):
+            width_ms = max(MIN_FLASH_CYCLE_MS, cycle_ms // 2)
+            return (
+                floor_segment,
+                f"{led_index}:{peak} {width_ms}ms pulse {delay_ms + chase_delay_ms}ms",
+            )
+        if motion == MOTION_STACK:
+            return (
+                floor_segment,
+                f"{led_index}:{peak} {cycle_ms}ms none {delay_ms + chase_delay_ms}ms",
+            )
         return (
             floor_segment,
             f"{led_index}:{peak} {cycle_ms}ms pulse {delay_ms + chase_delay_ms}ms",
         )
     # Breathe: the full cycle, in unison.
     return floor_segment, f"{led_index}:{peak} {cycle_ms}ms pulse{tail}"
+
+
+def _cycle_turn_lines(
+    agent: _ActiveAgent,
+    settings: ColorSettings,
+    *,
+    led_count: int,
+    duration_ms: int,
+) -> list[str]:
+    """One agent's TURN in the Cycle layout, in its chosen rhythm class."""
+    return _motion_turn_lines(
+        _display_color_for_agent(agent, settings),
+        agent.state,
+        settings,
+        provider=agent.provider,
+        led_count=led_count,
+        duration_ms=duration_ms,
+    )
+
+
+def _motion_turn_lines(
+    color: str,
+    state: LedDisplayState,
+    settings: ColorSettings,
+    *,
+    provider: str | None,
+    led_count: int,
+    duration_ms: int,
+) -> list[str]:
+    """A whole-strip rendering of this color/state's chosen rhythm.
+
+    The owner of these lines has the full strip for `duration_ms`, so
+    positional shapes get a real line to travel. Every shape stays
+    inside the safety compiler's floors (the compiler still has the
+    last word). Deterministic bytes -- write dedupe holds. Shared by
+    the Cycle layout's turns and the solo/preview render."""
+    if _is_static_agent_state(state):
+        return [
+            f"{_peak_for_state(color, state, settings)} {duration_ms}ms cosine"
+        ]
+    peak = _peak_for_state(color, state, settings)
+    floor_color = _floor_for_state(color, state, settings)
+    motion = agent_motion(
+        state,
+        cycle_ms=duration_ms,
+        provider=provider,
+        settings=settings,
+    )
+    if motion == MOTION_STEADY:
+        return [f"{peak} {duration_ms}ms cosine"]
+    if motion == MOTION_BLINK:
+        half = max(1, duration_ms // 2)
+        return [f"{peak} {half}ms none", f"{floor_color} {half}ms none"]
+    if motion == MOTION_HEARTBEAT:
+        beat = max(250, duration_ms // 6)
+        rest = max(250, duration_ms - 3 * beat)
+        return [
+            f"{peak} {beat}ms pulse",
+            f"{peak} {beat}ms pulse {max(0, beat // 2)}ms",
+            f"{floor_color} {rest}ms none",
+        ]
+    if motion == MOTION_DUOTONE:
+        from .presentation_policy import _hue_shifted_color
+
+        half = max(250, duration_ms // 2)
+        return [
+            f"{peak} {half}ms pulse",
+            f"{_hue_shifted_color(peak, 40.0)} {half}ms pulse",
+        ]
+    if motion in (MOTION_FLICKER, MOTION_TWINKLE, MOTION_DRIFT, MOTION_AURORA):
+        seed = 617 if motion == MOTION_AURORA else 271
+        segments = [
+            f"{index}:{peak} "
+            f"{max(250, (2 * duration_ms) // 3 + (index * 137) % 331)}ms pulse "
+            f"{(index * seed) % max(1, duration_ms // 3)}ms"
+            for index in range(led_count)
+        ]
+        return ["; ".join(segments)]
+    if motion in (
+        MOTION_CHASE,
+        MOTION_SCANNER,
+        MOTION_KITT,
+        MOTION_COMET,
+        MOTION_STACK,
+        MOTION_CONVERGE,
+        MOTION_TIDE,
+        MOTION_GRADIENT,
+        MOTION_MARQUEE,
+    ):
+        from .presentation_policy import _hue_shifted_color
+
+        step = max(60, duration_ms // max(1, 2 * led_count))
+        width = max(250, min(duration_ms // 2, 3 * step))
+        segments = []
+        for index in range(led_count):
+            shade = peak
+            if motion in (MOTION_GRADIENT, MOTION_MARQUEE):
+                fraction = index / max(1, led_count - 1)
+                shade = _hue_shifted_color(peak, (fraction - 0.5) * 48.0)
+            if motion == MOTION_CONVERGE:
+                delay = min(index, led_count - 1 - index) * step
+            else:
+                delay = index * step
+            if motion == MOTION_TIDE:
+                segments.append(
+                    f"{index}:{shade} "
+                    f"{max(250, 2 * (led_count - index) * step)}ms pulse {delay}ms"
+                )
+            elif motion == MOTION_STACK:
+                segments.append(
+                    f"{index}:{shade} "
+                    f"{max(250, (led_count - index) * step + 300)}ms none {delay}ms"
+                )
+            else:
+                segments.append(f"{index}:{shade} {width}ms pulse {delay}ms")
+        lines = ["; ".join(segments)]
+        if motion == MOTION_STACK:
+            lines.append(f"{floor_color} 400ms cosine")
+        return lines
+    return [f"{peak} {duration_ms}ms pulse"]
 
 
 def _cycle_program(
@@ -1953,16 +2222,54 @@ def _cycle_program(
     # once steady-state; the moment a real status change interrupts this
     # loop mid-breath, a bare snap reads as the animation abruptly stopping
     # instead of easing into the next cycle.
-    lines: list[str] = [f"off {settle_ms}ms cosine"]
-    for agent in agents:
+    #
+    # Each agent's TURN owns the whole strip, so its chosen motion can
+    # actually render (owner decision 2026-08-26 -- Cycle used to ignore
+    # the motion picker entirely). Rich turns are built first; if the
+    # firmware's 512-byte / 20-line budget would overflow, agents
+    # degrade from the END back to the plain breathe until it fits.
+    lead = [f"off {settle_ms}ms cosine"]
+
+    def plain_turn(agent) -> list[str]:
         color = _display_color_for_agent(agent, settings)
         if _is_static_agent_state(agent.state):
-            lines.append(f"{_peak_for_state(color, agent.state, settings)} {duration_ms}ms cosine")
-            continue
-        peak = _peak_for_state(color, agent.state, settings)
-        lines.append(f"{peak} {duration_ms}ms pulse")
-    lines.append("repeat")
-    return apply_brightness("\n".join(lines), brightness)
+            return [
+                f"{_peak_for_state(color, agent.state, settings)} {duration_ms}ms cosine"
+            ]
+        return [f"{_peak_for_state(color, agent.state, settings)} {duration_ms}ms pulse"]
+
+    # Rich turns only for an EXPLICIT motion choice -- Automatic keeps
+    # Cycle's classic whole-strip breath per agent exactly (same guard
+    # the solo render uses), so the speed dial's rendered duration and
+    # the layout's identity are unchanged for everyone who never opened
+    # the motion picker.
+    turns = [
+        (
+            _cycle_turn_lines(
+                agent,
+                settings,
+                led_count=led_count,
+                duration_ms=duration_ms,
+            )
+            if settings.agent_animation(agent.provider) != PROVIDER_ANIMATION_AUTO
+            else plain_turn(agent)
+        )
+        for agent in agents
+    ]
+
+    def assembled(current_turns) -> str:
+        return "\n".join([*lead, *(line for turn in current_turns for line in turn), "repeat"])
+
+    program = assembled(turns)
+    degrade_index = len(turns) - 1
+    while degrade_index >= 0 and (
+        len(program.encode("utf-8")) > MAX_LED_BYTES - 24
+        or program.count("\n") + 1 > MAX_LED_LINES - 1
+    ):
+        turns[degrade_index] = plain_turn(agents[degrade_index])
+        program = assembled(turns)
+        degrade_index -= 1
+    return apply_brightness(program, brightness)
 
 
 def _agents_that_fit(agents: list[_ActiveAgent], led_count: int) -> list[_ActiveAgent]:
@@ -2159,10 +2466,47 @@ def _spatial_split_program(
     reset_segments: list[str] = []
     index = 0
     for agent, count in blocks:
+        duration_ms = _SEGMENT_DURATION_MS_BY_STATE.get(agent.state, 760)
+        settle_ms = settle_duration_ms(duration_ms)
+        # Intra-block stagger: a spatial block is CONTIGUOUS, so the
+        # positional-degrades-to-wave conversion actually reads as
+        # travel here -- a chase runs through the block, a heartbeat
+        # lub-dubs it, a twinkle sparks it. Before 2026-08-26 this
+        # layout honored only Steady and rendered everything else as a
+        # plain unison pulse (owner decision: motions real everywhere).
+        stagger_ms = duration_ms // max(2, count) if count > 1 else 0
+        block_motion = agent_motion(
+            agent.state,
+            cycle_ms=duration_ms,
+            provider=agent.provider,
+            settings=settings,
+        )
         for offset in range(count):
             led_index = index + offset
-            segments.append(_segment_for_agent(led_index, agent, settings))
-            reset_segments.append(_reset_segment_for_agent(led_index, agent, settings))
+            if _is_static_agent_state(agent.state):
+                segments.append(_segment_for_agent(led_index, agent, settings))
+                reset_segments.append(
+                    _reset_segment_for_agent(led_index, agent, settings)
+                )
+                continue
+            if block_motion == MOTION_CONVERGE:
+                # Two fronts leaving the block's ends and meeting in
+                # its middle -- the block is contiguous, so this reads.
+                position = min(offset, count - 1 - offset)
+            else:
+                position = offset
+            reset, motion = _motion_segments(
+                led_index,
+                _display_color_for_agent(agent, settings),
+                agent.state,
+                settings,
+                cycle_ms=duration_ms,
+                settle_ms=settle_ms,
+                chase_delay_ms=(position * stagger_ms) % max(1, duration_ms),
+                provider=agent.provider,
+            )
+            segments.append(motion)
+            reset_segments.append(reset)
         index += count
 
     # Per-index reset line (rather than one blanket "off") so each LED

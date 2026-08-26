@@ -146,3 +146,20 @@ def test_codex_banked_credits_ride_evidence_into_the_snapshot():
         }
     )
     assert all("credits_balance" not in window for window in empty)
+
+
+def test_reset_event_fires_on_a_replenishment_jump_despite_poisoned_clocks():
+    """The live 2026-08-26 miss: one failed poll re-stamped observed_at
+    past the reset boundary (select_authoritative_snapshot), so the
+    timing detector could never see the crossing. A >= 50-point upward
+    jump with an advanced reset_at is unmistakably a refill and must
+    fire regardless of what the clocks claim."""
+    before = snapshot(2000, (lane(16, 1500),))  # observed PAST the boundary
+    after = snapshot(2100, (lane(100, 19500),))
+    events = detect_reset_events((before,), (after,), seen_event_ids=frozenset())
+    assert len(events) == 1
+    assert events[0].provider_id == "claude"
+
+    # A small drift up is NOT a reset on this path.
+    small = snapshot(2100, (lane(40, 19500),))
+    assert detect_reset_events((before,), (small,), seen_event_ids=frozenset()) == ()

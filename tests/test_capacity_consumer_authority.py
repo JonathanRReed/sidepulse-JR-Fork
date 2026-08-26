@@ -230,6 +230,11 @@ def test_unauthoritative_capacity_cannot_reach_any_consumer(
     assert target.quota_blink_until == 0.0
     assert target.completion_sweep_until == 0.0
     refresh.assert_not_called()
+    # The LEGACY capacity plane still cannot feed the runway LED: this
+    # base controller's producer stays None. Since 2026-08-26 the
+    # provider-usage facade overrides it with the JR plane's gated
+    # lanes (quota_runway.py) -- a different, authoritative producer,
+    # exactly what this test's contract demanded.
     assert target.quota_runway_state() is None
     runway_factory = target.signal_display_entries()[LED_DISPLAY_QUOTA_RUNWAY][0]
     assert runway_factory(255, 8) is None

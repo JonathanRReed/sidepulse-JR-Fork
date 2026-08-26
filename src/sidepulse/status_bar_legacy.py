@@ -104,6 +104,10 @@ _NS_STRING_DRAWING_USES_LINE_FRAGMENT_ORIGIN = 1 << 0
 from . import colors as colors_module
 from . import signals as signals_module
 from .draw_guard import guard_draw
+from .setup_window import build_setup_window
+from .mailbox_menu import build_agent_mailbox_menu_item
+from .device_menu import build_device_menu_item
+from .activity_ledger_menu import build_activity_ledger_menu_item
 from .accessibility_display import (
     AccessibilityDisplayPreferences,
     refresh_accessibility_display_preferences,
@@ -324,6 +328,8 @@ from .ipc import (
     default_latest_state_path,
 )
 from .keep_awake import battery_yields_hold, KEEPALIVE_FILE_NAME, KeepAwakeController
+from .celebrations import RESET_CELEBRATION_SECONDS, reset_celebration_program
+from .window_presentation import activate_app, present_window
 from .led_status import (
     MAX_CHANNEL_GAIN,
     MIN_CHANNEL_GAIN,
@@ -337,6 +343,7 @@ from .led_status import (
     burn_saved_animation_to_power_up,
     failure_signal_program,
     led_count_for_target,
+    notification_blink_program,
     normalize_brightness,
     normalized_device_name,
     quota_runway_program,
@@ -379,6 +386,7 @@ from .mailbox_preferences import (
     MailboxPreferenceProjection,
     apply_mailbox_preferences,
 )
+from .snooze_scope import filter_snoozed_statuses, status_snoozed
 from .menu_tracking import (
     ExactBoundarySchedule,
     MenuItemState,
@@ -529,6 +537,7 @@ from .settings import (
     LID_ANIMATION_CLOSED_ACTIVE,
     LID_ANIMATION_OPEN,
     LID_ANIMATION_OPEN_ACTIVE,
+    WEBHOOK_EVENT_KEYS,
     AgentMonitorSettings,
     LedAnimationSetting,
     default_lid_animation,
@@ -1310,6 +1319,11 @@ REMINDERS_WATCH_RETRY_SECONDS = 300.0
 LED_DISPLAY_WEATHER = "weather"
 LED_DISPLAY_QUOTA = "quota_alert"
 LED_DISPLAY_ALL_CLEAR = "all_clear"
+# A rate-limit RESET: the confetti moment (celebrations.py). Finite,
+# courtesy-gated, and deliberately NOT behind quota_alerts_enabled --
+# that flag guards warnings; a refilled meter is good news.
+LED_DISPLAY_RESET_CELEBRATION = "reset_celebration"
+LED_DISPLAY_CONNECTION = "connection_notice"
 LED_DISPLAY_PEEK = "peek"
 WEATHER_WATCH_SECONDS = 600.0
 WEATHER_WATCH_RETRY_SECONDS = 1800.0
@@ -1358,6 +1372,8 @@ DEVICE_MUTABLE_SIGNAL_KINDS = frozenset(
         LED_DISPLAY_ALL_CLEAR,
         LED_DISPLAY_CALENDAR,
         LED_DISPLAY_PEEK,
+        LED_DISPLAY_RESET_CELEBRATION,
+        LED_DISPLAY_CONNECTION,
     }
 )
 # Story #8 (night warmth): per-channel multipliers applied 19:00-07:00
@@ -1891,6 +1907,7 @@ class StatusBarController(NSObject):
         self.ask_blocked_by_agent: dict[str, float] = {}
         self.escalation_last_stage = 0
         self.escalation_chimed = False
+        self.escalation_webhook_fired = False
         self.led_controller = AgentLedController()
         self.battery_led_controller = BatteryLedController()
         self.agent_led_controllers_by_device = {}
@@ -2412,21 +2429,39 @@ class StatusBarController(NSObject):
         now: float | None = None,
     ) -> AttentionProjection:
         observed_at = time.monotonic() if now is None else float(now)
-        attention_snapshot = SimpleNamespace(
-            statuses=mailbox_attention_statuses(snapshot),
-            collected_at=snapshot.collected_at,
+        statuses = mailbox_attention_statuses(snapshot)
+        # Snooze scope (2026-08-26): a snoozed session stops claiming the
+        # lights too; a raised hand still breaks through (snooze_scope).
+        # The mailbox below keeps the FULL rows -- its preference pass
+        # owns dropdown wake semantics, and the Agent Browser keeps
+        # showing snoozed sessions on purpose.
+        visible = filter_snoozed_statuses(
+            statuses,
+            getattr(self, "mailbox_preferences", ()),
+            now=time.time(),
         )
-        projection = project_attention(attention_snapshot, self.settings)
+        projection = project_attention(
+            SimpleNamespace(statuses=visible, collected_at=snapshot.collected_at),
+            self.settings,
+        )
         self.current_attention_projection = projection
+        mailbox_projection = (
+            projection
+            if visible is statuses
+            else project_attention(
+                SimpleNamespace(statuses=statuses, collected_at=snapshot.collected_at),
+                self.settings,
+            )
+        )
         active_ids = {
             row.agent_id
-            for row in projection.visible_rows
+            for row in mailbox_projection.visible_rows
             if row.lifecycle_mode
             not in {LifecycleMode.COMPLETED_RECENTLY, LifecycleMode.FAILED_VISIBLE}
         }
         if active_ids:
             self.mailbox_seen_completion_ids.difference_update(active_ids)
-        mailbox = project_mailbox_for_target(projection, self)
+        mailbox = project_mailbox_for_target(mailbox_projection, self)
         self.current_mailbox_projection = mailbox
         self.mailbox_retained_order = dict(mailbox.retained_order)
         if not self.failure_signal_watermark_established:
@@ -4786,6 +4821,20 @@ class StatusBarController(NSObject):
         self.refresh_(None)
 
     @objc.IBAction
+    def setNightDimFraction_(self, sender):
+        item = sender.selectedItem()
+        raw = str(item.representedObject() or "1.0") if item is not None else "1.0"
+        try:
+            fraction = float(raw)
+        except ValueError:
+            return
+        self.settings = self.settings.with_night_dim_fraction(fraction)
+        save_settings(self.settings)
+        label = item.title() if item is not None else "Don't dim at night"
+        self.set_settings_message(f"Night brightness saved: {label}.")
+        self.refresh_(None)
+
+    @objc.IBAction
     def applyTimeboxShortcuts_(self, _sender):
         settings = self.settings
         for preset_minutes in TIMEBOX_PRESET_MINUTES:
@@ -5445,6 +5494,9 @@ class StatusBarController(NSObject):
         if editor is None:
             return
         editor.setString_("\n".join(lines).strip())
+        # "It's yours now" has to survive closing the window: capture
+        # used to set the text and persist nothing.
+        self._persist_studio_editor_text()
         self.set_settings_message("Captured. It's yours now -- edit away.")
 
     @objc.IBAction
@@ -6280,8 +6332,8 @@ class StatusBarController(NSObject):
         if self.why_panel_window is None:
             self.why_panel_window = build_why_panel_window(self)
         set_text_control_value(self.why_panel_text_view, body)
-        self.why_panel_window.makeKeyAndOrderFront_(None)
-        NSApp.activateIgnoringOtherApps_(True)
+        present_window(self.why_panel_window)
+        activate_app()
 
     @objc.IBAction
     def runFirstLaunchSetup_(self, _sender):
@@ -6390,6 +6442,26 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def setBatteryPowerPreviewFromCheckbox_(self, sender):
         self.set_battery_power_preview(sender.state() == NSOnState)
+
+    @objc.IBAction
+    def setBatteryChargingIdleFromCheckbox_(self, sender):
+        self.set_battery_charging_idle(sender.state() == NSOnState)
+
+    @objc.IBAction
+    def toggleQuotaAlerts_(self, sender):
+        enabled = checkbox_is_on(sender)
+        try:
+            self.settings = self.settings.with_quota_alerts_enabled(enabled)
+            save_settings(self.settings)
+        except Exception as exc:
+            self.set_settings_message(f"Could not save settings: {exc}")
+            self.settings = load_settings()
+            self.refresh_settings_window()
+            return
+        self.set_settings_message(
+            f"Quota alerts {'enabled' if enabled else 'disabled'}."
+        )
+        self.refresh_settings_window()
 
     @objc.IBAction
     def refreshUsageCenterTick_(self, timer):
@@ -6594,16 +6666,33 @@ class StatusBarController(NSObject):
         self.save_lid_animations_from_fields()
 
     def textDidEndEditing_(self, notification):
-        """NSTextView delegate: the two lid-animation program editors are
-        the only text views that set us as delegate -- committing when
-        editing ends gives them the same instant-apply contract as every
-        text field (see native_ui.make_field)."""
+        """NSTextView delegate: the lid-animation editors AND the Studio
+        editor commit when editing ends -- the same instant-apply
+        contract as every text field (see native_ui.make_field). The
+        Studio editor used to be excluded: a program typed and never
+        previewed was silently gone on quit (audit, 2026-08-26)."""
         editors = (
             self.settings_fields.get("closed_animation_program"),
             self.settings_fields.get("open_animation_program"),
         )
         if notification.object() in editors:
             self.save_lid_animations_from_fields()
+            return
+        studio = getattr(self, "studio_editor", None)
+        if studio is not None and notification.object() is studio:
+            self._persist_studio_editor_text()
+
+    def _persist_studio_editor_text(self) -> None:
+        editor = getattr(self, "studio_editor", None)
+        if editor is None:
+            return
+        try:
+            program = str(editor.string() or "")
+            if program.strip() and program != (self.settings.studio_program or ""):
+                self.settings = self.settings.with_studio_program(program)
+                save_settings(self.settings)
+        except Exception:
+            pass
 
     @objc.IBAction
     def previewLidClosedAnimation_(self, _sender):
@@ -6758,6 +6847,7 @@ class StatusBarController(NSObject):
                 # was answered) gets a fresh one-chime latch (and a
                 # fresh one-webhook latch).
                 self.escalation_chimed = False
+                self.escalation_webhook_fired = False
                 self.escalation_webhooked = False
             self.ask_blocked_since = oldest
         else:
@@ -7743,6 +7833,28 @@ class StatusBarController(NSObject):
                         )
             self.fire_escalation_webhook(stage)
 
+        # The webhook is decoupled from the display tier: the docs (and
+        # the setting's own help text) promise "stage-3 escalation
+        # always fires when the URL is set", but the tier CAPS the
+        # stage, so at the default menu_bar tier stage 3 never computed
+        # and the POST never happened (audit, 2026-08-26). The kitchen
+        # ping is judged on elapsed time alone.
+        raw_stage = signals_module.escalation_stage(
+            (
+                time.monotonic() - self.ask_blocked_since
+                if self.ask_blocked_since is not None
+                else None
+            ),
+            ramp_seconds=self.settings.escalation_ramp_seconds,
+            menu_bar_seconds=self.settings.escalation_menu_bar_seconds,
+            final_seconds=self.settings.escalation_final_seconds,
+            tier=signals_module.ESCALATION_TIER_TAKEOVER,
+        )
+        if raw_stage >= 3 and not getattr(self, "escalation_webhook_fired", False):
+            self.escalation_webhook_fired = True
+            if not self.escalation_chimed:
+                self.fire_escalation_webhook(raw_stage)
+
         if changed and allow_refresh:
             self.refresh_(None)
 
@@ -7959,6 +8071,14 @@ class StatusBarController(NSObject):
             status is None
             or not self.settings.completion_notification_enabled
             or not self.may_interrupt(signals_module.SIGNAL_COMPLETION)
+            # Snooze scope (2026-08-26): a snoozed session's completion
+            # stays out of Notification Center; live asks break through
+            # elsewhere, and the dropdown/browser still tell the story.
+            or status_snoozed(
+                status,
+                getattr(self, "mailbox_preferences", ()),
+                now=time.time(),
+            )
         ):
             return
         work_key = getattr(status, "work_key", None)
@@ -8631,9 +8751,9 @@ class StatusBarController(NSObject):
                 )
         self.refresh_settings_window()
         self.maybe_refresh_usage_summary()
-        self.settings_window.makeKeyAndOrderFront_(None)
+        present_window(self.settings_window)
         self._reconcile_current_presentation_inputs()
-        NSApp.activateIgnoringOtherApps_(True)
+        activate_app()
 
     @objc.IBAction
     def openAgentBrowser_(self, sender) -> bool:
@@ -8689,7 +8809,7 @@ class StatusBarController(NSObject):
             ),
             error_message=self.operator_action_error,
         )
-        NSApp.activateIgnoringOtherApps_(True)
+        activate_app()
         return True
 
     @objc.IBAction
@@ -10030,9 +10150,9 @@ class StatusBarController(NSObject):
         if self.setup_window is None:
             self.setup_window = build_setup_window(self)
         self.refresh_setup_window()
-        self.setup_window.makeKeyAndOrderFront_(None)
+        present_window(self.setup_window)
         self._reconcile_current_presentation_inputs()
-        NSApp.activateIgnoringOtherApps_(True)
+        activate_app()
 
     @objc.IBAction
     def redrawSetupDemo_(self, _sender):
@@ -10337,6 +10457,29 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("screen_bar_gauges"),
             self.settings.screen_bar_gauges_enabled,
         )
+        # Stale-after-external-change batch (audit, 2026-08-26): these
+        # switches were set at build time and never re-synced.
+        set_checkbox_state(
+            self.settings_buttons.get("screen_bar_show_in_full_screen"),
+            self.settings.screen_bar_show_in_full_screen,
+        )
+        set_checkbox_state(
+            self.settings_buttons.get("keep_awake_on_battery"),
+            self.settings.keep_awake_on_battery,
+        )
+        set_checkbox_state(
+            self.settings_buttons.get("menu_bar_label"),
+            self.settings.menu_bar_label_enabled,
+        )
+        set_field_value(
+            self.settings_fields.get("escalation_webhook_field"),
+            self.settings.escalation_webhook_url,
+        )
+        for event_key in WEBHOOK_EVENT_KEYS:
+            set_checkbox_state(
+                self.settings_buttons.get(f"webhook_event:{event_key}"),
+                event_key in self.settings.webhook_events,
+            )
         set_checkbox_state(
             self.settings_buttons.get("screen_bar_follow_alcove"),
             self.settings.screen_bar_follow_alcove,
@@ -10400,6 +10543,25 @@ class StatusBarController(NSObject):
             self.settings_buttons.get("battery_power_preview"),
             self.settings.battery_show_on_power_change,
         )
+        set_checkbox_state(
+            self.settings_buttons.get("battery_charging_idle"),
+            self.settings.battery_charging_idle_enabled,
+        )
+        night_dim_popup = self.settings_fields.get("night_dim_popup")
+        if night_dim_popup is not None:
+            # Compare as FLOATS: f"{1.0:g}" is "1" but the item carries
+            # "1.0", so the string compare never re-selected the
+            # default row (hostile review, 2026-08-26).
+            wanted = float(self.settings.night_dim_fraction)
+            for index in range(night_dim_popup.numberOfItems()):
+                item = night_dim_popup.itemAtIndex_(index)
+                try:
+                    value = float(str(item.representedObject() or ""))
+                except ValueError:
+                    continue
+                if abs(value - wanted) < 1e-9:
+                    night_dim_popup.selectItem_(item)
+                    break
         set_checkbox_state(
             self.settings_buttons.get("low_battery_alert"),
             self.settings.low_battery_alert_enabled,
@@ -11252,6 +11414,24 @@ class StatusBarController(NSObject):
         self.refresh_settings_window()
         self.refresh_(None)
 
+    def set_battery_charging_idle(self, enabled: bool) -> None:
+        try:
+            self.settings = self.settings.with_battery_charging_idle(enabled)
+            save_settings(self.settings)
+        except Exception as exc:
+            self.set_settings_message(f"Could not save settings: {exc}")
+            self.settings = load_settings()
+            self.refresh_settings_window()
+            return
+
+        self.set_settings_message(
+            "Charging trickle while idle "
+            f"{'enabled' if enabled else 'disabled'}."
+        )
+        self.schedule_event_refresh()
+        self.refresh_settings_window()
+        self.refresh_(None)
+
     def read_battery_snapshot(self) -> BatterySnapshot | None:
         cached = getattr(self, "_battery_snapshot_cache", None)
         now = time.monotonic()
@@ -11386,6 +11566,7 @@ class StatusBarController(NSObject):
             base
             * self.idle_dim_scale_factor()
             * self.focus_sync_scale_factor()
+            * self.night_dim_scale_factor()
             * float(self.settings.global_brightness_scale)
             * boost
         )
@@ -11458,6 +11639,18 @@ class StatusBarController(NSObject):
         return tuple(
             float(gain) * warm[index] for index, gain in enumerate(gains[:3])
         )
+
+    def night_dim_scale_factor(self, hour: int | None = None) -> float:
+        """Night warmth's brightness sibling: between 19:00 and 07:00
+        every surface dims by night_dim_fraction. 1.0 (the shipped
+        default) is a no-op; the escalation-ramp floor downstream still
+        guarantees an ignored ask stays visible through it."""
+        fraction = float(self.settings.night_dim_fraction)
+        if fraction >= 1.0:
+            return 1.0
+        if hour is None:
+            hour = datetime.now().hour
+        return fraction if (hour >= 19 or hour < 7) else 1.0
 
     def focus_sync_scale_factor(self) -> float:
         """1.0 normally; idle_dim_fraction (the same "how much to dim"
@@ -11769,6 +11962,26 @@ class StatusBarController(NSObject):
                     and now < getattr(self, "completion_sweep_until", 0.0)
                 ),
             ),
+            # Confetti for a refilled meter: courtesy-gated (a Focus
+            # refuses it), but NOT behind quota_alerts_enabled -- that
+            # flag guards warnings, and this is the good news.
+            (
+                LED_DISPLAY_RESET_CELEBRATION,
+                lambda: (
+                    self.may_interrupt(signals_module.SIGNAL_QUOTA)
+                    and now < getattr(self, "quota_reset_celebration_until", 0.0)
+                ),
+            ),
+            # A provider dropping from healthy: one brief notice blink,
+            # through the notification courtesy gate. This resurrects
+            # notification_blink_program, which shipped with no claim.
+            (
+                LED_DISPLAY_CONNECTION,
+                lambda: (
+                    self.may_interrupt(signals_module.SIGNAL_NOTIFICATION)
+                    and now < getattr(self, "connection_notice_until", 0.0)
+                ),
+            ),
             (
                 LED_DISPLAY_PEEK,
                 lambda: now < getattr(self, "peek_until", 0.0),
@@ -11814,6 +12027,33 @@ class StatusBarController(NSObject):
                 lambda: (
                     device.display == LED_DISPLAY_QUOTA_RUNWAY
                     and self.quota_runway_state() is not None
+                ),
+            ),
+            # Ambient charging trickle: DEAD LAST before the agent
+            # default, and only on a device showing the default agent
+            # display -- a device the user pinned to Studio, Timer,
+            # Battery, or Runway keeps its assignment, and an active
+            # timebox keeps its drain (the hostile review caught the
+            # first draft of this claim, placed higher, hijacking all
+            # four). The lifecycle gate is the product contract in one
+            # line: running, asking, freshly-done and visibly-failed
+            # agents all outrank an ambient display. At 100% the claim
+            # drops and idle takes back over.
+            (
+                LED_DISPLAY_BATTERY,
+                lambda: (
+                    self.settings.battery_charging_idle_enabled
+                    and device.display == LED_DISPLAY_AGENT
+                    and battery_snapshot is not None
+                    and battery_snapshot.is_plugged
+                    and not battery_snapshot.is_charged
+                    and not self.timebox_active()
+                    and not self.timebox_overtime()
+                    and (
+                        self.current_attention_projection is None
+                        or self.current_attention_projection.lifecycle_mode
+                        is LifecycleMode.IDLE
+                    )
                 ),
             ),
         )
@@ -12130,6 +12370,14 @@ class StatusBarController(NSObject):
             _set_virtual(self.test_signal_program(brightness))
         elif display == LED_DISPLAY_ESCALATION:
             _set_virtual(self.escalation_takeover_program(brightness))
+        elif display == LED_DISPLAY_RESET_CELEBRATION:
+            _set_virtual(reset_celebration_program(brightness))
+        elif display == LED_DISPLAY_CONNECTION:
+            _set_virtual(
+                notification_blink_program(
+                    self.settings.colors.mode_color("ask"), brightness
+                )
+            )
         elif display == LED_DISPLAY_COMPLETION:
             _set_virtual(
                 style_to_program(
@@ -12333,14 +12581,25 @@ class StatusBarController(NSObject):
         on a 2-LED Dot parses cleanly and then paints six LEDs that do not
         exist -- silence the owner reads as a broken animation. Warnings
         do not block anything; they just have to be sayable.
+
+        Cached for two seconds: this runs on the as-you-type path, and
+        enumerating devices (settings lookups, night-warmth gains, the
+        works) on EVERY keystroke was a measurable slice of the Studio's
+        typing lag. Device counts change on plug/unplug, not mid-word.
         """
+        cached = getattr(self, "_studio_led_count_cache", None)
+        now = time.monotonic()
+        if cached is not None and now - cached[1] < 2.0:
+            return cached[0]
         counts = [
             LED_COUNT if device.device_id == VIRTUAL_DEVICE_ID
             else led_count_for_target(device.target)
             for device in (self.status_bar_devices(remember=False) or [])
             if device.connected
         ]
-        return min(counts) if counts else LED_COUNT
+        value = min(counts) if counts else LED_COUNT
+        self._studio_led_count_cache = (value, now)
+        return value
 
     def studio_program_problems(self, program: str, *, led_count: int | None = None):
         """Everything wrong with a program, as sentences with step numbers.
@@ -12388,6 +12647,24 @@ class StatusBarController(NSObject):
             changed = None
         if changed is not None and changed is not editor:
             return
+        # Debounced: validating on EVERY keystroke put a parse (and its
+        # label repaint) between the user and the next character, on the
+        # same main thread the preview thumbnails are already painting
+        # at 12fps. A fifth of a second after the last keystroke is
+        # indistinguishable from instant and costs one parse per pause
+        # instead of one per character.
+        try:
+            NSObject.cancelPreviousPerformRequestsWithTarget_selector_object_(
+                self, "studioValidationDebounceFired:", None
+            )
+            self.performSelector_withObject_afterDelay_(
+                "studioValidationDebounceFired:", None, 0.2
+            )
+        except Exception:
+            self.refresh_studio_problem_label()
+
+    @objc.IBAction
+    def studioValidationDebounceFired_(self, _sender) -> None:
         self.refresh_studio_problem_label()
 
     def studio_problem_summary(self, program: str) -> tuple[str, str]:
@@ -13170,6 +13447,7 @@ class StatusBarController(NSObject):
         entry = self.signal_display_entries().get(device_display_kind)
         label = ""
         agent_display_rendered = False
+        write = None
         if entry is not None:
             factory, led_state, label_factory = entry
             controller = self.agent_controller_for_device(device)
@@ -13184,17 +13462,16 @@ class StatusBarController(NSObject):
                 else self.effective_signal_brightness_for_device(device)
             )
             program = factory(render_brightness, device_led_count)
-            label = label_factory(device, request.battery_snapshot)
             if program is not None:
+                label = label_factory(device, request.battery_snapshot)
                 write = controller.sync_program(program, led_state)
-            else:
-                write = LedStatusWrite(
-                    state=led_state,
-                    target=controller.last_target,
-                    program="",
-                    changed=False,
-                )
-        elif (
+            # A factory returning None means "not renderable right now"
+            # and falls back to Agent below -- the Screen Bar and the
+            # legacy immediate path already honor that contract; this
+            # path used to emit a no-op write instead, freezing a
+            # Studio-pinned device on its last program forever while
+            # agent state changes went dark (audit, 2026-08-26).
+        if write is None and (
             device_display_kind == LED_DISPLAY_BATTERY
             and request.battery_snapshot is not None
         ):
@@ -13212,7 +13489,7 @@ class StatusBarController(NSObject):
                 f"{device.name} Battery {request.battery_snapshot.percent}% "
                 f"{format_watts(request.battery_snapshot.adapter_power)}"
             )
-        else:
+        elif write is None:
             agent_display_rendered = True
             colors_for_render = self.agent_render_colors()
             override = self.settings.device_blend_mode(device.device_id)
@@ -13388,9 +13665,12 @@ class StatusBarController(NSObject):
         self,
         inputs: PresentationSchedulerInputs,
     ) -> bool:
+        # Deliberately NOT gated on display_asleep: closing the lid IS a
+        # ScreensDidSleep, so gating on it stopped lid observation at
+        # precisely the moment the lid closed -- catching the transition
+        # was a race between the 1s poll and the sleep notification.
         return bool(
             self._runtime_started
-            and not inputs.display_asleep
             and not inputs.app_terminating
             and self._lid_observation_relevant()
         )
@@ -13408,9 +13688,13 @@ class StatusBarController(NSObject):
         self,
         inputs: PresentationSchedulerInputs,
     ) -> bool:
+        # Not gated on display_asleep, for the same reason hardware
+        # writes aren't: writes continuing against an inventory frozen
+        # at lid-close would keep hitting a device that unmounted
+        # during the sleep transition, with no re-enumeration possible
+        # until wake.
         return bool(
             self._runtime_started
-            and not inputs.display_asleep
             and not inputs.app_terminating
             and (self.leds_enabled or self._devices_pane_requests_inventory())
         )
@@ -13419,10 +13703,18 @@ class StatusBarController(NSObject):
         self,
         inputs: PresentationSchedulerInputs,
     ) -> bool:
+        # display_asleep conflated "the screen is dark" with "nobody can
+        # see the light" -- but the hardware bar is an EXTERNAL device on
+        # the side of the machine, visible with the lid shut. That gate
+        # is exactly why the bar froze on its last program the moment
+        # the lid closed. When the machine truly sleeps no Python runs
+        # at all, so dropping the gate costs nothing; while a keep-awake
+        # policy holds the machine up for agents, the bar now keeps
+        # saying what they are doing. (The on-screen bar keeps its own
+        # display gate -- a dark screen still has nothing to show.)
         return bool(
             self._runtime_started
             and self.leds_enabled
-            and not inputs.display_asleep
             and not inputs.app_terminating
         )
 
@@ -14555,7 +14847,10 @@ class StatusBarController(NSObject):
         )
 
     def quota_runway_state(self) -> tuple[float, str] | None:
-        """Withhold every capacity-derived LED and hardware state this wave."""
+        """This base collects no usage, so it withholds the runway LED;
+        the provider-usage subclass overrides with the JR plane's gated
+        tightest lane (quota_runway.py). Legacy raw percents still
+        cannot reach this claim."""
         return None
 
     def studio_display_program(self, brightness: float) -> str | None:
@@ -14644,6 +14939,20 @@ class StatusBarController(NSObject):
                 lambda device, _snapshot: (
                     f"{device.name} Weather {self.weather_alert_event or 'alert'}"
                 ),
+            ),
+            LED_DISPLAY_RESET_CELEBRATION: (
+                lambda brightness, led_count: reset_celebration_program(
+                    brightness, led_count=led_count
+                ),
+                LedDisplayState.DONE,
+                lambda device, _snapshot: f"{device.name} Limit reset",
+            ),
+            LED_DISPLAY_CONNECTION: (
+                lambda brightness, _led_count: notification_blink_program(
+                    self.settings.colors.mode_color("ask"), brightness
+                ),
+                LedDisplayState.ASK,
+                lambda device, _snapshot: f"{device.name} Connection notice",
             ),
             LED_DISPLAY_PEEK: (
                 lambda brightness, led_count: self.peek_program(
@@ -15111,7 +15420,23 @@ class StatusBarController(NSObject):
         panes = getattr(self, "settings_panes", None)
         if window is None or panes is None:
             return
+        # Under the seven-category navigation, settings_panes is keyed
+        # by CATEGORY; the devices PAGE lives in
+        # _settings_category_children. Looking only at panes["devices"]
+        # made this whole method a silent no-op there -- the exact
+        # regression its docstring describes came back (audit,
+        # 2026-08-26).
         old_pane = panes.get("devices")
+        store, store_key = panes, "devices"
+        if old_pane is None:
+            for children in (
+                getattr(self, "_settings_category_children", None) or {}
+            ).values():
+                child = children.get("devices")
+                if child is not None:
+                    old_pane = child
+                    store, store_key = children, "devices"
+                    break
         if old_pane is None:
             return
         container = old_pane.superview()
@@ -15136,7 +15461,7 @@ class StatusBarController(NSObject):
             ]
         )
         old_pane.removeFromSuperview()
-        panes["devices"] = new_pane
+        store[store_key] = new_pane
         self.device_settings_controls = device_controls
 
     def sync_keep_awake(self, mode: AgentMode) -> None:
@@ -15950,126 +16275,6 @@ def _add_mailbox_empty_teaching(menu: NSMenu, target) -> None:
     menu.addItem_(connect_item)
 
 
-def build_agent_mailbox_menu_item(snapshot, target) -> NSMenuItem:
-    mailbox = mailbox_projection_for_menu(snapshot, target)
-    attention = getattr(target, "current_attention_projection", None)
-    if not isinstance(attention, AttentionProjection):
-        attention = project_attention(snapshot, target.settings)
-    sources = _mailbox_source_rows(attention)
-    workers_by_parent, orphan_workers = _mailbox_workers_by_parent(sources)
-    display_sources = [status for status in sources.values() if not status.is_subagent]
-    identity: dict[str, str] = {}
-    if len(display_sources) > 1:
-        menu_colors = getattr(getattr(target, "settings", None), "colors", None)
-        # Brand-anchored, like the LED/Screen Bar paths (audit V3): the
-        # dropdown's dots were the last surface still hashing agent ids
-        # into the abstract palette -- "it's purple for some reason when
-        # Claude's running", in the menu the owner looks at most.
-        if menu_colors is not None:
-            identity = colors_module.provider_identity_colors_for_agents(
-                [(status.agent_id, status.provider) for status in display_sources],
-                colors=menu_colors,
-            )
-        else:
-            identity = colors_module.identity_colors_for_agents(
-                [status.agent_id for status in display_sources],
-                groups=colors_module.identity_groups_for_statuses(
-                    display_sources, menu_colors
-                ),
-            )
-
-    summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        (
-            f"Agent Mailbox · {mailbox.active_count} active · "
-            f"{mailbox.needs_you_count} need you · {mailbox.ready_count} ready"
-        ),
-        None,
-        "",
-    )
-    mailbox_menu = NSMenu.alloc().init()
-    mailbox_menu.setAutoenablesItems_(False)
-    has_rows = any(section.rows for section in mailbox.sections)
-    for section in mailbox.sections:
-        shelf_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            _MAILBOX_SECTION_TITLES[section.kind], None, ""
-        )
-        shelf_menu = NSMenu.alloc().init()
-        shelf_menu.setAutoenablesItems_(False)
-        if not section.rows:
-            if not has_rows and section.kind == MailboxSectionKind.RECENT:
-                _add_mailbox_empty_teaching(shelf_menu, target)
-        provider_order: list[str] = []
-        for row in section.rows:
-            if row.provider not in provider_order:
-                provider_order.append(row.provider)
-        show_provider_headers = len(provider_order) > 1
-        rows = (
-            tuple(
-                row
-                for provider in provider_order
-                for row in section.rows
-                if row.provider == provider
-            )
-            if show_provider_headers
-            else section.rows
-        )
-        last_provider_header = None
-        for row in rows:
-            if show_provider_headers and row.provider != last_provider_header:
-                last_provider_header = row.provider
-                try:
-                    provider_title = provider_spec(row.provider).label
-                except ValueError:
-                    provider_title = row.provider.title()
-                shelf_menu.addItem_(disabled_menu_item(provider_title))
-            display_source = sources.get(row.agent_id)
-            navigation_source = sources.get(row.navigation_agent_id or "")
-            dot_color = None
-            if display_source is None:
-                display_source = navigation_source
-            if navigation_source is None:
-                navigation_source = display_source
-            if display_source is None or navigation_source is None:
-                synthetic = disabled_menu_item(
-                    f"{row.display_name}{_mailbox_row_suffix(row)}"
-                )
-                shelf_menu.addItem_(synthetic)
-            else:
-                rendered = _mailbox_display_status(
-                    row, display_source, navigation_source
-                )
-                if getattr(target, "settings", None) is not None:
-                    dot_color = target.settings.colors.session_color(row.agent_id)
-                row_item = build_session_menu_item(
-                    rendered,
-                    snapshot.collected_at,
-                    target,
-                    identity_color=dot_color or identity.get(row.agent_id),
-                    title_suffix=_mailbox_row_suffix(row),
-                )
-                row_item.setRepresentedObject_(navigation_source)
-                shelf_menu.addItem_(row_item)
-            children = (
-                orphan_workers
-                if row.agent_id == "sidepulse:mailbox:background-agents"
-                else workers_by_parent.get(row.agent_id, [])
-            )
-            if children:
-                shelf_menu.addItem_(
-                    build_worker_rollup_item(
-                        children,
-                        snapshot.collected_at,
-                        target,
-                        dot_color or identity.get(row.agent_id),
-                        max_visible=_MAILBOX_MAX_WORKERS_PER_ROLLUP,
-                    )
-                )
-        if section.overflow_count:
-            shelf_menu.addItem_(disabled_menu_item(f"{section.overflow_count} more"))
-        shelf_item.setSubmenu_(shelf_menu)
-        mailbox_menu.addItem_(shelf_item)
-    summary.setSubmenu_(mailbox_menu)
-    return summary
 
 
 MAX_ACTIVITY_MENU_ROWS = 8
@@ -16106,59 +16311,6 @@ def _activity_boundary_text(ledger: ActivityLedger, now_epoch: float) -> str:
     return f"Menu last opened {age}"
 
 
-def build_activity_ledger_menu_item(snapshot, target) -> NSMenuItem | None:
-    """The "what did I miss" section. None when there is nothing to say.
-
-    Collapsed by construction: one row in the dropdown, everything else in a
-    submenu, and no row at all when the ledger is empty. A permanently
-    present "Since you left · 0" is the same cry-wolf failure as a capacity
-    card that says "unavailable" when the owner switched it off.
-    """
-    # `callable(getattr(...))`, the way this menu already treats
-    # `active_focus_summary`: several tests build the dropdown against a
-    # stand-in target, and a section that answers "what did I miss" must
-    # never be the reason the whole menu fails to build.
-    restore = getattr(target, "ensure_activity_ledger", None)
-    if not callable(restore):
-        return None
-    ledger = restore()
-    if type(ledger) is not ActivityLedger or not ledger.entries:
-        return None
-    now_epoch = time.time()
-    unseen = ledger.unseen
-    seen = tuple(entry for entry in ledger.entries if entry not in unseen)
-    title = (
-        f"Since you left · {len(unseen)}"
-        if unseen
-        else "Recent activity"
-    )
-    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
-    submenu = NSMenu.alloc().init()
-    submenu.setAutoenablesItems_(False)
-    submenu.addItem_(disabled_menu_item(_activity_boundary_text(ledger, now_epoch)))
-    submenu.addItem_(NSMenuItem.separatorItem())
-
-    statuses_by_agent = _activity_statuses_by_agent(snapshot)
-    visible_unseen = unseen[:MAX_ACTIVITY_MENU_ROWS]
-    for entry in visible_unseen:
-        submenu.addItem_(
-            _activity_row_item(entry, now_epoch, statuses_by_agent, target)
-        )
-    remaining = MAX_ACTIVITY_MENU_ROWS - len(visible_unseen)
-    visible_seen = seen[:remaining] if remaining > 0 else ()
-    if visible_seen:
-        if visible_unseen:
-            submenu.addItem_(NSMenuItem.separatorItem())
-            submenu.addItem_(disabled_menu_item("Earlier"))
-        for entry in visible_seen:
-            submenu.addItem_(
-                _activity_row_item(entry, now_epoch, statuses_by_agent, target)
-            )
-    hidden = len(ledger.entries) - len(visible_unseen) - len(visible_seen)
-    if hidden > 0:
-        submenu.addItem_(disabled_menu_item(f"{hidden} more"))
-    item.setSubmenu_(submenu)
-    return item
 
 
 def _activity_row_item(
@@ -17078,110 +17230,6 @@ def cached_device_menu_item(
     return item
 
 
-def build_device_menu_item(device: StatusBarDevice, target: StatusBarController) -> NSMenuItem:
-    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(device.name, None, "")
-    item.setState_(1 if device.connected else 0)
-    submenu = NSMenu.alloc().init()
-
-    agent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Agent Status",
-        "setDeviceDisplayAgent:",
-        "",
-    )
-    agent.setTarget_(target)
-    agent.setRepresentedObject_(device.device_id)
-    agent.setState_(1 if device.display == LED_DISPLAY_AGENT else 0)
-    submenu.addItem_(agent)
-
-    battery = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Battery Level",
-        "setDeviceDisplayBattery:",
-        "",
-    )
-    battery.setTarget_(target)
-    battery.setRepresentedObject_(device.device_id)
-    battery.setState_(1 if device.display == LED_DISPLAY_BATTERY else 0)
-    submenu.addItem_(battery)
-
-    submenu.addItem_(NSMenuItem.separatorItem())
-    submenu.addItem_(disabled_menu_item(f"Brightness {brightness_percent(device.brightness)}%"))
-    submenu.addItem_(build_brightness_slider_item(device, target))
-    auto_brightness = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Auto-Brightness (matches screen)",
-        "toggleDeviceAutoBrightness:",
-        "",
-    )
-    auto_brightness.setTarget_(target)
-    auto_brightness.setRepresentedObject_(device.device_id)
-    auto_brightness.setState_(1 if device.auto_brightness_enabled else 0)
-    submenu.addItem_(auto_brightness)
-
-    submenu.addItem_(NSMenuItem.separatorItem())
-    red_gain, green_gain, blue_gain = device.channel_gains
-    submenu.addItem_(
-        disabled_menu_item(
-            f"Color Calibration -- R{round(red_gain * 100)}% "
-            f"G{round(green_gain * 100)}% B{round(blue_gain * 100)}%"
-        )
-    )
-    submenu.addItem_(
-        build_channel_gain_slider_item(device, target, "Red", red_gain, "setDeviceRedGain:")
-    )
-    submenu.addItem_(
-        build_channel_gain_slider_item(device, target, "Green", green_gain, "setDeviceGreenGain:")
-    )
-    submenu.addItem_(
-        build_channel_gain_slider_item(device, target, "Blue", blue_gain, "setDeviceBlueGain:")
-    )
-    reset_calibration = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Reset Calibration",
-        "resetDeviceColorCalibration:",
-        "",
-    )
-    reset_calibration.setTarget_(target)
-    reset_calibration.setRepresentedObject_(device.device_id)
-    submenu.addItem_(reset_calibration)
-
-    if not device.connected:
-        submenu.addItem_(NSMenuItem.separatorItem())
-        submenu.addItem_(disabled_menu_item("Not connected"))
-        remove = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Remove",
-            "removeRememberedDevice:",
-            "",
-        )
-        remove.setTarget_(target)
-        remove.setRepresentedObject_(device.device_id)
-        submenu.addItem_(remove)
-
-    if device.device_id == VIRTUAL_DEVICE_ID:
-        submenu.addItem_(NSMenuItem.separatorItem())
-        remove_bar = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Remove Screen Bar",
-            "toggleVirtualStatusDevice:",
-            "",
-        )
-        remove_bar.setTarget_(target)
-        submenu.addItem_(remove_bar)
-    elif device.connected and device.target is not None:
-        # The software replug, one click: the 2026-08-20 firmware wedge
-        # needed the guard daemon paused, the volume ejected, and a
-        # physical reseat -- a ritual the owner should never have to
-        # know. See resetStripDevice_.
-        submenu.addItem_(NSMenuItem.separatorItem())
-        reset_strip = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Reset Strip (eject, then replug)…",
-            "resetStripDevice:",
-            "",
-        )
-        reset_strip.setTarget_(target)
-        reset_strip.setRepresentedObject_(str(device.target))
-        submenu.addItem_(reset_strip)
-
-    item.setSubmenu_(submenu)
-    return item
-
-
 def build_brightness_slider_item(
     device: StatusBarDevice,
     target: StatusBarController,
@@ -17288,178 +17336,6 @@ def build_why_panel_window(target: StatusBarController) -> NSWindow:
     return window
 
 
-def build_setup_window(target: StatusBarController) -> NSWindow:
-    """The welcome window: what SidePulse is (shown live, not described),
-    which agents to connect, and the Mac-level installs -- a first-run
-    moment that should feel like the product, not a permissions form."""
-    width, height = 680, 800
-    style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
-    window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-        ((0, 0), (width, height)),
-        style,
-        NSBackingStoreBuffered,
-        False,
-    )
-    window.setTitle_("Welcome to SidePulse")
-    window.setReleasedWhenClosed_(False)
-    window.center()
-
-    root = NSView.alloc().init()
-    window.setContentView_(root)
-    root.setTranslatesAutoresizingMaskIntoConstraints_(False)
-    root.widthAnchor().constraintEqualToConstant_(width).setActive_(True)
-    root.heightAnchor().constraintEqualToConstant_(height).setActive_(True)
-
-    stack = native_ui.make_fill_stack(spacing=14.0)
-    scroll = native_ui.wrap_in_scroll_pane(stack, padding=0.0)
-    root.addSubview_(scroll)
-
-    # Hero: the product introduces itself by DOING the thing -- a live
-    # LED strip playing the full-team demo, not a paragraph about LEDs.
-    title = native_ui.make_label("SidePulse", size=27.0, bold=True)
-    hero_title_holder = native_ui.make_stack(orientation="vertical", spacing=0.0)
-    hero_title_holder.addArrangedSubview_(title)
-    stack.addArrangedSubview_(hero_title_holder)
-    subtitle = native_ui.make_label("Your agents, at a glance — as light.", secondary=True, size=14.0)
-    subtitle_holder = native_ui.make_stack(orientation="vertical", spacing=0.0)
-    subtitle_holder.addArrangedSubview_(subtitle)
-    stack.addArrangedSubview_(subtitle_holder)
-
-    demo_container = native_ui.make_fixed_area(SETUP_DEMO_WIDTH, SETUP_DEMO_HEIGHT)
-    demo_view = VirtualLedView.alloc().initWithFrame_(((0.0, 0.0), (SETUP_DEMO_WIDTH, SETUP_DEMO_HEIGHT)))
-    demo_view.setHasNotch_(False)
-    demo_colors = getattr(getattr(target, "settings", None), "colors", None) or ColorSettings.defaults()
-    _, demo_program = program_for_snapshot(
-        colors_module.preview_statuses_for_scenario(colors_module.PREVIEW_SCENARIO_FULL_TEAM),
-        led_count=8,
-        colors=demo_colors,
-        brightness=255,
-    )
-    demo_view.setProgram_startedAt_(demo_program, time.monotonic())
-    demo_container.addSubview_(demo_view)
-    stack.addArrangedSubview_(demo_container)
-
-    # Connect Your Agents: the same contextual one-action rows the
-    # Settings Agents pane uses, so first-run and settings agree.
-    agents_outer, agents_inner = native_ui.make_card("Connect Your Agents")
-    setup_fields: dict[str, object] = {"demo_view": demo_view}
-    setup_buttons: dict[str, object] = {}
-    for index, provider in enumerate(HOOK_PROVIDERS):
-        status_label = native_ui.make_label("", secondary=True, size=12.0)
-        install_button = native_ui.make_button("Install", target, f"install{provider.title()}Hooks:")
-        cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
-        cluster.addArrangedSubview_(status_label)
-        cluster.addArrangedSubview_(install_button)
-        agents_inner.addArrangedSubview_(native_ui.make_row(provider_spec(provider).label, cluster))
-        if index < len(HOOK_PROVIDERS) - 1:
-            native_ui.add_separator(agents_inner)
-        setup_fields[f"setup_{provider}_status"] = status_label
-        setup_buttons[f"setup_{provider}_install"] = install_button
-    stack.addArrangedSubview_(agents_outer)
-
-    # Set Up This Mac: the three system-level installs as switch rows.
-    mac_outer, mac_inner = native_ui.make_card("Set Up This Mac")
-    launch_row, launch, launch_status = _setup_toggle_row(
-        "Run at Login", "Start the menu-bar app automatically."
-    )
-    mac_inner.addArrangedSubview_(launch_row)
-    eject_row, eject_guard, eject_status = _setup_toggle_row(
-        SD_EJECT_GUARD_DISPLAY_NAME,
-        "Keep SidePulse Pro/SidePulse Dot available after sleep.",
-    )
-    mac_inner.addArrangedSubview_(eject_row)
-    sleep_row, sleep_helper, sleep_status = _setup_toggle_row(
-        "Closed-Lid Sleep Prevention",
-        "Opens a one-time administrator setup in Terminal.",
-    )
-    mac_inner.addArrangedSubview_(sleep_row)
-    # Full Disk Access unlocks Focus features (dimming per Focus mode).
-    # It can't be granted programmatically -- the row states the status
-    # and hands the user the Privacy pane.
-    fda_status = native_ui.make_label("", secondary=True, size=12.0)
-    fda_button = native_ui.make_button("Grant…", target, "openFullDiskAccessSettings:")
-    fda_reveal = native_ui.make_button(
-        "Reveal SidePulse" if running_inside_bundle() else "Reveal Program",
-        target,
-        "revealFocusBinaryInFinder:",
-    )
-    fda_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
-    fda_cluster.addArrangedSubview_(fda_status)
-    fda_cluster.addArrangedSubview_(fda_reveal)
-    fda_cluster.addArrangedSubview_(fda_button)
-    mac_inner.addArrangedSubview_(
-        native_ui.make_row(
-            "Focus Detection (Full Disk Access)",
-            fda_cluster,
-            help_text=(
-                "Lets SidePulse see which macOS Focus is active, so LEDs "
-                "can dim or turn off per Focus. Grant\u2026 opens the "
-                "Privacy pane; click +, then pick the app Reveal shows "
-                "you (macOS won't list it by itself). The full "
-                "walkthrough lives in Settings → Notifications & Focus → Focus."
-            ),
-        )
-    )
-    eject_uninstall = native_ui.make_button("Uninstall", target, "uninstallSdEjectGuard:")
-    eject_uninstall.setHidden_(True)
-    uninstall_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
-    uninstall_cluster.addArrangedSubview_(eject_uninstall)
-    uninstall_cluster.addArrangedSubview_(native_ui.make_hspacer())
-    mac_inner.addArrangedSubview_(uninstall_cluster)
-    stack.addArrangedSubview_(mac_outer)
-
-    # Footer: transient message + the two actions, pinned below the
-    # scrollable body so a long error cannot paint over the Mac card.
-    message = native_ui.make_wrapping_label("", secondary=True, size=12.0, max_width=420.0)
-    skip_button = native_ui.make_button("Skip for Now", target, "skipFirstLaunchSetup:")
-    setup_button = native_ui.make_button("Set Up", target, "runFirstLaunchSetup:")
-    setup_button.setKeyEquivalent_("\r")
-    actions = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
-    actions.addArrangedSubview_(native_ui.make_hspacer())
-    actions.addArrangedSubview_(skip_button)
-    actions.addArrangedSubview_(setup_button)
-    footer = native_ui.make_stack(orientation="vertical", spacing=8.0)
-    footer.addArrangedSubview_(message)
-    footer.addArrangedSubview_(actions)
-    root.addSubview_(footer)
-    NSLayoutConstraint.activateConstraints_(
-        [
-            scroll.topAnchor().constraintEqualToAnchor_constant_(root.topAnchor(), 28.0),
-            scroll.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 28.0),
-            scroll.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -28.0),
-            scroll.bottomAnchor().constraintEqualToAnchor_constant_(footer.topAnchor(), -12.0),
-            footer.leadingAnchor().constraintEqualToAnchor_constant_(root.leadingAnchor(), 28.0),
-            footer.trailingAnchor().constraintEqualToAnchor_constant_(root.trailingAnchor(), -28.0),
-            footer.bottomAnchor().constraintEqualToAnchor_constant_(root.bottomAnchor(), -20.0),
-        ]
-    )
-
-    setup_fields.update(
-        {
-            "launch_status": launch_status,
-            "eject_status": eject_status,
-            "sleep_status": sleep_status,
-            "fda_status": fda_status,
-            "message": message,
-        }
-    )
-    setup_buttons["fda_grant"] = fda_button
-    setup_buttons.update(
-        {
-            "launch": launch,
-            "eject_guard": eject_guard,
-            "eject_guard_uninstall": eject_uninstall,
-            "sleep_helper": sleep_helper,
-        }
-    )
-    # Recommended defaults, set ONCE here -- refresh_setup_window only
-    # touches enablement, never the checked state, so a user's opt-out
-    # survives every refresh (each provider Install click triggers one).
-    for key in ("launch", "eject_guard", "sleep_helper"):
-        set_checkbox_state(setup_buttons[key], True)
-    target.setup_fields = setup_fields
-    target.setup_buttons = setup_buttons
-    return window
 
 
 def choose_debug_export_path(format_name: str) -> Path | None:
@@ -17684,20 +17560,31 @@ class UsageGraphView(NSView):
             )
             line = NSBezierPath.bezierPath()
             area = NSBezierPath.bezierPath()
+            # A negative value is a GAP -- a day before this series had
+            # any samples. The old path clamped gaps to 0 and the
+            # percent history backfilled a fabricated flat line, so a
+            # year view claimed months of data that never existed.
+            started = False
+            last_x = None
             for index, raw_value in enumerate(values):
+                value = _finite_graph_value(raw_value, -1.0)
+                if value < 0.0:
+                    started = False
+                    continue
                 x = left + step * index
-                y = bottom + plot_height * min(
-                    1.0,
-                    max(0.0, _finite_graph_value(raw_value, 0.0)) / scale_max,
-                )
-                if index == 0:
+                y = bottom + plot_height * min(1.0, value / scale_max)
+                if not started:
                     line.moveToPoint_((x, y))
                     area.moveToPoint_((x, bottom))
                     area.lineToPoint_((x, y))
+                    started = True
                 else:
                     line.lineToPoint_((x, y))
                     area.lineToPoint_((x, y))
-            area.lineToPoint_((left + step * (len(values) - 1), bottom))
+                last_x = x
+            if last_x is None:
+                continue
+            area.lineToPoint_((last_x, bottom))
             area.closePath()
             color.colorWithAlphaComponent_(0.09).setFill()
             area.fill()

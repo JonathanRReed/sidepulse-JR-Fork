@@ -5,6 +5,18 @@ from types import SimpleNamespace
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _real_window_presentation(monkeypatch):
+    """These tests VERIFY presentation behavior against mock windows --
+    nothing real is shown, so the desktop-takeover gate opens for them.
+    (The gate exists because the suite once yanked the owner's focus
+    for minutes; see tests/test_window_presentation.py.)"""
+    monkeypatch.setattr(
+        "sidepulse.window_presentation.desktop_takeover_suppressed",
+        lambda: False,
+    )
+
 from sidepulse.presentation_policy import MotionClass
 from sidepulse.presentation_scheduler import plan_presentation_schedule
 from sidepulse.render_policy import (

@@ -38,6 +38,27 @@ os.environ["XDG_CACHE_HOME"] = str(_TEST_CACHE)
 os.environ["SIDEPULSE_TESTING"] = "1"
 os.environ["SIDEPULSE_TEST_VOLUME_ROOT"] = str(_TEST_VOLUMES)
 
+# The suite must NEVER take the desktop away from a person using this
+# machine. AppKit tests build real windows, and product code they
+# exercise calls makeKeyAndOrderFront_ / activateIgnoringOtherApps_ --
+# for a four-minute run that meant focus being yanked from the owner's
+# hands over and over ("makes this computer unusable", reported live
+# 2026-08-26). Two defenses, both belt-and-suspenders with the
+# SIDEPULSE_TESTING guard inside window_presentation.py:
+#   1. PROHIBITED activation policy: macOS itself refuses to ever make
+#      this process the active app, whatever the code under test asks.
+#   2. Set at conftest import time -- before any test module can touch
+#      AppKit -- exactly like the sandbox above, because a fixture
+#      would be too late.
+try:  # pragma: no cover - environment-dependent, no AppKit on CI
+    from AppKit import NSApplication, NSApplicationActivationPolicyProhibited
+
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyProhibited
+    )
+except Exception:
+    pass
+
 _LIVE_VOLUME_ROOT = Path("/Volumes")
 _LIVE_LAUNCH_AGENT_ROOT = Path.home().expanduser() / "Library" / "LaunchAgents"
 

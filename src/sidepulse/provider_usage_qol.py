@@ -80,10 +80,27 @@ def detect_reset_events(
                 or lane_after.reset_at is None
                 or lane_before.remaining_percent is None
                 or lane_after.remaining_percent is None
-                or not (before.observed_at < lane_before.reset_at <= after.observed_at)
                 or lane_after.reset_at <= lane_before.reset_at
-                or lane_after.remaining_percent <= lane_before.remaining_percent + 5.0
             ):
+                continue
+            # Two independent detectors, either fires:
+            #   TIMING -- the reset moment passed between our looks. One
+            #   failed poll re-stamps observed_at past the boundary
+            #   (select_authoritative_snapshot) and blinds this forever,
+            #   which is how the owner's live reset went unseen.
+            #   JUMP -- remaining leapt >= 50 points while the window
+            #   advanced: unmistakably a refill, whatever the clocks
+            #   claim (the usage-hook heuristic, promoted).
+            crossed = (
+                before.observed_at < lane_before.reset_at <= after.observed_at
+                and lane_after.remaining_percent
+                > lane_before.remaining_percent + 5.0
+            )
+            jumped = (
+                lane_after.remaining_percent
+                >= lane_before.remaining_percent + 50.0
+            )
+            if not crossed and not jumped:
                 continue
             event_id = _event_id(
                 after.provider_id,
@@ -174,6 +191,13 @@ def format_reset_countdown(reset_at: float | None, *, now: float) -> str:
         return "reset unknown"
     seconds = max(0, int(math.ceil(float(reset_at) - float(now))))
     if seconds <= 0:
+        # A reset moment more than a couple of minutes in the past is
+        # not "resetting now" -- it means the READING predates the
+        # reset. Three stale lanes all chanting "resetting now" forever
+        # (live, 2026-08-26) told the user the provider was stuck when
+        # it was the number that was old.
+        if float(now) - float(reset_at) > 120.0:
+            return "reset passed — reading is older"
         return "resetting now"
     minutes = max(1, seconds // 60)
     if minutes < 60:

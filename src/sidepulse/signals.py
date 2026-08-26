@@ -506,6 +506,12 @@ def grant_interrupt(
         return refuse(INTERRUPT_REFUSED_FOCUS)
     if permitted.quiet_hour and kind not in QUIET_HOUR_EXEMPT_KINDS:
         return refuse(INTERRUPT_REFUSED_QUIET_HOUR)
+    # A GRANTED courtesy may be audible: Focus and Quiet Hour were just
+    # checked and refused outright above, so by the time a grant exists
+    # there is nothing left for silence to protect. The hard-coded
+    # False that used to sit here meant the timebox chime -- a sound
+    # the user explicitly enabled -- could never play under any
+    # conditions (audit, 2026-08-26).
     return InterruptGrant(
         kind=kind,
         interrupt_class=INTERRUPT_COURTESY,
@@ -513,7 +519,7 @@ def grant_interrupt(
         repetitions=permitted.burst,
         cycle_seconds=cycle,
         hold_seconds=permitted.burst * cycle + INTERRUPT_SETTLE_SECONDS,
-        audible=False,
+        audible=True,
         reason=INTERRUPT_GRANTED,
     )
 

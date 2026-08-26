@@ -7,6 +7,7 @@ import hmac
 import json
 import math
 import re
+import time
 from dataclasses import dataclass
 
 from .provider_usage_platform import (
@@ -18,6 +19,11 @@ from .provider_usage_platform import (
 
 PROVIDER_SYNC_SCHEMA_VERSION = 1
 MAX_SYNC_PACKET_BYTES = 2 * 1024 * 1024
+#: Replay freshness bound: an authentic packet whose stamped time is
+#: older than this window is rejected on decode. HMAC alone proves who
+#: wrote a packet, not when -- an attacker who captured last month's
+#: envelope could otherwise replay a rosy quota forever.
+SYNC_PACKET_MAX_AGE_SECONDS = 7 * 24 * 60 * 60.0
 _MAX_QUOTA_SNAPSHOTS = 32
 _MAX_MACHINE_USAGE = 64
 _DEVICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -115,6 +121,10 @@ class ProviderSyncPacket:
         if len(usage_keys) != len(set(usage_keys)):
             raise ValueError("duplicate machine usage in sync packet")
         object.__setattr__(self, "generated_at", float(self.generated_at))
+
+
+class StaleSyncPacketError(ValueError):
+    """An authentic packet stamped outside the freshness window."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,7 +306,13 @@ def _decode_packet_document(document: object) -> ProviderSyncPacket:
     )
 
 
-def decode_signed_packet(data: bytes, secret: bytes) -> ProviderSyncPacket:
+def decode_signed_packet(
+    data: bytes,
+    secret: bytes,
+    *,
+    now: float | None = None,
+    max_age_seconds: float = SYNC_PACKET_MAX_AGE_SECONDS,
+) -> ProviderSyncPacket:
     if not isinstance(data, bytes) or len(data) > MAX_SYNC_PACKET_BYTES:
         raise ValueError("invalid sync envelope")
     try:
@@ -318,7 +334,11 @@ def decode_signed_packet(data: bytes, secret: bytes) -> ProviderSyncPacket:
     expected = hmac.new(_validate_secret(secret), payload_bytes, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature, expected):
         raise ValueError("sync signature mismatch")
-    return _decode_packet_document(payload)
+    packet = _decode_packet_document(payload)
+    current = time.time() if now is None else float(now)
+    if packet.generated_at < current - float(max_age_seconds):
+        raise StaleSyncPacketError("sync packet is outside the freshness window")
+    return packet
 
 
 def merge_provider_sync(
@@ -370,9 +390,11 @@ def merge_provider_sync(
 __all__ = [
     "MAX_SYNC_PACKET_BYTES",
     "PROVIDER_SYNC_SCHEMA_VERSION",
+    "SYNC_PACKET_MAX_AGE_SECONDS",
     "MachineUsageObservation",
     "MergedProviderSync",
     "ProviderSyncPacket",
+    "StaleSyncPacketError",
     "decode_signed_packet",
     "encode_signed_packet",
     "merge_provider_sync",

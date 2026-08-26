@@ -160,10 +160,13 @@ def percent_graph_model(
             if observed is not None:
                 carried = observed
             values.append(carried if carried is not None else -1.0)
-        first_known = next((value for value in values if value >= 0.0), None)
-        if first_known is None:
+        if all(value < 0.0 for value in values):
             continue
-        values = [value if value >= 0.0 else first_known for value in values]
+        # Days BEFORE the first sample stay negative: the chart renders
+        # them as a gap. They used to be backfilled with the first known
+        # reading, which drew a fabricated flat line across every day
+        # before history began (noticeable on 90/365 ranges -- history
+        # starts 2026-08-21).
         series.append({"provider_id": provider_id, "values": tuple(values)})
     return {
         "days": days,

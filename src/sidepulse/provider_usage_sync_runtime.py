@@ -11,9 +11,11 @@ from pathlib import Path
 from .provider_usage_platform import ProviderSourceState
 from .provider_usage_runtime import ProviderUsageState
 from .provider_usage_sync import (
+    MAX_SYNC_PACKET_BYTES,
     MachineUsageObservation,
     MergedProviderSync,
     ProviderSyncPacket,
+    StaleSyncPacketError,
     decode_signed_packet,
     encode_signed_packet,
     merge_provider_sync,
@@ -188,7 +190,14 @@ class ProviderSyncRuntime:
                 )
                 continue
             try:
-                remote = decode_signed_packet(fetched.packet or b"", secret)
+                remote = decode_signed_packet(
+                    fetched.packet or b"", secret, now=refreshed_at
+                )
+            except StaleSyncPacketError:
+                health.append(
+                    PeerSyncHealth(peer.peer_id, False, "packet_stale", None)
+                )
+                continue
             except ValueError:
                 health.append(
                     PeerSyncHealth(peer.peer_id, False, "packet_authentication_failed", None)
@@ -200,6 +209,16 @@ class ProviderSyncRuntime:
                 )
                 continue
             remotes.append(remote)
+            # Cache the verified envelope locally so the Usage Center can
+            # render "across synced Macs" without ever fetching -- the
+            # window path re-verifies signature and freshness on read.
+            try:
+                self._publisher(
+                    fetched.packet,
+                    self._local_directory / f"{peer.peer_id}.remote.packet",
+                )
+            except Exception:
+                pass
             health.append(
                 PeerSyncHealth(peer.peer_id, True, None, remote.generated_at)
             )
@@ -215,9 +234,58 @@ class ProviderSyncRuntime:
         )
 
 
+def load_cached_merged_sync(
+    state: ProviderUsageState,
+    *,
+    settings_loader: Callable[[], ProviderSyncSettings | object],
+    credentials,
+    local_directory: Path,
+    now: float | None = None,
+) -> MergedProviderSync | None:
+    """Merge the LOCAL usage state with already-synced peer documents.
+
+    Strictly offline: reads only the verified remote envelopes the last
+    sync pull cached beside the published packets. Signature and
+    freshness are re-checked on read; any per-peer failure is skipped.
+    Returns None unless sync is enabled with at least one peer, so the
+    Usage Center's "across this Mac" line stays honest when sync is off.
+    """
+    current = time.time() if now is None else float(now)
+    try:
+        loaded = settings_loader()
+        settings = getattr(loaded, "settings", loaded)
+        if (
+            type(settings) is not ProviderSyncSettings
+            or not settings.enabled
+            or settings.device_id is None
+            or not settings.peers
+        ):
+            return None
+        local_packet = build_local_sync_packet(state, settings, generated_at=current)
+    except Exception:
+        return None
+    remotes = []
+    directory = Path(local_directory)
+    for peer in settings.peers:
+        secret = _secret(credentials, peer.secret_account)
+        if secret is None:
+            continue
+        cached = directory / f"{peer.peer_id}.remote.packet"
+        try:
+            if cached.stat().st_size > MAX_SYNC_PACKET_BYTES:
+                continue
+            remote = decode_signed_packet(cached.read_bytes(), secret, now=current)
+        except (OSError, ValueError):
+            continue
+        if remote.device_id == peer.peer_id:
+            remotes.append(remote)
+    return merge_provider_sync(local_packet, tuple(remotes))
+
+
 __all__ = [
     "PeerSyncHealth",
     "ProviderSyncRefresh",
     "ProviderSyncRuntime",
     "build_local_sync_packet",
+    "load_cached_merged_sync",
 ]

@@ -314,6 +314,7 @@ def compose_presentation_program(
         "steady",
         "heartbeat",
         "scanner",
+        "kitt",
         "comet",
         "flicker",
         "stack",
@@ -322,11 +323,32 @@ def compose_presentation_program(
         "converge",
         "aurora",
         "tide",
+        "gradient",
+        "marquee",
+        "duotone",
     ):
         if motion_style == "steady":
             return _static_program(resolved, dsl=fallback)
-        floor_color = _scaled_color(normalized_color, 0.05)
-        peak_color = _scaled_color(normalized_color, 1.0)
+        # Gentleness (owner decision, 2026-08-26): the solo render
+        # honors the Working fade floor/ceiling, so one working agent
+        # is no brighter than the same agent in a crowd and the sliders
+        # are never no-ops. The per-provider MOTION still outranks the
+        # classic style picker. Hardcoded 0.05/1.0 remains the fallback
+        # when no color settings ride along.
+        floor_fraction, ceiling_fraction = 0.05, 1.0
+        if color_settings is not None:
+            try:
+                from .colors import MODE_WORKING
+
+                raw_floor, raw_ceiling = color_settings.fade_range(MODE_WORKING)
+                ceiling_fraction = max(0.1, min(1.0, float(raw_ceiling)))
+                floor_fraction = max(
+                    0.02, min(ceiling_fraction * 0.5, float(raw_floor))
+                )
+            except Exception:
+                floor_fraction, ceiling_fraction = 0.05, 1.0
+        floor_color = _scaled_color(normalized_color, floor_fraction)
+        peak_color = _scaled_color(normalized_color, ceiling_fraction)
         settle_text = f"{floor_color} 160ms cosine"
         if motion_style == "breathe":
             cycle_ms = round(RELAY_TRAVERSAL_SECONDS * 2000.0)
@@ -364,8 +386,58 @@ def compose_presentation_program(
                 f"{index}:{peak_color} {width_ms}ms pulse {(2 * led_count - 2 - index) * step_ms}ms"
                 for index in range(1, led_count - 1)
             ]
-            lines = (settle_text, "; ".join(segments), "repeat")
-            cycle_seconds = 0.16 + ((2 * led_count - 3) * step_ms + width_ms) / 1000.0
+            scanner_lines = [settle_text, "; ".join(segments)]
+            rest_ms = 0
+            if led_count <= 2:
+                # Two LEDs make a 0.76s loop -- under the 1s the safety
+                # envelope needs, so the shape silently fell to STATIC
+                # on the Dot (audit, 2026-08-26). Same rest kitt has.
+                rest_ms = 480
+                scanner_lines.append(f"{floor_color} {rest_ms}ms none")
+            scanner_lines.append("repeat")
+            lines = tuple(scanner_lines)
+            cycle_seconds = (
+                0.16
+                + ((2 * led_count - 3) * step_ms + width_ms + rest_ms) / 1000.0
+            )
+        elif motion_style == "kitt":
+            # The classic KITT eye (upstream PR #29's recipe): pulses
+            # nearly four times wider than their stagger, so neighbours
+            # overlap into one continuous swoosh instead of a hopping
+            # dot -- that overlap is the whole difference from scanner.
+            # Forward over every LED; return skips both endpoints so
+            # the turn-around never double-hits.
+            step_ms = 240 if led_count <= 2 else 85
+            width_ms = 320
+            forward = "; ".join(
+                f"{index}:{peak_color} {width_ms}ms pulse {index * step_ms}ms"
+                for index in range(led_count)
+            )
+            lines_list = [settle_text, forward]
+            back_indexes = tuple(range(led_count - 2, 0, -1))
+            if back_indexes:
+                lines_list.append(
+                    "; ".join(
+                        f"{index}:{peak_color} {width_ms}ms pulse "
+                        f"{position * step_ms}ms"
+                        for position, index in enumerate(back_indexes)
+                    )
+                )
+            rest_ms = 0
+            if led_count <= 2:
+                # Two LEDs have no return lane (the endpoint skip leaves
+                # nothing), so the loop lands under the 1s the safety
+                # envelope needs. A dark rest at the turn-around keeps
+                # the swoosh-swoosh-rest rhythm AND the analyzed window.
+                rest_ms = 480
+                lines_list.append(f"{floor_color} {rest_ms}ms none")
+            lines_list.append("repeat")
+            lines = tuple(lines_list)
+            forward_ms = (led_count - 1) * step_ms + width_ms
+            back_ms = (
+                (len(back_indexes) - 1) * step_ms + width_ms if back_indexes else 0
+            )
+            cycle_seconds = 0.16 + (forward_ms + back_ms + rest_ms) / 1000.0
         elif motion_style == "comet":
             # One-way sweep with an eased tail, then a dark beat.
             step_ms, width_ms = 180, 420
@@ -438,7 +510,7 @@ def compose_presentation_program(
             # Rolling waves over a LUMINOUS base: like drift, but resting
             # on a visible quarter-bright bed instead of near-dark, with
             # wider detune -- light moving on water at night.
-            bed_color = _scaled_color(normalized_color, 0.22)
+            bed_color = _scaled_color(normalized_color, 0.22 * ceiling_fraction)
             segments = [
                 f"{index}:{peak_color} "
                 f"{2400 + index * 220}ms pulse {(index * 617) % 1600}ms"
@@ -459,8 +531,75 @@ def compose_presentation_program(
                 f"{2 * (led_count - index) * step_ms}ms pulse {index * step_ms}ms"
                 for index in range(led_count)
             ]
+            tide_lines = [settle_text, "; ".join(segments)]
+            rest_ms = 0
+            if led_count <= 2:
+                # Same Dot-length fix as scanner/kitt: a 0.96s loop is
+                # under the safety envelope's 1s and fell to static.
+                rest_ms = 480
+                tide_lines.append(f"{floor_color} {rest_ms}ms none")
+            tide_lines.append("repeat")
+            lines = tuple(tide_lines)
+            cycle_seconds = 0.16 + (2 * led_count * step_ms + rest_ms) / 1000.0
+        elif motion_style == "gradient":
+            # tlip's gradient rolling wave: the chase's exact shape, but
+            # each LED pulses its OWN shade -- a hue ramp centred on the
+            # provider color, so identity survives while the wave gains
+            # depth. Span stays +/-24 degrees: far enough to read as a
+            # gradient, close enough that no LED reads as another
+            # provider's hue.
+            step_ms, width_ms = 95, 760
+            span = 48.0
+            segments = []
+            for index in range(led_count):
+                fraction = index / max(1, led_count - 1)
+                shade = _hue_shifted_color(
+                    peak_color, (fraction - 0.5) * span
+                )
+                segments.append(
+                    f"{index}:{shade} {width_ms}ms pulse {index * step_ms}ms"
+                )
             lines = (settle_text, "; ".join(segments), "repeat")
-            cycle_seconds = 0.16 + (2 * led_count * step_ms) / 1000.0
+            cycle_seconds = 0.16 + ((led_count - 1) * step_ms + width_ms) / 1000.0
+        elif motion_style == "marquee":
+            # A palette seeded from the provider color, rotated by the
+            # firmware's own roll -- the cheapest continuous motion in
+            # the DSL. Brightness ramp + a gentle hue ramp reads as a
+            # comet chasing its own tail.
+            roll_ms = 2400
+            # The repaint at the top of every loop must carry EXPLICIT
+            # timing: untimed steps inside a loop get stamped with a
+            # hard 250ms `none` hold by the safety compiler, which
+            # turned "endlessly rotating" into a freeze-snap each
+            # cycle. A full roll returns to its start arrangement, so
+            # this cosine repaints identical colors -- visually a brief
+            # gentle pause, and the declared period matches the real
+            # firmware cycle.
+            paint_ms = 250
+            palette = []
+            for index in range(led_count):
+                fraction = index / max(1, led_count - 1)
+                shade = _hue_shifted_color(peak_color, (fraction - 0.5) * 36.0)
+                palette.append(_scaled_color(shade, 0.08 + 0.92 * fraction))
+            lines = (
+                f"{' '.join(palette)} {paint_ms}ms cosine",
+                f"roll {roll_ms}ms linear",
+                "repeat",
+            )
+            cycle_seconds = (paint_ms + roll_ms) / 1000.0
+        elif motion_style == "duotone":
+            # The iOS pattern library's two-tone working breathe: swell
+            # to the color, then swell to its warmer neighbour. Twice
+            # the information of a plain breathe at the same calmness.
+            tone_ms = 900
+            second_tone = _hue_shifted_color(peak_color, 40.0)
+            lines = (
+                settle_text,
+                f"{peak_color} {tone_ms}ms pulse",
+                f"{second_tone} {tone_ms}ms pulse",
+                "repeat",
+            )
+            cycle_seconds = 0.16 + (2 * tone_ms) / 1000.0
         else:
             # Flicker: frozen per-LED detune -- deterministic shimmer.
             base_ms = 1800
@@ -715,6 +854,30 @@ def _scaled_color(color: str, intensity: float) -> str:
     from .led_status import scale_hex_brightness
 
     return scale_hex_brightness(color, max(0.0, min(1.0, intensity)))
+
+
+def _hue_shifted_color(color: str, degrees: float) -> str:
+    """The same color rotated around the hue wheel, lightness and
+    saturation untouched -- the ingredient gradient and duotone are made
+    of. Deterministic, so the write dedupe still holds."""
+    import colorsys
+
+    try:
+        red = int(color[1:3], 16) / 255.0
+        green = int(color[3:5], 16) / 255.0
+        blue = int(color[5:7], 16) / 255.0
+    except (ValueError, IndexError):
+        return color
+    hue, lightness, saturation = colorsys.rgb_to_hls(red, green, blue)
+    if saturation <= 0.001:
+        # A gray has no hue to rotate; shifting it invents a color the
+        # user never picked.
+        return color
+    hue = (hue + degrees / 360.0) % 1.0
+    shifted = colorsys.hls_to_rgb(hue, lightness, saturation)
+    return "#" + "".join(
+        f"{max(0, min(255, round(channel * 255.0))):02x}" for channel in shifted
+    )
 
 
 def _mean_intensity(intensities: tuple[float, ...]) -> float:

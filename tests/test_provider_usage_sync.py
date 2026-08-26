@@ -6,8 +6,10 @@ from sidepulse.provider_usage_platform import (
     UsageLane,
 )
 from sidepulse.provider_usage_sync import (
+    SYNC_PACKET_MAX_AGE_SECONDS,
     MachineUsageObservation,
     ProviderSyncPacket,
+    StaleSyncPacketError,
     decode_signed_packet,
     encode_signed_packet,
     merge_provider_sync,
@@ -71,14 +73,39 @@ def test_signed_packet_round_trip_and_tamper_rejection():
     )
     secret = b"fixture-shared-secret-32-bytes!!"
     encoded = encode_signed_packet(packet, secret)
-    assert decode_signed_packet(encoded, secret) == packet
+    # now= pins the freshness clock beside the fixture stamps
+    # (2026-08-26: decode also enforces the replay window).
+    assert decode_signed_packet(encoded, secret, now=1000.0) == packet
     tampered = encoded.replace(b'"input_tokens":100', b'"input_tokens":101')
     try:
-        decode_signed_packet(tampered, secret)
+        decode_signed_packet(tampered, secret, now=1000.0)
     except ValueError as exc:
         assert "signature" in str(exc)
     else:
         raise AssertionError("tampered sync packet accepted")
+
+
+def test_authentic_but_stale_packet_is_rejected_on_decode():
+    packet = ProviderSyncPacket(
+        schema_version=1,
+        device_id="mac-mini",
+        generated_at=1000,
+        quota_snapshots=(snapshot("claude", 1000, 25),),
+        machine_usage=(),
+        categories=("quota", "token_usage"),
+    )
+    secret = b"fixture-shared-secret-32-bytes!!"
+    encoded = encode_signed_packet(packet, secret)
+    # At the boundary the packet still decodes...
+    boundary = 1000.0 + SYNC_PACKET_MAX_AGE_SECONDS
+    assert decode_signed_packet(encoded, secret, now=boundary) == packet
+    # ...one second past it, an authentic replay is refused.
+    try:
+        decode_signed_packet(encoded, secret, now=boundary + 1.0)
+    except StaleSyncPacketError as exc:
+        assert "freshness" in str(exc)
+    else:
+        raise AssertionError("stale sync packet accepted")
 
 
 def test_account_quota_uses_freshest_observation_and_is_never_summed():

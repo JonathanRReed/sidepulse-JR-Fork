@@ -599,7 +599,22 @@ class ScreenBarSampler:
                 if not math.isfinite(value) or value < 0.0 or value > 255.0:
                     return None
                 channels.append(value / 255.0)
-            colors.append((channels[0], channels[1], channels[2], 1.0))
+            # Alpha carries "how lit is this LED" -- the convention every
+            # downstream consumer was written for (virtual_device's
+            # legacy path derives exactly this). The hard-coded 1.0 that
+            # used to sit here made dark LEDs opaque black: it killed
+            # the min-glow legibility floor, forced bracket "auto" to
+            # spatial forever, averaged darkness into the identity
+            # blend, and painted a ~92%-opaque black band across the
+            # menu bar on notchless displays (audit, 2026-08-26).
+            colors.append(
+                (
+                    channels[0],
+                    channels[1],
+                    channels[2],
+                    max(channels[0], channels[1], channels[2]),
+                )
+            )
         return ColorSample(generation, sampled_at, tuple(colors))
 
     def _notify_published(self, generation: int) -> None:

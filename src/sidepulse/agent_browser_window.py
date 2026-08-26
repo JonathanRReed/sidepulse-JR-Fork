@@ -325,7 +325,9 @@ class AgentBrowserWindowController(NSObject):
         self.select_work_key(preferred, notify_visit=False)
         self.focusSearch_(None)
         if show:
-            self.window.makeKeyAndOrderFront_(None)
+            from .window_presentation import present_window
+
+            present_window(self.window)
         return self.window
 
     def publish_projection(

@@ -165,11 +165,16 @@ def _codex_reading_freshness(
         return snapshot
     hours = age / 3600.0
     since = f"{hours / 24.0:.0f}d" if hours >= 48.0 else f"{hours:.0f}h"
+    # "run Codex to refresh" was said to a user who HAD just run Codex --
+    # opened it, poked around, quit. The evidence only moves when a turn
+    # COMPLETES, so the instruction has to say so.
     return dataclasses.replace(
         snapshot,
         state=ProviderSourceState.STALE,
         reason_code="local_reading_stale",
-        action_label=f"Last read {since} ago — run Codex to refresh",
+        action_label=(
+            f"Last read {since} ago — finish one Codex prompt to refresh"
+        ),
     )
 
 

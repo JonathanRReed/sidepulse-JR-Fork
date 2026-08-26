@@ -567,7 +567,14 @@ def battery_color(percent: int) -> str:
 
 
 def charging_pulse_length_ms(ratio: float) -> int:
-    speed = clamp(ratio)
+    # Speed is bucketed to 5% steps before it becomes milliseconds:
+    # adapter wattage jitters by fractions of a watt on every ioreg
+    # poll, and an un-bucketed pulse length turned that jitter into new
+    # program bytes -- a physical LEDS.LED rewrite -- every refresh tick
+    # for as long as the machine charged. A 5% bucket absorbs the
+    # jitter, keeps the endpoints exact (180ms trickle, 1400ms full
+    # rate), and a 61ms step is invisible inside a second-long pulse.
+    speed = round(clamp(ratio) * 20.0) / 20.0
     return round(180 + (1220 * speed))
 
 

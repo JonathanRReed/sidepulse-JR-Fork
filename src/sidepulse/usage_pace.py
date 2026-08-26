@@ -24,6 +24,13 @@ WINDOW_MINUTES_BY_LANE_ID: Final = {
     "weekly-sonnet": 7 * 24 * 60,
     "fable-only": 7 * 24 * 60,
     "monthly": 30 * 24 * 60,
+    # Beyond claude/codex: lanes without a row here never get a pace
+    # verdict, a glance color, or a critical-pace alert -- devin's daily
+    # lane sat at 0% remaining with no "out" verdict possible (audit,
+    # 2026-08-26).
+    "daily": 24 * 60,
+    "gemini-weekly": 7 * 24 * 60,
+    "claude-gpt-weekly": 7 * 24 * 60,
 }
 
 #: Below this much of the window elapsed, usage says nothing about pace.

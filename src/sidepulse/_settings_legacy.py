@@ -189,11 +189,10 @@ class DeviceDisplaySetting:
             "id": self.device_id,
             "name": self.name,
             "path": self.path,
-            "led_display": (
-                LED_DISPLAY_AGENT
-                if self.led_display == LED_DISPLAY_QUOTA_RUNWAY
-                else self.led_display
-            ),
+            # quota_runway persists as-is since 2026-08-26: the JR usage
+            # plane feeds quota_runway_state, so the save-time downgrade
+            # to agent guarded a promise the app now keeps.
+            "led_display": self.led_display,
             "brightness": self.brightness,
             "auto_brightness_enabled": self.auto_brightness_enabled,
             "red_gain": self.red_gain,
@@ -248,6 +247,12 @@ class AgentMonitorSettings:
     battery_full_charge_watts: float | None = None
     battery_show_on_power_change: bool = True
     battery_power_change_preview_seconds: float = DEFAULT_POWER_CHANGE_PREVIEW_SECONDS
+    # Ambient charging display: while NOTHING is running and the machine
+    # is plugged in but not yet full, the bar shows the charge level
+    # filling with the wattage-paced trickle pulse (program_for_battery)
+    # instead of the idle whisper. Agents running, done, or needing
+    # attention always break through -- the claim is gated on idle.
+    battery_charging_idle_enabled: bool = True
     # Below this percent while unplugged, every display switches to the
     # calm slow-red "plug me in" breathe (led_status.low_battery_program)
     # until power returns or the level recovers. Default on: a dying
@@ -398,6 +403,11 @@ class AgentMonitorSettings:
     # Named Studio programs -- a shelf of looks.
     studio_library: tuple[tuple[str, str], ...] = ()
     night_warmth_enabled: bool = False
+    # Night DIM, the warmth shift's brightness sibling: between 19:00
+    # and 07:00 every surface's brightness is multiplied by this. 1.0
+    # (the default) means "no night dimming". Composes with the rest of
+    # the stack, so night + idle + a Focus all darken together.
+    night_dim_fraction: float = 1.0
     # One master dial over EVERY surface's brightness -- strip and
     # Screen Bar alike -- reachable from the dropdown. Composes with
     # per-device brightness, auto-brightness, idle and Focus dimming.
@@ -449,8 +459,8 @@ class AgentMonitorSettings:
     def with_led_display(self, display: str) -> AgentMonitorSettings:
         if display not in LED_DISPLAY_CHOICES:
             raise ValueError(f"Unknown LED display: {display}")
-        if display == LED_DISPLAY_QUOTA_RUNWAY:
-            display = LED_DISPLAY_AGENT
+        # quota_runway is honored since 2026-08-26 (producer: the JR
+        # usage plane's gated lanes).
         return replace(self, led_display=display)
 
     def display_for_device(self, device_id: str) -> str:
@@ -475,8 +485,6 @@ class AgentMonitorSettings:
     ) -> AgentMonitorSettings:
         if display not in LED_DISPLAY_CHOICES:
             raise ValueError(f"Unknown LED display: {display}")
-        if display == LED_DISPLAY_QUOTA_RUNWAY:
-            display = LED_DISPLAY_AGENT
 
         devices: list[DeviceDisplaySetting] = []
         updated = False
@@ -739,6 +747,9 @@ class AgentMonitorSettings:
             battery_power_change_preview_seconds=preview_seconds,
         )
 
+    def with_battery_charging_idle(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, battery_charging_idle_enabled=bool(enabled))
+
     def lid_animation(self, kind: str) -> LedAnimationSetting:
         if kind == LID_ANIMATION_CLOSED:
             return self.lid_closed_animation
@@ -818,6 +829,11 @@ class AgentMonitorSettings:
 
     def with_night_warmth_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, night_warmth_enabled=bool(enabled))
+
+    def with_night_dim_fraction(self, fraction: float) -> AgentMonitorSettings:
+        return replace(
+            self, night_dim_fraction=max(0.0, min(1.0, float(fraction)))
+        )
 
     def with_completion_notification_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(
@@ -937,15 +953,17 @@ class AgentMonitorSettings:
         return replace(self, usage_graph_days=int(days))
 
     def with_quota_alerts_enabled(self, enabled: bool) -> AgentMonitorSettings:
-        # Fails closed on purpose. Threshold effects are only allowed to reach
-        # the user through the capacity AUTHORITY layer (select_binding_lanes),
-        # which refuses stale, model-inapplicable and unknown-source readings.
-        # Until this is wired to that layer -- rather than to raw provider
-        # percentages -- enabling it would let an unauthoritative reading blink
-        # the lights. quota_alerts.QuotaThresholdDetector is built and tested
-        # and waiting for exactly that wiring.
-        del enabled
-        return replace(self, quota_alerts_enabled=False)
+        # Un-neutered 2026-08-26. This setter used to delete its
+        # argument and force False, the loader forced False, and no
+        # switch existed -- yet FOUR alert features routed their only
+        # visible surface through the flag (quota blink, pace
+        # notifications, reset blink, connection cues), so all of them
+        # were unreachable by construction. The authority concern the
+        # old comment cited (a stale reading blinking the lights) is
+        # answered by the edge detectors themselves now: pace alerts
+        # and reset events fire on TRANSITIONS of the JR plane's own
+        # gated snapshots, not raw percentages.
+        return replace(self, quota_alerts_enabled=bool(enabled))
 
     def with_quota_alert_thresholds(self, thresholds) -> AgentMonitorSettings:
         del thresholds
@@ -1261,9 +1279,15 @@ class AgentMonitorSettings:
     def focus_dim_fraction(self, mode_identifier: str) -> float:
         """The brightness fraction to apply while this Focus is active --
         its own rule if set, otherwise the shared idle-dim amount (the
-        pre-per-Focus behavior)."""
+        pre-per-Focus behavior). A Sleep-type Focus with NO explicit rule
+        defaults to near-off instead: "I'm asleep" is the one Focus whose
+        meaning is unambiguous, and a bar breathing at bedroom-ceiling
+        brightness during it is a bug report waiting to happen. An
+        explicit rule -- any rule -- still wins."""
         rule = self.focus_dim_rules.get(mode_identifier)
         if rule is None:
+            if "sleep" in mode_identifier.lower():
+                return 0.05
             return self.idle_dim_fraction
         return max(0.0, min(1.0, float(rule)))
 
@@ -1306,11 +1330,9 @@ class AgentMonitorSettings:
     def to_dict(self) -> dict[str, Any]:
         return {
             "settings_schema_version": SETTINGS_SCHEMA_VERSION,
-            "led_display": (
-                LED_DISPLAY_AGENT
-                if self.led_display == LED_DISPLAY_QUOTA_RUNWAY
-                else self.led_display
-            ),
+            # quota_runway persists since 2026-08-26 (see the device
+            # to_dict note above).
+            "led_display": self.led_display,
             "devices": [device.to_dict() for device in self.devices],
             "virtual_status_device_enabled": self.virtual_status_device_enabled,
             "virtual_status_device_wraps_menu_bar": self.virtual_status_device_wraps_menu_bar,
@@ -1333,6 +1355,7 @@ class AgentMonitorSettings:
                 "full_charge_watts": self.battery_full_charge_watts,
                 "show_on_power_change": self.battery_show_on_power_change,
                 "power_change_preview_seconds": self.battery_power_change_preview_seconds,
+                "charging_idle_enabled": self.battery_charging_idle_enabled,
                 "low_battery_alert_enabled": self.low_battery_alert_enabled,
                 "low_battery_threshold_percent": self.low_battery_threshold_percent,
             },
@@ -1406,6 +1429,8 @@ class AgentMonitorSettings:
             "usage_event_hook_path": self.usage_event_hook_path,
             "studio_library": [list(item) for item in self.studio_library],
             "night_warmth_enabled": self.night_warmth_enabled,
+            "night_dim_fraction": self.night_dim_fraction,
+            "quota_alerts_enabled": self.quota_alerts_enabled,
             "global_brightness_scale": self.global_brightness_scale,
             "focus_signal_policy": dict(self.focus_signal_policy),
             "completion_notification_enabled": self.completion_notification_enabled,
@@ -1620,6 +1645,10 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             battery.get("power_change_preview_seconds"),
             DEFAULT_POWER_CHANGE_PREVIEW_SECONDS,
         ),
+        battery_charging_idle_enabled=_bool_setting(
+            battery.get("charging_idle_enabled"),
+            True,
+        ),
         low_battery_alert_enabled=_bool_setting(battery.get("low_battery_alert_enabled"), True),
         low_battery_threshold_percent=max(
             1.0, min(50.0, _float_setting(battery.get("low_battery_threshold_percent"), 5.0))
@@ -1694,9 +1723,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             if _claude_plan_limits_consented(data)
             else 0
         ),
-        # Not loaded: nothing consumes an authorised threshold crossing yet,
-        # so a stored True would be a promise the app cannot keep.
-        quota_alerts_enabled=False,
+        quota_alerts_enabled=_bool_setting(data.get("quota_alerts_enabled"), False),
         capacity_history_enabled=_bool_setting(
             data.get("capacity_history_enabled"), False
         ),
@@ -1724,28 +1751,28 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             data.get("forecast_release_authority")
         ),
         subagent_asks_alert=_bool_setting(data.get("subagent_asks_alert"), False),
+        # "percent" is a legal, UI-offered mode: the loader used to
+        # accept only the transcript metrics, so picking Percent left
+        # silently reverted to tokens on relaunch (audit, 2026-08-26).
         usage_display_mode=(
             data.get("usage_display_mode")
-            if data.get("usage_display_mode") in ("tokens", "cost", "sessions")
+            if data.get("usage_display_mode")
+            in ("tokens", "cost", "sessions", "percent")
             else "tokens"
         ),
-        usage_graph_providers=(
-            tuple(
-                provider_id
-                for provider_id in data.get("usage_graph_providers")
-                if provider_id in {"claude", "codex"}
-            )
-            if isinstance(data.get("usage_graph_providers"), list)
-            and any(
-                provider_id in {"claude", "codex"}
-                for provider_id in data.get("usage_graph_providers")
-            )
-            else ("claude", "codex")
+        # Any registry provider survives the round trip -- the setter
+        # was widened past {claude, codex} on 2026-08-21 but this
+        # filter kept snapping stored selections back to two.
+        usage_graph_providers=_usage_graph_providers_setting(
+            data.get("usage_graph_providers")
         ),
         codex_percent_enabled=_bool_setting(data.get("codex_percent_enabled"), True),
         escalation_webhook_url=str(data.get("escalation_webhook_url") or "").strip(),
         usage_event_hook_path=str(data.get("usage_event_hook_path") or "").strip(),
         night_warmth_enabled=_bool_setting(data.get("night_warmth_enabled"), False),
+        night_dim_fraction=max(
+            0.0, min(1.0, _float_setting(data.get("night_dim_fraction"), 1.0))
+        ),
         global_brightness_scale=max(
             0.05, _fraction_setting(data.get("global_brightness_scale"), 1.0)
         ),
@@ -1855,6 +1882,21 @@ def normalize_idle_dim_after_minutes(
     return max(MIN_IDLE_DIM_AFTER_MINUTES, min(MAX_IDLE_DIM_AFTER_MINUTES, float(value)))
 
 
+def _usage_graph_providers_setting(value: object) -> tuple[str, ...]:
+    from .provider_usage_platform import provider_descriptors
+
+    allowed = {descriptor.provider_id for descriptor in provider_descriptors()}
+    if isinstance(value, list):
+        kept = tuple(
+            dict.fromkeys(
+                provider_id for provider_id in value if provider_id in allowed
+            )
+        )
+        if kept:
+            return kept
+    return ("claude", "codex")
+
+
 def normalize_idle_dim_fraction(value: object, *, default: float = DEFAULT_IDLE_DIM_FRACTION) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return default
@@ -1870,8 +1912,8 @@ def normalize_closed_lid_grace_minutes(
 
 
 def _led_display_setting(value: object, default: str) -> str:
-    if value == LED_DISPLAY_QUOTA_RUNWAY:
-        return LED_DISPLAY_AGENT
+    # quota_runway loads as itself since 2026-08-26: the JR usage plane
+    # feeds quota_runway_state, so the load-time downgrade is retired.
     if isinstance(value, str) and value in LED_DISPLAY_CHOICES:
         return value
     return default

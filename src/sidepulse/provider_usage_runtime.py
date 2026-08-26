@@ -8,6 +8,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .provider_reconnect import (
+    FailureGate,
+    credential_fingerprint,
+    note_failure,
+    repair_grok_credential,
+    should_collect,
+)
 from .provider_usage_platform import (
     ProviderSourceState,
     ProviderUsageSnapshot,
@@ -16,6 +23,20 @@ from .provider_usage_platform import (
     select_authoritative_snapshot,
 )
 from .provider_usage_settings import ProviderUsageSettings
+
+#: States that arm a failure gate. NEEDS_SIGN_IN is terminal (only a
+#: fresh credential can fix it); the rest are transient and ride the
+#: exponential ladder. RATE_LIMITED matters most in practice: the Claude
+#: usage endpoint 429s, and before this gate existed the service kept
+#: re-asking every 120 s, which is exactly how one STAYS rate limited.
+_TERMINAL_FAILURE_STATES = frozenset({ProviderSourceState.NEEDS_SIGN_IN})
+_TRANSIENT_FAILURE_STATES = frozenset(
+    {
+        ProviderSourceState.RATE_LIMITED,
+        ProviderSourceState.UNAVAILABLE,
+        ProviderSourceState.ERROR,
+    }
+)
 
 Collector = Callable[[object, Path, float, object], ProviderUsageSnapshot]
 
@@ -171,6 +192,15 @@ class ProviderUsageService:
         self._state = loaded_state
         self._callbacks: list[Callable[[ProviderUsageState], None]] = []
         self._worker: threading.Thread | None = None
+        # Per-provider retry gates (see provider_reconnect): terminal
+        # auth failures wait for the credential source to change,
+        # transient failures ride an exponential ladder. In-memory only
+        # -- a relaunch deliberately retries everything once.
+        self._failure_gates: dict[str, FailureGate] = {}
+        # Providers the NEXT worker run must collect even through a
+        # gate, because a person just clicked something.
+        self._forced_providers: set[str] = set()
+        self._rerun_requested = False
 
     def snapshot(self) -> ProviderUsageState:
         with self._lock:
@@ -187,6 +217,7 @@ class ProviderUsageService:
         self,
         *,
         providers: tuple[str, ...] | None,
+        force: bool = False,
     ) -> ProviderUsageState:
         observed_at = float(self._clock())
         settings = self._settings()
@@ -203,6 +234,10 @@ class ProviderUsageService:
                     snapshots.append(previous)
                 continue
             if not preference.enabled:
+                # A disabled provider's old failure gate must not
+                # outlive the disable: re-enabling should probe fresh,
+                # not serve the pre-disable failure for up to an hour.
+                self._failure_gates.pop(provider_id, None)
                 snapshots.append(
                     _empty_snapshot(
                         provider_id,
@@ -223,6 +258,37 @@ class ProviderUsageService:
                     )
                 )
                 continue
+            gate = self._failure_gates.get(provider_id, FailureGate())
+            fingerprint = credential_fingerprint(self._home, provider_id)
+            previous = previous_by_provider.get(provider_id)
+            if previous is not None and not should_collect(
+                gate,
+                now=observed_at,
+                fingerprint=fingerprint,
+                forced=force,
+            ):
+                # The gate is armed and nothing changed: serve the last
+                # snapshot instead of re-asking a server that already
+                # said no. This is what stops a 429 from becoming a
+                # permanent 429.
+                snapshots.append(previous)
+                continue
+            if (
+                provider_id == "grok"
+                and gate.terminal
+                and fingerprint != gate.terminal_fingerprint
+            ):
+                # The user just ran `grok login`: clear any wedged
+                # stored-token copy so the fresh file wins immediately.
+                # Background-safe -- file reads only, never a prompt.
+                try:
+                    repair_grok_credential(
+                        self._credentials,
+                        home=self._home,
+                        now=observed_at,
+                    )
+                except Exception:
+                    pass
             try:
                 candidate = collector(
                     preference,
@@ -240,8 +306,44 @@ class ProviderUsageService:
                     reason="collector_failed",
                     action="Retry",
                 )
+            if candidate.state in _TERMINAL_FAILURE_STATES:
+                self._failure_gates[provider_id] = note_failure(
+                    gate,
+                    now=observed_at,
+                    terminal=True,
+                    fingerprint=fingerprint,
+                )
+            elif candidate.state in _TRANSIENT_FAILURE_STATES:
+                self._failure_gates[provider_id] = note_failure(
+                    gate,
+                    now=observed_at,
+                    terminal=False,
+                    fingerprint=None,
+                )
+            else:
+                self._failure_gates.pop(provider_id, None)
             previous_good = self._last_known_good.get(provider_id)
-            if candidate.state is ProviderSourceState.READY:
+            if (
+                candidate.state is ProviderSourceState.READY
+                and not candidate.lanes
+                and previous_good is not None
+                and previous_good.lanes
+            ):
+                # A lane-less READY means "the scan worked and found no
+                # quota evidence" -- e.g. Codex transcripts rotated away.
+                # That is the ABSENCE of a reading, not a newer reading;
+                # letting it overwrite last-known-good silently degraded
+                # "48% left" to a bare "ready" card with no number.
+                snapshots.append(
+                    replace(
+                        previous_good,
+                        observed_at=candidate.observed_at,
+                        state=ProviderSourceState.STALE,
+                        reason_code="reading_evidence_missing",
+                        action_label=previous_good.action_label or "Retry",
+                    )
+                )
+            elif candidate.state is ProviderSourceState.READY:
                 self._last_known_good[provider_id] = candidate
                 snapshots.append(candidate)
             elif candidate.state is ProviderSourceState.STALE and candidate.lanes:
@@ -282,11 +384,12 @@ class ProviderUsageService:
         providers: tuple[str, ...] | None = None,
         force: bool = False,
     ) -> ProviderUsageState:
-        del force
+        # `force` used to be deleted here, which meant a user-initiated
+        # reconnect could not push through a failure gate. Now it can.
         with self._lock:
             if self._closed:
                 return self._state
-        return self._run_refresh(providers=providers)
+        return self._run_refresh(providers=providers, force=force)
 
     def request(
         self,
@@ -309,22 +412,58 @@ class ProviderUsageService:
                 return self._state
             self._callbacks.append(callback)
             if self._worker is not None and self._worker.is_alive():
+                if force:
+                    # A person clicked while a background run was in
+                    # flight. That run already read the OLD credential;
+                    # piggybacking on it is how "Reconnect" used to
+                    # report stale results as fresh ones. Run once more
+                    # after it finishes.
+                    self._rerun_requested = True
+                    if providers is not None:
+                        self._forced_providers.update(providers)
                 return self._state
             self._state = replace(self._state, refreshing=True)
             self._worker = threading.Thread(
                 target=self._worker_main,
-                kwargs={"providers": providers},
+                kwargs={"providers": providers, "force": force},
                 name="SidePulseProviderUsage",
                 daemon=True,
             )
             self._worker.start()
             return self._state
 
-    def _worker_main(self, *, providers: tuple[str, ...] | None) -> None:
-        state = self._run_refresh(providers=providers)
-        with self._lock:
-            callbacks = tuple(self._callbacks)
-            self._callbacks.clear()
+    def _worker_main(
+        self,
+        *,
+        providers: tuple[str, ...] | None,
+        force: bool = False,
+    ) -> None:
+        pending_providers = providers
+        pending_force = force
+        while True:
+            state = self._run_refresh(
+                providers=pending_providers, force=pending_force
+            )
+            with self._lock:
+                if self._rerun_requested:
+                    pending_providers = (
+                        tuple(sorted(self._forced_providers)) or None
+                    )
+                    pending_force = True
+                    self._rerun_requested = False
+                    self._forced_providers.clear()
+                    continue
+                callbacks = tuple(self._callbacks)
+                self._callbacks.clear()
+                # Retire the worker UNDER THE LOCK, in the same critical
+                # section as the final rerun check. The exit used to
+                # happen while `is_alive()` was still true, so a forced
+                # request landing during callback delivery piggybacked
+                # on a thread that would never look at its flags again:
+                # the click was swallowed and the leaked flags fired a
+                # spurious forced run up to five minutes later.
+                self._worker = None
+                break
         for callback in callbacks:
             try:
                 callback(state)

@@ -15574,6 +15574,10 @@ class QuotaRunwayTests(unittest.TestCase):
         self.assertIsNone(self.controller.quota_runway_state())
 
     def test_runway_display_falls_back_to_agent_while_authority_is_withheld(self) -> None:
+        # 2026-08-26: the provider-usage facade now overrides
+        # quota_runway_state with the JR plane's gated lanes
+        # (quota_runway.py / test_quota_runway.py). THIS controller has
+        # no such producer, so the claim must keep failing closed.
         from sidepulse.settings import LED_DISPLAY_QUOTA_RUNWAY
 
         device = self.status_bar.StatusBarDevice(
@@ -15586,6 +15590,111 @@ class QuotaRunwayTests(unittest.TestCase):
         )
         kind = self.controller.active_led_display_kind_for_device(device, None)
         self.assertEqual(kind, self.status_bar.LED_DISPLAY_AGENT)
+
+
+class SnoozeScopeControllerTests(unittest.TestCase):
+    """Snooze silences lights and notifications, not just the dropdown
+    (2026-08-26; the pure rule lives in snooze_scope.py)."""
+
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def _work_key(self, work_id: str) -> WorkKey:
+        return WorkKey(
+            SourceKey("codex", "hooks", "global", "live_agent_events"),
+            WorkIdentifier(work_id),
+        )
+
+    def _snooze_preferences(self, work_id: str):
+        from sidepulse.mailbox_preferences import MailboxPreference
+
+        now = time.time()
+        return (
+            MailboxPreference(
+                self._work_key(work_id),
+                snoozed_at=now - 60.0,
+                snoozed_until=now + 3_600.0,
+            ),
+        )
+
+    def _status(self, mode: AgentMode, *, event_name: str = "PostToolUse") -> AgentStatus:
+        return AgentStatus(
+            provider="codex",
+            agent_id="codex:session:main",
+            display_name="Codex main",
+            mode=mode,
+            updated_at=datetime.now(timezone.utc),
+            event_name=event_name,
+            session_id="main",
+            work_key=self._work_key("main"),
+        )
+
+    def _snapshot(self, *statuses):
+        return collector_module.snapshot_from_statuses(
+            statuses,
+            sources=(),
+            collected_at=datetime.now(timezone.utc),
+            stale_after_seconds=3600.0,
+            tool_running_timeout_seconds=0.0,
+            completed_visible_seconds=3600.0,
+            idle_visible_seconds=3600.0,
+        )
+
+    def test_snoozed_working_session_stops_claiming_the_lights(self) -> None:
+        self.controller.mailbox_preferences = self._snooze_preferences("main")
+        projection = self.controller.update_attention_projection(
+            self._snapshot(self._status(AgentMode.WORKING)),
+            now=10.0,
+        )
+        self.assertEqual(projection.visible_rows, ())
+        self.assertEqual(projection.light_rows, ())
+        self.assertIs(self.controller.current_attention_projection, projection)
+        # The dropdown's mailbox path keeps the row -- its own
+        # preference pass owns dropdown/browser wake semantics.
+        mailbox = self.controller.current_mailbox_projection
+        row_ids = [
+            row.agent_id
+            for section in mailbox.sections
+            for row in section.rows
+        ]
+        self.assertIn("codex:session:main", row_ids)
+
+    def test_snoozed_session_with_a_live_ask_still_lights_up(self) -> None:
+        self.controller.mailbox_preferences = self._snooze_preferences("main")
+        projection = self.controller.update_attention_projection(
+            self._snapshot(
+                self._status(
+                    AgentMode.WAITING_FOR_INPUT,
+                    event_name="PermissionRequest",
+                )
+            ),
+            now=10.0,
+        )
+        self.assertEqual(
+            [row.agent_id for row in projection.visible_rows],
+            ["codex:session:main"],
+        )
+        self.assertEqual(len(projection.actionable_attention), 1)
+
+    def test_completion_notification_is_suppressed_for_a_snoozed_session(self) -> None:
+        controller = self.controller
+        controller.settings = controller.settings.with_completion_notification_enabled(True)
+        controller.may_interrupt = MagicMock(return_value=SimpleNamespace(audible=True))
+        controller._deliver_semantic_notification = MagicMock(return_value=True)
+        status = self._status(AgentMode.COMPLETED, event_name="Stop")
+        controller._notification_events_by_work_key = {
+            status.work_key: SimpleNamespace(
+                key="event", interruption_class="completion"
+            )
+        }
+
+        controller.mailbox_preferences = self._snooze_preferences("main")
+        controller.post_completion_notification(status)
+        controller._deliver_semantic_notification.assert_not_called()
+
+        controller.mailbox_preferences = ()
+        controller.post_completion_notification(status)
+        controller._deliver_semantic_notification.assert_called_once()
 
 
 class PowerUpLookTests(unittest.TestCase):
@@ -17767,7 +17876,10 @@ class QuotaAlertTests(unittest.TestCase):
         self.controller.settings = (
             self.controller.settings.with_quota_alerts_enabled(True)
         )
-        self.assertFalse(self.controller.settings.quota_alerts_enabled)
+        # The flag is real now (2026-08-26) -- but the LEGACY raw-percent
+        # tracker below stays a stub regardless: raw percentages never
+        # drive effects; the JR plane's edge detectors do.
+        self.assertTrue(self.controller.settings.quota_alerts_enabled)
         self.controller.track_quota_thresholds({"Codex weekly": 70.0})
         self.assertEqual(self.controller.quota_blink_until, 0.0)
         with patch.object(self.controller, "refresh_") as refresh:
@@ -17823,9 +17935,12 @@ class QuotaAlertTests(unittest.TestCase):
             save_settings(configured.with_quota_alerts_enabled(True), path)
             loaded = load_settings(path)
             payload = json.loads(path.read_text())
-        self.assertFalse(loaded.quota_alerts_enabled)
+        # Alerts persist now (real, consumed, UI-toggleable); custom
+        # thresholds still normalize to the locked 90/95 and stay
+        # unserialized.
+        self.assertTrue(loaded.quota_alerts_enabled)
         self.assertEqual(loaded.quota_alert_thresholds, (90.0, 95.0))
-        self.assertNotIn("quota_alerts_enabled", payload)
+        self.assertIn("quota_alerts_enabled", payload)
         self.assertNotIn("quota_alert_thresholds", payload)
         self.assertEqual(
             AgentMonitorSettings().with_quota_alert_thresholds([]).quota_alert_thresholds,
@@ -18308,8 +18423,8 @@ class StudioDisplayAndTrancheCTests(unittest.TestCase):
     def test_empty_studio_program_falls_back(self) -> None:
         self.assertIsNone(self.controller.studio_display_program(255))
 
-    def test_studio_option_is_in_the_display_popup(self) -> None:
-        from sidepulse.settings import LED_DISPLAY_STUDIO
+    def test_studio_and_runway_options_are_in_the_display_popup(self) -> None:
+        from sidepulse.settings import LED_DISPLAY_QUOTA_RUNWAY, LED_DISPLAY_STUDIO
 
         volume_root = Path(self._tmp.name) / "volumes"
         (volume_root / "SidePulseDot").mkdir(parents=True)
@@ -18319,11 +18434,13 @@ class StudioDisplayAndTrancheCTests(unittest.TestCase):
             self.controller.ensure_all_settings_panes()
         controls = next(iter(self.controller.device_settings_controls.values()))
         popup = controls["display_popup"]
-        keys = {
-            popup.itemAtIndex_(index).representedObject()
-            for index in range(popup.numberOfItems())
-        }
+        keys = {}
+        for index in range(popup.numberOfItems()):
+            item = popup.itemAtIndex_(index)
+            keys[item.representedObject()] = str(item.title())
         self.assertIn(LED_DISPLAY_STUDIO, keys)
+        # 2026-08-26: choosable again -- the JR usage plane feeds it.
+        self.assertEqual(keys.get(LED_DISPLAY_QUOTA_RUNWAY), "Quota runway")
 
     def test_apply_weather_location_round_trip(self) -> None:
         self.controller.show_settings_window()
@@ -21652,19 +21769,16 @@ class LidObservationRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(lid_timer.invalidations, 0)
 
+        # Closing the lid IS a ScreensDidSleep: display sleep must NOT
+        # withdraw lid observation, or catching the closed transition
+        # becomes a race between the 1s poll and the sleep notification
+        # -- the very race that froze the closed-lid animation.
         self.controller.reconcile_presentation_timers(
             self._inputs(display_asleep=True)
         )
-        self.controller.runtimeTimerFired_(lid_timer)
-        self.assertEqual(
+        self.assertIn(
+            self.status_bar.RuntimeFeature.LID_OBSERVATION,
             self.controller._runtime_timer_registry.snapshot().active_features,
-            (),
-        )
-        submitted = self.controller._os_poll_worker.snapshot().submitted
-        self.controller._lid_observation_timer_fired()
-        self.assertEqual(
-            self.controller._os_poll_worker.snapshot().submitted,
-            submitted,
         )
 
         self.controller.reconcile_presentation_timers(self._inputs())
@@ -22392,6 +22506,15 @@ class LatestFeatureSettingsCompositionTests(unittest.TestCase):
     def test_installed_agents_is_lazy_grouped_private_and_refreshable(self) -> None:
         from sidepulse.installed_agents import installed_surface_registrations
 
+        # This test exercises the isVisible()-gated inventory refresh,
+        # which needs the window actually presented. The activation
+        # policy in conftest still keeps focus with the owner.
+        self.enterContext(
+            patch(
+                "sidepulse.window_presentation.desktop_takeover_suppressed",
+                return_value=False,
+            )
+        )
         self.controller.show_settings_window()
         self.assertNotIn("installed_agents", self.controller.settings_panes)
         self.assertEqual(

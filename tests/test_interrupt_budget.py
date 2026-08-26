@@ -720,3 +720,140 @@ def test_a_stale_focus_reading_is_refreshed_within_a_second(controller) -> None:
     uses -- it must not pin an ended Focus forever."""
     controller._focus_ids_cache = (time.monotonic() - 5.0, ["com.apple.focus.work"])
     assert not controller.focus_is_active()
+
+
+def test_charging_trickle_claims_the_idle_strip_and_yields_to_agents(
+    controller,
+) -> None:
+    """The ambient charging display: plugged-in and idle claims the
+    battery display; ANY non-idle lifecycle -- working, asking, freshly
+    done -- takes the strip back; full charge and the off-switch both
+    drop the claim."""
+    from sidepulse import status_bar
+    from sidepulse.attention import LifecycleMode
+    from sidepulse.battery import BatterySnapshot
+
+    device = _device(status_bar)
+    charging = BatterySnapshot(percent=60, is_charging=True, is_plugged=True)
+    controller.current_attention_projection = None
+
+    assert controller.settings.battery_charging_idle_enabled
+    assert (
+        controller.active_led_display_kind_for_device(device, charging)
+        == status_bar.LED_DISPLAY_BATTERY
+    )
+
+    # Full: the claim drops, idle takes back over.
+    full = BatterySnapshot(percent=100, is_charged=True, is_plugged=True)
+    assert (
+        controller.active_led_display_kind_for_device(device, full)
+        == status_bar.LED_DISPLAY_AGENT
+    )
+
+    # On battery power: no claim.
+    unplugged = BatterySnapshot(percent=60)
+    assert (
+        controller.active_led_display_kind_for_device(device, unplugged)
+        == status_bar.LED_DISPLAY_AGENT
+    )
+
+    # Anything non-idle in the lifecycle outranks the trickle.
+    class _Projection:
+        pass
+
+    for mode in (
+        LifecycleMode.ACTIVE,
+        LifecycleMode.WAITING,
+        LifecycleMode.COMPLETED_RECENTLY,
+        LifecycleMode.FAILED_VISIBLE,
+    ):
+        projection = _Projection()
+        projection.lifecycle_mode = mode
+        controller.current_attention_projection = projection
+        assert (
+            controller.active_led_display_kind_for_device(device, charging)
+            == status_bar.LED_DISPLAY_AGENT
+        ), mode
+
+    projection = _Projection()
+    projection.lifecycle_mode = LifecycleMode.IDLE
+    controller.current_attention_projection = projection
+    assert (
+        controller.active_led_display_kind_for_device(device, charging)
+        == status_bar.LED_DISPLAY_BATTERY
+    )
+
+    # The off-switch is respected.
+    controller.settings = controller.settings.with_battery_charging_idle(False)
+    assert (
+        controller.active_led_display_kind_for_device(device, charging)
+        == status_bar.LED_DISPLAY_AGENT
+    )
+
+
+def test_charging_trickle_never_steals_a_pinned_display_or_a_timebox(
+    controller,
+) -> None:
+    """Hostile-review regression: the first draft of the trickle claim
+    sat ABOVE Timer/Studio/Runway and ignored the per-device display
+    pin, so every pinned device silently became a battery meter while
+    the Mac charged. The trickle claims ONLY default-display devices
+    and yields to a running timebox."""
+    from unittest.mock import patch
+
+    from sidepulse import status_bar
+    from sidepulse.battery import BatterySnapshot
+
+    charging = BatterySnapshot(percent=60, is_charging=True, is_plugged=True)
+    controller.current_attention_projection = None
+    assert controller.settings.battery_charging_idle_enabled
+
+    for pinned in (
+        status_bar.LED_DISPLAY_STUDIO,
+        status_bar.LED_DISPLAY_TIMER,
+    ):
+        device = _device(status_bar, display=pinned)
+        assert (
+            controller.active_led_display_kind_for_device(device, charging)
+            == pinned
+        ), pinned
+
+    # A running timebox owns the strip even on a default-display device.
+    default_device = _device(status_bar)
+    with patch.object(type(controller), "timebox_active", lambda _self: True):
+        assert (
+            controller.active_led_display_kind_for_device(
+                default_device, charging
+            )
+            == status_bar.LED_DISPLAY_TIMER
+        )
+
+
+def test_reset_celebration_claims_the_strip_and_respects_focus(controller) -> None:
+    """The confetti moment: claims the strip when armed, refuses under a
+    Focus (courtesy), and renders a finite firmware-valid program that
+    is NOT gated behind quota_alerts_enabled."""
+    import time as time_module
+
+    from sidepulse import status_bar
+    from sidepulse.celebrations import reset_celebration_program
+    from sidepulse.firmware_validation import validate_firmware_program
+
+    device = _device(status_bar)
+    controller.quota_reset_celebration_until = time_module.monotonic() + 6.0
+    assert (
+        controller.active_led_display_kind_for_device(device, None)
+        == status_bar.LED_DISPLAY_RESET_CELEBRATION
+    )
+
+    _turn_on_a_focus(controller)
+    assert (
+        controller.active_led_display_kind_for_device(device, None)
+        == status_bar.LED_DISPLAY_AGENT
+    )
+
+    for led_count in (2, 8):
+        program = reset_celebration_program(255, led_count=led_count)
+        result = validate_firmware_program(program, led_count=led_count)
+        assert result.accepted, (led_count, result.reason)
+    assert "repeat 3" in reset_celebration_program(255)  # finite by design

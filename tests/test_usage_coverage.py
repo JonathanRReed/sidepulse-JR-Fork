@@ -837,7 +837,7 @@ def test_unknown_models_count_activity_but_have_no_estimated_price(tmp_path: Pat
     assert totals.pricing_coverage.priced_token_count == 1_000_000
     assert totals.pricing_coverage.total_token_count == 3_000_000
     assert totals.pricing_coverage.table_version
-    assert totals.pricing_coverage.table_as_of == "2026-08-12"
+    assert totals.pricing_coverage.table_as_of == "2026-08-26"
     summary = usage_stats.usage_summary_line(totals, "cost")
     assert summary is not None
     assert "estimated" in summary.lower()

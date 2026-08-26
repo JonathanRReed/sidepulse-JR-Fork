@@ -20,6 +20,14 @@ from . import usage_percent_history, usage_stats
 from .providers import default_state_dir
 
 _IN_FLIGHT_ATTR = "_usage_graph_worker_in_flight"
+_RESCAN_PENDING_ATTR = "_usage_graph_rescan_pending"
+_LAST_BUILD_ATTR = "_usage_graph_last_build"
+
+#: A landed model younger than this for the SAME (days, metric,
+#: providers) is served from memory instead of rescanned. Pane
+#: switches used to re-pay the full transcript scan (~9s warm, ~30s
+#: cold, all of it GIL time the menus feel) for identical inputs.
+_MODEL_REUSE_SECONDS = 60.0
 
 
 def _build_payload(settings) -> tuple[dict, str | None]:
@@ -43,11 +51,40 @@ def _build_payload(settings) -> tuple[dict, str | None]:
         since_epoch=period_start.timestamp(),
         codex_root=Path.home() / ".codex" / "sessions",
     )
+    provider_ids = tuple(settings.usage_graph_providers)
+    extra_sessions: dict[str, dict[str, int]] | None = None
+    if mode == "sessions":
+        # Sessions is the one metric EVERY watched provider can answer:
+        # the hook ledgers record session_start for grok, devin, and
+        # friends. Chart whoever has data, not just the transcript two.
+        from .session_history import ledger_session_days
+
+        try:
+            from .providers import HOOK_PROVIDERS
+
+            registry_ids = tuple(HOOK_PROVIDERS)
+        except Exception:
+            registry_ids = provider_ids
+        try:
+            extra_sessions = ledger_session_days(
+                default_state_dir() / "agent-monitor",
+                since_epoch=period_start.timestamp(),
+                provider_ids=registry_ids,
+            )
+        except Exception:
+            extra_sessions = None
+        if extra_sessions:
+            provider_ids = provider_ids + tuple(
+                provider_id
+                for provider_id in extra_sessions
+                if provider_id not in provider_ids
+            )
     model = usage_stats.usage_graph_model(
         totals.records,
         days=days,
         metric=mode,
-        provider_ids=settings.usage_graph_providers,
+        provider_ids=provider_ids,
+        extra_sessions=extra_sessions,
     )
     claude_tokens = (
         totals.input_tokens + totals.cached_input_tokens + totals.output_tokens
@@ -66,7 +103,7 @@ def build_usage_graph_model(settings) -> dict:
     return _build_payload(settings)[0]
 
 
-def _scanning_placeholder(settings) -> dict:
+def scanning_placeholder(settings) -> dict:
     days = int(getattr(settings, "usage_graph_days", 7) or 7)
     return {
         "days": days,
@@ -79,24 +116,84 @@ def _scanning_placeholder(settings) -> dict:
     }
 
 
-def refresh_usage_graph(target) -> None:
-    """Fire-and-forget rebuild; lands on main via NSOperationQueue."""
-    if getattr(target, _IN_FLIGHT_ATTR, False):
-        return
-    setattr(target, _IN_FLIGHT_ATTR, True)
+def _build_key(settings) -> tuple:
+    return (
+        int(getattr(settings, "usage_graph_days", 7) or 7),
+        str(getattr(settings, "usage_display_mode", "tokens") or "tokens"),
+        tuple(getattr(settings, "usage_graph_providers", ()) or ()),
+    )
 
-    # A year-deep cold scan takes tens of seconds; until it lands the
-    # chart must say SCANNING, never "No activity in this range".
-    graph = getattr(target, "settings_fields", {}).get("profile_usage_graph")
-    if graph is not None and getattr(target, "usage_graph_model", None) is None:
+
+def _drop_to_utility_qos() -> None:
+    """The scan parses six figures of JSONL lines -- pure GIL time. At
+    default QoS that thread competes with the main thread head-on and
+    the whole app reads as laggy while the chart loads. The Screen Bar
+    sampler solved this exact problem already; reuse its helper."""
+    try:
+        from .screen_bar_pipeline import _drop_current_thread_to_utility_qos
+
+        _drop_current_thread_to_utility_qos()
+    except Exception:
+        pass
+
+
+def refresh_usage_graph(target) -> None:
+    """Fire-and-forget rebuild; lands on main via AppHelper.callAfter."""
+    import time as _time
+
+    fields = getattr(target, "settings_fields", {}) or {}
+    graph = fields.get("profile_usage_graph")
+    key = _build_key(target.settings)
+
+    # Same inputs, recent result: serve the landed model without paying
+    # the scan again (a pane switch rebuilds the view but not the data).
+    last = getattr(target, _LAST_BUILD_ATTR, None)
+    model = getattr(target, "usage_graph_model", None)
+    if (
+        model is not None
+        and last is not None
+        and last[0] == key
+        and _time.monotonic() - last[1] < _MODEL_REUSE_SECONDS
+    ):
+        if graph is not None:
+            try:
+                graph.setModel_(model)
+            except Exception:
+                pass
+        return
+
+    # Feedback FIRST, gating second: whatever else happens, the person
+    # who just picked "Year" must see SCANNING, never a stale range and
+    # never "No activity in this range". The old gate skipped this
+    # whenever any model had ever landed, so a range change showed the
+    # previous range's chart (or an empty one) for the whole scan.
+    if graph is not None and (
+        model is None
+        or model.get("days") != key[0]
+        or model.get("metric") != key[1]
+    ):
         try:
-            graph.setModel_(_scanning_placeholder(target.settings))
+            graph.setModel_(scanning_placeholder(target.settings))
         except Exception:
             pass
 
+    if getattr(target, _IN_FLIGHT_ATTR, False):
+        # A scan is running for OLDER settings. Dropping this request
+        # silently was how a mid-scan range change landed the wrong
+        # chart; remember it and re-fire when the current scan lands.
+        setattr(target, _RESCAN_PENDING_ATTR, True)
+        return
+    setattr(target, _IN_FLIGHT_ATTR, True)
+
     def _work() -> None:
+        _drop_to_utility_qos()
         model = None
         summary = None
+        # The key of what was ACTUALLY built: the scan reads live
+        # settings, so a range change that lands before the thread runs
+        # is already honored here -- and memoizing the requested key
+        # instead would force a pointless identical rescan right after.
+        built_key = _build_key(target.settings)
         try:
             model, summary = _build_payload(target.settings)
         except Exception:
@@ -104,27 +201,31 @@ def refresh_usage_graph(target) -> None:
         finally:
             def _apply() -> None:
                 setattr(target, _IN_FLIGHT_ATTR, False)
-                if model is None:
-                    return
-                target.usage_graph_model = model
-                target._usage_local_scan_complete = True
-                fields = getattr(target, "settings_fields", {}) or {}
-                view = fields.get("profile_usage_graph")
-                if view is not None:
-                    try:
-                        view.setModel_(model)
-                    except Exception:
-                        pass
-                # The old acceptance-gated path could leave "Loading local
-                # usage history…" forever; scan-derived truth resolves it
-                # whenever that path has said nothing.
-                if summary and not getattr(target, "usage_summary_text", None):
-                    label = fields.get("profile_usage_label")
-                    if label is not None:
+                pending = bool(getattr(target, _RESCAN_PENDING_ATTR, False))
+                setattr(target, _RESCAN_PENDING_ATTR, False)
+                if model is not None:
+                    target.usage_graph_model = model
+                    target._usage_local_scan_complete = True
+                    setattr(target, _LAST_BUILD_ATTR, (built_key, _time.monotonic()))
+                    fields = getattr(target, "settings_fields", {}) or {}
+                    view = fields.get("profile_usage_graph")
+                    if view is not None:
                         try:
-                            label.setStringValue_(summary)
+                            view.setModel_(model)
                         except Exception:
                             pass
+                    # The old acceptance-gated path could leave "Loading
+                    # local usage history…" forever; scan-derived truth
+                    # resolves it whenever that path has said nothing.
+                    if summary and not getattr(target, "usage_summary_text", None):
+                        label = fields.get("profile_usage_label")
+                        if label is not None:
+                            try:
+                                label.setStringValue_(summary)
+                            except Exception:
+                                pass
+                if pending:
+                    refresh_usage_graph(target)
 
             try:
                 # AppHelper.callAfter is the PyObjC-blessed main-thread
@@ -142,4 +243,8 @@ def refresh_usage_graph(target) -> None:
     ).start()
 
 
-__all__ = ["build_usage_graph_model", "refresh_usage_graph"]
+__all__ = [
+    "build_usage_graph_model",
+    "refresh_usage_graph",
+    "scanning_placeholder",
+]

@@ -87,8 +87,10 @@ def test_graph_model_charts_every_provider_with_history() -> None:
     assert set(by_provider) == {"grok", "devin"}
     # grok day -1 takes the WORST lane (40, not 70); today carries forward.
     assert by_provider["grok"] == (90.0, 40.0, 40.0)
-    # devin's earlier empty days repeat the first known value.
-    assert by_provider["devin"] == (55.0, 55.0, 55.0)
+    # devin's PRE-history days are gaps (negative sentinel the chart
+    # skips), not a fabricated flat line -- the old backfill drew data
+    # for days before any sample existed (audit, 2026-08-26).
+    assert by_provider["devin"] == (-1.0, -1.0, 55.0)
 
 
 def test_append_writes_private_jsonl(tmp_path) -> None:

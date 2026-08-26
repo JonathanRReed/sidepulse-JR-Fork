@@ -168,15 +168,23 @@ def test_request_runs_off_caller_thread_and_coalesces(tmp_path):
     )
     callbacks = []
     first = service.request(callback=callbacks.append, providers=("codex",), force=True)
+    # A FORCED request during an in-flight run may not piggyback on it:
+    # that run already read the old credential, which is how "Reconnect"
+    # used to report pre-click results as fresh ones. It runs once more.
     second = service.request(callback=callbacks.append, providers=("codex",), force=True)
+    # An UNFORCED request still coalesces onto whatever is in flight.
+    third = service.request(callback=callbacks.append, providers=("codex",))
     assert first.refreshing is True
     assert second.refreshing is True
+    assert third.refreshing is True
     gate.set()
     deadline = time.time() + 3
     while time.time() < deadline and not callbacks:
         time.sleep(0.01)
-    assert len(collector_threads) == 1
-    assert collector_threads[0] != threading.current_thread().name
+    assert len(collector_threads) == 2
+    assert all(
+        name != threading.current_thread().name for name in collector_threads
+    )
     assert callbacks and callbacks[0].refreshing is False
     service.close()
 
@@ -242,3 +250,162 @@ def test_a_stale_but_real_reading_is_not_replaced_by_the_last_known_good(tmp_pat
     codex = next(s for s in second.snapshots if s.provider_id == "codex")
     assert codex.state is ProviderSourceState.STALE, "last_known_good masked a stale reading"
     assert codex.lanes[0].remaining_percent == 48
+
+
+def test_rate_limited_provider_backs_off_instead_of_hammering(tmp_path):
+    """The Claude usage endpoint 429s; before the failure gate the
+    service asked again every refresh, which is how one STAYS rate
+    limited. A gated provider serves its previous snapshot; a forced
+    (user-initiated) refresh still pushes through."""
+    settings = default_provider_usage_settings().with_enabled("grok", False)
+    calls = []
+    clock = {"now": 1000.0}
+
+    def collector(_pref, _home, observed, _credentials):
+        calls.append(observed)
+        return snapshot(
+            "claude", state=ProviderSourceState.RATE_LIMITED, observed=observed
+        )
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={"claude": collector},
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: clock["now"],
+    )
+
+    service.refresh_now(providers=("claude",))
+    assert len(calls) == 1
+    clock["now"] = 1120.0  # inside the 300 s first rung
+    service.refresh_now(providers=("claude",))
+    assert len(calls) == 1, "a gated provider was re-collected"
+    service.refresh_now(providers=("claude",), force=True)
+    assert len(calls) == 2, "force must bypass the gate"
+    clock["now"] = 1000.0 + 10_000.0  # past every rung
+    service.refresh_now(providers=("claude",))
+    assert len(calls) == 3
+
+
+def test_terminal_gate_lifts_when_the_credential_file_changes(tmp_path):
+    """A signed-out provider is not worth re-asking every two minutes;
+    it IS worth re-asking the moment the user signs in somewhere. The
+    gate watches the provider's own credential file for that."""
+    import json as _json
+
+    settings = default_provider_usage_settings()
+    calls = []
+    clock = {"now": 1000.0}
+
+    def collector(_pref, _home, observed, _credentials):
+        calls.append(observed)
+        return snapshot(
+            "grok", state=ProviderSourceState.NEEDS_SIGN_IN, observed=observed
+        )
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={"grok": collector},
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: clock["now"],
+    )
+
+    service.refresh_now(providers=("grok",))
+    assert len(calls) == 1
+    clock["now"] = 1200.0
+    service.refresh_now(providers=("grok",))
+    assert len(calls) == 1, "terminal failure was re-collected with no change"
+
+    grok_dir = tmp_path / ".grok"
+    grok_dir.mkdir()
+    (grok_dir / "auth.json").write_text(
+        _json.dumps({"https://auth.x.ai::a": {"key": "k" * 24}}),
+        encoding="utf-8",
+    )
+    clock["now"] = 1300.0
+    service.refresh_now(providers=("grok",))
+    assert len(calls) == 2, "a credential change must lift the gate"
+
+
+def test_ready_without_lanes_does_not_clobber_a_real_reading(tmp_path):
+    """A lane-less READY says "the scan found no quota evidence" -- the
+    absence of a reading, not a newer one. It must neither replace the
+    last known good numbers nor render as a bare card with no number."""
+    settings = default_provider_usage_settings().with_enabled("grok", False)
+    current = {"lanes": True}
+
+    def collector(_pref, _home, observed, _credentials):
+        if current["lanes"]:
+            return snapshot("codex", remaining=48, observed=observed)
+        base = snapshot("codex", observed=observed)
+        import dataclasses as _dataclasses
+
+        return _dataclasses.replace(base, lanes=())
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={"codex": collector},
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: 1000,
+    )
+
+    first = service.refresh_now(providers=("codex",))
+    assert first.by_provider("codex").lanes
+
+    current["lanes"] = False
+    second = service.refresh_now(providers=("codex",))
+    codex = second.by_provider("codex")
+    assert codex.state is ProviderSourceState.STALE
+    assert codex.lanes and codex.lanes[0].remaining_percent == 48
+
+    current["lanes"] = True
+    third = service.refresh_now(providers=("codex",))
+    assert third.by_provider("codex").state is ProviderSourceState.READY
+
+
+def test_forced_request_during_callback_delivery_is_not_swallowed(tmp_path):
+    """Hostile-review regression: the worker used to exit its rerun
+    loop and only THEN deliver callbacks, still alive -- a forced
+    request landing in that window piggybacked on a thread that would
+    never look at its flags again. The click was swallowed and the
+    leaked flags fired a spurious forced run minutes later. The worker
+    now retires under the lock, so a request during delivery starts a
+    fresh worker."""
+    settings = default_provider_usage_settings()
+    collects = []
+
+    def collect(_pref, _home, observed, _credentials):
+        collects.append(observed)
+        return snapshot("codex", observed=observed)
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={"codex": collect},
+        credentials=object(),
+        home=tmp_path,
+        clock=time.time,
+    )
+
+    states = []
+    second_round = threading.Event()
+
+    def first_callback(state):
+        states.append(("first", state))
+        # We are INSIDE delivery: the worker has already made its exit
+        # decision. A forced request from here must not be lost.
+        service.request(
+            callback=lambda s: (states.append(("second", s)), second_round.set()),
+            providers=("codex",),
+            force=True,
+        )
+
+    service.request(callback=first_callback, providers=("codex",), force=True)
+    assert second_round.wait(3), "the mid-delivery forced request was swallowed"
+    assert len(collects) == 2
+    assert [name for name, _s in states] == ["first", "second"]
+    with service._lock:
+        assert service._rerun_requested is False
+        assert not service._forced_providers
+    service.close()

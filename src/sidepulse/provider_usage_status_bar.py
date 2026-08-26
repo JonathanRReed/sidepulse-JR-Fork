@@ -431,14 +431,28 @@ else:
             self._sidepulse_provider_usage_state = service.snapshot()
             return service
 
-        def _request_provider_usage(self, *, force: bool = False) -> None:
+        def _request_provider_usage(
+            self,
+            *,
+            force: bool = False,
+            providers: tuple[str, ...] | None = None,
+        ) -> None:
             service = self._provider_usage_service()
             current = service.request(
                 callback=self._provider_usage_ready,
                 force=force,
+                providers=providers,
             )
             self._sidepulse_provider_usage_state = current
             refresh_native_usage_summary(self)
+
+        def _provider_usage_log(self, message: str) -> None:
+            _legacy.log_status_bar(message)
+
+        def _show_provider_usage_feedback(self, message: str) -> None:
+            from .provider_usage_feedback import show_provider_usage_feedback
+
+            show_provider_usage_feedback(self, message)
 
         def _provider_usage_ready(self, state: ProviderUsageState) -> None:
             try:
@@ -478,11 +492,18 @@ else:
         def applyProviderUsageState_(self, state) -> None:
             if type(state) is not ProviderUsageState:
                 return
+            # The edge BASELINE is owned by this method alone. It used
+            # to read _sidepulse_provider_usage_state, which every 15s
+            # tick overwrites with the service's current state -- so a
+            # tick landing between the worker's publish and this apply
+            # made previous == current and blinded EVERY edge detector
+            # (resets, thresholds, pace, hooks, connection loss).
             previous_state = getattr(
                 self,
-                "_sidepulse_provider_usage_state",
+                "_sidepulse_provider_usage_edge_baseline",
                 ProviderUsageState((), None, None, False),
             )
+            self._sidepulse_provider_usage_edge_baseline = state
             self._sidepulse_provider_usage_state = state
             # Percent history: every provider's "how much is left", so the
             # settings chart can show ALL of them.
@@ -515,6 +536,7 @@ else:
                     float(getattr(self, "quota_blink_until", 0.0) or 0.0),
                     time.monotonic() + 4.0,
                 )
+                self._celebrate_quota_resets(reset_events)
             thresholds = {
                 preference.provider_id: preference.threshold_remaining
                 for preference in settings.providers
@@ -543,6 +565,7 @@ else:
             # content-free banner per window, through the same gates as
             # every other quota effect.
             self._alert_new_critical_pace(previous_state, state)
+            self._alert_connection_loss(previous_state, state)
             controller = getattr(self, "_sidepulse_provider_usage_window", None)
             if controller is not None:
                 controller.refresh(state)
@@ -686,55 +709,51 @@ else:
             except Exception:
                 return 0.0
 
-        def _alert_new_critical_pace(self, previous_state, state) -> None:
-            from .provider_usage_platform import provider_descriptor
-            from .usage_pace import critical_pace_transitions
+        def quota_runway_state(self):
+            """The base withholds this LED (it collects no usage). The JR
+            plane's gated lanes ARE the authority it waited for -- the same
+            numbers the menu meters and the quota ember trust."""
+            from .quota_runway import quota_runway_state_for_controller
 
-            try:
-                seen = tuple(
-                    getattr(self, "_sidepulse_seen_pace_alerts", ())
-                )
-                alerts = critical_pace_transitions(
-                    previous_state.snapshots,
-                    state.snapshots,
-                    now=time.time(),
-                    seen_keys=frozenset(seen),
-                )
-                if not alerts:
-                    return
-                self._sidepulse_seen_pace_alerts = (
-                    *seen,
-                    *(key for key, _p, _l in alerts),
-                )[-256:]
-                if not getattr(self.settings, "quota_alerts_enabled", False):
-                    return
-                may_interrupt = getattr(self, "may_interrupt", None)
-                signal = getattr(_legacy.signals_module, "SIGNAL_QUOTA", None)
-                if callable(may_interrupt) and signal is not None:
-                    if not may_interrupt(signal):
-                        return
-                quiet = getattr(self, "quiet_active", None)
-                if callable(quiet) and quiet():
-                    return
-                self.quota_blink_until = max(
-                    float(getattr(self, "quota_blink_until", 0.0) or 0.0),
-                    time.monotonic() + 4.0,
-                )
-                client = self._notification_client_for_use()
-                for key, provider_id, _label in alerts[:3]:
-                    label = provider_descriptor(provider_id).label
-                    safe = "".join(
-                        ch for ch in label if ch.isalnum() or ch == " "
-                    ).strip() or provider_id
-                    article = "An" if safe[:1].upper() in "AEIOU" else "A"
-                    client.deliver(
-                        "quota.pace." + key.replace(":", "-"),
-                        "SidePulse",
-                        f"{article} {safe} limit is running low",
-                        {},
-                    )
-            except Exception as exc:
-                _legacy.log_status_bar(f"pace alert: {exc}")
+            return quota_runway_state_for_controller(self)
+
+        def _alert_new_critical_pace(self, previous_state, state) -> None:
+            from .provider_usage_feedback import alert_new_critical_pace
+
+            alert_new_critical_pace(
+                self,
+                previous_state,
+                state,
+                log=_legacy.log_status_bar,
+                signal_kind=getattr(
+                    _legacy.signals_module, "SIGNAL_QUOTA", None
+                ),
+            )
+
+        def _celebrate_quota_resets(self, events) -> None:
+            from .provider_usage_feedback import celebrate_quota_resets
+
+            celebrate_quota_resets(
+                self,
+                events,
+                log=_legacy.log_status_bar,
+                signal_kind=getattr(
+                    _legacy.signals_module, "SIGNAL_QUOTA", None
+                ),
+            )
+
+        def _alert_connection_loss(self, previous_state, state) -> None:
+            from .provider_usage_feedback import alert_connection_loss
+
+            alert_connection_loss(
+                self,
+                previous_state,
+                state,
+                log=_legacy.log_status_bar,
+                signal_kind=getattr(
+                    _legacy.signals_module, "SIGNAL_NOTIFICATION", None
+                ),
+            )
 
         def _active_usage_providers(self) -> frozenset[str]:
             """Providers with a MAIN session actually working right now --
@@ -819,93 +838,66 @@ else:
                 self._sidepulse_provider_usage_window = controller
             controller.show(self.provider_usage_state)
 
+        def _provider_action_label(self, provider_id: str) -> str:
+            state = getattr(self, "provider_usage_state", None)
+            snapshot = next(
+                (
+                    item
+                    for item in getattr(state, "snapshots", ())
+                    if item.provider_id == provider_id
+                ),
+                None,
+            )
+            return str(getattr(snapshot, "action_label", "") or "")
+
+        def _claude_action_wants_connect(self) -> bool:
+            """Only a Connect/Reconnect click earns the Keychain flow.
+
+            The short-circuit used to fire for EVERY Claude action, so
+            clicking "Retry later" on a rate-limited card ran a
+            synchronous `security` read (30s ceiling) on the main
+            thread -- a beachball nobody asked for."""
+            label = self._provider_action_label("claude").lower()
+            return "connect" in label or not label
+
         @_legacy.objc.IBAction
         def usageCenterAction_(self, sender) -> None:
             """A card's action button: identifier carries the provider."""
             provider_id = str(sender.identifier() or "")
-            if provider_id == "claude":
+            if provider_id == "claude" and self._claude_action_wants_connect():
                 self._connect_claude_usage()
                 return
             # Staged browser-access flow (enable -> import -> organization);
             # a plain refresh remains the fallback for other actions.
             if provider_id and run_provider_usage_action(self, provider_id):
                 return
-            self._request_provider_usage(force=True)
+            # Scoped to this provider: a full-fleet force here let one
+            # "Retry" click march every provider through its backoff
+            # gate at once.
+            self._request_provider_usage(
+                force=True,
+                providers=(provider_id,) if provider_id else None,
+            )
 
         @_legacy.objc.IBAction
         def performProviderUsageAction_(self, sender) -> None:
             payload = sender.representedObject()
             provider_id = payload.get("provider_id") if isinstance(payload, dict) else None
-            if provider_id == "claude":
+            if provider_id == "claude" and self._claude_action_wants_connect():
                 self._connect_claude_usage()
                 return
             if provider_id and run_provider_usage_action(self, provider_id):
                 return
+            # The fallthrough used to open a window and change nothing --
+            # the definition of a dead button. At minimum, look again.
+            if provider_id:
+                self._request_provider_usage(force=True, providers=(provider_id,))
             self.openProviderUsageCenter_(sender)
 
         def _connect_claude_usage(self) -> None:
-            """Connect, or say EXACTLY why not.
+            from .provider_usage_feedback import connect_claude_usage
 
-            Every failure used to fall through to 'open the Usage Center'
-            -- which read as "it just opens a page and doesn't actually
-            connect anything." The live failure on this Mac was real and
-            reportable: Claude Code's Keychain entry existed but held an
-            EMPTY accessToken (signed out / cleared by an update)."""
-            message = "Claude usage connected."
-            try:
-                from .claude_quota import credential_from_keychain_payload
-                from .credentials import (
-                    CLAUDE_CODE_KEYCHAIN,
-                    CredentialOutcome,
-                    KeychainConsentLedger,
-                    read_keychain_secret,
-                )
-                from .providers import default_state_dir
-
-                result = read_keychain_secret(
-                    CLAUDE_CODE_KEYCHAIN,
-                    allow_prompt=True,
-                    ledger=KeychainConsentLedger(
-                        default_state_dir() / "keychain-consent.json"
-                    ),
-                )
-                if not result.ok:
-                    message = {
-                        CredentialOutcome.DENIED: (
-                            "Keychain access was declined — click Connect "
-                            "again and choose Allow."
-                        ),
-                        CredentialOutcome.COOLING_DOWN: (
-                            "Keychain access was declined recently — try "
-                            "again in a few minutes."
-                        ),
-                    }.get(
-                        result.outcome,
-                        "Claude Code's sign-in was not found in the Keychain.",
-                    )
-                else:
-                    credential = credential_from_keychain_payload(result.secret)
-                    if credential is None:
-                        message = (
-                            "Claude Code's stored sign-in is empty — run "
-                            "claude in a terminal and sign in, then click "
-                            "Connect Claude usage again."
-                        )
-                    else:
-                        ProviderCredentialStore().set(
-                            "claude",
-                            "oauth-token",
-                            credential.access_token,
-                        )
-                        self._request_provider_usage(force=True)
-            except Exception as exc:
-                message = f"Could not read the Claude Code sign-in: {exc}"
-            try:
-                self.set_settings_message(message)
-                _legacy.log_status_bar(f"claude usage connect: {message}")
-            except Exception:
-                pass
-            self.openProviderUsageCenter_(None)
+            connect_claude_usage(self, log=_legacy.log_status_bar)
 
         def applicationDidFinishLaunching_(self, notification):
             result = _BaseStatusBarController.applicationDidFinishLaunching_(

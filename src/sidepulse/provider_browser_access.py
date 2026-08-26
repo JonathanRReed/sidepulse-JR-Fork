@@ -199,11 +199,75 @@ def handle_provider_usage_action(
             + (_signed_out_hint(title, url) if url is not None else "")
         )
     if label in ("Run grok login", "Reconnect Grok"):
-        # Grok's sign-in belongs to the grok CLI; SidePulse reads the
-        # CLI's own auth file. Saying so beats a silent refresh.
+        # Grok's sign-in belongs to the grok CLI, but "run grok login"
+        # was being said to users whose CLI was ALREADY signed in --
+        # the collector was wedged on a stale stored token instead.
+        # Actually probe the auth file and repair the wedge, then say
+        # what was found.
+        import time as _time
+        from pathlib import Path as _Path
+
+        from .provider_reconnect import repair_grok_credential
+
+        try:
+            result = repair_grok_credential(
+                credential_store,
+                home=_Path.home(),
+                now=_time.time(),
+            )
+            return result.message
+        except Exception:
+            return (
+                "Run `grok login` in a terminal — SidePulse reads the "
+                "CLI's sign-in automatically on the next refresh."
+            )
+    if provider_id == "codex" and (
+        label.startswith("Last read")
+        or "run Codex" in label
+        or label.startswith("Use Codex once")
+        or label == "Reconnect Codex"
+    ):
+        # Codex usage comes from the CLI's own transcripts; the honest
+        # action is "look again and say what the evidence shows" --
+        # including the case where the user DID just run Codex but the
+        # run never completed a turn, so nothing was written.
+        import time as _time
+        from pathlib import Path as _Path
+
+        from .provider_reconnect import codex_activity_report
+
+        try:
+            return codex_activity_report(_Path.home(), _time.time())
+        except Exception:
+            return "Rescanning Codex CLI activity now."
+    if provider_id == "antigravity" and (
+        "Antigravity" in label or "agy" in label
+    ):
+        # Antigravity's quota comes from its own loopback service; the
+        # only "reconnect" is making sure that service is up. This
+        # label used to match nothing -- a dead button (audit).
         return (
-            "Run `grok login` in a terminal — SidePulse reads the CLI's "
-            "sign-in automatically on the next refresh."
+            "Antigravity's usage comes from its local service. Open the "
+            "Antigravity app (or run `agy` in a terminal) so its "
+            "endpoint is running — SidePulse reads it on the next "
+            "refresh."
+        )
+    if provider_id == "openai-api" and (
+        "Admin key" in label or label.lower().startswith("reconnect openai")
+    ):
+        # Clipboard flow, same contract as the Import stage: the key is
+        # read only when clicked. This label also used to match nothing.
+        clipboard = clipboard_reader()
+        if plausible_token(clipboard):
+            try:
+                credential_store.set("openai-api", "admin-key", clipboard.strip())
+            except Exception as exc:
+                return f"Could not store the OpenAI Admin key: {exc}"
+            return "OpenAI Admin key stored — refreshing usage now."
+        return (
+            "Copy an OpenAI ADMIN key (platform.openai.com → Settings → "
+            "Admin keys), then click this again — SidePulse reads it "
+            "from the clipboard only when you click."
         )
     if label.startswith("Choose ") and "organization" in label:
         clipboard = clipboard_reader().strip()
@@ -247,12 +311,22 @@ def run_provider_usage_action(controller, provider_id: str) -> bool:
     )
     if message is None:
         return False
+    # The message MUST land somewhere visible. set_settings_message's
+    # only sink is empty until Settings has been opened once, which is
+    # how "Reconnect Grok" spent months answering into the void.
+    feedback = getattr(controller, "_show_provider_usage_feedback", None)
+    if callable(feedback):
+        try:
+            feedback(message)
+        except Exception:
+            pass
+    else:
+        try:
+            controller.set_settings_message(message)
+        except Exception:
+            pass
     try:
-        controller.set_settings_message(message)
-    except Exception:
-        pass
-    try:
-        controller._request_provider_usage(force=True)
+        controller._request_provider_usage(force=True, providers=(provider_id,))
     except Exception:
         pass
     return True

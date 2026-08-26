@@ -12,7 +12,6 @@ import time
 
 import objc
 from AppKit import (
-    NSApp,
     NSBackingStoreBuffered,
     NSBezierPath,
     NSButton,
@@ -35,6 +34,7 @@ from AppKit import (
 from .colors import default_agent_color
 from .provider_usage_center import project_usage_center, usage_center_text
 from .provider_usage_runtime import ProviderUsageState
+from .provider_usage_sync_cache import cached_merged_sync
 
 _ = usage_center_text  # retained for the why-panel text projection
 
@@ -231,6 +231,9 @@ class ProviderUsageWindowController:
         projection = project_usage_center(
             state,
             now=time.time() if now is None else float(now),
+            # Cached local documents only -- the window never fetches
+            # (cached_merged_sync is TTL-memoized and best-effort).
+            merged_sync=cached_merged_sync(state),
         )
         self._clear()
 
@@ -324,16 +327,10 @@ class ProviderUsageWindowController:
     def show(self, state: ProviderUsageState) -> None:
         self.refresh(state)
         self._start_refresh_pulse()
-        self.window.makeKeyAndOrderFront_(None)
-        try:
-            NSApp.activateIgnoringOtherApps_(True)
-        except Exception:
-            # activateWithOptions: lives on NSRunningApplication, not
-            # NSApplication -- the modern NSApplication API is activate().
-            try:
-                NSApp.activate()
-            except Exception:
-                pass
+        from .window_presentation import activate_app, present_window
+
+        present_window(self.window)
+        activate_app()
 
     def close(self) -> None:
         timer = self._refresh_timer

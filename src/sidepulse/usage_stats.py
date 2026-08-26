@@ -95,16 +95,34 @@ _CACHE_BYTES_PER_ENTRY = 320
 DEDUPE_DIGEST_HEX_CHARS = 32
 USAGE_MARKER = '"usage"'
 CODEX_MARKER = '"token_count"'
-PRICING_TABLE_VERSION = "sidepulse-anthropic-v1"
-PRICING_TABLE_AS_OF = "2026-08-12"
+PRICING_TABLE_VERSION = "sidepulse-rates-v2"
+PRICING_TABLE_AS_OF = "2026-08-26"
 
 
 # (input $/MTok, output $/MTok) by model-id substring, first match wins.
 # Cache reads bill at 0.1x input; cache writes at 1.25x input.
+# Rates checked 2026-08-26 against Anthropic's published pricing
+# (Fable 5: $10/$50, cache read $1/MTok). Before this row, 55% of this
+# machine's tokens were fable-model records dropped from every dollar
+# figure with no disclosure -- the "$23k estimated" was a silent floor.
 MODEL_PRICING: tuple[tuple[str, float, float], ...] = (
+    ("fable", 10.0, 50.0),
     ("opus", 15.0, 75.0),
     ("sonnet", 3.0, 15.0),
     ("haiku", 1.0, 5.0),
+)
+# Codex models, same substring-match convention. Checked 2026-08-26
+# against OpenAI's published pricing (GPT-5.6 Sol after the Aug-22 cut;
+# Luna/Terra; GPT-5.4 family). Order matters: longest prefixes first.
+GPT_MODEL_PRICING: tuple[tuple[str, float, float], ...] = (
+    ("gpt-5.6-luna", 0.20, 1.20),
+    ("gpt-5.6-terra", 2.0, 12.0),
+    ("gpt-5.6-sol", 4.0, 20.0),
+    ("gpt-5.6", 4.0, 20.0),
+    ("gpt-5.4-mini", 0.75, 4.50),
+    ("gpt-5.4-nano", 0.20, 1.25),
+    ("gpt-5.4", 2.50, 15.0),
+    ("gpt-5", 2.50, 15.0),
 )
 CACHE_READ_RATE = 0.1
 CACHE_WRITE_RATE = 1.25
@@ -436,6 +454,14 @@ def _pricing_for_model(model: str) -> tuple[float, float] | None:
     pricing_key = _pricing_key_for_model(model)
     for marker, input_rate, output_rate in MODEL_PRICING:
         if marker == pricing_key:
+            return input_rate, output_rate
+    return None
+
+
+def _gpt_pricing_for_model(model: str) -> tuple[float, float] | None:
+    lowered = str(model or "").lower()
+    for marker, input_rate, output_rate in GPT_MODEL_PRICING:
+        if marker in lowered:
             return input_rate, output_rate
     return None
 
@@ -2287,6 +2313,17 @@ def usage_summary_line(
             parts.append(
                 f"saved ~${totals.estimated_cache_savings_usd:,.0f} with caching (estimated)"
             )
+        # A dollar figure without its coverage is a silent floor: the
+        # Overview line showed "$23k estimated" while 55% of the tokens
+        # were unpriced models (audit, 2026-08-26). Cost mode already
+        # disclosed; the tokens-mode line now does too when partial.
+        pricing_fraction = totals.pricing_coverage.fraction
+        if (
+            totals.estimated_cost_usd >= 0.5
+            and pricing_fraction is not None
+            and pricing_fraction < 0.995
+        ):
+            parts.append(f"{pricing_fraction:.0%} of tokens priced")
     return str(period_label) + ": " + " · ".join(parts)
 
 
@@ -2352,6 +2389,20 @@ def daily_buckets(records, days: int = 7, *, now: datetime | None = None):
         provider_bucket["sessions"].add(session)
         if provider == "codex":
             bucket["codex_tokens"] += inp + cached_in + out
+            # Codex cost was skipped by code choice while the records
+            # carried model + token splits the whole time (owner
+            # decision 2026-08-26: price it). No cache-write premium --
+            # OpenAI bills cache writes at the plain input rate.
+            gpt_pricing = _gpt_pricing_for_model(model)
+            if gpt_pricing is None:
+                continue
+            input_rate, output_rate = gpt_pricing
+            provider_bucket["cost"] += (
+                inp * input_rate
+                + cached_in * input_rate * CACHE_READ_RATE
+                + cache_create * input_rate
+                + out * output_rate
+            ) / 1_000_000.0
         else:
             pricing = _pricing_for_model(model)
             if pricing is None:
@@ -2380,6 +2431,7 @@ def usage_graph_model(
     metric: str,
     provider_ids: tuple[str, ...],
     now: datetime | None = None,
+    extra_sessions: dict[str, dict[str, int]] | None = None,
 ) -> dict:
     """Build one shared-axis, range-consistent graph projection.
 
@@ -2397,6 +2449,20 @@ def usage_graph_model(
     ):
         raise ValueError("usage providers must be a nonempty unique tuple")
     buckets = daily_buckets(records, days=days, now=now)
+    if metric == "sessions" and extra_sessions:
+        # Ledger-derived sessions for providers with no local
+        # transcripts (grok, devin, any hook-emitting provider) --
+        # "why does the graph only have Claude and Codex?" answered
+        # for the one metric every provider can honestly report.
+        for provider_id, day_counts in extra_sessions.items():
+            for day, count in day_counts.items():
+                bucket = buckets.get(day)
+                if bucket is None:
+                    continue
+                entry = bucket["providers"].setdefault(provider_id, {})
+                entry["sessions"] = max(
+                    int(entry.get("sessions", 0) or 0), int(count)
+                )
     label_stride = max(1, days // 6)
     labels = tuple(
         day[5:].replace("-", "/") if index % label_stride == 0 else ""

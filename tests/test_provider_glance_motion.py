@@ -152,4 +152,51 @@ def test_multi_agent_segments_support_the_new_rhythms() -> None:
 
     _, scanner = segments("scanner")
     _, chase = segments("chase")
-    assert scanner == chase  # positional sweep degrades in a shared layout
+    # 2026-08-26 (owner decision): positional sweeps still ride the
+    # travelling-wave conversion in shared layouts, but the CLASSES stay
+    # distinguishable -- scanner travels as a narrow flare, chase as the
+    # full swell. They used to be byte-identical.
+    assert scanner != chase
+    assert "pulse" in scanner and "pulse" in chase
+    _, stack = segments("stack")
+    assert "none" in stack  # stack piles on hard, no easing
+
+
+def test_new_motions_pass_firmware_grammar_and_byte_budget() -> None:
+    """EVERY motion must stay CONTINUOUS and firmware-valid on both
+    compiled LED counts. Scanner and tide shipped silently STATIC on
+    the 2-LED Dot -- their loops landed under the safety envelope's 1s
+    minimum and fell closed with no test at that count to notice
+    (audit, 2026-08-26)."""
+    from sidepulse.animation import MAX_LED_BYTES, MAX_LED_LINES
+    from sidepulse.colors import PROVIDER_ANIMATION_CHOICES
+    from sidepulse.firmware_validation import validate_firmware_program
+
+    base = ColorSettings.defaults()
+    moving = tuple(
+        style
+        for style in PROVIDER_ANIMATION_CHOICES
+        if style not in ("auto", "steady")
+    )
+    for style in moving:
+        for led_count in (2, 8):
+            program = compose_presentation_program(
+                _active_glance(),
+                presentation_time=100.0,
+                led_count=led_count,
+                color="#10A37F",
+                preferences=PREFS,
+                provider="codex",
+                color_settings=base.with_agent_animation("codex", style),
+            )
+            assert program.motion is MotionClass.CONTINUOUS, (style, led_count)
+            assert len(program.dsl.encode("utf-8")) <= MAX_LED_BYTES, (
+                style,
+                led_count,
+                len(program.dsl.encode("utf-8")),
+            )
+            assert program.dsl.count("\n") + 1 <= MAX_LED_LINES
+            result = validate_firmware_program(
+                program.dsl, led_count=led_count
+            )
+            assert result.accepted, (style, led_count, result.reason)

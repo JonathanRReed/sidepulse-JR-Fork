@@ -93,7 +93,7 @@ Pricing is an explicitly versioned local estimate. Unknown models remain visible
 
 ## Cross-Mac sync
 
-SidePulse sync is local-first and peer-to-peer over SSH/SFTP, normally addressed through Tailscale. Envelopes are encrypted with ChaCha20-Poly1305 and signed with Ed25519. Account-wide quota snapshots use the freshest valid observation and are never summed. Machine-local token events are unioned by stable event identity.
+SidePulse sync is local-first and peer-to-peer over SSH/SFTP, normally addressed through Tailscale. Envelopes are JSON signed with HMAC-SHA256 using the per-peer pairing secret — they are authenticated, not encrypted; confidentiality in transit comes from the SSH/SFTP channel. Packets stamped older than a bounded freshness window (7 days) are rejected on decode to blunt replays. Account-wide quota snapshots use the freshest valid observation and are never summed. Machine-local token events are deduplicated by device and provider, latest observation wins.
 
 On the first Mac:
 

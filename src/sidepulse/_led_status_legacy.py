@@ -1327,7 +1327,18 @@ class AgentLedController:
             return False
         self.last_uptime_check_monotonic = now
         try:
-            status_path = Path(self.device_path) / "STATUS.TXT"
+            root = Path(self.device_path)
+            # Production controllers carry the LEDS.LED FILE path, not
+            # the volume root -- appending STATUS.TXT to that yields
+            # <volume>/LEDS.LED/STATUS.TXT, NotADirectoryError, and a
+            # silent False: reboot detection had never fired in the
+            # shipped app (audit, 2026-08-26). Mirror the keepalive
+            # helper's file-vs-directory handling.
+            from .device_writer import KNOWN_LED_FILE_NAMES
+
+            if root.name.upper() in KNOWN_LED_FILE_NAMES:
+                root = root.parent
+            status_path = root / "STATUS.TXT"
             text = status_path.read_text(errors="replace")[:4096]
         except OSError:
             return False

@@ -17,7 +17,6 @@ from sidepulse.capacity_types import ForecastReleaseState, QuotaHorizon
 from sidepulse.settings import (
     CLAUDE_PLAN_LIMITS_CONSENT_VERSION,
     CURRENT_SETTINGS_SCHEMA_VERSION,
-    LED_DISPLAY_AGENT,
     LED_DISPLAY_QUOTA_RUNWAY,
     AgentMonitorSettings,
     DeviceDisplaySetting,
@@ -296,9 +295,11 @@ def test_settings_migration_disables_legacy_quota_authority_and_runway(
     api.anthropic.com on the 5-minute worker, from a value they were never
     asked for. It needs fresh consent, stamped by this build.
 
-    The rest still cannot load -- nothing consumes an authorised threshold
-    crossing, so alerts, thresholds, the runway LED and the quota webhooks
-    are still stripped on the way in and on the way out.
+    quota_alert_thresholds and the quota webhooks still cannot load --
+    nothing consumes an authorised threshold crossing. The runway LED
+    left this set on 2026-08-26: the JR usage plane's gated lanes feed
+    quota_runway_state now, so the choice persists and round-trips
+    (rendering still fails closed to Agent when no lane has a percent).
     """
     target = tmp_path / "settings.json"
     target.write_text(
@@ -329,10 +330,16 @@ def test_settings_migration_disables_legacy_quota_authority_and_runway(
 
     assert restored.claude_plan_limits_enabled is False
     assert restored.claude_plan_limits_consent_version == 0
-    assert restored.quota_alerts_enabled is False
+    # quota_alerts_enabled is a REAL, consumed, UI-toggleable flag as of
+    # 2026-08-26 (the quota blink claim, pace notifications). A stored
+    # true now loads as true -- the old strip-on-load guarded a promise
+    # the app could not keep, and it can keep it now.
+    assert restored.quota_alerts_enabled is True
     assert restored.quota_alert_thresholds == (90.0, 95.0)
-    assert restored.led_display == LED_DISPLAY_AGENT
-    assert restored.devices[0].led_display == LED_DISPLAY_AGENT
+    # 2026-08-26: the runway choice survives the load -- the JR usage
+    # plane now feeds quota_runway_state, so the downgrade is retired.
+    assert restored.led_display == LED_DISPLAY_QUOTA_RUNWAY
+    assert restored.devices[0].led_display == LED_DISPLAY_QUOTA_RUNWAY
     assert restored.webhook_events == ("completion",)
 
     save_settings(restored, target)
@@ -344,11 +351,11 @@ def test_settings_migration_disables_legacy_quota_authority_and_runway(
     # downgrade loses nothing; what matters is that a reload can never
     # turn them back into active authority.
     reloaded = load_settings(target)
-    assert reloaded.quota_alerts_enabled is False
+    assert reloaded.quota_alerts_enabled is True
     assert reloaded.quota_alert_thresholds == (90.0, 95.0)
-    assert reloaded.led_display == LED_DISPLAY_AGENT
-    assert migrated["led_display"] == LED_DISPLAY_AGENT
-    assert migrated["devices"][0]["led_display"] == LED_DISPLAY_AGENT
+    assert reloaded.led_display == LED_DISPLAY_QUOTA_RUNWAY
+    assert migrated["led_display"] == LED_DISPLAY_QUOTA_RUNWAY
+    assert migrated["devices"][0]["led_display"] == LED_DISPLAY_QUOTA_RUNWAY
     assert migrated["webhook_events"] == ["completion"]
 
 
@@ -361,9 +368,11 @@ def test_settings_migration_programmatic_legacy_quota_controls_fail_closed(
     grants a READ, not an effect. It is still not reachable from a forged
     dataclass, because the value alone is not consent -- only a stamp this
     build wrote is, and `replace()` cannot forge one it does not set.
-    Everything below still grants an EFFECT -- a blink, an LED program, an
-    outbound webhook -- and none of those has an authority-fed producer, so
-    they stay unreachable from both the mutators and a hand-forged dataclass.
+    Thresholds and quota webhooks still grant an EFFECT with no
+    authority-fed producer, so they stay unreachable from both the
+    mutators and a hand-forged dataclass. The runway display gained its
+    producer on 2026-08-26 (the JR usage plane's gated lanes), so its
+    mutators and persistence are honest preferences now.
     """
     settings = (
         AgentMonitorSettings()
@@ -379,10 +388,15 @@ def test_settings_migration_programmatic_legacy_quota_controls_fail_closed(
     )
 
     assert settings.claude_plan_limits_enabled is True
-    assert settings.quota_alerts_enabled is False
+    # The alerts mutator honours its argument now (consumers exist);
+    # thresholds and quota webhooks below still fail closed -- nothing
+    # feeds them authority yet. The runway mutators honour their
+    # argument since 2026-08-26: the JR usage plane's gated lanes are
+    # the runway LED's producer.
+    assert settings.quota_alerts_enabled is True
     assert settings.quota_alert_thresholds == (90.0, 95.0)
-    assert settings.led_display == LED_DISPLAY_AGENT
-    assert settings.devices[0].led_display == LED_DISPLAY_AGENT
+    assert settings.led_display == LED_DISPLAY_QUOTA_RUNWAY
+    assert settings.devices[0].led_display == LED_DISPLAY_QUOTA_RUNWAY
     with pytest.raises(ValueError):
         settings.with_webhook_event("quota_threshold", True)
 
@@ -409,11 +423,32 @@ def test_settings_migration_programmatic_legacy_quota_controls_fail_closed(
 
     payload = json.loads(target.read_text())
     assert payload["claude_plan_limits_enabled"] is True
-    assert "quota_alerts_enabled" not in payload
+    # The alerts flag is persisted now (real feature); thresholds stay
+    # stripped -- still no authority-fed producer for custom values.
+    assert payload["quota_alerts_enabled"] is True
     assert "quota_alert_thresholds" not in payload
-    assert payload["led_display"] == LED_DISPLAY_AGENT
-    assert payload["devices"][0]["led_display"] == LED_DISPLAY_AGENT
+    assert payload["led_display"] == LED_DISPLAY_QUOTA_RUNWAY
+    assert payload["devices"][0]["led_display"] == LED_DISPLAY_QUOTA_RUNWAY
     assert payload["webhook_events"] == ["completion"]
+
+
+def test_quota_runway_display_choice_round_trips(tmp_path: Path) -> None:
+    """The runway choice persists and loads (producer landed 2026-08-26)."""
+    target = tmp_path / "settings.json"
+    settings = (
+        AgentMonitorSettings()
+        .with_led_display(LED_DISPLAY_QUOTA_RUNWAY)
+        .with_device_display(
+            "SidePulsePro",
+            LED_DISPLAY_QUOTA_RUNWAY,
+            path="/private/tmp/SidePulsePro",
+        )
+    )
+    save_settings(settings, target)
+    loaded = load_settings(target)
+    assert loaded.led_display == LED_DISPLAY_QUOTA_RUNWAY
+    assert loaded.devices[0].led_display == LED_DISPLAY_QUOTA_RUNWAY
+    assert loaded.display_for_device("SidePulsePro") == LED_DISPLAY_QUOTA_RUNWAY
 
 
 def test_a_forged_claude_opt_in_carries_no_consent_across_a_reload(

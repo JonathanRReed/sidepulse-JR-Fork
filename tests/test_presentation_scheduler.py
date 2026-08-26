@@ -307,7 +307,11 @@ def test_inputs_plan_and_consumed_state_are_frozen_and_validate_scalar_boundarie
         plan.reconcile_immediately = True  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         state.consumed_deadline = 1.0  # type: ignore[misc]
-    with pytest.raises(TypeError):
+    # Older CPython surfaced this as TypeError (slots refusing an unknown
+    # name); current CPython routes every assignment on a frozen dataclass
+    # through __setattr__ first, so FrozenInstanceError arrives instead.
+    # Either way the write is refused, which is what this pins.
+    with pytest.raises((TypeError, FrozenInstanceError)):
         inputs.canonical_state = object()  # type: ignore[attr-defined]
 
     for field in (

@@ -238,8 +238,8 @@ def collect_cursor(
                 else "Enable Cursor browser access"
             ),
         )
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
+    def _fetch(bearer: str):
+        headers = {"Authorization": f"Bearer {bearer}"}
         account = http_json(
             "GET",
             "https://cursor.com/api/auth/me",
@@ -252,8 +252,38 @@ def collect_cursor(
             headers=headers,
             timeout=HTTP_TIMEOUT_SECONDS,
         )
+        return account, usage
+
+    try:
+        account, usage = _fetch(token)
     except ProviderHttpError as error:
-        return _http_failure("cursor", observed_at, error)
+        # The Cursor app's own database token wins by default, but a
+        # STALE one made the imported credential unreachable: Reconnect
+        # cleared the store, the user pasted a fresh key, and the
+        # collector went right back to the stale database token -- 401
+        # forever (audit, 2026-08-26). On an auth rejection, try the
+        # imported credential before reporting failure.
+        stored = (
+            _credential(credentials, "cursor", "token")
+            if credentials is not None
+            else None
+        )
+        fallback = (
+            stored.secret
+            if stored is not None and stored.available and stored.secret
+            else None
+        )
+        if (
+            error.status in (401, 403)
+            and fallback is not None
+            and fallback != token
+        ):
+            try:
+                account, usage = _fetch(fallback)
+            except ProviderHttpError as retry_error:
+                return _http_failure("cursor", observed_at, retry_error)
+        else:
+            return _http_failure("cursor", observed_at, error)
     if not isinstance(usage, dict):
         return _failure(
             "cursor",
