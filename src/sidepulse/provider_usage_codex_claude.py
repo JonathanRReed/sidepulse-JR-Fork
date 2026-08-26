@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -106,6 +107,9 @@ def _default_provider_local_scan(
         ),
     }
     if provider_id == "codex":
+        document["windows_observed_at"] = getattr(
+            totals, "codex_rate_limit_observed_at", None
+        )
         document["windows"] = [
             dict(window)
             for window in tuple(getattr(totals, "codex_rate_limit_evidence", ()))[:64]
@@ -136,6 +140,39 @@ def _default_claude_quota_fetch(access_token: str) -> list[dict]:
     return fetch_windows(access_token=access_token)
 
 
+#: Codex quota is only ever as fresh as the newest rollout the CLI wrote.
+#: Past this, a reading is reported as STALE rather than as the current
+#: number: usage burned on another machine, in the web app, or through a
+#: surface that writes no rollout is invisible here, and silence is not
+#: evidence that nothing changed. Reported live as "why does it say 48
+#: percent, it should be around 96" -- the 48 was three days old.
+CODEX_READING_STALE_SECONDS = 6 * 3600.0
+
+
+def _codex_reading_freshness(
+    snapshot: ProviderUsageSnapshot,
+    evidence_observed_at: object,
+    *,
+    observed_at: float,
+) -> ProviderUsageSnapshot:
+    """Mark a Codex snapshot stale when its evidence has stopped moving."""
+    if not isinstance(evidence_observed_at, (int, float)) or isinstance(
+        evidence_observed_at, bool
+    ):
+        return snapshot
+    age = float(observed_at) - float(evidence_observed_at)
+    if age <= CODEX_READING_STALE_SECONDS or not snapshot.lanes:
+        return snapshot
+    hours = age / 3600.0
+    since = f"{hours / 24.0:.0f}d" if hours >= 48.0 else f"{hours:.0f}h"
+    return dataclasses.replace(
+        snapshot,
+        state=ProviderSourceState.STALE,
+        reason_code="local_reading_stale",
+        action_label=f"Last read {since} ago — run Codex to refresh",
+    )
+
+
 def collect_codex(
     preference: ProviderPreference,
     *,
@@ -156,8 +193,9 @@ def collect_codex(
     windows = facts.get("windows")
     if not isinstance(windows, (list, tuple)):
         windows = ()
+    observed_evidence_at = facts.get("windows_observed_at")
     try:
-        return parse_codex_usage(
+        snapshot = parse_codex_usage(
             windows=windows,
             observed_at=observed_at,
             input_tokens=max(0, int(facts.get("input_tokens", 0))),
@@ -171,6 +209,9 @@ def collect_codex(
                 if facts.get("account_label") is not None
                 else None
             ),
+        )
+        return _codex_reading_freshness(
+            snapshot, observed_evidence_at, observed_at=observed_at
         )
     except (TypeError, ValueError):
         return _failure(

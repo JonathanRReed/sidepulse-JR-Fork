@@ -23,6 +23,7 @@ from .mailbox_preferences import (
     MailboxPreferenceProjection,
 )
 from .operator_state import (
+    ACTIVE_SILENCE_SECONDS,
     CanonicalOperatorState,
     CanonicalRequestTruth,
     CanonicalWorkTruth,
@@ -41,7 +42,14 @@ MAX_AGENT_QUERY_SCALARS: Final = 200
 # dead session the provider never closed (crashed turn, killed terminal)
 # -- presenting it as live ("Grok · active" with no grok anywhere) is a
 # lie. It demotes to the Recent shelf with a "stale" label instead.
-ACTIVE_AGE_STALE_SECONDS: Final = 3_600.0
+#
+# Pinned to the SAME silence the LED projection uses. At 3600s this list
+# went on calling a dead session "active" for a full hour after the
+# lights had already stopped showing it: a codex turn died mid-tool
+# (pre_tool_use with no post_tool_use), and the strip was honest while
+# the list still said running. Two surfaces disagreeing about the same
+# work is the defect, so there is one threshold now, not two.
+ACTIVE_AGE_STALE_SECONDS: Final = ACTIVE_SILENCE_SECONDS
 MAX_AGENT_BROWSER_DOCUMENTS: Final = 100
 MAX_AGENT_BROWSER_RESULTS: Final = 100
 MAX_AGENT_BROWSER_CATALOG: Final = 1_000

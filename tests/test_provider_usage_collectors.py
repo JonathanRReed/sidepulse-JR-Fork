@@ -345,3 +345,53 @@ def test_devin_falls_back_to_the_stored_token_when_no_browser_session_exists(mon
     )
     assert result.state.value == "ready"
     assert http.calls[0][2]["Authorization"] == "Bearer pasted-key"
+
+
+def test_codex_reading_that_stopped_moving_is_reported_stale():
+    """Reported live as "why does it say 48 percent, it should be around
+    96": the 48 was computed from a rollout written three days earlier.
+    Codex quota is only as fresh as the newest rollout, and usage burned
+    elsewhere is invisible here, so a frozen reading must say so."""
+    from sidepulse.provider_usage_codex_claude import (
+        CODEX_READING_STALE_SECONDS,
+        collect_codex,
+    )
+
+    now = 1_000_000.0
+
+    def scan(_home, _observed_at):
+        return {
+            "windows": [
+                {"label": "primary", "window_minutes": 10080, "used_percent": 52.0}
+            ],
+            "windows_observed_at": now - CODEX_READING_STALE_SECONDS - 60.0,
+        }
+
+    result = collect_codex(
+        preference("codex"), home=Path("/tmp"), observed_at=now, local_scanner=scan
+    )
+    assert result.state.value == "stale"
+    assert result.reason_code == "local_reading_stale"
+    # The number is still shown -- it is the newest thing known, just old.
+    assert result.lanes[0].remaining_percent == 48.0
+    assert "ago" in result.action_label
+
+
+def test_a_fresh_codex_reading_is_not_flagged():
+    from sidepulse.provider_usage_codex_claude import collect_codex
+
+    now = 1_000_000.0
+
+    def scan(_home, _observed_at):
+        return {
+            "windows": [
+                {"label": "primary", "window_minutes": 10080, "used_percent": 52.0}
+            ],
+            "windows_observed_at": now - 60.0,
+        }
+
+    result = collect_codex(
+        preference("codex"), home=Path("/tmp"), observed_at=now, local_scanner=scan
+    )
+    assert result.state.value == "ready"
+    assert result.action_label is None

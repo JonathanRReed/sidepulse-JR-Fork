@@ -149,6 +149,9 @@ class UsageTotals:
         default_factory=lambda: PricingCoverageMetrics(0, 0, 0, 0)
     )
     codex_rate_limit_evidence: tuple[dict, ...] = ()
+    #: When that evidence was written (epoch seconds). Without it a
+    #: reading frozen days ago renders identically to a live one.
+    codex_rate_limit_observed_at: float | None = None
 
     @property
     def local_activity_coverage(self) -> dict[str, UsageSourceCoverage]:
@@ -1984,7 +1987,9 @@ def _scan_inventory_usage(
         total_token_count=total_pricing_token_count,
     )
     if rate_candidates:
-        totals.codex_rate_limit_evidence = max(rate_candidates, key=lambda item: item[0])[1]
+        newest = max(rate_candidates, key=lambda item: item[0])
+        totals.codex_rate_limit_evidence = newest[1]
+        totals.codex_rate_limit_observed_at = newest[0] / 1_000_000_000.0
     codex_source = next(
         (source for source in inventory.sources if source.provider_id == "codex"),
         None,
