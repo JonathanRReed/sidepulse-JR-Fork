@@ -244,6 +244,13 @@ class ProviderUsageService:
             if candidate.state is ProviderSourceState.READY:
                 self._last_known_good[provider_id] = candidate
                 snapshots.append(candidate)
+            elif candidate.state is ProviderSourceState.STALE and candidate.lanes:
+                # A stale-but-real reading is NEWER information than the
+                # last known good one, and it is the same numbers wearing
+                # an honest label. Substituting last_known_good here is
+                # what let a Codex quota frozen three days ago keep
+                # rendering as a live "ready" reading.
+                snapshots.append(candidate)
             elif previous_good is not None:
                 snapshots.append(
                     select_authoritative_snapshot(

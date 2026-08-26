@@ -210,3 +210,35 @@ def test_service_restores_and_persists_last_known_good(tmp_path):
     assert refreshed.by_provider("codex").state is ProviderSourceState.STALE
     assert refreshed.by_provider("codex").lanes[0].remaining_percent == 17
     assert saved == [refreshed]
+
+
+def test_a_stale_but_real_reading_is_not_replaced_by_the_last_known_good(tmp_path):
+    """Reported as "why does it say codex ... 48 percent, it should be
+    around 96". The collector correctly marked a three-day-old Codex
+    quota STALE, and this substitution handed the OLDER ready snapshot
+    back instead -- so a frozen number kept rendering as live. A stale
+    reading carrying real lanes is newer information than last_known_good
+    and must win; only a reading with nothing in it falls back."""
+    settings = default_provider_usage_settings().with_enabled("grok", False)
+    current = {"state": ProviderSourceState.READY}
+
+    def collector(_pref, _home, observed, _credentials):
+        return snapshot("codex", state=current["state"], remaining=48, observed=observed)
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={"codex": collector},
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: 1000,
+    )
+
+    first = service.refresh_now()
+    codex = next(s for s in first.snapshots if s.provider_id == "codex")
+    assert codex.state is ProviderSourceState.READY
+
+    current["state"] = ProviderSourceState.STALE
+    second = service.refresh_now()
+    codex = next(s for s in second.snapshots if s.provider_id == "codex")
+    assert codex.state is ProviderSourceState.STALE, "last_known_good masked a stale reading"
+    assert codex.lanes[0].remaining_percent == 48
