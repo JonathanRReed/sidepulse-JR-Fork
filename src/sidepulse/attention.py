@@ -16,6 +16,7 @@ from .operator_state import (
     TransitionKind,
     active_work_went_silent,
     completed_work_no_longer_recent,
+    projection_now_epoch,
 )
 from .provider_facts import NextActor, RequestKey, WorkKey, WorkLifecycle
 from .settings import AgentMonitorSettings
@@ -258,6 +259,7 @@ def project_attention_from_operator_state(
     ):
         raise ValueError("invalid canonical operator events")
     request_by_key = {request.key: request for request in state.requests}
+    now_epoch = projection_now_epoch(state)
     rows: list[ProjectedAgentRow] = []
     for work in state.works:
         requests = tuple(
@@ -299,7 +301,7 @@ def project_attention_from_operator_state(
         # watched the session finish. Silent-past-the-line demotes to
         # the idle whisper; the next real event resurrects it.
         if lifecycle is LifecycleMode.ACTIVE and active_work_went_silent(
-            work, state.last_clock.wall_epoch if state.last_clock else None
+            work, now_epoch
         ):
             lifecycle = LifecycleMode.IDLE
         # COMPLETED is a moment: after the recent window the row settles
@@ -307,9 +309,7 @@ def project_attention_from_operator_state(
         # the COMPLETED aggregate) until the presence horizon drops it.
         if (
             lifecycle is LifecycleMode.COMPLETED_RECENTLY
-            and completed_work_no_longer_recent(
-                work, state.last_clock.wall_epoch if state.last_clock else None
-            )
+            and completed_work_no_longer_recent(work, now_epoch)
         ):
             lifecycle = LifecycleMode.IDLE
         source_status = AgentStatus(

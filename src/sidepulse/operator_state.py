@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import total_ordering
@@ -73,6 +74,42 @@ def active_silence_seconds_for(provider_id: str | None) -> float:
     return PROVIDER_ACTIVE_SILENCE_SECONDS.get(
         provider_id or "", ACTIVE_SILENCE_SECONDS
     )
+
+
+def projection_now_epoch(state) -> float | None:
+    """Wall-clock now, floored at the newest thing actually observed.
+
+    Every age window in this app (silence, completed-recently, and the
+    accessibility summaries) used ``state.last_clock.wall_epoch`` -- the
+    moment of the LAST OBSERVED EVENT -- as "now". While an agent is
+    chattering that reads like the real clock, but the instant
+    everything goes quiet it FREEZES: the silence window is measured
+    against a clock that stops advancing exactly when silence begins, so
+    active_work_went_silent and completed_work_no_longer_recent can
+    never come true. Reported live as "you ended, yet it still says
+    agents are active and it's showing the claude colors going across"
+    -- a finished turn held its completion sweep forever, because the
+    only clock that could have retired it was that finished turn's own
+    last event.
+
+    This is provider-independent on purpose: the freeze had nothing to
+    do with which agent went quiet, and every provider inherits the fix.
+    Per-provider tuning stays where it belongs, in
+    active_silence_seconds_for.
+
+    The observed floor is kept so a machine whose wall clock sits behind
+    the evidence (a restore after sleep, a clock stepped backwards) can
+    never make work look YOUNGER than the events proving it happened.
+    """
+    observed = state.last_clock.wall_epoch if state.last_clock else None
+    if observed is None:
+        # Never observed a clock at all: no basis to age anything, and
+        # the callers already read None as "leave it alone". The freeze
+        # this fixes is a clock that EXISTS and stops advancing, not a
+        # missing one.
+        return None
+    now = time.time()
+    return observed if observed > now else now
 
 
 def active_work_went_silent(work, now_epoch: float | None) -> bool:

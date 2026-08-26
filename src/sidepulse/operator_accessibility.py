@@ -29,6 +29,7 @@ from .operator_state import (
     SemanticEventKey,
     TransitionKind,
     active_work_went_silent,
+    projection_now_epoch,
     semantic_event_key_to_payload,
 )
 from .presentation_policy import (
@@ -284,7 +285,7 @@ def status_item_accessibility(
     if stale_holds:
         details.append(f"Stale request held: {stale_holds}")
 
-    now_epoch = state.last_clock.wall_epoch if state.last_clock else None
+    now_epoch = projection_now_epoch(state)
     active = sum(
         work.lifecycle is WorkLifecycle.ACTIVE
         and not active_work_went_silent(work, now_epoch)
@@ -363,7 +364,7 @@ def status_item_title(
     failed = sum(work.lifecycle is WorkLifecycle.FAILED for work in primary_works)
     if failed:
         return "1 failed" if failed == 1 else f"{failed} failed"
-    now_epoch = state.last_clock.wall_epoch if state.last_clock else None
+    now_epoch = projection_now_epoch(state)
     active = sum(
         work.lifecycle is WorkLifecycle.ACTIVE
         and not active_work_went_silent(work, now_epoch)

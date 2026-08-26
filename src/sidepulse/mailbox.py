@@ -17,6 +17,7 @@ from .operator_state import (
     CanonicalOperatorState,
     CanonicalRequestTruth,
     RequestPhase,
+    projection_now_epoch,
 )
 from .provider_facts import (
     NextActor,
@@ -366,7 +367,7 @@ def project_canonical_mailbox(
             timing_uncertain=any(member.timing_uncertain for member in family),
         )
         section = _canonical_section_for(
-            row, now_epoch=state.last_clock.wall_epoch if state.last_clock else None
+            row, now_epoch=projection_now_epoch(state)
         )
         candidate_sections[work.key] = section
         candidate_epochs[work.key] = updated_at_epoch
