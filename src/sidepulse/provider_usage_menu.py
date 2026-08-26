@@ -99,6 +99,19 @@ def _state_label(snapshot: ProviderUsageSnapshot) -> str:
     }[snapshot.state]
 
 
+def _staleness_marker(snapshot: ProviderUsageSnapshot) -> str:
+    """Why this number is not current, in one word.
+
+    A blanket "stale" is true but useless when the cause is a sign-in
+    that stopped working: the owner can act on "reconnect" and cannot
+    act on "stale". Both mean the figure beside it is a LAST-KNOWN
+    reading, not a live one.
+    """
+    if snapshot.reason_code == "authentication_required":
+        return "reconnect"
+    return "stale"
+
+
 def _row(
     snapshot: ProviderUsageSnapshot,
     *,
@@ -120,7 +133,16 @@ def _row(
         title = f"{provider_label} · {remaining}"
         detail = f"{lane.label} {remaining} · {format_reset_countdown(lane.reset_at, now=now)}"
         if snapshot.state is ProviderSourceState.STALE:
-            detail += " · stale"
+            # The TITLE is the line that gets read -- this row is the whole
+            # glance for most people, and "Codex · 48% left" is a claim
+            # about right now. Marking only the detail hid staleness one
+            # level down: reported as "am i on the latest version its out
+            # of date for codex" against a reading three days old that
+            # looked perfectly current here. Applies to every provider,
+            # since any of them can go stale.
+            marker = _staleness_marker(snapshot)
+            title += f" · {marker}"
+            detail += f" · {marker}"
     token_total = (
         snapshot.input_tokens
         + snapshot.cached_input_tokens

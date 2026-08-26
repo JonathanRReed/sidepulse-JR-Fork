@@ -373,3 +373,44 @@ def test_one_heavy_evening_cannot_condemn_a_fresh_weekly_window():
         now=now,
     )
     assert seasoned is not None and seasoned.verdict == "critical"
+
+
+def _titles(*snapshots):
+
+    state = ProviderUsageState(
+        snapshots=tuple(snapshots),
+        refreshed_at=1000,
+        next_refresh_at=None,
+        refreshing=False,
+    )
+    return [row.title for row in project_usage_menu(state, now=1000).rows]
+
+
+def test_a_stale_reading_says_so_on_the_row_itself():
+    """The title IS the glance -- "Codex · 48% left" is a claim about
+    right now. Marking only the submenu detail hid staleness one level
+    down: reported as "am i on the latest version its out of date for
+    codex" against a figure three days old that looked current here."""
+    stale = snapshot(
+        "codex", "Weekly", 48, state=ProviderSourceState.STALE, action="Run Codex"
+    )
+    assert _titles(stale) == ["Codex · 48% left · stale"]
+
+
+def test_a_broken_sign_in_says_reconnect_not_stale():
+    """Both mean "last-known, not live", but the owner can act on
+    reconnect and cannot act on stale."""
+    import dataclasses
+
+    expired = dataclasses.replace(
+        snapshot(
+            "claude", "Weekly", 71, state=ProviderSourceState.STALE, action="Reconnect"
+        ),
+        reason_code="authentication_required",
+    )
+    assert _titles(expired) == ["Claude · 71% left · reconnect"]
+
+
+def test_a_live_reading_carries_no_marker():
+    fresh = snapshot("devin", "Weekly", 100)
+    assert _titles(fresh) == ["Devin · 100% left"]
