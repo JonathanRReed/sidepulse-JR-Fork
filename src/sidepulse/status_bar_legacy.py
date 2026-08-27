@@ -69,6 +69,7 @@ try:
     from Foundation import (
         NSURL,
         NSAttributedString,
+        NSDefaultRunLoopMode,
         NSIndexSet,
         NSMutableAttributedString,
         NSObject,
@@ -3244,7 +3245,7 @@ class StatusBarController(NSObject):
             (refresh_key, generation),
             False,
         )
-        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, NSRunLoopCommonModes)
+        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, NSDefaultRunLoopMode)
         self._capacity_refresh_deadline_timers[refresh_key] = timer
         provider_id = refresh_key.source.provider_id
         states = getattr(self, "_usage_provider_states", {})
@@ -3271,7 +3272,7 @@ class StatusBarController(NSObject):
             refresh_key,
             False,
         )
-        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, NSRunLoopCommonModes)
+        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, NSDefaultRunLoopMode)
         timers[refresh_key] = timer
 
     @objc.IBAction
@@ -3589,7 +3590,9 @@ class StatusBarController(NSObject):
             None,
             False,
         )
-        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, NSRunLoopCommonModes)
+        # Default mode: capacity bookkeeping has no claim on a scroll
+        # gesture; a deferred deadline settles the moment tracking ends.
+        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, NSDefaultRunLoopMode)
         return timer
 
     def schedule_capacity_timers(self, *, epoch_now: float | None = None) -> None:
@@ -14421,7 +14424,10 @@ class StatusBarController(NSObject):
                                 fire_at=self._device_inventory_fire_at,
                                 interval=STATUS_BAR_DEVICE_POLL_SECONDS,
                                 tolerance=STATUS_BAR_DEVICE_POLL_SECONDS * 0.1,
-                                common_modes=True,
+                                # Default mode: statting volumes mid-scroll
+                                # was menu jank; deferring a poll until the
+                                # scroll ends is invisible.
+                                common_modes=False,
                             ),
                         )
                     if current_display_environment_active:
@@ -14445,7 +14451,9 @@ class StatusBarController(NSObject):
                                 fire_at=self._calendar_observation_fire_at,
                                 interval=CALENDAR_WATCH_SECONDS,
                                 tolerance=CALENDAR_WATCH_SECONDS * 0.1,
-                                common_modes=True,
+                                # Default mode: an EventKit fetch has no
+                                # business running inside a scroll gesture.
+                                common_modes=False,
                             ),
                         )
                     if current_reminders_observation_active:
@@ -14457,7 +14465,7 @@ class StatusBarController(NSObject):
                                 fire_at=self._reminders_observation_fire_at,
                                 interval=REMINDERS_WATCH_SECONDS,
                                 tolerance=REMINDERS_WATCH_SECONDS * 0.1,
-                                common_modes=True,
+                                common_modes=False,
                             ),
                         )
                     if current_weather_observation_active:
@@ -14469,7 +14477,7 @@ class StatusBarController(NSObject):
                                 fire_at=self._weather_observation_fire_at,
                                 interval=WEATHER_WATCH_SECONDS,
                                 tolerance=WEATHER_WATCH_SECONDS * 0.1,
-                                common_modes=True,
+                                common_modes=False,
                             ),
                         )
                     for feature, interval in (
@@ -14493,7 +14501,11 @@ class StatusBarController(NSObject):
                                 fire_at=fire_at,
                                 interval=interval,
                                 tolerance=interval * 0.1,
-                                common_modes=True,
+                                # Default mode, like a marquee pausing while
+                                # you scroll: settings preview thumbnails
+                                # re-rendering inside the scroll gesture was
+                                # the Animation Studio's own lag.
+                                common_modes=False,
                             ),
                         )
                     if current_timebox_deadline is not None:

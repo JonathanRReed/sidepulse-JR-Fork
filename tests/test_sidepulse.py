@@ -19805,7 +19805,8 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
         self.assertEqual(weather_timers[0].delay, 600.0)
         self.assertEqual(weather_timers[0].interval, 600.0)
         self.assertEqual(weather_timers[0].tolerances, [60.0])
-        self.assertTrue(self.factory.registrations[-1][1])
+        # Default mode (2026-08-26): a weather fetch defers past scrolls.
+        self.assertFalse(self.factory.registrations[-1][1])
         self.assertIn(
             self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH,
             tuple(
@@ -20391,7 +20392,9 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         )
         self.assertGreaterEqual(timer.interval, 1.0 / 30.0)
         self.assertEqual(timer.tolerances, [timer.interval * 0.1])
-        self.assertIn((timer, True), self.factory.registrations)
+        # Default mode (2026-08-26): preview thumbnails re-rendering inside
+        # a scroll gesture was the settings window's own lag.
+        self.assertIn((timer, False), self.factory.registrations)
         self.assertEqual(
             sum(
                 candidate.feature
@@ -20439,7 +20442,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
             is self.status_bar.RuntimeFeature.SETTINGS_COLOR_PREVIEW
         )
         self.assertGreaterEqual(timer.interval, 1.0 / 30.0)
-        self.assertIn((timer, True), self.factory.registrations)
+        self.assertIn((timer, False), self.factory.registrations)
         self.clock[0] += timer.interval
         self.controller.runtimeTimerFired_(timer)
         engine.step.assert_called_once()
@@ -20475,7 +20478,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
             if timer.feature is self.status_bar.RuntimeFeature.SETUP_DEMO
         )
         self.assertEqual(first.interval, 1.0 / 30.0)
-        self.assertIn((first, True), self.factory.registrations)
+        self.assertIn((first, False), self.factory.registrations)
 
         self.clock[0] += first.interval
         self.controller.runtimeTimerFired_(first)
