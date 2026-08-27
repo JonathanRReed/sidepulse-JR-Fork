@@ -2792,9 +2792,9 @@ def _build_extras_pane(target: StatusBarController):
     native_ui.add_separator(quota_inner)
     quota_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
-            "Capacity alerts, outbound events, queue advice, and hardware "
-            "runway are unavailable until a supported source and explicit "
-            "forecast release authority exist.",
+            "Capacity history feeds the detail card's recent-days rows. "
+            "Alerts and hardware runway come from the live usage lanes, "
+            "not from this history.",
             secondary=True,
         )
     )

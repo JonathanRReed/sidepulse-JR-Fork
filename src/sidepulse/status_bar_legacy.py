@@ -7204,7 +7204,7 @@ class StatusBarController(NSObject):
         ):
             try:
                 models.append(
-                    build_capacity_detail(snapshot, projection, history, None, now)
+                    build_capacity_detail(snapshot, projection, history, now)
                 )
             except (TypeError, ValueError) as exc:
                 log_status_bar(f"capacity detail refused: {exc}")

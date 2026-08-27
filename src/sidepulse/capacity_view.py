@@ -1,6 +1,6 @@
 """Pure, bounded presentation models for canonical capacity truth.
 
-This module formats already-normalized capacity, refresh, history, and forecast
+This module formats already-normalized capacity, refresh, and history
 records. It owns no source work, persistence, AppKit objects, timers, or
 provider parsing.
 """
@@ -13,8 +13,6 @@ from dataclasses import dataclass
 from typing import Final
 
 from .capacity_authority import CapacityProjection, LaneAuthority
-from .capacity_calibration import ReleasedForecast
-from .capacity_forecast import ForecastRefusalCode
 from .capacity_history import (
     MAX_CAPACITY_HISTORY_SAMPLES,
     NO_OBSERVATION,
@@ -392,43 +390,10 @@ class CapacityHistoryRowModel:
 
 
 @dataclass(frozen=True, slots=True)
-class CapacityForecastStatusModel:
-    available: bool
-    status_text: str
-    refusal_text: str | None
-    earliest_exhaustion_epoch: float | None
-    latest_exhaustion_epoch: float | None
-
-    def __post_init__(self) -> None:
-        numeric = (self.earliest_exhaustion_epoch, self.latest_exhaustion_epoch)
-        if not (
-            type(self.available) is bool
-            and _bounded_text(self.status_text)
-            and (self.refusal_text is None or _bounded_text(self.refusal_text))
-            and all(
-                value is None or (type(value) is float and math.isfinite(value) and value >= 0.0) for value in numeric
-            )
-        ):
-            raise ValueError("invalid capacity forecast status")
-        if self.available:
-            if (
-                self.refusal_text is not None
-                or self.earliest_exhaustion_epoch is None
-                or self.latest_exhaustion_epoch is None
-            ):
-                raise ValueError("available capacity forecast lacks released bounds")
-            if self.earliest_exhaustion_epoch > self.latest_exhaustion_epoch:
-                raise ValueError("invalid capacity forecast status")
-        elif self.refusal_text is None or any(value is not None for value in numeric):
-            raise ValueError("unavailable capacity forecast carries released bounds")
-
-
-@dataclass(frozen=True, slots=True)
 class CapacityDetailModel:
     heading: str
     providers: tuple[CapacityProviderDetailModel, ...]
     source_health: tuple[CapacitySourceHealthRowModel, ...]
-    forecast: CapacityForecastStatusModel
     history_enabled: bool
     history: tuple[CapacityHistoryRowModel, ...]
 
@@ -439,7 +404,6 @@ class CapacityDetailModel:
             and all(type(provider) is CapacityProviderDetailModel for provider in self.providers)
             and type(self.source_health) is tuple
             and all(type(health) is CapacitySourceHealthRowModel for health in self.source_health)
-            and type(self.forecast) is CapacityForecastStatusModel
             and type(self.history_enabled) is bool
             and type(self.history) is tuple
             and all(type(row) is CapacityHistoryRowModel for row in self.history)
@@ -879,80 +843,6 @@ def _source_health_rows(
     return tuple(rows)
 
 
-_FORECAST_REFUSAL_TEXT: Final = {
-    ForecastRefusalCode.INVALID_INPUT: "Forecast input is invalid",
-    ForecastRefusalCode.INVALID_CLOCK: "Forecast clock is unavailable",
-    ForecastRefusalCode.HISTORY_CONSENT_REQUIRED: "Capacity history is off",
-    ForecastRefusalCode.HISTORY_TOO_LARGE: "Forecast history is unavailable",
-    ForecastRefusalCode.NO_ACCOUNT_DISCRIMINATOR: "Account continuity is unavailable",
-    ForecastRefusalCode.IDENTITY_CHANGED: "Account continuity changed",
-    ForecastRefusalCode.HISTORY_OUT_OF_ORDER: "History order is uncertain",
-    ForecastRefusalCode.DUPLICATE_TIMESTAMP_CONFLICT: "History timestamps conflict",
-    ForecastRefusalCode.CROSS_LANE_HISTORY: "Lane continuity changed",
-    ForecastRefusalCode.CROSS_ACCOUNT_HISTORY: "Account continuity changed",
-    ForecastRefusalCode.NONMONOTONIC_USAGE: "Observed capacity is not monotonic",
-    ForecastRefusalCode.INTERVAL_UNBOUNDED: "Observation interval is too large",
-    ForecastRefusalCode.INSUFFICIENT_CYCLE_ELAPSED: "More cycle time is required",
-    ForecastRefusalCode.INSUFFICIENT_SLOPES: "More observations are required",
-    ForecastRefusalCode.INSUFFICIENT_SLOPE_COVERAGE: "More observation coverage is required",
-    ForecastRefusalCode.SOURCE_PARTIAL: "Source observation is partial",
-    ForecastRefusalCode.SOURCE_STALE: "Source observation is stale",
-    ForecastRefusalCode.SOURCE_UNAVAILABLE: "Source observation is unavailable",
-    ForecastRefusalCode.RESET_UNKNOWN: "Reset time is unknown",
-    ForecastRefusalCode.RESET_DISPUTED: "Reset time is disputed",
-    ForecastRefusalCode.RESET_NOT_FUTURE: "Reset is not in the future",
-    ForecastRefusalCode.RESET_UNSTABLE: "Reset continuity is uncertain",
-    ForecastRefusalCode.NO_POSITIVE_BURN: "No declining capacity trend was observed",
-    ForecastRefusalCode.RUNWAY_UNBOUNDED: "Forecast range is unbounded",
-    ForecastRefusalCode.EXHAUSTION_NOT_BEFORE_RESET: "Capacity lasts through reset",
-    ForecastRefusalCode.AUTHORITY_MISSING: "Forecast release authority is missing",
-    ForecastRefusalCode.AUTHORITY_WITHHELD: "Forecast release is not authorized",
-    ForecastRefusalCode.RELEASE_AUTHORITY_REVOKED: "Forecast release was revoked",
-    ForecastRefusalCode.AUTHORITY_EXPIRED: "Forecast release authority expired",
-    ForecastRefusalCode.AUTHORITY_NOT_YET_VALID: "Forecast release authority is not active",
-    ForecastRefusalCode.AUTHORITY_MISMATCHED: "Forecast release scope does not match",
-    ForecastRefusalCode.CALIBRATION_SAMPLE_MISMATCH: "Forecast calibration scope does not match",
-    ForecastRefusalCode.CALIBRATION_INSUFFICIENT: "Forecast calibration is insufficient",
-    ForecastRefusalCode.BASELINE_NOT_BEATEN: "Forecast did not beat its baseline",
-    ForecastRefusalCode.FALSE_WARNING_REGRESSED: "Forecast warning quality is insufficient",
-    ForecastRefusalCode.MISS_RATE_REGRESSED: "Forecast miss quality is insufficient",
-    ForecastRefusalCode.FORECAST_UNAVAILABLE: "Forecast evidence is unavailable",
-}
-
-
-def _forecast_status(forecast_view: ReleasedForecast | None) -> CapacityForecastStatusModel:
-    if forecast_view is None:
-        return CapacityForecastStatusModel(
-            False,
-            "Forecast unavailable",
-            "No released forecast",
-            None,
-            None,
-        )
-    if type(forecast_view) is not ReleasedForecast:
-        raise TypeError("forecast_view must be ReleasedForecast or None")
-    if forecast_view.refusal_code is not None:
-        return CapacityForecastStatusModel(
-            False,
-            "Forecast unavailable",
-            _FORECAST_REFUSAL_TEXT.get(
-                forecast_view.refusal_code,
-                "Forecast evidence is unavailable",
-            ),
-            None,
-            None,
-        )
-    assert forecast_view.earliest_exhaustion_epoch is not None
-    assert forecast_view.latest_exhaustion_epoch is not None
-    return CapacityForecastStatusModel(
-        True,
-        "Forecast available",
-        None,
-        float(forecast_view.earliest_exhaustion_epoch),
-        float(forecast_view.latest_exhaustion_epoch),
-    )
-
-
 _HISTORY_LABEL: Final = {
     HistoryInterval.DAY: "Day",
     HistoryInterval.SEVEN_DAYS: "7 days",
@@ -1046,7 +936,6 @@ def build_capacity_detail(
     snapshot: CapacitySnapshot | CapacityDetailSnapshot,
     projection: CapacityProjection,
     history_summary: CapacityHistoryPresentation | None,
-    forecast_view: ReleasedForecast | None,
     now: float,
 ) -> CapacityDetailModel:
     """Build a complete immutable detail projection without source work."""
@@ -1074,7 +963,6 @@ def build_capacity_detail(
             refresh=refresh_snapshot,
             refresh_now=refresh_now,
         ),
-        forecast=_forecast_status(forecast_view),
         history_enabled=history_enabled,
         history=history,
     )
@@ -1161,7 +1049,6 @@ __all__ = [
     "CapacityCardRowModel",
     "CapacityDetailModel",
     "CapacityDetailSnapshot",
-    "CapacityForecastStatusModel",
     "CapacityHistoryPresentation",
     "CapacityHistoryRowModel",
     "CapacityHistorySummaryInput",

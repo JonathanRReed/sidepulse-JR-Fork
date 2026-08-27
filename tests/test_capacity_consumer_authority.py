@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from sidepulse.capacity_authority import select_binding_lanes
-from sidepulse.capacity_calibration import ForecastReleaseAuthority
 from sidepulse.capacity_types import (
     CapacitySnapshot,
     CapacitySourceHealth,
@@ -103,8 +102,10 @@ _EXPECTED_REFUSAL = {
     "missing_reset": "reset_not_credible",
     "partial_observation": "usage_partial",
     # The one legitimate reading. It binds, and that is the point: a gate that
-    # refused everything would prove nothing about the five above.
-    "withheld_forecast_authority": None,
+    # refused everything would prove nothing about the five above. (Named for
+    # the deleted forecast plane until 2026-08-26; the healthy control is
+    # about binding authority, which outlived the forecaster.)
+    "healthy_control": None,
 }
 # Whether the lane may still be SHOWN. A refused BINDING is not the same as a
 # hidden row: a stale number and a window with no reset are true things that
@@ -116,7 +117,7 @@ _EXPECTED_PRESENTABLE = {
     "unknown_source": False,
     "missing_reset": True,
     "partial_observation": False,
-    "withheld_forecast_authority": True,
+    "healthy_control": True,
 }
 
 
@@ -142,7 +143,7 @@ def _canonical_case(case_name: str) -> tuple[CapacitySnapshot | None, ExecutionC
         observation = _observation(reset_state=ResetState.UNKNOWN)
     elif case_name == "partial_observation":
         observation = _observation(value_state=ObservationState.PARTIAL)
-    elif case_name == "withheld_forecast_authority":
+    elif case_name == "healthy_control":
         observation = _observation()
     else:
         raise AssertionError(f"unknown adversary: {case_name}")
@@ -187,7 +188,7 @@ def controller(request):
         "unknown_source",
         "missing_reset",
         "partial_observation",
-        "withheld_forecast_authority",
+        "healthy_control",
     ),
 )
 def test_unauthoritative_capacity_cannot_reach_any_consumer(
@@ -208,7 +209,6 @@ def test_unauthoritative_capacity_cannot_reach_any_consumer(
         assert authority.presentable is _EXPECTED_PRESENTABLE[case_name]
         assert projection.binding_lanes == (() if expected else (authority,))
 
-    assert ForecastReleaseAuthority.withheld().permitted_claim_classes == ()
     target.settings = replace(
         AgentMonitorSettings(),
         quota_alerts_enabled=True,

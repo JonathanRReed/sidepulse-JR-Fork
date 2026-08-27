@@ -17,7 +17,6 @@ from sidepulse.capacity_types import (
     CapacityValue,
     ExecutionContext,
     ForecastConfidence,
-    ForecastReleaseState,
     LaneApplicability,
     ObservationState,
     QuotaEffect,
@@ -176,7 +175,6 @@ def test_canonical_enums_keep_truth_and_authority_states_distinct() -> None:
     assert LaneApplicability.AMBIGUOUS is not LaneApplicability.INAPPLICABLE
     assert SampleDisposition.IDENTITY_AMBIGUOUS is not SampleDisposition.INVALID
     assert ForecastConfidence.UNAVAILABLE is not ForecastConfidence.LOW_LINEAR
-    assert ForecastReleaseState.WITHHELD is not ForecastReleaseState.AUTHORIZED
 
 
 def test_source_and_lane_keys_are_immutable_stable_value_identities() -> None:

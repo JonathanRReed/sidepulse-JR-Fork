@@ -118,12 +118,6 @@ class ForecastConfidence(str, Enum):
     HIGH_HISTORICAL = "high_historical"
 
 
-class ForecastReleaseState(str, Enum):
-    WITHHELD = "withheld"
-    AUTHORIZED = "authorized"
-    REVOKED = "revoked"
-
-
 def _is_finite_number(value: object) -> bool:
     return type(value) in {int, float} and math.isfinite(value)
 
@@ -540,7 +534,6 @@ __all__ = [
     "CapacityValue",
     "ExecutionContext",
     "ForecastConfidence",
-    "ForecastReleaseState",
     "LaneApplicability",
     "ObservationState",
     "QuotaEffect",

@@ -6,14 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from sidepulse.capacity_calibration import (
-    CALIBRATION_SCHEMA_VERSION,
-    ROBUST_METHOD_VERSION,
-    ForecastClaimClass,
-    ForecastIdentityClass,
-    ForecastReleaseAuthority,
-)
-from sidepulse.capacity_types import ForecastReleaseState, QuotaHorizon
 from sidepulse.settings import (
     CLAUDE_PLAN_LIMITS_CONSENT_VERSION,
     CURRENT_SETTINGS_SCHEMA_VERSION,
@@ -194,92 +186,6 @@ def test_invalid_programmatic_operator_retention_is_serialized_off(
     )
 
     assert json.loads(target.read_text())["operator_history_retention_days"] == 0
-
-
-def test_forecast_release_authority_defaults_to_withheld() -> None:
-    """New installations must not gain forecast release authority implicitly."""
-    authority = AgentMonitorSettings().forecast_release_authority
-
-    assert authority.release_state is ForecastReleaseState.WITHHELD
-    assert authority.permitted_claim_classes == ()
-
-
-def test_legacy_forecast_flags_and_local_calibration_cannot_authorize(tmp_path: Path) -> None:
-    """Migrating permissive legacy keys must still produce withheld authority."""
-    target = tmp_path / "settings.json"
-    target.write_text(
-        json.dumps(
-            {
-                "forecast_enabled": True,
-                "forecast_release_state": "authorized",
-                "forecast_calibration": {"mean_absolute_error": 0.0},
-            }
-        )
-    )
-
-    authority = load_settings(target).forecast_release_authority
-
-    assert authority.release_state is ForecastReleaseState.WITHHELD
-    assert authority.permitted_claim_classes == ()
-
-
-def test_explicit_release_authority_round_trips_as_one_versioned_record(
-    tmp_path: Path,
-) -> None:
-    """Dropping any authority field during persistence must invalidate its exact scope."""
-    target = tmp_path / "settings.json"
-    authority = ForecastReleaseAuthority(
-        method_version=ROBUST_METHOD_VERSION,
-        schema_version=CALIBRATION_SCHEMA_VERSION,
-        identity_class=ForecastIdentityClass.OPAQUE_ACCOUNT,
-        horizon=QuotaHorizon.SHORT,
-        permitted_claim_classes=(ForecastClaimClass.EXHAUSTION_ENVELOPE,),
-        calibration_sample_min=50,
-        calibration_sample_max=200,
-        issued_at=1_000.0,
-        expires_at=20_000.0,
-        release_state=ForecastReleaseState.AUTHORIZED,
-    )
-
-    save_settings(
-        replace(AgentMonitorSettings(), forecast_release_authority=authority),
-        target,
-    )
-    restored = load_settings(target)
-
-    assert restored.forecast_release_authority == authority
-    assert set(json.loads(target.read_text())["forecast_release_authority"]) == {
-        "calibration_sample_max",
-        "calibration_sample_min",
-        "expires_at",
-        "horizon",
-        "identity_class",
-        "issued_at",
-        "method_version",
-        "permitted_claim_classes",
-        "release_state",
-        "schema_version",
-    }
-
-
-def test_malformed_or_partial_release_authority_fails_closed(tmp_path: Path) -> None:
-    """A partial local authority record must not survive as authorized."""
-    target = tmp_path / "settings.json"
-    target.write_text(
-        json.dumps(
-            {
-                "forecast_release_authority": {
-                    "schema_version": CALIBRATION_SCHEMA_VERSION,
-                    "release_state": "authorized",
-                }
-            }
-        )
-    )
-
-    authority = load_settings(target).forecast_release_authority
-
-    assert authority.release_state is ForecastReleaseState.WITHHELD
-    assert authority.permitted_claim_classes == ()
 
 
 def test_settings_migration_disables_legacy_quota_authority_and_runway(

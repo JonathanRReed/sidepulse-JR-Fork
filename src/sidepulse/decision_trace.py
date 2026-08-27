@@ -354,9 +354,9 @@ def capacity_detail_text(models) -> str:
                 lines.append(f"      {' · '.join(part for part in detail if part)}")
         lines.append("")
         # Said once for the whole card, not per row: "may this number drive
-        # an alert, an LED or a forecast" has exactly one answer in a build
-        # with no account binding, and repeating it thirteen times is how a
-        # panel stops being read.
+        # an alert or an LED" has exactly one answer in a build with no
+        # account binding, and repeating it thirteen times is how a panel
+        # stops being read.
         rows = tuple(
             row
             for provider in model.providers
@@ -374,10 +374,6 @@ def capacity_detail_text(models) -> str:
                     f"no — {reason.lower()}" if reason else "no",
                 )
             )
-        forecast = model.forecast
-        lines.append(_dotted("Forecast", forecast.status_text))
-        if forecast.refusal_text:
-            lines.append(f"      {forecast.refusal_text}")
         if not model.history_enabled:
             lines.append(_dotted("Capacity history", "off"))
         else:

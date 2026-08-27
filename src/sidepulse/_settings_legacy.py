@@ -8,11 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from .battery import DEFAULT_POWER_CHANGE_PREVIEW_SECONDS
-from .capacity_calibration import (
-    ForecastReleaseAuthority,
-    forecast_release_authority_from_payload,
-    forecast_release_authority_to_payload,
-)
 from .colors import ColorSettings
 from .led_status import DEFAULT_CHANNEL_GAIN, normalize_channel_gain
 from .providers import PROVIDER_REGISTRY
@@ -388,9 +383,6 @@ class AgentMonitorSettings:
     # Zero is the explicit off state. Broad or legacy history consent never
     # enables the metadata-only operator ledger.
     operator_history_retention_days: int = 0
-    forecast_release_authority: ForecastReleaseAuthority = field(
-        default_factory=ForecastReleaseAuthority.withheld
-    )
     usage_graph_days: int = 7
     # "tokens" leads with token counts (cost approximated in parens,
     # the CodexBar presentation); "cost" leads with dollars.
@@ -1418,9 +1410,6 @@ class AgentMonitorSettings:
                 and self.operator_history_retention_days in (0, 7, 30, 90)
                 else 0
             ),
-            "forecast_release_authority": forecast_release_authority_to_payload(
-                self.forecast_release_authority
-            ),
             "usage_graph_days": self.usage_graph_days,
             "usage_display_mode": self.usage_display_mode,
             "usage_graph_providers": list(self.usage_graph_providers),
@@ -1746,9 +1735,6 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             if type(data.get("operator_history_retention_days")) is int
             and data.get("operator_history_retention_days") in (0, 7, 30, 90)
             else 0
-        ),
-        forecast_release_authority=forecast_release_authority_from_payload(
-            data.get("forecast_release_authority")
         ),
         subagent_asks_alert=_bool_setting(data.get("subagent_asks_alert"), False),
         # "percent" is a legal, UI-offered mode: the loader used to

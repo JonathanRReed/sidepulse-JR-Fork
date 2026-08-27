@@ -6,8 +6,6 @@ import pytest
 
 from sidepulse import usage_stats
 from sidepulse.capacity_authority import select_binding_lanes
-from sidepulse.capacity_calibration import FORECAST_UNAVAILABLE_TEXT, ReleasedForecast
-from sidepulse.capacity_forecast import ForecastRefusalCode
 from sidepulse.capacity_history import CapacityHistorySummary, HistoryInterval
 from sidepulse.capacity_refresh import (
     CapacityRefreshCoordinator,
@@ -251,7 +249,7 @@ def test_one_exact_batch_keeps_transcript_and_capacity_truth_independent(
     assert CLAUDE_QUOTA not in capacity_rows
 
 
-def test_two_provider_story_never_invents_binding_refresh_or_forecast_truth() -> None:
+def test_two_provider_story_never_invents_binding_or_refresh_truth() -> None:
     codex_source = _source("codex", "local")
     claude_source = _source("claude", "experimental-remote")
     codex_health = _health(
@@ -374,12 +372,6 @@ def test_two_provider_story_never_invents_binding_refresh_or_forecast_truth() ->
         refresh.snapshot_state(NOW + 2.0),
         NOW + 2.0,
     )
-    forecast = ReleasedForecast(
-        FORECAST_UNAVAILABLE_TEXT,
-        ForecastRefusalCode.AUTHORITY_WITHHELD,
-        None,
-        None,
-    )
     history_off = CapacityHistoryPresentation(False, ())
     history_on = CapacityHistoryPresentation(
         True,
@@ -396,14 +388,12 @@ def test_two_provider_story_never_invents_binding_refresh_or_forecast_truth() ->
         detail_snapshot,
         projection,
         history_off,
-        forecast,
         NOW + 2.0,
     )
     detail_on = build_capacity_detail(
         detail_snapshot,
         projection,
         history_on,
-        forecast,
         NOW + 2.0,
     )
     detail_rows = tuple(
@@ -438,9 +428,6 @@ def test_two_provider_story_never_invents_binding_refresh_or_forecast_truth() ->
     assert detail_off.history == ()
     assert detail_on.history_enabled is True
     assert detail_on.history[0].label == "Day"
-    assert detail_off.forecast.available is False
-    assert detail_off.forecast.earliest_exhaustion_epoch is None
-    assert detail_off.forecast.latest_exhaustion_epoch is None
 
     local_activity = build_provider_usage_view(
         "claude",

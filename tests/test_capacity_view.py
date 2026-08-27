@@ -9,8 +9,6 @@ from itertools import permutations
 import pytest
 
 from sidepulse.capacity_authority import CapacityProjection, select_binding_lanes
-from sidepulse.capacity_calibration import FORECAST_UNAVAILABLE_TEXT, ReleasedForecast
-from sidepulse.capacity_forecast import ForecastRefusalCode
 from sidepulse.capacity_history import (
     NO_OBSERVATION,
     CapacityHistorySummary,
@@ -50,7 +48,6 @@ from sidepulse.capacity_view import (
     CapacityCardModel,
     CapacityCardRowModel,
     CapacityDetailSnapshot,
-    CapacityForecastStatusModel,
     CapacityHistoryPresentation,
     CapacityHistorySummaryInput,
     build_capacity_card,
@@ -504,7 +501,7 @@ def test_detail_groups_every_lane_by_provider_and_applicability() -> None:
         allow_unbound_legacy=True,
     )
 
-    detail = build_capacity_detail(snapshot, projection, None, None, NOW)
+    detail = build_capacity_detail(snapshot, projection, None, NOW)
 
     assert [group.provider for group in detail.providers] == ["Claude", "Codex"]
     assert [group.applicability for group in detail.providers[0].groups] == [LaneApplicability.APPLICABLE]
@@ -529,7 +526,7 @@ def test_detail_projects_source_success_attempt_cooldown_and_typed_health() -> N
     )
     snapshot = _snapshot(lane)
 
-    detail = build_capacity_detail(snapshot, _projection(lane), None, None, NOW)
+    detail = build_capacity_detail(snapshot, _projection(lane), None, NOW)
 
     assert len(detail.source_health) == 1
     health = detail.source_health[0]
@@ -570,7 +567,7 @@ def test_detail_uses_refresh_event_times_against_the_injected_render_clock() -> 
         refresh_now=230.0,
     )
 
-    detail = build_capacity_detail(detail_snapshot, _projection(lane), None, None, NOW)
+    detail = build_capacity_detail(detail_snapshot, _projection(lane), None, NOW)
 
     assert len(detail.source_health) == 1
     health = detail.source_health[0]
@@ -610,7 +607,7 @@ def test_detail_refuses_refresh_sources_outside_the_capacity_snapshot() -> None:
     )
 
     with pytest.raises(ValueError, match="refresh source does not match capacity snapshot"):
-        build_capacity_detail(detail_snapshot, _projection(lane), None, None, NOW)
+        build_capacity_detail(detail_snapshot, _projection(lane), None, NOW)
 
 
 @pytest.mark.parametrize(
@@ -651,7 +648,7 @@ def test_detail_refuses_refresh_scope_that_does_not_match_a_capacity_lane(
     )
 
     with pytest.raises(ValueError, match="refresh source does not match capacity snapshot"):
-        build_capacity_detail(detail_snapshot, _projection(lane), None, None, NOW)
+        build_capacity_detail(detail_snapshot, _projection(lane), None, NOW)
 
 
 def test_detail_snapshot_requires_a_current_clock_for_refresh_state() -> None:
@@ -699,7 +696,6 @@ def test_detail_accepts_refresh_health_for_an_explicit_empty_source_snapshot() -
         detail_snapshot,
         CapacityProjection((), ()),
         None,
-        None,
         NOW,
     )
 
@@ -743,34 +739,8 @@ def test_detail_refuses_multiple_refresh_scopes_for_one_health_only_source() -> 
             detail_snapshot,
             CapacityProjection((), ()),
             None,
-            None,
             NOW,
         )
-
-
-def test_detail_maps_forecast_refusal_without_exposing_internal_code() -> None:
-    lane = _lane()
-    snapshot = _snapshot(lane)
-    refusal = ReleasedForecast(
-        FORECAST_UNAVAILABLE_TEXT,
-        ForecastRefusalCode.AUTHORITY_WITHHELD,
-        None,
-        None,
-    )
-
-    detail = build_capacity_detail(snapshot, _projection(lane), None, refusal, NOW)
-
-    assert detail.forecast.status_text == "Forecast unavailable"
-    assert detail.forecast.refusal_text == "Forecast release is not authorized"
-    assert detail.forecast.earliest_exhaustion_epoch is None
-    assert "authority_withheld" not in _all_text(detail)
-
-
-def test_forecast_status_model_rejects_negative_or_reversed_released_bounds() -> None:
-    with pytest.raises(ValueError, match="invalid capacity forecast status"):
-        CapacityForecastStatusModel(True, "Forecast available", None, -1.0, 2.0)
-    with pytest.raises(ValueError, match="invalid capacity forecast status"):
-        CapacityForecastStatusModel(True, "Forecast available", None, 3.0, 2.0)
 
 
 def test_detail_renders_only_bounded_metadata_history_summaries_when_enabled() -> None:
@@ -790,7 +760,7 @@ def test_detail_renders_only_bounded_metadata_history_summaries_when_enabled() -
         ),
     )
 
-    detail = build_capacity_detail(snapshot, _projection(lane), history, None, NOW)
+    detail = build_capacity_detail(snapshot, _projection(lane), history, NOW)
 
     assert detail.history_enabled is True
     assert [(row.label, row.summary_text) for row in detail.history] == [
@@ -917,7 +887,7 @@ def test_copy_projection_does_no_filesystem_subprocess_or_network_work(monkeypat
     monkeypatch.setattr(socket, "socket", forbidden)
 
     card = build_capacity_card(_projection(lane), NOW)
-    detail = build_capacity_detail(snapshot, _projection(lane), None, None, NOW)
+    detail = build_capacity_detail(snapshot, _projection(lane), None, NOW)
 
     assert card.rows[0].remaining_text == "50% left"
     assert detail.providers[0].groups[0].rows[0].remaining_text == "50% left"
@@ -937,7 +907,7 @@ def test_untrusted_diagnostic_fields_never_enter_copy() -> None:
     projection = _projection(lane)
 
     card = build_capacity_card(projection, NOW)
-    detail = build_capacity_detail(snapshot, projection, None, None, NOW)
+    detail = build_capacity_detail(snapshot, projection, None, NOW)
     copy = _all_text((card, detail)).lower()
 
     assert "users/private" not in copy
@@ -953,7 +923,7 @@ def test_detail_rejects_projection_from_another_snapshot() -> None:
     second = _lane(window="second")
 
     with pytest.raises(ValueError, match="projection does not match snapshot"):
-        build_capacity_detail(_snapshot(first), _projection(second), None, None, NOW)
+        build_capacity_detail(_snapshot(first), _projection(second), None, NOW)
 
 
 def test_card_refuses_nonfinite_clock() -> None:
