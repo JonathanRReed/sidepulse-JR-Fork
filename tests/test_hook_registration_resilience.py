@@ -14,6 +14,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 from sidepulse.install import hook_command_arguments, verify_hook_command
 from sidepulse.providers import _is_sidepulse_hook_invocation
 
@@ -53,3 +55,68 @@ def test_every_shape_we_have_ever_registered_is_recognized_as_ours() -> None:
     for shape in (legacy, module, frozen):
         assert _is_sidepulse_hook_invocation(shape) is True, shape
     assert _is_sidepulse_hook_invocation(["/bin/echo", "hello"]) is False
+
+
+def test_registration_is_gated_on_the_probe_run(tmp_path: Path) -> None:
+    """install_provider_hooks refuses to write a config whose command
+    failed its probe run (wired 2026-08-26): a registered hook that
+    cannot run blocks every prompt in every session."""
+    from unittest.mock import patch
+
+    from sidepulse.install import HookVerificationError, install_provider_hooks
+
+    config = tmp_path / "claude" / "settings.json"
+    config.parent.mkdir(parents=True)
+    config.parent.chmod(0o700)
+    config.write_text('{"permissions": {"allow": ["Bash(date)"]}}\n')
+    config.chmod(0o600)
+    log = tmp_path / "state" / "claude.jsonl"
+
+    with (
+        patch(
+            "sidepulse.install.verify_hook_command",
+            return_value="interpreter not found: /nonexistent/python",
+        ),
+        pytest.raises(HookVerificationError, match="does not run"),
+    ):
+        install_provider_hooks(
+            "claude",
+            log_path=log,
+            config_path=config,
+            python_executable="/nonexistent/python",
+        )
+
+    assert config.read_text() == '{"permissions": {"allow": ["Bash(date)"]}}\n'
+    assert not log.exists()
+
+
+def test_dry_run_registration_skips_the_probe(tmp_path: Path) -> None:
+    """A dry run must stay side-effect free -- including the probe subprocess."""
+    from unittest.mock import patch
+
+    from sidepulse.install import install_provider_hooks
+
+    config = tmp_path / "claude" / "settings.json"
+    config.parent.mkdir(parents=True)
+    config.parent.chmod(0o700)
+    config.write_text("{}\n")
+    config.chmod(0o600)
+    log = tmp_path / "state" / "claude.jsonl"
+    log.parent.mkdir(parents=True)
+    log.parent.chmod(0o700)
+    log.write_text("")
+    log.chmod(0o600)
+
+    with patch(
+        "sidepulse.install.verify_hook_command",
+        side_effect=AssertionError("probe must not run on dry_run"),
+    ):
+        result = install_provider_hooks(
+            "claude",
+            log_path=log,
+            config_path=config,
+            dry_run=True,
+            python_executable="python3",
+        )
+
+    assert result.dry_run is True

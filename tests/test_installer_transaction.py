@@ -364,11 +364,14 @@ def test_provider_install_failure_does_not_mutate_sibling_provider(tmp_path: Pat
     _private_log(claude_log)
 
     with pytest.raises(ValueError, match="duplicate"):
+        # sys.executable, not "python3": the registration gate probe-runs
+        # the command first, and the system python3 (no sidepulse) is now
+        # correctly refused before validation ever sees the config.
         install_provider_hooks(
             "claude",
             log_path=claude_log,
             config_path=claude_config,
-            python_executable="python3",
+            python_executable=sys.executable,
         )
 
     assert codex_config.read_text() == original_codex

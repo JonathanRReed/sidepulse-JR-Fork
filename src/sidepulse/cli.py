@@ -28,6 +28,7 @@ from .doctor import (
 )
 from .hook import hook_log_main
 from .install import (
+    HookVerificationError,
     install_provider_hooks,
     uninstall_provider_hooks,
 )
@@ -888,7 +889,15 @@ def install_hook_results(args: argparse.Namespace):
     results = []
     for provider in providers:
         log_path = install_log_path(provider, args)
-        results.append(install_provider_hooks(provider, log_path=log_path, dry_run=args.dry_run))
+        try:
+            results.append(
+                install_provider_hooks(provider, log_path=log_path, dry_run=args.dry_run)
+            )
+        except HookVerificationError as exc:
+            # Refused, not failed: nothing was written. Say so and keep
+            # going -- one broken interpreter must not hide the other
+            # providers' outcomes.
+            print(f"{provider}: {exc}")
     return results
 
 

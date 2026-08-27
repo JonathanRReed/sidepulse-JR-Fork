@@ -1573,7 +1573,38 @@ UNINSTALLERS = {
 }
 
 
+class HookVerificationError(RuntimeError):
+    """The hook command failed its pre-registration probe run."""
+
+
+def _probe_registration_command(provider: str, python_executable: str | None) -> None:
+    """Run the exact command once against a scratch log before writing it.
+
+    This is the gate verify_hook_command was written for (wired
+    2026-08-26): a registered hook that cannot run does not degrade a
+    feature -- it blocks every prompt in every session for that agent.
+    The scratch log keeps the probe's fake session out of live state.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="sidepulse-hook-probe-") as scratch:
+        error = verify_hook_command(
+            hook_command_arguments(
+                provider,
+                Path(scratch) / "probe.jsonl",
+                python_executable,
+            )
+        )
+    if error is not None:
+        raise HookVerificationError(
+            f"refusing to register {provider} hooks -- the command does not "
+            f"run: {error}"
+        )
+
+
 def install_provider_hooks(provider: str, **kwargs: Any) -> InstallResult:
+    if not kwargs.get("dry_run"):
+        _probe_registration_command(provider, kwargs.get("python_executable"))
     return INSTALLERS[provider](**kwargs)
 
 
