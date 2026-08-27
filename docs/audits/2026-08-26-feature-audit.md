@@ -26,17 +26,21 @@ bucketing; graph worker placeholder/pending/QoS/memo + first tests.
 
 ## Deferred — ranked
 
-1. **Cross-Mac usage sync is dead in the app** (CLI-only): the UI seam
+Items 1, 3, 4, 9, 14, 15, 16, and 17 below were fixed later the same day
+(0.4.0 audit waves — see CHANGELOG); each carries a FIXED annotation. The
+findings are kept as written so the history survives.
+
+1. **FIXED 2026-08-26.** **Cross-Mac usage sync is dead in the app** (CLI-only): the UI seam
    `project_usage_center(state, merged_sync=…)` is called without the
    parameter. Also the CHANGELOG's "encrypted" claim is wrong (HMAC-
    signed plaintext) and replay has no freshness check.
 2. **Statuspage incidents never reach snapshots** — menu rows work, but
    `ProviderUsageSnapshot.incident` is None at every construction site,
    so the Usage Center's incident line is dead.
-3. **Quota-runway LED display** is selectable but `quota_runway_state()`
+3. **FIXED 2026-08-26.** **Quota-runway LED display** is selectable but `quota_runway_state()`
    returns None unconditionally; the forecast pane and
    capacity_forecast/calibration modules are runtime-dead behind it.
-4. **Cost coverage**: MODEL_PRICING lacks fable/claude-5 rates (55% of
+4. **FIXED 2026-08-26.** **Cost coverage**: MODEL_PRICING lacks fable/claude-5 rates (55% of
    this machine's tokens unpriced, dollars silently undercounted) and
    codex cost is skipped by code choice though records carry the data.
    Needs a real pricing decision, not a guess.
@@ -60,7 +64,7 @@ bucketing; graph worker placeholder/pending/QoS/memo + first tests.
    (metadata query, no prompt) would close it properly.
 8. **Devin org-header 401** can delete a valid token on Reconnect when
    organization_id is missing (re-import usually restores it).
-9. **Snooze scope**: snoozed families still show in the Agent Browser
+9. **FIXED 2026-08-26.** **Snooze scope**: snoozed families still show in the Agent Browser
    shelf and still light LEDs/notify — the menu is the only surface
    that honors it. "SidePulse will retry" on failed preference saves is
    false (dirty flags written, never read).
@@ -87,31 +91,33 @@ bucketing; graph worker placeholder/pending/QoS/memo + first tests.
 13. **Auto-hide menu bar users** lose the Screen Bar entirely with no
     diagnostic (space_hides_menu_bar conflates auto-hide with
     full-screen).
-14. **Motions are dead in whole multi-agent layouts** beyond the
+14. **FIXED 2026-08-26.** **Motions are dead in whole multi-agent layouts** beyond the
     documented wave-degrade: Cycle never consults agent_motion; Spatial
     Split honors only Steady; Relay collapses everything to the baton;
     aurora==drift byte-identical in shared strips. The Agents-pane copy
     names only four motions as simplifying. Needs a degrade-policy
     decision, then `_cycle_program`/`_segment_for_agent` work.
-15. **Previews collapse 15 of 18 motions into 2 shapes** — thumbnails,
+15. **FIXED 2026-08-26.** **Previews collapse 15 of 18 motions into 2 shapes** — thumbnails,
     hover try-outs, and the hardware preview push all route through the
     4-bucket PROVIDER_ANIMATION_STYLES bridge while the live solo
     render plays the real shape. What you preview is not what you get;
     the fix is routing previews through compose_presentation_program.
-16. **Solo live render ignores the classic Idle/Working style pickers
+16. **FIXED 2026-08-26.** **Solo live render ignores the classic Idle/Working style pickers
     and gentleness sliders** (hardcoded floor 0.05 / peak 1.0): one
     working agent renders ~2× brighter than the same agent in a crowd,
     and those dials are no-ops whenever exactly one agent is engaged.
     Product decision needed: should the solo compositor honor
     fade_range/animation_style?
-17. **Urgent states lose all motion at fade ceiling 100%** (urgent
+17. **FIXED 2026-08-26.** **Urgent states lose all motion at fade ceiling 100%** (urgent
     floor is lifted to the ceiling; at 1.0 floor==peak, so Ask/Failed
     render steady). Either cap the slider below 1.0 for urgent lift or
     keep a minimum swing.
 18. **Screen Bar min-glow floor silently overrides its brightness
     slider below 25%** (values 1–63 all render as 64; explicit 0
     works). Surface the floor in the slider UI or compose differently.
-19. **FEATURE-MATRIX.md is stale** (2026-08-20): no 18-motion
+19. **Matrix portion addressed 2026-08-26** (FEATURE-MATRIX.md rewritten
+    from live code in the docs wave; the in-code comment and CLI notes
+    below remain open.) **FEATURE-MATRIX.md is stale** (2026-08-20): no 18-motion
     vocabulary, charging trickle, night warmth/dim, lid animations,
     timer display, Studio v1. Also stale in-code comments:
     status_bar_legacy "keeps its choice" claim about the withheld

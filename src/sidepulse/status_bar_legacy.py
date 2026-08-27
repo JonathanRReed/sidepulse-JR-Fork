@@ -16021,39 +16021,6 @@ def refresh_usage_menu_card(target, *, now: float, reset_now: float) -> None:
     _apply_usage_card_layout(target, layout)
 
 
-def session_row_suffix(
-    status: AgentStatus,
-    *,
-    worker_count: int = 0,
-    working_since: float | None = None,
-    unseen_done: bool = False,
-) -> str:
-    """The row's trailing facts: plan-ready tag, live worker count,
-    elapsed working time, and the unseen-done marker."""
-    parts = []
-    if status.is_plan_ready:
-        parts.append("Plan ready")
-    if worker_count == 1:
-        parts.append("1 worker")
-    elif worker_count > 1:
-        parts.append(f"{worker_count} workers")
-    if working_since is not None and status.mode in (
-        AgentMode.WORKING,
-        AgentMode.TOOL_RUNNING,
-        AgentMode.LONG_TASK_PROGRESS,
-    ):
-        minutes = int(max(0.0, time.monotonic() - working_since) // 60)
-        if minutes >= 60:
-            parts.append(f"{minutes // 60}h {minutes % 60}m")
-        elif minutes >= 1:
-            parts.append(f"{minutes}m")
-    if unseen_done and status.mode == AgentMode.COMPLETED:
-        parts.append("new")
-    if not parts:
-        return ""
-    return " \u00b7 " + " \u00b7 ".join(parts)
-
-
 _MAILBOX_SECTION_TITLES = {
     MailboxSectionKind.NEEDS_YOU: "Needs You",
     MailboxSectionKind.IN_PROGRESS: "In Progress",
@@ -16799,9 +16766,9 @@ def remote_ledger_menu_rows(target) -> tuple[LedgerRow, ...]:
 
 def remote_ledger_row_title(row: LedgerRow, now: datetime) -> str:
     state = state_for_mode(row.status.mode)
-    # relative_age_label, not format_age: "one dropdown should not
-    # measure time two ways" (its own docstring) -- the Other Macs rows
-    # were the last holdout saying "12m03s" beside rows saying "12m ago".
+    # relative_age_label: "one dropdown should not measure time two
+    # ways" (its own docstring) -- the Other Macs rows were the last
+    # holdout saying "12m03s" beside rows saying "12m ago".
     parts = [state.label, relative_age_label(row.status.age_seconds(now))]
     if row.status.stale:
         parts.append("stale")
@@ -17844,46 +17811,6 @@ def colors_legend_text(statuses, *, is_live: bool, prefix: str | None = None) ->
     return prefix + " · ".join(parts)
 
 
-def add_button(
-    parent,
-    title: str,
-    x: int,
-    y: int,
-    width: int,
-    height: int,
-    target: StatusBarController,
-    selector: str,
-):
-    button = NSButton.alloc().initWithFrame_(((x, y), (width, height)))
-    button.setTitle_(title)
-    button.setBezelStyle_(NSBezelStyleRounded)
-    button.setTarget_(target)
-    button.setAction_(selector)
-    parent.addSubview_(button)
-    return button
-
-
-def add_checkbox(
-    parent,
-    title: str,
-    x: int,
-    y: int,
-    width: int,
-    height: int,
-    target: StatusBarController | None,
-    selector: str,
-):
-    checkbox = NSButton.alloc().initWithFrame_(((x, y), (width, height)))
-    checkbox.setButtonType_(NSButtonTypeSwitch)
-    checkbox.setTitle_(title)
-    if target is not None:
-        checkbox.setTarget_(target)
-    if selector:
-        checkbox.setAction_(selector)
-    parent.addSubview_(checkbox)
-    return checkbox
-
-
 def make_provider_opener_popup(provider: str, target):
     popup = native_ui.make_popup_button(target, "setProviderOpenPreference:")
     for action in provider_open_actions(provider):
@@ -17920,51 +17847,6 @@ def provider_open_action_label(provider: str, action: str) -> str:
 
 def select_popup_action(popup, action: str) -> None:
     select_popup_item(popup, "action", action)
-
-
-def add_slider(
-    parent,
-    x: int,
-    y: int,
-    width: int,
-    height: int,
-    *,
-    min_value: float,
-    max_value: float,
-    value: float,
-    target: StatusBarController,
-    action: str,
-    identifier: str | None = None,
-):
-    """A plain NSSlider placed directly in a window's content view --
-    unlike build_brightness_slider_item/build_channel_gain_slider_item,
-    which wrap a slider in an NSView because NSMenuItem requires a custom
-    view for anything beyond a title+action, a normal window content view
-    can host the control directly. identifier is set so the existing
-    setDeviceBrightness:/setDeviceRedGain:/etc. IBActions (which read
-    sender.identifier() for the device id) work unmodified regardless of
-    which container the slider lives in.
-    """
-    slider = NSSlider.alloc().initWithFrame_(((x, y), (width, height)))
-    slider.setMinValue_(min_value)
-    slider.setMaxValue_(max_value)
-    slider.setDoubleValue_(value)
-    slider.setContinuous_(False)
-    slider.setTarget_(target)
-    slider.setAction_(action)
-    if identifier is not None:
-        slider.setIdentifier_(identifier)
-    parent.addSubview_(slider)
-    return slider
-
-
-def add_editable_field(parent, text: str, x: int, y: int, width: int, height: int):
-    field = NSTextField.alloc().initWithFrame_(((x, y), (width, height)))
-    field.setStringValue_(text)
-    field.setEditable_(True)
-    field.setSelectable_(True)
-    parent.addSubview_(field)
-    return field
 
 
 def add_text_view(parent, text: str, x: int, y: int, width: int, height: int):
@@ -18389,89 +18271,6 @@ def native_session_menu_title(status: AgentStatus) -> str:
     return " — ".join(parts)
 
 
-def build_session_options_menu(
-    status: AgentStatus,
-    now: datetime,
-    target: StatusBarController,
-) -> NSMenu:
-    menu = NSMenu.alloc().init()
-    menu.addItem_(disabled_menu_item(flatten_menu_title(menu_title_for_status(status, now))))
-    menu.addItem_(disabled_menu_item(session_detail_for_status(status, now)))
-    menu.addItem_(NSMenuItem.separatorItem())
-
-    if getattr(target, "settings", None) is not None:
-        selected = target.settings.session_open_action(status.provider, status.origin)
-    else:
-        selected = None
-    selected = selected or default_session_open_action(status)
-    for action in available_session_open_actions(status):
-        add_session_open_action_item(
-            menu,
-            session_open_action_label(status, action),
-            status,
-            action,
-            target,
-            selected=action == selected,
-        )
-
-    # Identity color override: the spec's "auto-assigned, OVERRIDABLE".
-    # Auto + the eight palette hues, each shown as its own colored dot.
-    menu.addItem_(NSMenuItem.separatorItem())
-    identity_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Identity Color", None, ""
-    )
-    identity_menu = NSMenu.alloc().init()
-    current_override = None
-    if getattr(target, "settings", None) is not None:
-        current_override = target.settings.colors.session_color(status.agent_id)
-    choices: list[tuple[str, str | None]] = [("Automatic", None)]
-    choices.extend(
-        (hex_color, hex_color) for hex_color in colors_module.IDENTITY_PALETTE
-    )
-    for label, hex_color in choices:
-        choice = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            label if hex_color is None else f"● {label}",
-            "setSessionIdentityColor:",
-            "",
-        )
-        choice.setTarget_(target)
-        choice.setRepresentedObject_({"agent_id": status.agent_id, "color": hex_color})
-        if hex_color is not None:
-            attributed = NSMutableAttributedString.alloc().initWithString_(f"● {label}")
-            attributed.addAttribute_value_range_(
-                NSForegroundColorAttributeName, nscolor_from_hex(hex_color), (0, 1)
-            )
-            choice.setAttributedTitle_(attributed)
-        if (hex_color is None and current_override is None) or (
-            hex_color is not None and current_override == hex_color
-        ):
-            choice.setState_(NSOnState)
-        identity_menu.addItem_(choice)
-    identity_item.setSubmenu_(identity_menu)
-    menu.addItem_(identity_item)
-    return menu
-
-
-def add_session_open_action_item(
-    menu: NSMenu,
-    title: str,
-    status: AgentStatus,
-    action: str,
-    target: StatusBarController,
-    *,
-    selected: bool,
-) -> None:
-    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        title,
-        "openSessionWithAction:",
-        "",
-    )
-    item.setTarget_(target)
-    item.setRepresentedObject_({"status": status, "action": action})
-    item.setState_(1 if selected else 0)
-    menu.addItem_(item)
-
-
 _session_row_icon_cache: dict[tuple, object] = {}
 
 
@@ -18697,10 +18496,6 @@ def app_icon(path: str):
     return image
 
 
-def flatten_menu_title(title: str) -> str:
-    return " · ".join(part.strip() for part in title.splitlines() if part.strip())
-
-
 def build_error_menu(exc: Exception) -> NSMenu:
     menu = NSMenu.alloc().init()
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -18767,7 +18562,7 @@ def unseen_completions(
 
 def recent_statuses(snapshot) -> list[AgentStatus]:
     """Main sessions only -- sub-agents render indented under their
-    parent (active_subagents_by_parent), not as top-level rows."""
+    parent (via the mailbox worker rollup), not as top-level rows."""
     statuses = [status for status in snapshot.statuses if not status.is_subagent]
     # Freshly finished sessions stay visible (with their "new" tag)
     # even while other sessions keep working -- the collector demotes
@@ -18809,22 +18604,6 @@ def recent_statuses(snapshot) -> list[AgentStatus]:
     return statuses[:12]
 
 
-def active_subagents_by_parent(snapshot) -> dict[str, list[AgentStatus]]:
-    """Fresh, still-running sub-agents grouped by their parent session.
-    Finished sub-agents are noise and drop out immediately."""
-    groups: dict[str, list[AgentStatus]] = {}
-    for status in snapshot.statuses:
-        if not status.is_subagent or status.mode == AgentMode.COMPLETED:
-            continue
-        parent = status.parent_agent_id
-        if parent is None:
-            continue
-        groups.setdefault(parent, []).append(status)
-    for children in groups.values():
-        children.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
-    return groups
-
-
 def ask_statuses(projection, settings=None) -> list[AgentStatus]:
     """Source rows for the projection's proven actionable requests."""
     if not isinstance(projection, AttentionProjection):
@@ -18833,42 +18612,6 @@ def ask_statuses(projection, settings=None) -> list[AgentStatus]:
             settings or AgentMonitorSettings(),
         )
     return [row.source_status for row in projection.actionable_attention]
-
-
-def menu_title_for_status(status: AgentStatus, now: datetime) -> str:
-    state = state_for_mode(status.mode)
-    title, project = session_title_parts(status)
-    origin = menu_origin_label(status)
-    if origin:
-        first_line = f"{state.label}  {origin}  {title}"
-    else:
-        first_line = f"{state.label}  {title}"
-    if project:
-        return f"{first_line}\n{project}"
-    return first_line
-
-
-def session_detail_for_status(status: AgentStatus, now: datetime) -> str:
-    state = state_for_mode(status.mode)
-    age = format_age(status.age_seconds(now))
-    details = [state.label, age]
-    if status.origin:
-        details.append(status.origin)
-    if status.tool_name:
-        details.append(status.tool_name)
-    return " · ".join(details)
-
-
-def menu_origin_label(status: AgentStatus) -> str | None:
-    if not status.origin:
-        return None
-    return status.origin
-
-
-def primary_session_open_action(status: AgentStatus | object) -> str | None:
-    if not isinstance(status, AgentStatus):
-        return None
-    return default_session_open_action(status)
 
 
 def session_title_parts(status: AgentStatus) -> tuple[str, str | None]:
@@ -18942,17 +18685,6 @@ def image_for_symbol(symbol: str, description: str):
 def log_status_bar(message: str) -> None:
     timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
     print(f"{timestamp} {message}", flush=True)
-
-
-def format_age(seconds: float) -> str:
-    seconds = max(0, int(seconds))
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes, rest = divmod(seconds, 60)
-    if minutes < 60:
-        return f"{minutes}m{rest:02d}s"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}h{minutes:02d}m"
 
 
 def open_url(url: str) -> None:

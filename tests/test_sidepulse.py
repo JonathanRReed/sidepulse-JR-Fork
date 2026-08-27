@@ -1240,53 +1240,6 @@ for (const event of [
             self.assertIsNone(status.cwd)
             self.assertNotIn("startup replay", status.display_name)
 
-    def test_status_bar_session_menu_title_is_task_and_project(self) -> None:
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-
-        now = datetime.now(timezone.utc)
-        status = AgentStatus(
-            provider="codex",
-            agent_id="codex:session:019ee395",
-            display_name="sidepulse: Refine README agent status modes (019ee395)",
-            mode=AgentMode.COMPLETED,
-            updated_at=now,
-            event_name="Stop",
-            session_id="019ee395",
-            cwd="/Users/pero/pgit/sidepulse",
-        )
-
-        self.assertEqual(
-            status_bar.menu_title_for_status(status, now),
-            "Done  Refine README agent status modes\nsidepulse",
-        )
-        self.assertEqual(
-            status_bar.session_detail_for_status(status, now).split(" · ")[0],
-            "Done",
-        )
-
-    def test_status_bar_session_menu_title_suppresses_duplicate_project(self) -> None:
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-
-        now = datetime.now(timezone.utc)
-        status = AgentStatus(
-            provider="grok",
-            agent_id="grok:session:019f7724",
-            display_name="ai_food (019f7724)",
-            mode=AgentMode.WAITING_FOR_INPUT,
-            updated_at=now,
-            event_name="Notification",
-            session_id="019f7724",
-            cwd="/Users/pero/git/ai_food",
-        )
-
-        self.assertEqual(status_bar.menu_title_for_status(status, now), "Ask  ai_food")
-
     def test_status_bar_grok_provider_uses_badge_icon(self) -> None:
         try:
             from sidepulse import status_bar
@@ -2302,42 +2255,6 @@ for (const event of [
             0.0,
         )
 
-    def test_status_bar_session_row_has_inline_options(self) -> None:
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-
-        now = datetime.now(timezone.utc)
-        status = AgentStatus(
-            provider="claude",
-            agent_id="claude:session:abc",
-            display_name="Claude abc",
-            mode=AgentMode.WAITING_FOR_INPUT,
-            updated_at=now,
-            event_name="Notification",
-            session_id="1ca4348e-2aec-4147-9e81-d7d56364d257",
-            cwd="/Users/pero/pgit/sdstatus_bitbang",
-        )
-        target = SimpleNamespace(settings=AgentMonitorSettings())
-
-        row = status_bar.build_session_menu_item(status, now, target)
-        options = status_bar.build_session_options_menu(status, now, target)
-        titles = [
-            options.itemAtIndex_(index).title()
-            for index in range(options.numberOfItems())
-            if options.itemAtIndex_(index).title()
-        ]
-
-        self.assertEqual(row.title(), status_bar.native_session_menu_title(status))
-        self.assertIsNotNone(row.image())
-        self.assertIsNone(row.submenu())
-        self.assertIsNone(row.view())
-        self.assertEqual(row.representedObject(), status)
-        self.assertTrue(any(title.startswith("Ask  Claude abc") for title in titles))
-        self.assertIn("Open in VS Code", titles)
-        self.assertIn("Resume in Terminal", titles)
-
     def test_status_bar_native_session_row_uses_task_title(self) -> None:
         try:
             from sidepulse import status_bar
@@ -2371,85 +2288,6 @@ for (const event of [
         self.assertNotIn("Working", title)
         self.assertNotIn("Claude in VS Code", title)
         self.assertNotEqual(title, "Working  Claude in VS Code  functions")
-
-    def test_status_bar_session_row_shows_origin_when_known(self) -> None:
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-
-        now = datetime.now(timezone.utc)
-        status = AgentStatus(
-            provider="claude",
-            agent_id="claude:session:abc",
-            display_name="Claude abc",
-            mode=AgentMode.WAITING_FOR_INPUT,
-            updated_at=now,
-            event_name="Notification",
-            session_id="1ca4348e-2aec-4147-9e81-d7d56364d257",
-            cwd="/Users/pero/pgit/sdstatus_bitbang",
-            origin="Claude in VS Code",
-        )
-
-        self.assertTrue(
-            status_bar.menu_title_for_status(status, now).startswith(
-                "Ask  Claude in VS Code  Claude abc"
-            )
-        )
-        self.assertIn("Claude in VS Code", status_bar.session_detail_for_status(status, now))
-        self.assertEqual(status_bar.primary_session_open_action(status), SESSION_OPEN_VSCODE)
-
-        target = SimpleNamespace(
-            settings=AgentMonitorSettings().with_session_open_action(
-                "claude",
-                SESSION_OPEN_TERMINAL,
-                "Claude in VS Code",
-            )
-        )
-        options = status_bar.build_session_options_menu(status, now, target)
-        by_title = {
-            options.itemAtIndex_(index).title(): options.itemAtIndex_(index)
-            for index in range(options.numberOfItems())
-            if options.itemAtIndex_(index).title()
-        }
-        self.assertEqual(by_title["Resume in Terminal"].state(), 1)
-        self.assertEqual(by_title["Open in VS Code"].state(), 0)
-
-    def test_codex_session_options_are_codex_specific(self) -> None:
-        try:
-            from sidepulse import status_bar
-        except SystemExit as exc:
-            self.skipTest(str(exc))
-
-        now = datetime.now(timezone.utc)
-        status = AgentStatus(
-            provider="codex",
-            agent_id="codex:session:abc",
-            display_name="Codex abc",
-            mode=AgentMode.WORKING,
-            updated_at=now,
-            event_name="PreToolUse",
-            session_id="019ee395-2f64-7cc3-b566-afcc1d626160",
-            cwd="/tmp/project with spaces",
-        )
-        target = SimpleNamespace(settings=AgentMonitorSettings())
-
-        row = status_bar.build_session_menu_item(status, now, target)
-        options = status_bar.build_session_options_menu(status, now, target)
-        titles = [
-            options.itemAtIndex_(index).title()
-            for index in range(options.numberOfItems())
-            if options.itemAtIndex_(index).title()
-        ]
-
-        self.assertEqual(row.title(), status_bar.native_session_menu_title(status))
-        self.assertIsNotNone(row.image())
-        self.assertIsNone(row.submenu())
-        self.assertTrue(any(title.startswith("Working  Codex abc") for title in titles))
-        self.assertIn("Open in Codex", titles)
-        self.assertIn("Resume in Terminal", titles)
-        self.assertNotIn("Open in VS Code", titles)
-        self.assertNotIn("Open Claude App", titles)
 
     def test_status_bar_device_submenu_has_brightness_slider(self) -> None:
         try:
@@ -18143,7 +17981,6 @@ class T3AdoptionTests(unittest.TestCase):
             tool="ExitPlanMode",
         )
         self.assertTrue(plan.is_plan_ready)
-        self.assertIn("Plan ready", self.status_bar.session_row_suffix(plan))
 
     def test_unseen_completions_cleared_by_menu_open(self) -> None:
         from types import SimpleNamespace as NS
@@ -18188,20 +18025,6 @@ class T3AdoptionTests(unittest.TestCase):
         self.assertIn("claude:session:a", self.controller.cleared_session_ids)
         snapshot = self.controller.last_snapshot
         self.assertEqual(self.status_bar.unseen_completions(snapshot, self.controller), [])
-
-    def test_working_suffix_formats_minutes(self) -> None:
-        working = self._status("claude:session:a", AgentMode.WORKING)
-        suffix = self.status_bar.session_row_suffix(
-            working, working_since=time.monotonic() - 250.0
-        )
-        self.assertIn("4m", suffix)
-        with_workers = self.status_bar.session_row_suffix(working, worker_count=3)
-        self.assertIn("3 workers", with_workers)
-
-
-class MenuTeachingTests(unittest.TestCase):
-    """The dropdown teaches: empty state says what happens next, and a
-    daily tip advertises a feature (clicking it opens the right pane)."""
 
     def _menu(self, *, hooks_installed: bool = True):
         from sidepulse import status_bar

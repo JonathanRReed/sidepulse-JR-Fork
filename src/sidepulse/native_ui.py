@@ -518,11 +518,11 @@ def build_sidebar_table(width: float = 200.0):
 
 # --- Plain controls for stack-view content --------------------------------
 #
-# Unlike this file's frame-based predecessors in status_bar.py
-# (add_button/add_checkbox/add_editable_field/add_slider, still used by
-# the menu-bar dropdown and the first-launch setup window -- neither of
-# those changed here), these take no x/y: NSStackView positions its
-# arranged subviews itself, so a fixed origin would just be discarded.
+# Unlike this file's frame-based predecessors in status_bar.py (the
+# add_button/add_checkbox/add_editable_field/add_slider family, deleted
+# 2026-08-26 once nothing outside its own tests called it), these take
+# no x/y: NSStackView positions its arranged subviews itself, so a
+# fixed origin would just be discarded.
 # Controls with their own intrinsic content size (buttons, popups, text
 # fields) need no size hint at all; NSSlider has no useful intrinsic
 # width, so callers should wrap it in constrain_width().
