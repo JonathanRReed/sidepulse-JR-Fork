@@ -5,6 +5,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "src" / "sidepulse" / "provider_usage_status_bar.py"
+# The usage-row builder was extracted here for the facade's size ratchet
+# (2026-08-27); the menu-composition contract spans both files.
+MENU_MODULE = ROOT / "src" / "sidepulse" / "usage_menu_injection.py"
 
 
 def _tree():
@@ -46,10 +49,11 @@ def test_provider_usage_runs_through_background_service_and_main_thread_apply():
 
 def test_menu_replaces_legacy_capacity_card_with_compact_native_usage():
     source = MODULE.read_text(encoding="utf-8")
+    menu_source = MENU_MODULE.read_text(encoding="utf-8")
     assert "_original_build_menu" in source
-    assert "_usage_menu_item" in source
-    assert "project_usage_menu" in source
-    assert "Open Usage Center…" in source
+    assert "_usage_menu_item" in menu_source
+    assert "project_usage_menu" in menu_source
+    assert "Open Usage Center…" in menu_source
     assert "No reading" not in source
     assert "no reading" not in source
 
