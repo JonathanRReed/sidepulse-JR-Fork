@@ -230,6 +230,18 @@ def write_hook_payload(provider, log_path, payload_text):
     write_hook_line(log_path, format_hook_payload(provider, payload_text))
 
 
+class _InlineHardwareWorker:
+    """Run the LIVE hardware pipeline synchronously: render on submit,
+    then apply the result exactly the way the runtime worker does."""
+
+    def __init__(self, controller) -> None:
+        self._controller = controller
+
+    def submit(self, command) -> None:
+        result = self._controller._sync_hardware_device(command.payload)
+        self._controller._apply_hardware_write_result(command, result)
+
+
 def snapshot_from_statuses(statuses, **kwargs):
     """Test fixture: compose a MonitorSnapshot from bare statuses.
 
@@ -22839,6 +22851,10 @@ class RelayControllerContinuityTests(unittest.TestCase):
         delayed.assert_not_called()
 
     def test_status_rebuild_keeps_controller_phase_and_maps_two_to_eight_leds(self) -> None:
+        # Drives sync_leds -- the SHIPPED pipeline (request, worker render,
+        # result apply) -- with an inline worker. The old version drove
+        # sync_leds_now, a hand-copied ladder that had been dead since
+        # 2026-08-13 and is deleted now.
         device_root = Path(self._tmp.name) / "SidePulseDot"
         device_root.mkdir()
         target = device_root / "LEDS.LED"
@@ -22870,6 +22886,12 @@ class RelayControllerContinuityTests(unittest.TestCase):
 
         initial = (_status("codex", AgentMode.WORKING), _status("claude", AgentMode.WORKING))
         changed = (_status("codex", AgentMode.WORKING), _status("claude", AgentMode.IDLE_READY))
+        clock = {"now": 100.1}
+        self.controller.leds_enabled = True
+        self.controller._hardware_write_active = True
+        self.controller.led_animation_until_monotonic = 0.0
+        self.controller._relay_epoch = 100.0
+        self.controller._hardware_write_worker = _InlineHardwareWorker(self.controller)
         with (
             patch.object(self.controller, "status_bar_devices", return_value=[device]),
             patch.object(
@@ -22880,12 +22902,13 @@ class RelayControllerContinuityTests(unittest.TestCase):
             patch.object(self.controller, "schedule_screen_bar_sync", side_effect=capture_schedule),
             patch(
                 "sidepulse.status_bar.time.monotonic",
-                side_effect=[100.1, 100.12, 100.15, 100.9, 100.92, 100.95],
+                side_effect=lambda: clock["now"],
             ),
         ):
-            self.controller.sync_leds_now(AgentMode.WORKING, None, "agent", initial)
+            self.controller.sync_leds(AgentMode.WORKING, None, "agent", initial)
             first_program = target.read_text(encoding="utf-8")
-            self.controller.sync_leds_now(AgentMode.WORKING, None, "agent", changed)
+            clock["now"] = 100.9
+            self.controller.sync_leds(AgentMode.WORKING, None, "agent", changed)
             rebuilt_program = target.read_text(encoding="utf-8")
 
         self.assertEqual(self._first_pulse_index(first_program), 0)
@@ -23009,11 +23032,18 @@ class RelayControllerContinuityTests(unittest.TestCase):
             payloads.append(payload)
             self.controller.applyScreenBarSync_(payload)
 
+        # Live pipeline, inline worker (the hand-copied sync_leds_now
+        # ladder this test used to drive was deleted 2026-08-26).
+        self.controller.leds_enabled = True
+        self.controller._hardware_write_active = True
+        self.controller.led_animation_until_monotonic = 0.0
+        self.controller._relay_epoch = 100.0
+        self.controller._hardware_write_worker = _InlineHardwareWorker(self.controller)
         with (
             patch.object(
                 self.controller,
                 "status_bar_devices",
-                side_effect=[[physical], [virtual_device], [physical], [virtual_device]],
+                return_value=[physical, virtual_device],
             ),
             patch.object(
                 self.controller,
@@ -23029,9 +23059,9 @@ class RelayControllerContinuityTests(unittest.TestCase):
             ),
             patch("sidepulse.status_bar.time.monotonic", return_value=100.1),
         ):
-            self.controller.sync_leds_now(AgentMode.WORKING, None, "agent", initial)
+            self.controller.sync_leds(AgentMode.WORKING, None, "agent", initial)
             first_physical = physical_target.read_text(encoding="utf-8")
-            self.controller.sync_leds_now(
+            self.controller.sync_leds(
                 AgentMode.WORKING,
                 None,
                 "agent",
@@ -23040,15 +23070,21 @@ class RelayControllerContinuityTests(unittest.TestCase):
             second_physical = physical_target.read_text(encoding="utf-8")
 
         self.assertEqual(first_physical, second_physical)
-        self.assertEqual(virtual.set_program.call_count, 2)
-        first_virtual = virtual.set_program.call_args_list[0].args[0]
-        second_virtual = virtual.set_program.call_args_list[1].args[0]
+        # The live pipeline paints the bar twice per sync: once inline for
+        # immediate feedback, once from the post-write schedule carrying
+        # the physical anchor. Four paints for two syncs.
+        self.assertEqual(virtual.set_program.call_count, 4)
+        first_virtual = virtual.set_program.call_args_list[1].args[0]
+        second_virtual = virtual.set_program.call_args_list[3].args[0]
         self.assertNotEqual(first_virtual, second_virtual)
         self.assertEqual(
-            virtual.set_program.call_args_list[0].kwargs["dedupe_token"],
             virtual.set_program.call_args_list[1].kwargs["dedupe_token"],
+            virtual.set_program.call_args_list[3].kwargs["dedupe_token"],
         )
-        self.assertEqual(payloads[0]["started_at"], 100.1)
+        # A real write carries a physical anchor instant (from the worker
+        # clock); the deduped second write carries none, so the bar keeps
+        # its phase.
+        self.assertIsInstance(payloads[0]["started_at"], float)
         self.assertIsNone(payloads[1]["started_at"])
 
 

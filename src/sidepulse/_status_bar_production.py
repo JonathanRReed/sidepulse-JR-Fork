@@ -335,10 +335,6 @@ else:
             self._capture_hardware_render_colors()
             return _LegacyStatusBarController.sync_leds(self, *args, **kwargs)
 
-        def sync_leds_now(self, *args, **kwargs):
-            self._capture_hardware_render_colors()
-            return _LegacyStatusBarController.sync_leds_now(self, *args, **kwargs)
-
         def _sync_hardware_device(self, request):
             started = time.perf_counter()
             outcome = "ok"
