@@ -17,11 +17,6 @@ from .capacity_types import (
     SampleDisposition,
     SourceKey,
 )
-from .provider_facts import (
-    ProviderQuotaWindow,
-    WatermarkOrder,
-    compare_watermarks,
-)
 
 MAX_RESET_FUTURE_SECONDS = 366 * 24 * 60 * 60
 MILLISECONDS_EPOCH_THRESHOLD = 100_000_000_000
@@ -131,37 +126,6 @@ class ResetContinuityDecision:
     disposition: SampleDisposition
     forecast_eligible: bool
     reason_code: str
-
-
-def accept_newer_quota_windows(
-    previous: tuple[ProviderQuotaWindow, ...],
-    incoming: tuple[ProviderQuotaWindow, ...],
-) -> tuple[ProviderQuotaWindow, ...]:
-    """Merge quota lanes only when exact source watermark authority advances."""
-    if not (
-        type(previous) is tuple
-        and type(incoming) is tuple
-        and len(previous) <= 128
-        and len(incoming) <= 128
-        and all(type(window) is ProviderQuotaWindow for window in (*previous, *incoming))
-    ):
-        raise ValueError("invalid quota window batch")
-    accepted: dict[QuotaLaneKey, ProviderQuotaWindow] = {}
-    for window in previous:
-        existing = accepted.get(window.lane_key)
-        if existing is None or compare_watermarks(
-            window.watermark,
-            existing.watermark,
-        ) is WatermarkOrder.NEWER:
-            accepted[window.lane_key] = window
-    for window in incoming:
-        existing = accepted.get(window.lane_key)
-        if existing is None or compare_watermarks(
-            window.watermark,
-            existing.watermark,
-        ) is WatermarkOrder.NEWER:
-            accepted[window.lane_key] = window
-    return tuple(accepted[key] for key in sorted(accepted))
 
 
 def derive_reset_countdown(reset: ResetFact, *, now: float) -> ResetCountdown:

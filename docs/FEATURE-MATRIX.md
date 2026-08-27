@@ -43,7 +43,7 @@ gate has passed for that exact commit.
 | Color palettes, blend modes, provider identity, per-device brightness and calibration | Shipped | Reviewed defaults |
 | 18-motion vocabulary (`PROVIDER_ANIMATION_CHOICES`), including the 2026-08-26 sourced KITT, Gradient, Marquee, and Duotone; previews route through the real solo renderer | Shipped (0.4.0) | Automatic |
 | Charging trickle while idle (wattage-paced, yields to any agent claim and pinned displays) | Shipped (0.4.0) | On |
-| Night warmth and optional night dim (7 PM–7 AM), composed with the ambient stack | Shipped | Warmth on, dim off |
+| Night warmth and optional night dim (7 PM–7 AM), composed with the ambient stack | Shipped | Off |
 | Lid animations (preset Lid Closed / Lid Open programs, brightness-composed) | Shipped | Presets |
 | Timer/timebox display with draining fill and chime | Shipped | Off |
 | Studio: hand-written LED programs, saved library, `INIT.LED` power-up burn | Shipped | Off |
@@ -67,7 +67,8 @@ gate has passed for that exact commit.
 | Native accounting for ChatGPT/Codex, Claude, Cursor, Devin, Grok, Antigravity, and optional OpenAI API org usage | Shipped | Provider-specific setup |
 | Browser-session import for provider auth, behind per-provider consent, secrets in Keychain | Shipped | Off |
 | Reconnect truth model: signed-out providers watch their own credential file, transient failures ride an exponential ladder, reconnect buttons probe before claiming success | Shipped (0.4.0) | On |
-| Quota alerts switch (reset blink, pace notifications, threshold effects, connection cues) and finite reset celebrations | Shipped (0.4.0) | Alerts switch in Extras |
+| Quota alerts switch (reset blink, pace notifications, threshold effects, connection cues) | Shipped (0.4.0) | Off (switch in Extras) |
+| Reset celebrations: finite confetti sweep plus one notification per refill, courtesy-budget gated (deliberately not behind the alerts switch) | Shipped (0.4.0) | On |
 | Quota Runway LED display, fed from the usage plane's own gated lanes (worst remaining lane, provider-colored) | Shipped (0.4.0) | Selectable per device |
 | Local usage and cost summaries with priced-coverage disclosure ("NN% of tokens priced") | Shipped | Transcript-scan opt-ins apply |
 | Codex capacity windows through the capacity authority | Shipped | On where evidence exists |

@@ -185,7 +185,9 @@ gated the same way every shipped wave has been.
 
 - Two direct commits on 08-17: `0d1082c` (closed-lid control rework,
   audit.py status-history JSONL + CSV/HTML export — we already carry our
-  own hardened audit.py; theirs adds battery/lid snapshots to rows) and
+  own hardened audit.py; theirs adds battery/lid snapshots to rows. Our
+  own status-audit export plane was deleted 2026-08-26; audit.py is the
+  state-directory janitor now) and
   `5b7ea52` (`scripts/macos-sd-diagnostics.sh`). Any future idea-port of
   keep-awake/lid work should read `0d1082c` first — it rewrote those
   surfaces on top of what we forked.

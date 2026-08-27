@@ -49,7 +49,6 @@ from sidepulse.render_policy import (
     RenderSchedule,
     choose_render_cadence,
     choose_render_schedule,
-    refresh_divisor_fps,
 )
 from sidepulse.screen_bar_pipeline import ColorSample, SamplePair
 
@@ -328,46 +327,9 @@ def test_a_144hz_panel_gets_the_thirty_fps_breathe_it_asks_for(monkeypatch) -> N
     )
     assert schedule.cadence.fps == 30.0
     assert _delivered_fps(monkeypatch, schedule) == pytest.approx(30.0, abs=0.2)
-    # The intermediate value that used to be handed to the driver snap. It is
-    # off the timer's lattice (60/28.8 = 2.083), which is the whole defect.
-    assert refresh_divisor_fps(144.0, 30.0) == pytest.approx(28.8)
 
 
-# --- the guard against re-adoption -------------------------------------------
-
-
-def test_the_schedule_never_snaps_a_cadence_to_the_panel(monkeypatch) -> None:
-    """`refresh_divisor_fps` is correct about panels and must not be composed
-    with the driver snap in front of it. Reinstating the call fails here."""
-    calls: list[tuple] = []
-
-    def spy(refresh_hz, target_fps):
-        calls.append((refresh_hz, target_fps))
-        return refresh_divisor_fps(refresh_hz, target_fps)
-
-    monkeypatch.setattr(render_policy, "refresh_divisor_fps", spy)
-    for panel in ALL_PANELS:
-        for link in (True, False):
-            for gentle in (True, False):
-                choose_render_schedule(
-                    RenderEnvironment(thermal="fair"),
-                    True,
-                    display_link_available=link,
-                    gentle_motion=gentle,
-                    refresh_hz=panel,
-                )
-    assert calls == [], (
-        "choose_render_schedule consulted the panel divisor snap; composing it "
-        "with deliverable_fps is what cut 30 fps to 20 on a 144 Hz panel"
-    )
-
-
-def test_the_panel_divisor_snap_itself_is_still_correct() -> None:
-    """It is kept, unwired, because it is the right answer for a driver that is
-    genuinely vsync-locked to the panel -- which neither driver here is."""
-    assert refresh_divisor_fps(120.0, 20.0) == pytest.approx(20.0)  # exactly 1/6
-    assert refresh_divisor_fps(90.0, 20.0) == pytest.approx(18.0)  # 1/5, not 1/4.5
-    assert refresh_divisor_fps(144.0, 30.0) == pytest.approx(28.8)  # 1/5
-    assert refresh_divisor_fps(60.0, 90.0) == 60.0  # never above the panel
-    assert refresh_divisor_fps(None, 30.0) == 30.0  # no panel, no opinion
-    assert refresh_divisor_fps(0.0, 30.0) == 30.0
+# The guard against re-adoption used to spy on refresh_divisor_fps and
+# assert the schedule never called it. The function was deleted outright
+# on 2026-08-26 (tests were its only callers), so re-composing the panel
+# snap now fails at import, which is a stronger guard than the spy was.

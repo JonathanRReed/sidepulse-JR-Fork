@@ -1,8 +1,10 @@
-# SidePulse (JR fork)
+# JR-BAR (formerly SidePulse)
 
 A macOS menu-bar app that turns AI-agent activity into ambient light —
 on SidePulse LED hardware (the Pro in a MacBook's SD slot, the Dot on
-USB-C) and on an on-screen light bar that hugs the notch.
+USB-C) and on an on-screen light bar that hugs the notch. The rename to
+JR-BAR is display-name-first: bundle identifiers, file paths, and the
+`sidepulse` CLI keep the old name for now.
 
 When Claude Code or Codex is working, the lights breathe in that
 session's color. When a task finishes, they sweep green. When an agent
@@ -14,14 +16,16 @@ you glance at the light.
 This is a fork of
 [inteliwear/sidepulse](https://github.com/inteliwear/sidepulse) that
 grows the original device companion into a universal status indicator
-for the Mac. It diverges deliberately (hardware stays first-class, new
-signal surfaces, deep customization behind good defaults) but keeps
-the Python core merge-friendly with upstream.
+for the Mac. It is fully divergent — hardware stays first-class, new
+signal surfaces, deep customization behind good defaults — with no
+intention of merging back upstream; upstream work is reviewed and
+ported behavior by behavior instead.
 
 ## What it does
 
 - **Watches agent sessions** through provider hooks — Claude Code,
-  Codex, Gemini, Devin, Cursor, Grok, and friends. It knows the
+  Codex, Devin, Grok, Cursor, Hermes, OpenClaw, OpenCode, Antigravity,
+  and Kiro. It knows the
   difference between a main session and its sub-agent workers, between
   "finished and you've seen it" and "finished while you were away",
   and between a real blocked-on-you request (permission prompt, error)
@@ -32,7 +36,7 @@ the Python core merge-friendly with upstream.
   of live sessions (click one to jump to its terminal — or click the
   Screen Bar itself while an ask is live).
 - **Layers Mac signals on top**: calendar and reminder glows,
-  severe-weather warnings, battery, notification blinks, and quota
+  severe-weather warnings, battery, and quota
   alerts share one precedence ladder. A blocked agent always outranks
   the rest; per-Focus and per-device policies decide what else gets
   through (a Dot can be pinned to one provider, or to asks only).
@@ -52,8 +56,10 @@ sidepulse setup
 ```
 
 `sidepulse setup` walks through hook installation per provider,
-optional launch-at-login, and the app-bundle install (a sealed
-"SidePulse.app" so macOS permission grants attach to a real app name).
+installs SidePulse Pro Eject Prevention, and writes the status-bar
+LaunchAgent so the menu-bar app starts now and at login. (The sealed
+production "SidePulse.app" comes from the signed PKG built by
+`packaging/build_macos_pkg.sh`.)
 The menu-bar app's own Setup window covers the same ground with
 buttons. Everything works with zero granted permissions; individual
 features ask for what they need when you turn them on:
@@ -63,7 +69,6 @@ features ask for what they need when you turn them on:
 | Full Disk Access | Focus-mode reactions (dim/off/profile per Focus) | You enable Focus features |
 | Calendar / Reminders | Event and reminder glows | You enable those signals |
 | Screen Recording | The Screen Bar matching Alcove's live capsule width | Automatic if granted; quietly skipped otherwise |
-| Notifications DB (via FDA) | Per-app notification blinks | You enable notification blinks |
 
 ## The Screen Bar
 
@@ -106,8 +111,8 @@ wearing your colors.
   thread; a change-gated Screen Bar (60fps active, 30fps resting breathe) with 60Hz-capped WASM sampling;
   6,000+ checks in the verification gate; corrupt settings are preserved for recovery,
   never silently reset. Architecture notes live in
-  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), the build ledger in
-  [`docs/FORK-ROADMAP.md`](docs/FORK-ROADMAP.md).
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), the historical build
+  ledger in [`docs/archive/FORK-ROADMAP.md`](docs/archive/FORK-ROADMAP.md).
 
 ## Credits
 
@@ -254,15 +259,16 @@ the display indefinitely.
 The `sidepulse` Python package collects and normalizes local AI agent hook
 events. The macOS status-bar app receives hook events through a lightweight
 local Unix socket, keeps the latest agent states in memory, and writes only a
-small `latest.json` restart snapshot plus provider JSONL debug logs. Hooks also
-append `event-status.jsonl`, a compact decision log that records each hook event
-and the SidePulse status it produced for debugging/export. The app does not
-rescan historical logs or transcripts on every refresh.
+small `latest.json` restart snapshot plus provider JSONL debug logs. The app
+does not rescan historical logs or transcripts on every refresh.
 
 The package can also mirror the aggregate state to a mounted SidePulse Pro or
 SidePulse Dot by writing the current LED program to `LEDS.LED`.
 
-The monitor currently supports:
+The monitor supports every registered provider — Codex, Claude, Devin,
+Grok, Cursor, Hermes, OpenClaw, OpenCode, Antigravity, and Kiro
+(`sidepulse agent-monitor doctor` reports each provider's detected
+config and log paths). The founding four:
 
 | Provider | Config | Detected log |
 | --- | --- | --- |
@@ -317,12 +323,14 @@ Set up this Mac explicitly after package install:
 sidepulse setup
 ```
 
-`sidepulse setup` installs or refreshes Claude, Devin, Codex, and Grok hooks, installs
+`sidepulse setup` installs or refreshes hooks for every registered provider, installs
 SidePulse Pro Eject Prevention, writes the status-bar LaunchAgent, starts both helpers
 immediately, and enables them at login. This is intentionally an explicit
-command instead of a `pip install` side effect. To set up only one provider, use
-`sidepulse setup codex`, `sidepulse setup claude`, `sidepulse setup devin`, or
-`sidepulse setup grok`. Existing hook entries are preserved for every setup
+command instead of a `pip install` side effect. To set up only one provider,
+name it: `sidepulse setup codex`, `sidepulse setup claude`,
+`sidepulse setup cursor`, and so on. Every hook command is probe-run before
+any provider config is written; a command that cannot run is refused with a
+clear error. Existing hook entries are preserved for every setup
 command.
 To skip the status-bar app but still install hooks and SidePulse Pro Eject Prevention, use
 `sidepulse setup --no-status-bar`.
@@ -382,6 +390,9 @@ sidepulse agent-monitor install claude
 sidepulse agent-monitor install devin
 sidepulse agent-monitor install grok
 ```
+
+Any registered provider name works the same way (`cursor`, `hermes`,
+`openclaw`, `opencode`, `antigravity`, `kiro`).
 
 Each hook invokes a small, standard-library-only Python entry point. It writes
 the event to the monitor log and then makes a short best-effort local socket
@@ -548,14 +559,12 @@ firmware/websim `sdled.wasm` engine, then AppKit only draws the returned RGB
 frames.
 
 Open `Settings...` from the dropdown to manage agent integrations. The settings
-window can install or uninstall Claude, Devin, Codex, and Grok hooks. The transcript
+window can install or uninstall provider hooks. The transcript
 checkboxes control the file-based CLI/debug fallback; the status-bar app gets
 live updates from the local hook event socket. Settings are stored at
 `${XDG_CONFIG_HOME:-~/.config}/sidepulse/agent-monitor/settings.json`.
-
-Settings can export the hook decision log as CSV or HTML. This log lives at
-`${XDG_STATE_HOME:-~/.local/state}/sidepulse/agent-monitor/event-status.jsonl`
-and shows the path from provider hook event to interpreted SidePulse status.
+Safe diagnostic export lives in the History pane; the old hook decision
+log and its CSV/HTML exporters were deleted 2026-08-26.
 
 The `Keep Awake With Lid Closed` menu section controls the stronger sleep
 prevention policy:

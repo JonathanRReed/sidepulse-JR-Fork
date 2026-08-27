@@ -1,5 +1,9 @@
 # SidePulse Stabilization-First Implementation Plan
 
+> **Historical.** Executed in 2026-08. The `runtime_truth` plane this plan
+> introduces was deleted 2026-08-26 in the 0.5.0 coalescence — do not
+> re-implement from this document.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make SidePulse truthfully report agent activity and provider usage, maintain one stable device and runtime identity, isolate tests from the host Mac, simplify the menu and settings, and improve the Screen Bar without adding another integration or settings pane.

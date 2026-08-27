@@ -47,10 +47,10 @@ one real cycle (`colors ↔ led_status ↔ _led_status_legacy`).
 | Remote & integrations | `remote_peers.py`, `cloud_ingest.py`, `webhook_delivery.py`, `t3_compat.py` | Peer Macs over SFTP, loopback cloud-event ingest, outbound webhooks, T3 Code local-state reads |
 | Runtime scheduling | `runtime_scheduler.py`, `core_state.py`, `refresh_admission.py` | Timer/worker registries, latest-wins workers, core-state observation, refresh admission |
 | Firmware grammar | `led_wasm.py`, packaged `sdled.wasm` | Authoritative LED parser and animation stepping |
-| Usage and capacity | `usage_stats.py`, `provider_capacity.py`, `capacity_*` modules | Local usage aggregation, provider evidence, authority gates, forecasts, history, reset handling |
+| Usage and capacity | `usage_stats.py`, `provider_capacity.py`, `capacity_*` modules | Local usage aggregation, provider evidence, authority gates, history, reset handling (the quota-forecast plane was deleted 2026-08-26) |
 | Persistence | `settings.py` → `_settings_legacy.py`, `*_store.py`, `private_io.py` | Settings (facade + legacy body), ledgers, histories, atomic private-file writes, recovery from corrupt data |
 | Settings UI | `settings_window.py`, `settings_category_runtime.py`, `settings_navigation.py` | Pane builders, seven-category IA, navigation — currently glued to the monolith by `_install()` namespace injection (see Controller boundary) |
-| Packaging and launch | `app_bundle.py`, `status_bar_launch.py`, `packaging/` | Sealed app bundle, launch agent, signing, verification, installer and notarization |
+| Packaging and launch | `app_bundle.py`, `status_bar_launch.py`, `packaging/` | Bundle identity helpers (the production bundle is built by `packaging/build_macos_pkg.sh`; the development-wrapper builder was deleted 2026-08-26), launch agent, signing, verification, installer and notarization |
 
 ## Display pipeline
 

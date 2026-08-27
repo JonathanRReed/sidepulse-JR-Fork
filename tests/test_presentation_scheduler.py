@@ -21,7 +21,6 @@ from sidepulse.presentation_scheduler import (
     PresentationSchedulerInputs,
     PresentationSchedulerState,
     plan_presentation_schedule,
-    plan_presentation_timers,
 )
 from sidepulse.runtime_scheduler import (
     RUNTIME_TIMER_SELECTOR,
@@ -124,7 +123,6 @@ def test_all_relevance_and_lifecycle_combinations_follow_the_timer_matrix(
 
     assert _features(plan) == expected_features
     assert plan.reconcile_immediately is (active_surface and deadline_kind == "elapsed")
-    assert plan_presentation_timers(inputs, now=NOW) == plan.intents
 
 
 @pytest.mark.parametrize(

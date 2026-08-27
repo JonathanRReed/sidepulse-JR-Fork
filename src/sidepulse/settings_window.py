@@ -65,17 +65,51 @@ from .alcove_observation import (
     request_screen_recording_access,
     reset_alcove_status,
 )
-from .colors import ANIMATION_MODE_KEYS, MODE_ROW_LABELS, matching_preset
-from .led_status import ANIMATION_STYLE_CHOICES, program_for_display_state
+from .app_bundle import default_app_bundle_path, running_inside_bundle
+from .colors import (
+    ANIMATION_MODE_KEYS,
+    BLEND_MODE_CHOICES,
+    BLEND_MODE_CYCLE,
+    BLEND_MODE_DESCRIPTIONS,
+    BLEND_MODE_LABELS,
+    BLEND_MODE_ROUND_ROBIN,
+    FADE_MODE_KEYS,
+    MODE_ROW_LABELS,
+    matching_preset,
+)
+from .installed_agents import SurfaceSupportLevel, installed_surface_registrations
+from .led_status import (
+    ANIMATION_STYLE_CHOICES,
+    MAX_CHANNEL_GAIN,
+    MIN_CHANNEL_GAIN,
+    LedDisplayState,
+    brightness_percent,
+    led_count_for_target,
+    normalize_brightness,
+    program_for_display_state,
+    style_to_program,
+)
 from .operator_accessibility import normalize_semantic_text_scale
 from .provider_capacity import CapacityPolicyState, provider_capacity_policies
+from .providers import (
+    HOOK_PROVIDERS,
+    PROVIDER_SPECS,
+    negotiated_provider_sources,
+    provider_spec,
+)
 from .session_actions import provider_session_opener_providers
 from .settings import (
+    CALIBRATION_PROFILE_SLOTS,
+    LED_DISPLAY_AGENT,
+    LED_DISPLAY_BATTERY,
     LED_DISPLAY_QUOTA_RUNWAY,
+    LED_DISPLAY_STUDIO,
+    LED_DISPLAY_TIMER,
     LID_ANIMATION_CLOSED,
     LID_ANIMATION_CLOSED_ACTIVE,
     LID_ANIMATION_OPEN,
     LID_ANIMATION_OPEN_ACTIVE,
+    save_settings,
 )
 
 # _install() only fills names this module does not already define, so an
@@ -83,8 +117,10 @@ from .settings import (
 # these three are new, which status_bar does not re-export.
 from .virtual_device import (
     LED_COUNT,
+    VIRTUAL_DEVICE_ID,
     WINDOW_WIDTH,
     ScreenBarWingState,
+    VirtualLedView,
     screen_bar_wing_state,
     slot_width_for_screen,
 )

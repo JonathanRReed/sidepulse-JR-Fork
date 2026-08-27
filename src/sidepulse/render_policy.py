@@ -42,34 +42,6 @@ DISPLAY_LINK_MAX_FPS = 120.0
 DISPLAY_LINK_CEILINGS = (ACTIVE_RENDER_FPS, GENTLE_MOTION_FPS)
 
 
-def refresh_divisor_fps(refresh_hz: float | None, target_fps: float) -> float:
-    """Snap a target framerate to an integer divisor of the panel.
-
-    A cadence that is not a whole fraction of the display's refresh
-    beats against vsync and reads as judder -- the exact opposite of
-    what a slower cadence is for. 20 fps asked of a 120 Hz panel becomes
-    exactly every sixth frame; asked of a 90 Hz panel it becomes 18
-    (every fifth) rather than a cadence that slips a frame forever.
-
-    DELIBERATELY UNWIRED. This is the right answer for a driver that is
-    genuinely vsync-locked to the panel, and neither driver here is one -- see
-    the comment in ``choose_render_schedule`` for why composing it with
-    ``deliverable_fps`` cost a third of the framerate on every panel that is
-    not a whole multiple of 60. Kept because the reasoning above is sound and a
-    future vsync-locked driver would want it; not called, and
-    ``tests/test_panel_refresh_delivered_fps.py`` fails if it is called again.
-    """
-    if not refresh_hz or refresh_hz <= 0.0 or target_fps <= 0.0:
-        return target_fps
-    if target_fps >= refresh_hz:
-        return float(refresh_hz)
-    for divisor in range(1, 241):
-        candidate = refresh_hz / divisor
-        if candidate <= target_fps + 1e-9:
-            return candidate
-    return target_fps
-
-
 @dataclass(frozen=True, slots=True)
 class RenderEnvironment:
     visible: bool = True
@@ -80,25 +52,6 @@ class RenderEnvironment:
         default_factory=AccessibilityDisplayPreferences
     )
     accessibility_generation: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class AccessibilityGenerationChange:
-    presentation_dirty: bool
-    create_cue: bool
-
-
-def reduce_accessibility_generation_change(
-    previous: RenderEnvironment,
-    current: RenderEnvironment,
-) -> AccessibilityGenerationChange:
-    """Reduce a preference generation edge without inventing an arrival cue."""
-    return AccessibilityGenerationChange(
-        presentation_dirty=(
-            current.accessibility_generation != previous.accessibility_generation
-        ),
-        create_cue=False,
-    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -877,10 +877,6 @@ def transfer_limit_kbits(max_bytes: int, timeout_seconds: float) -> int:
     return max(1, int(math.ceil(needed_bits / (1024.0 * seconds))))
 
 
-def worst_case_transfer_bytes(limit_kbits: int, timeout_seconds: float) -> float:
-    return float(limit_kbits) * 1024.0 / 8.0 * max(0.1, float(timeout_seconds))
-
-
 SFTP_PATH: Final = Path("/usr/bin/sftp")
 #: Options that make this a read with no ambient authority: no prompts, no
 #: passwords, no keyboard-interactive, no port forwarding, no connection

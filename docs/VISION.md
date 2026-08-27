@@ -133,7 +133,7 @@ So the "general notification bar" ambition is fully served — anything can anno
 
 *Tier 1 — first-party adapters.* A lean Python protocol with heavy default implementations, registered in one static catalog, so adding Cursor or Antigravity is one file and the rest of the app does not change. Adopt t3code's **driver-kind vs instance-id split** now, not later: `codex` is the driver, `codex_work` and `codex_personal` are instances, and sessions reference instances. Multi-account is native from day one instead of a migration. Also reserve an `environment_id` field in session identity even though v1 only ever has one value — remote-machine aggregation later becomes additive rather than a schema break.
 
-*Tier 2 — the open Signal API, four doorways onto one socket:*
+*Tier 2 — the open Signal API, four doorways onto one socket* **(retired 2026-08-26, owner decision — kept for the record)**:
 1. **CLI:** `jrbar signal --source my-ci --subject build:main --state broken --title "3 tests failing" --action "Open log:open ./log"` — this is the doorway that gets us tmux users, cron jobs, Makefiles, and every harness we have not integrated.
 2. **Shortcuts action** — non-developers, Focus automations, Stream Deck.
 3. **Unix socket + JSON schema** — the same contract the first-party hook path uses, so nothing is second-class.
@@ -199,17 +199,17 @@ Crucially: `jrbar signal` also **reads** — `jrbar status --json` gives the who
 
 **Proof it worked.** A harness we have never integrated becomes visible by adding one manifest file with no Python changes. Sessions started before JR-BAR was installed appear correctly. Two JR-BAR instances reading the same physical directory do not double-count.
 
-### 7. The open Signal API and its trust model  ·  _medium_
+### 7. The open Signal API and its trust model  ·  RETIRED
 
-**What.** `jrbar signal` CLI, a Shortcuts action, the unix socket + JSON schema, and the pull-mode manifest — four doorways, one semantic Signal type with no presentation fields. Plus the permission layer: per-source approval cards in the dropdown, per-source urgency ceilings (default 'notice', promotion is an explicit user act, 'blocking' reserved for first-party agent adapters), token-bucket rate limiting with auto-mute, explicit approval for actions with the command shown in full. And `jrbar status --json` for reads.
-
-**Why.** This is the generalization the owner wants, done safely, and it is also the cheapest possible route to harness coverage — anything with a shell can feed us. It is already the approved next feature when the freeze lifts. The permission model is not overhead: our user is a developer who is already nervous about agents with shell access, and Conductor got publicly hammered for requesting far broader scopes to do far less.
-
-**Proof it worked.** A five-line shell script in someone else's CI puts a state on the bar within 30 seconds of reading the docs. A hostile plugin cannot exceed the flash-safety envelope, cannot latch, cannot occupy an agent slot, and cannot escalate. A flooding source is auto-muted without degrading the agent lane.
+**Retired 2026-08-26 (owner decision).** The open Signal API — the
+`jrbar signal` CLI, Shortcuts action, socket schema, pull-mode manifest,
+and its permission layer — is off the roadmap. The full entry lives in
+git history; nothing here should be built or claimed. (`sidepulse serve`
+remains the one shipped read-only loopback surface.)
 
 ### 8. Quota lane with honest provenance — and cut the bespoke forecasting  ·  _medium_
 
-**What.** Keep quota as a first-class lane (a generic three-window + named-extras + label/value-escape-hatch schema, per CodexBar's UsageSnapshot/RateWindow shape) with threshold-crossing-with-hysteresis notification: fire only on an actual crossing, mark all higher thresholds fired so one 30%->2% drop is one alert not three, re-arm on recovery. Tag every number with its provenance (provider-reported / model-priced / unpriced) and distinguish 'this harness has no quota API' from 'we have not heard from it yet' via a declarative capability flag on the adapter, not a switch-by-name. Adopt UsageFormatter's conventions wholesale. CUT the bespoke capacity_forecast / capacity_calibration / capacity_history machinery.
+**What.** Keep quota as a first-class lane (a generic three-window + named-extras + label/value-escape-hatch schema, per CodexBar's UsageSnapshot/RateWindow shape) with threshold-crossing-with-hysteresis notification: fire only on an actual crossing, mark all higher thresholds fired so one 30%->2% drop is one alert not three, re-arm on recovery. Tag every number with its provenance (provider-reported / model-priced / unpriced) and distinguish 'this harness has no quota API' from 'we have not heard from it yet' via a declarative capability flag on the adapter, not a switch-by-name. Adopt UsageFormatter's conventions wholesale. CUT the bespoke capacity_forecast / capacity_calibration / capacity_history machinery. (Done 2026-08-26 for capacity_forecast and capacity_calibration; capacity_history stays, behind retention consent.)
 
 **Why.** Quota anxiety is independently documented and real ('I limited out very fast this morning without even writing code'), and it is a genuinely different failure from 'my agent finished' — you can know an agent finished and still get blindsided by a dead quota mid-task. But we currently have five capacity modules doing prediction work that CodexBar does better with a fraction of the code, and prediction against an undocumented, changing token contract is a treadmill we will lose. Report what we know, honestly, and stop guessing.
 
@@ -271,7 +271,7 @@ _Options._ (a) Ship it now: calendar, weather, reminders, battery, builds all in
 
 _Options._ (a) Lead with SidePulse Pro/Dot; the app is the driver for the hardware. (b) Lead with free or cheap software (Screen Bar + menu bar, fully excellent alone); hardware is an upsell to people already in love. (c) Bundle.
 
-**Recommendation.** (b). Nobody buys a $50 accessory for an app they have not already come to depend on, and the category price anchor for the software is $15-20 one-time. vibesignal already ships an on-screen fallback specifically so people can try before buying hardware, and ai-pulse is a purely virtual version of your own device that exists because the software case stands alone. Build the virtual 8-slot bar into the dropdown so every software user sees exactly what the hardware would show — that is the conversion mechanism. Suggested packaging: free tier (Screen Bar + menu bar + 3 harnesses), $25 lifetime Pro (unlimited harnesses + the Signal API + quota lanes), hardware sold separately and never required.
+**Recommendation.** (b). Nobody buys a $50 accessory for an app they have not already come to depend on, and the category price anchor for the software is $15-20 one-time. vibesignal already ships an on-screen fallback specifically so people can try before buying hardware, and ai-pulse is a purely virtual version of your own device that exists because the software case stands alone. Build the virtual 8-slot bar into the dropdown so every software user sees exactly what the hardware would show — that is the conversion mechanism. Suggested packaging: free tier (Screen Bar + menu bar + 3 harnesses), $25 lifetime Pro (unlimited harnesses + quota lanes), hardware sold separately and never required.
 
 ### Divergent-but-merge-friendly fork, or hard divergence?
 
@@ -289,4 +289,4 @@ _Options._ (a) Keep the 8-hue identity palette as the primary way you tell sessi
 
 _Options._ (a) Stay PyObjC, as locked. (b) Rewrite in Swift for AppKit fidelity, performance, signing simplicity, and closer kinship with CodexBar. (c) Stay PyObjC for the shell, but extract the pure core into a language-agnostic, heavily tested package behind a JSON contract.
 
-**Recommendation.** (c). Do not rewrite now — a rewrite would consume the entire runway and produce the same product. But the work in builds #1-#3 (light language, signal core, surface descriptor) is pure logic with no AppKit in it, and if it lands as a standalone, fully tested Python package speaking a documented JSON contract, then a later Swift shell is a mechanical port of the UI layer rather than a from-scratch rebuild. It also gives us `jrbar` as a real CLI for free, which is build #7's foundation and the community-extensibility seam. This preserves the locked PyObjC direction while removing its long-term cost.
+**Recommendation.** (c). Do not rewrite now — a rewrite would consume the entire runway and produce the same product. But the work in builds #1-#3 (light language, signal core, surface descriptor) is pure logic with no AppKit in it, and if it lands as a standalone, fully tested Python package speaking a documented JSON contract, then a later Swift shell is a mechanical port of the UI layer rather than a from-scratch rebuild. It also gives us `jrbar` as a real CLI for free, the community-extensibility seam. This preserves the locked PyObjC direction while removing its long-term cost.

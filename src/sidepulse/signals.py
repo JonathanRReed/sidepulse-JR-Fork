@@ -260,23 +260,6 @@ def quota_crossings(
     return fired
 
 
-def quota_resets(
-    previous: dict[str, float],
-    current: dict[str, float],
-) -> list[str]:
-    """Window keys whose usage just RESET: a large downward transition
-    (>=50% before, near zero now). The mirror image of quota_crossings,
-    same first-observation silence -- restarts never celebrate."""
-    reset = []
-    for key, percent in current.items():
-        prior = previous.get(key)
-        if prior is None:
-            continue
-        if prior >= 50.0 and percent <= 10.0:
-            reset.append(key)
-    return reset
-
-
 # --- The interrupt budget ---------------------------------------------
 #
 # ONE gate. Every request to interrupt the owner -- an LED claim, a
@@ -522,20 +505,3 @@ def grant_interrupt(
         audible=True,
         reason=INTERRUPT_GRANTED,
     )
-
-
-def signal_hold_seconds(
-    style: SignalStyle,
-    *,
-    burst: int = DEFAULT_ALERT_BURST,
-) -> float:
-    """How long ONE burst of a moment signal claims the bar.
-
-    The burst budget decides this now -- exactly `burst` repetitions at
-    a cadence the 2Hz law permits, plus a settle beat -- instead of each
-    pattern carrying its own private count (a blink played 3, a
-    double-blink 2, and everything else held for "about two seconds",
-    which is a duration, not a burst). Same arithmetic as
-    grant_interrupt, for callers holding a style rather than a grant.
-    """
-    return normalize_alert_burst(burst) * budgeted_style(style).speed_seconds + INTERRUPT_SETTLE_SECONDS

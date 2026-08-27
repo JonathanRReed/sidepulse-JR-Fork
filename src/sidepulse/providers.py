@@ -1251,24 +1251,6 @@ _PROVIDER_SOURCE_REGISTRATIONS = (
 )
 
 
-def provider_source_registrations() -> tuple[ProviderSourceRegistration, ...]:
-    """Return the immutable, import-time first-party source declarations."""
-    return _PROVIDER_SOURCE_REGISTRATIONS
-
-
-def provider_capacity_source_registrations() -> tuple[ProviderSourceRegistration, ...]:
-    """Return only exact provider sources that declare capacity observation."""
-    capacity_capability = CapabilityIdentifier("remote_quota_windows")
-    return tuple(
-        registration
-        for registration in _PROVIDER_SOURCE_REGISTRATIONS
-        if any(
-            capability_id == capacity_capability
-            for capability_id, _versions in registration.capability_versions
-        )
-    )
-
-
 def negotiated_provider_sources() -> tuple[NegotiatedProviderSource, ...]:
     """Negotiate one visible canonical row per declared read capability."""
     rows: list[NegotiatedProviderSource] = []
@@ -1300,26 +1282,6 @@ def negotiated_provider_sources() -> tuple[NegotiatedProviderSource, ...]:
     return tuple(rows)
 
 
-def sources_with_capability(
-    sources: tuple[NegotiatedProviderSource, ...],
-    capability_id: CapabilityIdentifier,
-) -> tuple[NegotiatedProviderSource, ...]:
-    """Return exact capability rows that passed read-side negotiation."""
-    return tuple(
-        source
-        for source in sources
-        if source.declared_capability_id == capability_id
-        and source.observation_invocation_allowed
-    )
-
-# The CANONICAL event vocabulary -- what everything normalizes TO. Cursor,
-# Hermes and Antigravity register their own native names in their configs
-# (their spec .events tuples), but those must never enter this set:
-# canonical_event_name returns members of this set verbatim, so a native name
-# here would leak through ingest un-normalized and break mode mapping
-# downstream. ANTIGRAVITY_EVENTS is absent for exactly that reason -- its
-# PreInvocation is a config key, never an ingested event name, and a hand
-# written hook that forwarded the literal name is dropped rather than guessed.
 KNOWN_EVENTS = tuple(
     dict.fromkeys(
         event

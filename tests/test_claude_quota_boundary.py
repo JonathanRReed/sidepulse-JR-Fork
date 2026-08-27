@@ -8,7 +8,6 @@ from unittest.mock import patch
 import pytest
 
 from sidepulse import claude_quota
-from sidepulse.capacity_types import SourceHealthKind
 
 
 def _unexpected_boundary(*_args, **_kwargs):
@@ -57,15 +56,12 @@ def test_explicit_claude_evidence_normalization_is_pure_and_bounded() -> None:
         patch.object(urllib.request, "urlopen", side_effect=_unexpected_boundary),
     ):
         windows = claude_quota.windows_from_payload(payload)
-        health = claude_quota.unsupported_source_health(observed_at=100.0)
 
     assert [window["label"] for window in windows] == [
         "5-hour",
         "weekly",
         "Opus only",
     ]
-    assert health.kind is SourceHealthKind.UNSUPPORTED
-    assert health.reason_code == "claude_remote_quota_unsupported"
 
 
 def test_untrusted_claude_labels_and_unbounded_lanes_are_not_forwarded() -> None:

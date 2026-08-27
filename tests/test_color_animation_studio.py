@@ -44,7 +44,6 @@ from sidepulse.colors import (
     ColorSettings,
     StudioPreviewSession,
     agent_motion,
-    is_brand_color,
     normalize_studio_section,
     program_for_snapshot,
     provider_color_row,
@@ -55,6 +54,15 @@ from sidepulse.colors import (
 from sidepulse.led_status import LedDisplayState
 from sidepulse.models import AgentMode, AgentStatus
 from sidepulse.providers import PROVIDER_SPECS
+
+
+def is_brand_color(hex_value):
+    """Local guard over the live brand table (the src helper was deleted
+    2026-08-26: tests were its only callers; the TABLE is load-bearing)."""
+    from sidepulse.colors import _BRAND_NAME_BY_HEX, normalize_hex
+
+    return normalize_hex(hex_value, "#000000").upper() in _BRAND_NAME_BY_HEX
+
 
 
 def _status(provider: str, mode: AgentMode, *, agent_id: str | None = None) -> AgentStatus:

@@ -1,7 +1,7 @@
 """Threshold defaults and input coercion.
 
 Edge detection itself already existed in `signals.quota_crossings` (upward
-transitions only, silent on first sight) and `signals.quota_resets`. This
+transitions only, silent on first sight). This
 covers only what was actually missing: the owner's 90/95 defaults, coercion
 of user input, and the burst budget.
 """

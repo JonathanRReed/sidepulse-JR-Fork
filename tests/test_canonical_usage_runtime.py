@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from sidepulse import usage_stats
 from sidepulse.capacity_types import (
     CapacityUnit,
     CapacityValue,
@@ -19,15 +20,12 @@ from sidepulse.capacity_types import (
 from sidepulse.provider_contracts import CapabilityIdentifier
 from sidepulse.provider_facts import (
     EventToken,
-    ProviderQuotaWindow,
     ProviderWatermark,
-    SourceHealth,
     WatermarkBasis,
 )
 from sidepulse.providers import (
     NegotiatedProviderSource,
     negotiated_provider_sources,
-    sources_with_capability,
 )
 from sidepulse.refresh_policy import ProviderRefreshState, plan_menu_open_refresh
 from sidepulse.reset_policy import ResetBoundaryPlan, plan_reset_boundary_refresh
@@ -36,11 +34,30 @@ from sidepulse.usage_stats import (
     PricingCoverage,
     ProviderUsageResult,
     UsageSourceStatus,
-    scan_provider_usage,
     scan_usage,
     usage_summary_line,
 )
 from sidepulse.usage_view import UsageWindowViewModel
+
+
+def scan_provider_usage(source, root, cache_path, *, since_epoch):
+    """Local oracle over the live scanner (the thin public wrapper was
+    deleted 2026-08-26: tests were its only callers)."""
+    result, _totals = usage_stats._scan_provider_usage_with_totals(
+        source, root, cache_path, since_epoch=since_epoch
+    )
+    return result
+
+
+def sources_with_capability(sources, capability_id):
+    """Local filter (the src helper was deleted 2026-08-26)."""
+    return tuple(
+        row
+        for row in sources
+        if row.declared_capability_id == capability_id
+        and row.observation_invocation_allowed
+    )
+
 
 
 def _source(provider: str, capability: str) -> NegotiatedProviderSource:
@@ -373,40 +390,6 @@ def _watermark(source_key: SourceKey, sequence: int) -> ProviderWatermark:
         sequence=sequence,
         tie_break_rank=1,
     )
-
-
-def test_older_quota_watermark_cannot_replace_a_newer_reset_boundary() -> None:
-    from sidepulse.reset_policy import accept_newer_quota_windows
-
-    source_key = SourceKey("codex", "quota", "local", "remote_quota_windows")
-    lane_key = QuotaLaneKey(
-        source_key,
-        "scope:source-only",
-        "shared",
-        None,
-        "five-hour",
-        QuotaEffect.ALL_WORKLOADS,
-    )
-    current = ProviderQuotaWindow(
-        lane_key,
-        30.0,
-        300,
-        2_000.0,
-        _watermark(source_key, 2),
-        SourceHealth.HEALTHY,
-        False,
-    )
-    older = ProviderQuotaWindow(
-        lane_key,
-        20.0,
-        300,
-        1_900.0,
-        _watermark(source_key, 1),
-        SourceHealth.HEALTHY,
-        False,
-    )
-
-    assert accept_newer_quota_windows((current,), (older,)) == (current,)
 
 
 def test_static_capability_composition_runs_enabled_exact_sources_independently(

@@ -31,7 +31,6 @@ from .capacity_sources import (
     SupportedLaneEvidence,
 )
 from .capacity_types import (
-    CapacitySourceHealth,
     ObservationState,
     QuotaEffect,
     ResetState,
@@ -97,19 +96,6 @@ CLAUDE_AUTH_MODE = "consumer"
 
 class ClaudeQuotaUnavailableError(RuntimeError):
     pass
-
-
-def unsupported_source_health(*, observed_at: float) -> CapacitySourceHealth:
-    """Return bounded health for the unavailable trusted Claude source."""
-    return CapacitySourceHealth(
-        source=CLAUDE_QUOTA_SOURCE,
-        kind=SourceHealthKind.UNSUPPORTED,
-        observed_at=observed_at,
-        last_attempt_at=observed_at,
-        retry_at=None,
-        reason_code=CLAUDE_REMOTE_QUOTA_UNSUPPORTED,
-        has_last_known_good=False,
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,13 +493,3 @@ def capacity_evidence_from_windows(
         has_last_known_good=False,
         auth_mode=CLAUDE_AUTH_MODE,
     )
-
-
-def summary_line(windows: list[dict]) -> str | None:
-    if not windows:
-        return None
-    parts = [
-        f"{window['label']} {window['utilization']:.0f}%"
-        for window in windows[:3]
-    ]
-    return "Claude plan: " + " · ".join(parts)

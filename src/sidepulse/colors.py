@@ -3000,25 +3000,6 @@ def _attention_motion_programs(
     )
 
 
-def _with_attention_takeover(
-    program: str,
-    agents: list[_ActiveAgent],
-    *,
-    settings: ColorSettings,
-    brightness: float,
-) -> str:
-    """Compatibility wrapper for finite attention-arrival composition."""
-    if not settings.round_robin_urgency_alert:
-        return program
-    if not any(agent.state == LedDisplayState.ASK for agent in agents):
-        return program
-    return compose_attention_arrival(
-        program,
-        attention_color=settings.mode_color(MODE_ASK),
-        brightness=brightness,
-    ).arrival_program
-
-
 def _ambient_level_for_agent(agent: _ActiveAgent, settings: ColorSettings) -> str:
     """Where this LED already sits under the ordinary gentleness ceiling --
     the level an urgency takeover rises FROM, with no urgency lift applied."""
@@ -3583,10 +3564,6 @@ def swatch_name(hex_value: str) -> str:
         or _STATE_NAME_BY_HEX.get(key)
         or CUSTOM_SWATCH_NAME
     )
-
-
-def is_brand_color(hex_value: str) -> bool:
-    return normalize_hex(hex_value, "#000000").upper() in _BRAND_NAME_BY_HEX
 
 
 @dataclass(frozen=True)

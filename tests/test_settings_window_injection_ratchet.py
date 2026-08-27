@@ -17,42 +17,21 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "sidepulse"
 
-# Frozen 2026-08-19 (60 names). Shrink-only.
+# Frozen 2026-08-19 (60 names); shrunk to 31 on 2026-08-26 by the
+# explicit-import tranche (every name importable without a cycle moved
+# to a real import; what remains is defined in status_bar_legacy itself).
 INJECTED_NAMES = frozenset(
     {
         "ANIMATION_STYLE_DISPLAY_LABELS",
-        "BLEND_MODE_CHOICES",
-        "BLEND_MODE_CYCLE",
-        "BLEND_MODE_DESCRIPTIONS",
-        "BLEND_MODE_LABELS",
-        "BLEND_MODE_ROUND_ROBIN",
-        "CALIBRATION_PROFILE_SLOTS",
         "DEFAULT_SETTINGS_PANE",
-        "FADE_MODE_KEYS",
-        "HOOK_PROVIDERS",
-        "LED_DISPLAY_AGENT",
-        "LED_DISPLAY_BATTERY",
-        "LED_DISPLAY_STUDIO",
-        "LED_DISPLAY_TIMER",
-        "LedDisplayState",
-        "MAX_CHANNEL_GAIN",
-        "MIN_CHANNEL_GAIN",
-        "PROVIDER_SPECS",
         "SCREEN_BAR_PREVIEW_HEIGHT",
         "StatusBarController",
         "StatusBarDevice",
-        "SurfaceSupportLevel",
         "TIMEBOX_PRESET_MINUTES",
         "UsageGraphView",
-        "VIRTUAL_DEVICE_ID",
-        "VirtualLedView",
         "add_color_swatch",
         "add_preview_dot",
-        "brightness_percent",
-        "default_app_bundle_path",
         "focus_sync",
-        "installed_surface_registrations",
-        "led_count_for_target",
         "log_status_bar",
         "make_blend_mode_popup",
         "make_closed_lid_awake_policy_popup",
@@ -60,15 +39,10 @@ INJECTED_NAMES = frozenset(
         "make_preview_scenario_popup",
         "make_provider_opener_popup",
         "native_ui",
-        "negotiated_provider_sources",
-        "normalize_brightness",
         "nscolor_from_hex",
         "open_url",
         "os",
         "provider_icon_for_provider",
-        "provider_spec",
-        "running_inside_bundle",
-        "save_settings",
         "select_blend_mode",
         "select_color_preset",
         "select_popup_item",
@@ -77,7 +51,6 @@ INJECTED_NAMES = frozenset(
         "set_preview_dot_color",
         "set_preview_dot_rgb",
         "signals_module",
-        "style_to_program",
         "sys",
         "usage_stats",
     }
@@ -148,6 +121,11 @@ def test_namespace_injection_only_shrinks() -> None:
         f"{sorted(new)}"
     )
     retired = INJECTED_NAMES - current
-    if retired:
-        # Shrinking is the goal; keep the frozen list honest when it does.
-        assert retired <= INJECTED_NAMES
+    # Shrinking is the goal; keep the frozen list honest when it does.
+    # (The original branch asserted `retired <= INJECTED_NAMES`, which is
+    # true by construction -- a tautology found in the 2026-08-26 audit.
+    # Now a retired name must actually leave the frozen list.)
+    assert not retired, (
+        "settings_window no longer relies on these injected names -- "
+        f"remove them from INJECTED_NAMES: {sorted(retired)}"
+    )

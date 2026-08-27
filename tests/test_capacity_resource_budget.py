@@ -7,10 +7,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sidepulse import usage_stats
 from sidepulse.capacity_refresh import RefreshStatusKind
 from sidepulse.capacity_types import SourceKey
 from sidepulse.providers import negotiated_provider_sources
-from sidepulse.usage_stats import scan_provider_usage
 from sidepulse.usage_view import build_provider_usage_view
 from tests.test_sidepulse import isolate_controller
 
@@ -38,6 +38,16 @@ CLAUDE_TRANSCRIPTS = SourceKey(
     "local",
     "transcript_usage",
 )
+
+
+def scan_provider_usage(source, root, cache_path, *, since_epoch):
+    """Local oracle over the live scanner (the thin public wrapper was
+    deleted 2026-08-26: tests were its only callers)."""
+    result, _totals = usage_stats._scan_provider_usage_with_totals(
+        source, root, cache_path, since_epoch=since_epoch
+    )
+    return result
+
 
 
 @pytest.fixture

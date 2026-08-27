@@ -13,7 +13,6 @@ from sidepulse.render_policy import (
     RenderEnvironment,
     choose_render_cadence,
     choose_render_schedule,
-    reduce_accessibility_generation_change,
     rounded_silhouette,
     runtime_render_environment,
 )
@@ -112,32 +111,6 @@ def test_accessibility_snapshot_and_generation_do_not_change_cadence() -> None:
     ) == choose_render_schedule(baseline, True, display_link_available=True)
     with pytest.raises(FrozenInstanceError):
         accessible.accessibility_generation = 42  # type: ignore[misc]
-
-
-def test_accessibility_generation_change_marks_dirty_without_creating_cue() -> None:
-    previous = RenderEnvironment(accessibility_generation=8)
-    current = RenderEnvironment(
-        preferences=AccessibilityDisplayPreferences(reduce_motion=True),
-        accessibility_generation=9,
-    )
-
-    change = reduce_accessibility_generation_change(previous, current)
-
-    assert change.presentation_dirty is True
-    assert change.create_cue is False
-
-
-def test_unchanged_accessibility_generation_is_not_dirty_or_a_cue() -> None:
-    previous = RenderEnvironment(accessibility_generation=8)
-    current = RenderEnvironment(
-        preferences=AccessibilityDisplayPreferences(increase_contrast=True),
-        accessibility_generation=8,
-    )
-
-    change = reduce_accessibility_generation_change(previous, current)
-
-    assert change.presentation_dirty is False
-    assert change.create_cue is False
 
 
 def test_geometry_key_is_color_free_but_invalidates_geometry_inputs() -> None:

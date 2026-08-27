@@ -64,7 +64,7 @@ from sidepulse.device_writer import (
     validate_led_text,
     write_led_program,
 )
-from sidepulse.hook import format_hook_payload, routed_hook_payload, write_hook_payload
+from sidepulse.hook import format_hook_payload, routed_hook_payload
 from sidepulse.install import (
     hook_command,
     install_claude_hooks,
@@ -92,7 +92,7 @@ from sidepulse.ipc import (
     send_hook_event,
     send_refresh_hint,
 )
-from sidepulse.keep_awake import KeepAwakeController, status_file_for_target
+from sidepulse.keep_awake import KeepAwakeController
 from sidepulse.led_status import (
     ANIMATION_STYLE_BLINK,
     ANIMATION_STYLE_CHOICES,
@@ -209,6 +209,25 @@ from sidepulse.status_bar_launch import (
     install_launch_agent,
     launch_agent_installed,
 )
+
+
+def write_hook_line(log_path, line):
+    """Local fixture writer (deleted from hook.py 2026-08-26: production
+    goes through routed/normalized records; only fixtures write raw lines)."""
+    from sidepulse import audit
+    from sidepulse.private_io import append_private_text, redact_event_payload
+
+    log_path = log_path.expanduser()
+    safe_line = redact_event_payload(line)
+    append_private_text(
+        log_path,
+        json.dumps(safe_line, separators=(",", ":"), ensure_ascii=False) + "\n",
+    )
+    audit.compact_jsonl_file(log_path)
+
+
+def write_hook_payload(provider, log_path, payload_text):
+    write_hook_line(log_path, format_hook_payload(provider, payload_text))
 
 
 def snapshot_from_statuses(statuses, **kwargs):
@@ -4236,8 +4255,6 @@ for (const event of [
                 status_read_async=False,
             )
 
-            self.assertEqual(status_file_for_target(device / "LEDS.LED"), status_path)
-            self.assertEqual(status_file_for_target(device / "STATUS.TXT"), status_path)
             self.assertEqual(
                 controller.poke_status_file(device / "LEDS.LED", now=0),
                 status_path,
@@ -7522,19 +7539,6 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         disabled = ColorSettings.defaults().with_round_robin_urgency_alert(False)
         _s, quiet = colors_module.program_for_snapshot(asking, led_count=8, colors=disabled, brightness=255)
         self.assertTrue(quiet.splitlines()[0].startswith("0:"))
-
-    def test_attention_takeover_never_breaks_device_limits(self) -> None:
-        # Programs also drive real hardware (20 lines / 512 bytes) -- the
-        # takeover degrades to a single flash, then to no preamble at all,
-        # rather than ever producing an over-limit program.
-        settings = ColorSettings.defaults()
-        askers = [SimpleNamespace(state=colors_module.LedDisplayState.ASK)]
-        fat = "\n".join("0:#112233 100ms" for _ in range(18))
-        out = colors_module._with_attention_takeover(fat, askers, settings=settings, brightness=255)
-        self.assertEqual(len(out.splitlines()), 20)  # single-flash fallback: 18 + 2
-        fatter = "\n".join("0:#112233 100ms" for _ in range(20))
-        out2 = colors_module._with_attention_takeover(fatter, askers, settings=settings, brightness=255)
-        self.assertEqual(out2, fatter)
 
     def test_round_robin_led_assignment_is_invariant_to_input_status_order(self) -> None:
         # Regression guard: the collector sorts statuses most-recently-
@@ -10999,8 +11003,6 @@ class PrivateStateSecurityTests(unittest.TestCase):
             self.assertFalse(path.exists())
 
     def test_redacted_hook_lines_still_classify_asks_completions_and_grok(self) -> None:
-        from sidepulse.hook import write_hook_line
-
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             claude_log = base / "claude.jsonl"
@@ -11220,8 +11222,6 @@ class PrivateStateSecurityTests(unittest.TestCase):
 
     def test_active_hook_append_compacts_tail_and_skips_symlinked_jsonl(self) -> None:
         from sidepulse import audit
-        from sidepulse.hook import write_hook_line
-
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             active = base / "active.jsonl"
@@ -12179,7 +12179,7 @@ class SubagentAndPhantomAskTests(unittest.TestCase):
 
 class ClaudeQuotaTests(unittest.TestCase):
     def test_windows_from_payload_tolerates_schema_growth(self) -> None:
-        from sidepulse.claude_quota import summary_line, windows_from_payload
+        from sidepulse.claude_quota import windows_from_payload
 
         payload = {
             "five_hour": {"utilization": 42.5, "resets_at": "2026-08-12T04:00:00Z"},
@@ -12193,8 +12193,6 @@ class ClaudeQuotaTests(unittest.TestCase):
         self.assertEqual(len(windows), 3)
         self.assertEqual(windows[0]["label"], "5-hour")
         self.assertEqual(windows[0]["utilization"], 42.5)
-        self.assertIn("weekly 61%", summary_line(windows))
-        self.assertIsNone(summary_line([]))
         self.assertEqual(windows_from_payload("nope"), [])
 
 
@@ -17668,19 +17666,6 @@ class QuotaAlertTests(unittest.TestCase):
         self.controller.track_quota_thresholds({"Codex weekly": 60.0})
         self.controller.track_quota_thresholds({"Codex weekly": 95.0})
         self.assertEqual(self.controller.quota_blink_until, 0.0)
-
-    def test_quota_sunrise_fires_on_reset_only(self) -> None:
-        from sidepulse.signals import quota_resets
-
-        # First sight: silent. High->low: sunrise. Drift down: silent.
-        self.assertEqual(quota_resets({}, {"Codex weekly": 2.0}), [])
-        self.assertEqual(
-            quota_resets({"Codex weekly": 83.0}, {"Codex weekly": 1.0}),
-            ["Codex weekly"],
-        )
-        self.assertEqual(
-            quota_resets({"Codex weekly": 40.0}, {"Codex weekly": 5.0}), []
-        )
 
     def test_sunrise_consumer_stays_dormant(self) -> None:
         self.controller.settings = (

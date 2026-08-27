@@ -349,10 +349,6 @@ def _validate_candidates(
             raise InstalledAgentInventoryError("unreviewed inventory candidate")
 
 
-def _candidate_is_present(root: InventoryRoot, candidate: InventoryCandidate) -> bool:
-    return _location_is_present(root, candidate.relative_path, candidate.marker_kind)
-
-
 def _candidate_is_present_in_any_location(
     roots: dict[str, InventoryRoot],
     candidate: InventoryCandidate,

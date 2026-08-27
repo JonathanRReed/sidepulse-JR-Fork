@@ -224,19 +224,11 @@ class KeepAwakeController:
         return "Keep awake standby"
 
 
-def status_file_for_target(target: Path) -> Path:
-    return keepalive_file_for_target(target)
-
-
 def keepalive_file_for_target(target: Path) -> Path:
     known_file_names = KNOWN_LED_FILE_NAMES | {KEEPALIVE_FILE_NAME.upper(), "STATUS.TXT"}
     if target.name.upper() in known_file_names:
         return target.parent / KEEPALIVE_FILE_NAME
     return target / KEEPALIVE_FILE_NAME
-
-
-def read_status_file(path: Path) -> None:
-    touch_keepalive_file(path)
 
 
 def touch_keepalive_file(path: Path) -> None:

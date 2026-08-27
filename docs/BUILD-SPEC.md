@@ -144,6 +144,12 @@ Our `capacity_types.py` is already the right shape and is *stricter* than what w
 
 ### B2. Burn rate and time-remaining — the math
 
+> **Overtaken by events (2026-08-26).** The quota-forecast plane this
+> section analyzes — `capacity_forecast`, `capacity_calibration`, the
+> forecast release authority — was deleted in the 0.5.0 coalescence. It
+> never reached a user. The Quota Runway display renders from the usage
+> plane's own gated lanes instead. Kept as written for the math record.
+
 Ours (`capacity_forecast.py`) is already more defensible than CodexBar's. **Do not port their algorithm.** CodexBar emits a point ETA from single-snapshot linear extrapolation (`UsagePace.weekly`: `rate = used/elapsed; eta = (100-used)/rate`), or for Codex-weekly only, a weighted-median curve reconstruction. Neither refuses; both can emit confident nonsense.
 
 **State the math we ship:**

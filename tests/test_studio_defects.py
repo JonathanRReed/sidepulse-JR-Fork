@@ -29,7 +29,6 @@ from sidepulse.colors import (
     SWATCH_GROUP_DEFAULT,
     ColorSettings,
     default_agent_color,
-    is_brand_color,
     mode_color_row,
     mode_color_rows,
     provider_color_row,
@@ -44,6 +43,15 @@ MOTION_BLINK = colors_module.MOTION_BLINK
 
 
 # --- Defect 4: the throwaway-local class ------------------------------------
+
+
+def is_brand_color(hex_value):
+    """Local guard over the live brand table (the src helper was deleted
+    2026-08-26: tests were its only callers; the TABLE is load-bearing)."""
+    from sidepulse.colors import _BRAND_NAME_BY_HEX, normalize_hex
+
+    return normalize_hex(hex_value, "#000000").upper() in _BRAND_NAME_BY_HEX
+
 
 
 def test_the_model_carries_the_animation_sentence_not_just_its_key() -> None:

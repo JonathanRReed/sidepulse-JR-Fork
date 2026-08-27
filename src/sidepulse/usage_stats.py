@@ -605,29 +605,6 @@ def _read_verified_prefix(
     )
 
 
-def _open_verified_text(path: Path, expected_stat: os.stat_result):
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
-    descriptor = os.open(path, flags)
-    try:
-        current = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(current.st_mode)
-            or current.st_dev != expected_stat.st_dev
-            or current.st_ino != expected_stat.st_ino
-            or current.st_size != expected_stat.st_size
-            or current.st_mtime_ns != expected_stat.st_mtime_ns
-        ):
-            raise OSError(f"usage file changed while opening: {path}")
-        return os.fdopen(descriptor, "r", encoding="utf-8", errors="replace")
-    except Exception:
-        os.close(descriptor)
-        raise
-
-
 def _scan_codex_lines(handle):
     """The shared per-line codex scan for full and tail parses."""
     last_counts = None
@@ -2137,23 +2114,6 @@ def _scan_provider_usage_with_totals(
         cache_source_key=source_key,
     )
     return _provider_result(source_key, totals), totals
-
-
-def scan_provider_usage(
-    source: NegotiatedProviderSource,
-    root: Path,
-    cache_path: Path | None,
-    *,
-    since_epoch: float,
-) -> ProviderUsageResult:
-    """Scan one exact negotiated transcript source into a content-free result."""
-    result, _totals = _scan_provider_usage_with_totals(
-        source,
-        root,
-        cache_path,
-        since_epoch=since_epoch,
-    )
-    return result
 
 
 def _secondary_provider_cache_path(

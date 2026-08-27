@@ -237,13 +237,3 @@ def plan_presentation_schedule(
         reconcile_immediately=reconcile_immediately,
         next_state=next_state,
     )
-
-
-def plan_presentation_timers(
-    inputs: PresentationSchedulerInputs,
-    *,
-    now: float,
-) -> tuple[RuntimeTimerIntent, ...]:
-    """Return the locked public timer tuple for stateless consumers."""
-
-    return plan_presentation_schedule(inputs, now=now).intents

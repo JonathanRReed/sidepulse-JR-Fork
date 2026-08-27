@@ -39,6 +39,14 @@ NOW = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
 # --- helpers ----------------------------------------------------------
 
 
+def worst_case_transfer_bytes(limit_kbits, timeout_seconds):
+    """Local oracle (deleted from src 2026-08-26; tests were its only
+    callers): the most bytes a peer at the -l limit can push before the
+    timeout fires, plus one TCP window of slop."""
+    return (limit_kbits * 1000.0 / 8.0) * timeout_seconds + 64 * 1024
+
+
+
 class Clock:
     """A monotonic clock the test drives by hand."""
 
@@ -813,7 +821,7 @@ def test_bytes_on_the_wire_are_bounded_by_the_bandwidth_limit():
     a broken peer from filling this disk inside the window."""
     for timeout in (0.5, 1.0, 4.0, 16.0):
         limit = remote_peers.transfer_limit_kbits(remote_peers.MAX_PAYLOAD_BYTES, timeout)
-        worst = remote_peers.worst_case_transfer_bytes(limit, timeout)
+        worst = worst_case_transfer_bytes(limit, timeout)
         assert worst <= remote_peers.MAX_TRANSFER_BYTES
         assert worst >= remote_peers.MAX_PAYLOAD_BYTES
 

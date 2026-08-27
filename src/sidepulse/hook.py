@@ -10,7 +10,7 @@ from . import audit
 from .hook_dedupe import HookEventDeduplicator
 from .ipc import ProviderRefreshHint, send_refresh_hint
 from .origin import annotate_payload_with_origin
-from .private_io import append_private_text, redact_event_payload
+from .private_io import append_private_text
 from .provider_adapters import (
     InertProviderRecord,
     NormalizedProviderRecord,
@@ -53,21 +53,6 @@ def format_hook_payload(
         line["logged_at"] = line.get("logged_at") or timestamp
         return line
     return {"logged_at": timestamp, "event": payload}
-
-
-def write_hook_line(log_path: Path, line: dict[str, Any]) -> None:
-    log_path = log_path.expanduser()
-    safe_line = redact_event_payload(line)
-    append_private_text(
-        log_path,
-        json.dumps(safe_line, separators=(",", ":"), ensure_ascii=False) + "\n",
-    )
-    audit.compact_jsonl_file(log_path)
-
-
-def write_hook_payload(provider: str, log_path: Path, payload_text: str) -> None:
-    line = format_hook_payload(provider, payload_text)
-    write_hook_line(log_path, line)
 
 
 def routed_hook_payload(

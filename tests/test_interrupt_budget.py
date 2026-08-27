@@ -52,6 +52,17 @@ CRITICAL_KINDS = (
 )
 
 
+def signal_hold_seconds(style, *, burst=signals.DEFAULT_ALERT_BURST):
+    """Local oracle (the src helper was deleted 2026-08-26: tests were
+    its only callers). Same arithmetic as grant_interrupt, for a caller
+    holding a style rather than a grant."""
+    return (
+        signals.normalize_alert_burst(burst) * signals.budgeted_style(style).speed_seconds
+        + signals.INTERRUPT_SETTLE_SECONDS
+    )
+
+
+
 def _focus() -> signals.InterruptBudget:
     return signals.InterruptBudget(focus_active=True)
 
@@ -217,7 +228,7 @@ def test_the_burst_law_and_the_hold_helper_agree() -> None:
                 key, budget=signals.InterruptBudget(burst=burst), style=style
             )
             assert grant.hold_seconds == pytest.approx(
-                signals.signal_hold_seconds(style, burst=burst)
+                signal_hold_seconds(style, burst=burst)
             )
 
 
@@ -269,11 +280,11 @@ def test_the_2hz_floor_slows_a_cadence_and_changes_nothing_else() -> None:
 def test_a_default_burst_of_three_at_the_2hz_floor_is_the_shortest_burst() -> None:
     """The floor is a floor, not a fixed cadence: a slow signal keeps
     its own pace."""
-    fastest = signals.signal_hold_seconds(
+    fastest = signal_hold_seconds(
         signals.SignalStyle("#FFFFFF", signals.PATTERN_BLINK, 0.1, 1.0)
     )
     assert fastest == pytest.approx(3 * 0.5 + signals.INTERRUPT_SETTLE_SECONDS)
-    slow = signals.signal_hold_seconds(
+    slow = signal_hold_seconds(
         signals.SignalStyle("#FFFFFF", signals.PATTERN_BREATHE, 2.6, 1.0)
     )
     assert slow == pytest.approx(3 * 2.6 + signals.INTERRUPT_SETTLE_SECONDS)
@@ -567,7 +578,7 @@ def test_the_burst_budget_sets_how_long_a_sweep_claims_the_bar(controller) -> No
     style = controller.settings.signal_style(signals.SIGNAL_COMPLETION)
     three = controller.completion_sweep_until - started
     assert three == pytest.approx(
-        signals.signal_hold_seconds(style, burst=3), abs=0.5
+        signal_hold_seconds(style, burst=3), abs=0.5
     )
 
     controller.settings = controller.settings.with_alert_burst(6)
@@ -577,7 +588,7 @@ def test_the_burst_budget_sets_how_long_a_sweep_claims_the_bar(controller) -> No
     controller.track_completions((_status("codex", AgentMode.COMPLETED),))
     six = controller.completion_sweep_until - restarted
     assert six > three
-    assert six == pytest.approx(signals.signal_hold_seconds(style, burst=6), abs=0.5)
+    assert six == pytest.approx(signal_hold_seconds(style, burst=6), abs=0.5)
 
 
 def test_a_signal_dialled_into_strobe_range_is_slowed_before_the_hardware(

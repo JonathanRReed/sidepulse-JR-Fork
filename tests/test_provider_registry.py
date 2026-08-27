@@ -16,10 +16,37 @@ from sidepulse.providers import (
     NegotiatedProviderSource,
     ProviderSourceRegistration,
     negotiated_provider_sources,
-    provider_capacity_source_registrations,
-    provider_source_registrations,
-    sources_with_capability,
 )
+
+
+def provider_source_registrations():
+    """Local view over the live static table (the src thin wrappers were
+    deleted 2026-08-26: tests were their only callers)."""
+    from sidepulse import providers
+
+    return providers._PROVIDER_SOURCE_REGISTRATIONS
+
+
+def provider_capacity_source_registrations():
+    capacity = CapabilityIdentifier("remote_quota_windows")
+    return tuple(
+        registration
+        for registration in provider_source_registrations()
+        if any(
+            capability_id == capacity
+            for capability_id, _versions in registration.capability_versions
+        )
+    )
+
+
+def sources_with_capability(sources, capability_id):
+    return tuple(
+        source
+        for source in sources
+        if source.declared_capability_id == capability_id
+        and source.observation_invocation_allowed
+    )
+
 
 
 def _row_identity(row: NegotiatedProviderSource) -> tuple[str, str, str, str]:

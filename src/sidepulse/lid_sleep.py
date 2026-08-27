@@ -140,19 +140,6 @@ def run_sudo_pmset_disablesleep(
     )
 
 
-def run_privileged_pmset_disablesleep(
-    enabled: bool,
-    *,
-    runner: CommandRunner = subprocess.run,
-) -> None:
-    """Compatibility wrapper for the old name.
-
-    Runtime sleep control is intentionally non-interactive. Any admin prompt
-    belongs to an explicit helper installation step, never a background refresh.
-    """
-    run_sudo_pmset_disablesleep(enabled, runner=runner)
-
-
 def sleep_helper_sudoers_rule(user: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9._-]+", user):
         raise ValueError(f"invalid sudoers user: {user!r}")
