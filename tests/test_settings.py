@@ -41,13 +41,12 @@ def test_notification_banner_is_off_for_new_installs_and_preserves_legacy_choice
     assert payload["completion_notification_enabled"] is True
 
 
-def test_capacity_history_is_opt_in_with_independent_local_activity_consent() -> None:
+def test_capacity_history_is_opt_in() -> None:
     """New and migrated installations must not silently begin either retention stream."""
     settings = AgentMonitorSettings()
 
     assert settings.capacity_history_enabled is False
     assert settings.capacity_history_retention_days == 7
-    assert settings.local_activity_history_enabled is False
 
 
 def test_capacity_history_settings_round_trip_only_supported_retention(tmp_path: Path) -> None:
@@ -57,7 +56,6 @@ def test_capacity_history_settings_round_trip_only_supported_retention(tmp_path:
         AgentMonitorSettings(),
         capacity_history_enabled=True,
         capacity_history_retention_days=30,
-        local_activity_history_enabled=True,
     )
 
     save_settings(settings, target)
@@ -65,7 +63,6 @@ def test_capacity_history_settings_round_trip_only_supported_retention(tmp_path:
 
     assert restored.capacity_history_enabled is True
     assert restored.capacity_history_retention_days == 30
-    assert restored.local_activity_history_enabled is True
 
 
 def test_legacy_settings_do_not_import_broad_usage_or_transcript_history(
@@ -88,7 +85,6 @@ def test_legacy_settings_do_not_import_broad_usage_or_transcript_history(
 
     assert restored.capacity_history_enabled is False
     assert restored.capacity_history_retention_days == 7
-    assert restored.local_activity_history_enabled is False
 
 
 def test_invalid_or_boolean_retention_fails_closed_to_seven_days(tmp_path: Path) -> None:
@@ -100,7 +96,6 @@ def test_invalid_or_boolean_retention_fails_closed_to_seven_days(tmp_path: Path)
                 {
                     "capacity_history_enabled": True,
                     "capacity_history_retention_days": value,
-                    "local_activity_history_enabled": True,
                 }
             )
         )
@@ -109,7 +104,6 @@ def test_invalid_or_boolean_retention_fails_closed_to_seven_days(tmp_path: Path)
 
         assert restored.capacity_history_enabled is True
         assert restored.capacity_history_retention_days == 7
-        assert restored.local_activity_history_enabled is True
 
 
 def test_invalid_programmatic_retention_is_not_serialized(tmp_path: Path) -> None:

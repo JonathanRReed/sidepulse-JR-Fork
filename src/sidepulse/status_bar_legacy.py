@@ -1870,8 +1870,6 @@ class StatusBarController(NSObject):
         self.last_power_connected = None
         self.battery_preview_until = 0.0
         self.quota_blink_until = 0.0
-        self.quota_blink_color = None
-        self.quota_blink_label = None
         self.quota_last_percents: dict[str, float] = {}
         # Calendar glow: monotonic deadline of the next event's start
         # (0.0 = no upcoming event inside the lead window).
@@ -4581,8 +4579,6 @@ class StatusBarController(NSObject):
         del percents
         self.quota_last_percents = {}
         self.quota_blink_until = 0.0
-        self.quota_blink_color = None
-        self.quota_blink_label = None
 
     def release_preview_engines(self) -> None:
         """Drop EVERY preview surface's WASM engine when settings goes
@@ -12397,7 +12393,6 @@ class StatusBarController(NSObject):
                 style_to_program(
                     self.budgeted_signal_style(signals_module.SIGNAL_QUOTA),
                     brightness,
-                    color=self.quota_blink_color,
                 )
             )
         elif display == LED_DISPLAY_REMINDERS:
@@ -14963,14 +14958,9 @@ class StatusBarController(NSObject):
                 lambda device, _snapshot: f"{device.name} All clear",
             ),
             LED_DISPLAY_QUOTA: (
-                lambda brightness, led_count: styled(
-                    signals_module.SIGNAL_QUOTA,
-                    color=self.quota_blink_color,
-                )(brightness, led_count),
+                styled(signals_module.SIGNAL_QUOTA),
                 LedDisplayState.ASK,
-                lambda device, _snapshot: (
-                    f"{device.name} Quota {self.quota_blink_label or ''}"
-                ),
+                lambda device, _snapshot: f"{device.name} Quota",
             ),
             LED_DISPLAY_REMINDERS: (
                 styled(signals_module.SIGNAL_REMINDERS),

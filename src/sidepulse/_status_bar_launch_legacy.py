@@ -505,13 +505,6 @@ def launch_agent_path_env(_python_executable: str) -> str:
     return "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
-def executable_parent(python_executable: str) -> Path | None:
-    path = Path(python_executable)
-    if not path.is_absolute():
-        return None
-    return path.parent
-
-
 def production_bundle_executable(executable: Path | str | None = None) -> Path:
     """Resolve the current frozen PyInstaller executable inside SidePulse.app."""
     candidate = Path(executable or sys.executable or "")

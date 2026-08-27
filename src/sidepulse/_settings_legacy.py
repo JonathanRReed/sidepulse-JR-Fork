@@ -67,12 +67,6 @@ LID_ANIMATION_CLOSED = "closed"
 LID_ANIMATION_OPEN = "open"
 LID_ANIMATION_CLOSED_ACTIVE = "closed_active"
 LID_ANIMATION_OPEN_ACTIVE = "open_active"
-LID_ANIMATION_CHOICES = (
-    LID_ANIMATION_CLOSED,
-    LID_ANIMATION_OPEN,
-    LID_ANIMATION_CLOSED_ACTIVE,
-    LID_ANIMATION_OPEN_ACTIVE,
-)
 # Distinct out-of-the-box looks for "agents were RUNNING when the lid
 # moved" -- the whole point is that you can TELL without looking twice.
 DEFAULT_LID_CLOSED_ACTIVE_PROGRAM = (
@@ -210,7 +204,6 @@ class AgentMonitorSettings:
     devices: tuple[DeviceDisplaySetting, ...] = ()
     virtual_status_device_enabled: bool = False
     closed_lid_awake_policy: str = CLOSED_LID_AWAKE_NEVER
-    closed_lid_system_override_enabled: bool = False
     # How long (minutes) to keep holding the lid-closed awake state after
     # agent activity *looks* like it stopped, before actually letting the
     # policy release -- a buffer against a false "done" reading (e.g. a
@@ -249,7 +242,7 @@ class AgentMonitorSettings:
     # attention always break through -- the claim is gated on idle.
     battery_charging_idle_enabled: bool = True
     # Below this percent while unplugged, every display switches to the
-    # calm slow-red "plug me in" breathe (led_status.low_battery_program)
+    # calm slow-red "plug me in" breathe (the low_battery signal's default style)
     # until power returns or the level recovers. Default on: a dying
     # battery is the one signal that should outrank agent status.
     low_battery_alert_enabled: bool = True
@@ -370,7 +363,6 @@ class AgentMonitorSettings:
     # transcript and broad usage settings never enable either history stream.
     capacity_history_enabled: bool = False
     capacity_history_retention_days: int = 7
-    local_activity_history_enabled: bool = False
     # The second Mac. Off by default in every direction: nothing is
     # discovered, nothing is fetched, nothing about this desk is written
     # where a peer could read it, and a peer's row may not take a light
@@ -764,9 +756,6 @@ class AgentMonitorSettings:
         if policy not in CLOSED_LID_AWAKE_CHOICES:
             raise ValueError(f"Unknown closed-lid awake policy: {policy}")
         return replace(self, closed_lid_awake_policy=policy)
-
-    def with_closed_lid_system_override(self, enabled: bool) -> AgentMonitorSettings:
-        return replace(self, closed_lid_system_override_enabled=bool(enabled))
 
     def with_closed_lid_grace_minutes(self, minutes: float) -> AgentMonitorSettings:
         return replace(self, closed_lid_grace_minutes=normalize_closed_lid_grace_minutes(minutes))
@@ -1332,7 +1321,6 @@ class AgentMonitorSettings:
             "screen_bar_wing_length": self.screen_bar_wing_length,
             "screen_bar_bracket_style": self.screen_bar_bracket_style,
             "closed_lid_awake_policy": self.closed_lid_awake_policy,
-            "closed_lid_system_override_enabled": self.closed_lid_system_override_enabled,
             "closed_lid_grace_minutes": self.closed_lid_grace_minutes,
             "keep_awake_on_battery": self.keep_awake_on_battery,
             "lid_closed_animation": self.lid_closed_animation.to_dict(),
@@ -1401,7 +1389,6 @@ class AgentMonitorSettings:
                 and self.capacity_history_retention_days in (7, 30, 90)
                 else 7
             ),
-            "local_activity_history_enabled": self.local_activity_history_enabled,
             "remote_peers": self.remote_peers.to_dict(),
             "cloud_ingest_enabled": self.cloud_ingest_enabled,
             "operator_history_retention_days": (
@@ -1449,16 +1436,6 @@ def default_config_dir(home: Path | None = None) -> Path:
 
 def default_settings_path(home: Path | None = None) -> Path:
     return default_config_dir(home) / "settings.json"
-
-
-def _hex_color(raw: object) -> str | None:
-    """'#RRGGBB' (normalized upper-case) or None for anything else."""
-    if not isinstance(raw, str):
-        return None
-    value = raw.strip()
-    if re.fullmatch(r"#?[0-9a-fA-F]{6}", value):
-        return "#" + value.lstrip("#").upper()
-    return None
 
 
 def _escalation_thresholds(data: dict) -> dict[str, float]:
@@ -1593,10 +1570,6 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         closed_lid_awake_policy=_closed_lid_awake_policy(
             data.get("closed_lid_awake_policy"),
         ),
-        closed_lid_system_override_enabled=_bool_setting(
-            data.get("closed_lid_system_override_enabled"),
-            False,
-        ),
         keep_awake_on_battery=_bool_setting(
             data.get("keep_awake_on_battery"), True
         ),
@@ -1721,9 +1694,6 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             if type(data.get("capacity_history_retention_days")) is int
             and data.get("capacity_history_retention_days") in (7, 30, 90)
             else 7
-        ),
-        local_activity_history_enabled=_bool_setting(
-            data.get("local_activity_history_enabled"), False
         ),
         # RemotePeerSettings.from_dict never raises and normalises every
         # bound itself, so a hand-edited or truncated block degrades to

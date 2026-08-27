@@ -211,6 +211,57 @@ from sidepulse.status_bar_launch import (
 )
 
 
+def snapshot_from_statuses(statuses, **kwargs):
+    """Test fixture: compose a MonitorSnapshot from bare statuses.
+
+    Moved out of _collector_legacy on 2026-08-26 -- production builds
+    snapshots through the live collector; only tests composed them from
+    loose statuses. Resolves every collector function at call time so the
+    facade's patched status_is_stale semantics apply.
+    """
+    from sidepulse import _collector_legacy as _cl
+
+    fresh = []
+    stale = []
+    collected_at = kwargs["collected_at"]
+    for status in statuses:
+        status = _cl.status_for_snapshot(
+            status,
+            collected_at,
+            post_tool_working_visible_seconds=kwargs.get(
+                "post_tool_working_visible_seconds",
+                _cl.POST_TOOL_WORKING_VISIBLE_SECONDS,
+            ),
+        )
+        is_stale = _cl.status_is_stale(
+            status,
+            collected_at,
+            stale_after_seconds=kwargs["stale_after_seconds"],
+            tool_running_timeout_seconds=kwargs["tool_running_timeout_seconds"],
+            completed_visible_seconds=kwargs["completed_visible_seconds"],
+            idle_visible_seconds=kwargs["idle_visible_seconds"],
+        )
+        current = _cl._replace_stale(status, is_stale)
+        (stale if is_stale else fresh).append(current)
+
+    if any(_cl.status_counts_active(status) for status in fresh):
+        inactive = [status for status in fresh if not _cl.status_counts_active(status)]
+        fresh = [status for status in fresh if _cl.status_counts_active(status)]
+        stale.extend(_cl._replace_stale(status, True) for status in inactive)
+
+    fresh.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
+    stale.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
+    visible = tuple(fresh)
+    stale_visible = tuple(stale)
+    return _cl.MonitorSnapshot(
+        aggregate=_cl.aggregate_status(visible, stale_visible),
+        statuses=visible,
+        stale_statuses=stale_visible,
+        sources=kwargs["sources"],
+        collected_at=collected_at,
+    )
+
+
 class FakeProcess:
     def __init__(self) -> None:
         self.terminated = False
@@ -1304,8 +1355,15 @@ for (const event of [
     def test_virtual_screen_bar_frame_covers_notch_plus_led_band(self) -> None:
         try:
             from sidepulse import virtual_device
+            from sidepulse.screen_bar_runtime import install_screen_bar_runtime
         except (ImportError, SystemExit) as exc:
             self.skipTest(str(exc))
+
+        # The shipped geometry: install_screen_bar_runtime() rewrites the
+        # band/window metrics at facade import, so pinning the pre-install
+        # constants guarded a frame no user ever saw (and made this test
+        # fail or pass by process import order).
+        install_screen_bar_runtime()
 
         screen = SimpleNamespace(
             frame=lambda: SimpleNamespace(
@@ -1325,14 +1383,17 @@ for (const event of [
 
         self.assertEqual(
             virtual_device.virtual_window_frame_for_screen(screen),
-            ((640.0, 945.0), (232.0, 37.0)),
+            ((640.0, 944.0), (232.0, 38.0)),
         )
 
     def test_virtual_screen_bar_on_notchless_display_is_led_band_only(self) -> None:
         try:
             from sidepulse import virtual_device
+            from sidepulse.screen_bar_runtime import install_screen_bar_runtime
         except (ImportError, SystemExit) as exc:
             self.skipTest(str(exc))
+
+        install_screen_bar_runtime()
 
         screen = SimpleNamespace(
             frame=lambda: SimpleNamespace(
@@ -1353,7 +1414,7 @@ for (const event of [
         self.assertFalse(virtual_device.screen_has_notch(screen))
         self.assertEqual(
             virtual_device.virtual_window_frame_for_screen(screen),
-            ((850.0, 1075.0), (220.0, 5.0)),
+            ((830.0, 1058.0), (260.0, 22.0)),
         )
 
     def test_virtual_screen_bar_frame_rate_contract(self) -> None:
@@ -4672,11 +4733,6 @@ for (const event of [
                 1.6,
             )
 
-            enabled = settings.with_closed_lid_system_override(True)
-            save_settings(enabled, settings_path)
-            loaded_enabled = load_settings(settings_path)
-            self.assertTrue(loaded_enabled.closed_lid_system_override_enabled)
-
             completed = settings.with_setup_screen_completed(True)
             save_settings(completed, settings_path)
             loaded_completed = load_settings(settings_path)
@@ -4690,7 +4746,6 @@ for (const event of [
             loaded = load_settings(settings_path)
 
             self.assertEqual(loaded.closed_lid_awake_policy, CLOSED_LID_AWAKE_NEVER)
-            self.assertFalse(loaded.closed_lid_system_override_enabled)
             self.assertFalse(loaded.setup_screen_completed)
             self.assertEqual(
                 loaded.lid_animation(LID_ANIMATION_CLOSED),
@@ -5574,7 +5629,7 @@ for (const event of [
             tool_name="webrun",
         )
 
-        snapshot = collector_module.snapshot_from_statuses(
+        snapshot = snapshot_from_statuses(
             (status,),
             sources=(),
             collected_at=now,
@@ -8819,12 +8874,18 @@ class LowPowerModeTests(unittest.TestCase):
         self.assertEqual(kind, status_bar.LED_DISPLAY_BATTERY)
 
     def test_low_battery_program_is_a_calm_whole_bar_breathe(self) -> None:
-        from sidepulse.led_status import LOW_BATTERY_BREATH_MS, low_battery_program
+        # The low-battery reminder is a deliberately CALM slow red breathe
+        # -- "plug me in sometime soon", not an alarm. A charge reminder
+        # that strobes is a nagging light; one long 3.6s breath reads as
+        # patient. Pinned against the live signal default, which is the
+        # only place the style lives now.
+        from sidepulse.led_status import style_to_program
+        from sidepulse.signals import DEFAULT_SIGNAL_STYLES, SIGNAL_LOW_BATTERY
 
-        program = low_battery_program(255)
+        program = style_to_program(DEFAULT_SIGNAL_STYLES[SIGNAL_LOW_BATTERY], 255)
         lines = program.splitlines()
         self.assertEqual(lines[-1], "repeat")
-        self.assertIn(f"{LOW_BATTERY_BREATH_MS}ms pulse", program)
+        self.assertIn("3600ms pulse", program)
         # Whole-bar lines only: no per-LED "N:" prefixes, so the same
         # program renders on the 2-LED Dot, 8-LED Pro, and Screen Bar.
         for line in lines:
@@ -11698,8 +11759,6 @@ class AskInboxAndActionsTests(unittest.TestCase):
 
     def test_ask_statuses_filters_to_sessions_needing_the_user(self) -> None:
         from datetime import datetime, timezone
-
-        from sidepulse.collector import snapshot_from_statuses
 
         statuses = (
             _status("codex", AgentMode.WORKING),
@@ -15049,7 +15108,7 @@ class FailureSignalProjectionContractTests(unittest.TestCase):
         isolate_controller(self)
 
     def _snapshot(self, *statuses):
-        return collector_module.snapshot_from_statuses(
+        return snapshot_from_statuses(
             statuses,
             sources=(),
             collected_at=datetime.now(timezone.utc),
@@ -15457,7 +15516,7 @@ class SnoozeScopeControllerTests(unittest.TestCase):
         )
 
     def _snapshot(self, *statuses):
-        return collector_module.snapshot_from_statuses(
+        return snapshot_from_statuses(
             statuses,
             sources=(),
             collected_at=datetime.now(timezone.utc),
@@ -17712,8 +17771,6 @@ class QuotaAlertTests(unittest.TestCase):
         with patch.object(self.controller, "refresh_") as refresh:
             self.controller.track_quota_thresholds({"Codex weekly": 91.0})
         self.assertEqual(self.controller.quota_blink_until, 0.0)
-        self.assertIsNone(self.controller.quota_blink_label)
-        self.assertIsNone(self.controller.quota_blink_color)
         refresh.assert_not_called()
 
     def test_disabled_or_quiet_never_blinks(self) -> None:
@@ -18350,9 +18407,10 @@ class CalendarAlertTests(unittest.TestCase):
 
     def test_glow_program_fits_device_limits_and_repeats(self) -> None:
         from sidepulse.device_writer import MAX_LED_BYTES, MAX_LED_LINES
-        from sidepulse.led_status import calendar_glow_program
+        from sidepulse.led_status import style_to_program
+        from sidepulse.signals import DEFAULT_SIGNAL_STYLES, SIGNAL_CALENDAR
 
-        program = calendar_glow_program(128)
+        program = style_to_program(DEFAULT_SIGNAL_STYLES[SIGNAL_CALENDAR], 128)
         self.assertLessEqual(len(program.encode()), MAX_LED_BYTES)
         self.assertLessEqual(len(program.splitlines()), MAX_LED_LINES)
         # Unlike a one-shot alert, the warning holds until the event

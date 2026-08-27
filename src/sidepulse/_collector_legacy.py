@@ -2775,58 +2775,6 @@ def _merged_status_candidates(
     return tuple(merged[agent_id] for agent_id in sorted(merged))
 
 
-def snapshot_from_statuses(
-    statuses: tuple[AgentStatus, ...],
-    *,
-    sources: tuple[SourceSpec, ...],
-    collected_at: datetime,
-    stale_after_seconds: float,
-    tool_running_timeout_seconds: float,
-    completed_visible_seconds: float,
-    idle_visible_seconds: float,
-    post_tool_working_visible_seconds: float = POST_TOOL_WORKING_VISIBLE_SECONDS,
-) -> MonitorSnapshot:
-    fresh: list[AgentStatus] = []
-    stale: list[AgentStatus] = []
-    for status in statuses:
-        status = status_for_snapshot(
-            status,
-            collected_at,
-            post_tool_working_visible_seconds=post_tool_working_visible_seconds,
-        )
-        is_stale = status_is_stale(
-            status,
-            collected_at,
-            stale_after_seconds=stale_after_seconds,
-            tool_running_timeout_seconds=tool_running_timeout_seconds,
-            completed_visible_seconds=completed_visible_seconds,
-            idle_visible_seconds=idle_visible_seconds,
-        )
-        current = _replace_stale(status, is_stale)
-        if is_stale:
-            stale.append(current)
-        else:
-            fresh.append(current)
-
-    if any(status_counts_active(status) for status in fresh):
-        inactive = [status for status in fresh if not status_counts_active(status)]
-        fresh = [status for status in fresh if status_counts_active(status)]
-        stale.extend(_replace_stale(status, True) for status in inactive)
-
-    fresh.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
-    stale.sort(key=lambda status: (status.priority, -status.updated_at.timestamp()))
-
-    visible = tuple(fresh)
-    stale_visible = tuple(stale)
-    return MonitorSnapshot(
-        aggregate=aggregate_status(visible, stale_visible),
-        statuses=visible,
-        stale_statuses=stale_visible,
-        sources=sources,
-        collected_at=collected_at,
-    )
-
-
 def status_is_stale(
     status: AgentStatus,
     now: datetime,

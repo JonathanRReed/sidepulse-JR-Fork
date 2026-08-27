@@ -43,11 +43,6 @@ ASK_AMBER = "#FF3A00"
 WORKING_CYAN = "#00E5FF"
 DONE_GREEN = "#00FF66"
 IDLE_DIM = "#020204"
-# The low-battery reminder: a deliberately CALM slow red breathe -- "plug
-# me in sometime soon", not an alarm. A charge reminder that strobes is a
-# nagging light; one long 3.6s breath reads as patient.
-LOW_BATTERY_RED = "#E01010"
-LOW_BATTERY_BREATH_MS = 3600
 # 240, not 60: every reassert physically rewrites LEDS.LED and the
 # firmware restarts its loop from line 1 -- a visible mid-breath hitch.
 # Remounts are caught by device discovery immediately anyway; this
@@ -797,14 +792,6 @@ def brightness_percent(value: float | None) -> int:
     return round(normalize_brightness(value) / 255 * 100)
 
 
-def low_battery_program(brightness: float = 255) -> str:
-    """The low-battery signal's DEFAULT style through the one renderer
-    (see LOW_BATTERY_RED's comment for why it's deliberately slow)."""
-    from .signals import DEFAULT_SIGNAL_STYLES, SIGNAL_LOW_BATTERY
-
-    return style_to_program(DEFAULT_SIGNAL_STYLES[SIGNAL_LOW_BATTERY], brightness)
-
-
 def quota_runway_program(
     fraction_left: float,
     *,
@@ -1002,14 +989,6 @@ def style_to_program(
             ]
         )
     return apply_brightness(body, effective)
-
-
-def calendar_glow_program(brightness: float = 255) -> str:
-    """The calendar signal's DEFAULT style through the one renderer --
-    kept as a named helper for call sites and tests."""
-    from .signals import DEFAULT_SIGNAL_STYLES, SIGNAL_CALENDAR
-
-    return style_to_program(DEFAULT_SIGNAL_STYLES[SIGNAL_CALENDAR], brightness)
 
 
 NOTIFICATION_BLINK_SECONDS = 3 * 0.3 + 0.4  # default blink style's hold

@@ -384,36 +384,6 @@ def battery_segment(index: int, color: str, transition_ms: int) -> str:
     return f"{index}:{color} {transition_ms}ms ease"
 
 
-def write_battery_to_leds(
-    snapshot: BatterySnapshot,
-    *,
-    device_path: Path | None = None,
-    file_name: str = DEFAULT_FILE_NAME,
-    dry_run: bool = False,
-    full_charge_watts: float | None = None,
-    brightness: float = 255,
-) -> BatteryLedWrite:
-    target = resolve_target_path(device_path=device_path, file_name=file_name)
-    program = program_for_battery(
-        snapshot,
-        led_count=led_count_for_target(target),
-        full_charge_watts=full_charge_watts,
-        brightness=brightness,
-    )
-    written_target = write_led_program(
-        program,
-        device_path=target,
-        file_name=file_name,
-        dry_run=dry_run,
-        preserve_existing_inode=not dry_run,
-    )
-    return BatteryLedWrite(
-        target=written_target,
-        program=program,
-        changed=True,
-    )
-
-
 class BatteryLedController:
     def __init__(
         self,
