@@ -445,6 +445,25 @@ IDLE_BREATH_CYCLE_MS = (
     + IDLE_BREATH_DWELL_MS
 )
 
+# First light: the startup chime's job, done with light -- one soft
+# white cycle of the same asymmetric breath, then live status takes
+# over. Finite, ends dark, expressive exactly once (2026-08-26).
+FIRST_LIGHT_WHITE = "#6E7278"
+FIRST_LIGHT_SECONDS = (
+    IDLE_BREATH_APPROACH_MS + IDLE_BREATH_INHALE_MS + IDLE_BREATH_EXHALE_MS
+) / 1000.0
+
+
+def first_light_program() -> str:
+    return "\n".join(
+        [
+            f"off {IDLE_BREATH_APPROACH_MS}ms cosine",
+            f"{FIRST_LIGHT_WHITE} {IDLE_BREATH_INHALE_MS}ms cosine",
+            f"off {IDLE_BREATH_EXHALE_MS}ms cosine",
+        ]
+    )
+
+
 SETTLE_MIN_MS = 40
 SETTLE_MAX_MS = 160
 SETTLE_FRACTION = 0.12

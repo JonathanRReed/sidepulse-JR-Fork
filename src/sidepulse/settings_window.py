@@ -80,8 +80,6 @@ from .colors import (
 from .installed_agents import SurfaceSupportLevel, installed_surface_registrations
 from .led_status import (
     ANIMATION_STYLE_CHOICES,
-    MAX_CHANNEL_GAIN,
-    MIN_CHANNEL_GAIN,
     LedDisplayState,
     brightness_percent,
     led_count_for_target,
@@ -1274,92 +1272,12 @@ CALIBRATION_TEST_PATCHES: tuple[tuple[str, str], ...] = (
 
 
 def build_calibration_popover_content(device: StatusBarDevice, target: StatusBarController):
-    """The content shown inside the "Calibrate…" popover for one device:
-    a guided matching flow, not blind sliders. The reference patches at
-    the top are the ground truth — click one and the device lights with
-    that exact color (through the current gains), so you hold the device
-    beside the screen and adjust each slider until light and patch agree.
-    Closing the popover returns the device to live status automatically.
-    """
-    stack = native_ui.make_stack(orientation="vertical", spacing=14.0)
-    native_ui.constrain_width(stack, 300.0)
+    """Delegates to the guided stepper (calibration_flow, 2026-08-26):
+    one question with one-tap coarse answers, sliders revealed only when
+    the nudges are not enough, before/after on a button."""
+    from .calibration_flow import build_calibration_flow_content
 
-    stack.addArrangedSubview_(
-        native_ui.make_label(
-            "Every LED is now TRUE WHITE, and the patch below\n"
-            "shows true white on screen. Adjust Red, Green, and\n"
-            "Blue until the light looks white to you — then check\n"
-            "the other patches if you want to fine-tune.",
-            secondary=True,
-            size=11.0,
-        )
-    )
-    patch_size = 26
-    patch_gap = 10
-    patches_width = len(CALIBRATION_TEST_PATCHES) * (patch_size + patch_gap) - patch_gap
-    patches = native_ui.make_fixed_area(float(patches_width), float(patch_size))
-    x = 0
-    for _label, hex_color in CALIBRATION_TEST_PATCHES:
-        add_color_swatch(
-            patches,
-            hex_color,
-            x,
-            1,
-            target,
-            "startCalibrationTest:",
-            {"device_id": device.device_id, "hex": hex_color},
-        )
-        x += patch_size + patch_gap
-    stack.addArrangedSubview_(patches)
-    native_ui.add_separator(stack)
-
-    auto_checkbox = native_ui.make_checkbox(
-        "Auto-Brightness (matches screen)", target, "toggleDeviceAutoBrightness:"
-    )
-    auto_checkbox.setRepresentedObject_(device.device_id)
-    auto_checkbox.setState_(1 if device.auto_brightness_enabled else 0)
-    stack.addArrangedSubview_(auto_checkbox)
-
-    native_ui.add_separator(stack)
-    stack.addArrangedSubview_(
-        native_ui.make_label(
-            # Named, because two calibratable surfaces exist and an
-            # anonymous header is a mis-click trap (adversarial review).
-            f"Color Calibration — {device.name}",
-            bold=True,
-            size=13.0,
-        )
-    )
-
-    controls: dict[str, object] = {"auto_brightness_checkbox": auto_checkbox}
-    red, green, blue = device.channel_gains
-    for label, channel, gain, action, tint in (
-        ("Red", "red", red, "setDeviceRedGain:", NSColor.systemRedColor()),
-        ("Green", "green", green, "setDeviceGreenGain:", NSColor.systemGreenColor()),
-        ("Blue", "blue", blue, "setDeviceBlueGain:", NSColor.systemBlueColor()),
-    ):
-        slider = native_ui.make_slider(
-            min_value=MIN_CHANNEL_GAIN * 100.0,
-            max_value=MAX_CHANNEL_GAIN * 100.0,
-            value=gain * 100.0,
-            target=target,
-            action=action,
-            identifier=device.device_id,
-        )
-        native_ui.constrain_width(slider, 200.0)
-        try:
-            slider.setTrackFillColor_(tint)
-        except Exception:
-            pass
-        stack.addArrangedSubview_(native_ui.make_row(label, slider))
-        controls[f"{channel}_slider"] = slider
-
-    reset_button = native_ui.make_button("Reset to Default", target, "resetDeviceColorCalibration:")
-    reset_button.setRepresentedObject_(device.device_id)
-    stack.addArrangedSubview_(reset_button)
-    controls["reset_button"] = reset_button
-
-    return stack, controls
+    return build_calibration_flow_content(device, target)
 
 
 SCREEN_BAR_PREVIEW_NOTCH_WIDTH = 200.0

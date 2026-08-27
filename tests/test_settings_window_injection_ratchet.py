@@ -18,7 +18,8 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parent.parent / "src" / "sidepulse"
 
 # Frozen 2026-08-19 (60 names); shrunk to 31 on 2026-08-26 by the
-# explicit-import tranche (every name importable without a cycle moved
+# explicit-import tranche, then 30 when the calibration stepper moved
+# out (every name importable without a cycle moved
 # to a real import; what remains is defined in status_bar_legacy itself).
 INJECTED_NAMES = frozenset(
     {
@@ -29,7 +30,6 @@ INJECTED_NAMES = frozenset(
         "StatusBarDevice",
         "TIMEBOX_PRESET_MINUTES",
         "UsageGraphView",
-        "add_color_swatch",
         "add_preview_dot",
         "focus_sync",
         "log_status_bar",

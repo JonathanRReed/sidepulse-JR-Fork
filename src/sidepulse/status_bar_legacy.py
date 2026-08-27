@@ -331,6 +331,8 @@ from .keep_awake import battery_yields_hold, KEEPALIVE_FILE_NAME, KeepAwakeContr
 from .celebrations import RESET_CELEBRATION_SECONDS, reset_celebration_program
 from .window_presentation import activate_app, present_window
 from .led_status import (
+    FIRST_LIGHT_SECONDS,
+    first_light_program,
     MAX_CHANNEL_GAIN,
     MIN_CHANNEL_GAIN,
     AgentLedController,
@@ -6656,6 +6658,80 @@ class StatusBarController(NSObject):
             return
         self.set_device_channel_gains_reset(str(device_id))
 
+    # One coarse temperature nudge (the stepper's "Too warm"/"Too cool"):
+    # red and blue move in opposite directions by this much per tap.
+    CALIBRATION_NUDGE_STEP = 0.04
+
+    @objc.IBAction
+    def nudgeCalibrationWarmth_(self, sender):
+        payload = sender.representedObject()
+        if not isinstance(payload, dict):
+            return
+        device_id = str(payload.get("device_id") or "")
+        fix = str(payload.get("fix") or "")
+        if not device_id or fix not in {"warmer", "cooler"}:
+            return
+        red, _green, blue = self.settings.channel_gains_for_device(device_id)
+        step = self.CALIBRATION_NUDGE_STEP if fix == "warmer" else -self.CALIBRATION_NUDGE_STEP
+
+        def clamp(value: float) -> float:
+            return max(MIN_CHANNEL_GAIN, min(MAX_CHANNEL_GAIN, value))
+
+        self.set_device_channel_gain(device_id, "red", clamp(red + step))
+        self.set_device_channel_gain(device_id, "blue", clamp(blue - step))
+        controls = self.device_settings_controls.get(device_id, {})
+        self.refresh_device_settings_controls(device_id, controls)
+
+    @objc.IBAction
+    def calibrationLooksWhite_(self, sender):
+        device_id = str(sender.representedObject() or "")
+        controls = self.device_settings_controls.get(device_id, {})
+        matched = controls.get("calibration_matched_label")
+        if matched is not None:
+            matched.setHidden_(False)
+        fine = controls.get("calibration_fine_section")
+        if fine is not None:
+            fine.setHidden_(True)
+        self.set_settings_message("Calibration matched to your eye.")
+
+    @objc.IBAction
+    def toggleCalibrationFineTune_(self, sender):
+        device_id = str(sender.representedObject() or "")
+        controls = self.device_settings_controls.get(device_id, {})
+        fine = controls.get("calibration_fine_section")
+        if fine is not None:
+            fine.setHidden_(not fine.isHidden())
+
+    @objc.IBAction
+    def toggleCalibrationCompare_(self, sender):
+        """A/B: show the gains from when the popover opened, tap again to
+        come back. Comparing by memory is how calibrations drift."""
+        device_id = str(sender.representedObject() or "")
+        if not device_id:
+            return
+        baselines = getattr(self, "_calibration_compare_baseline", {})
+        stashes = getattr(self, "_calibration_compare_stash", {})
+        self._calibration_compare_baseline = baselines
+        self._calibration_compare_stash = stashes
+        baseline = baselines.get(device_id)
+        if baseline is None:
+            return
+        controls = self.device_settings_controls.get(device_id, {})
+        button = controls.get("calibration_compare_button")
+        stashed = stashes.pop(device_id, None)
+        if stashed is None:
+            stashes[device_id] = self.settings.channel_gains_for_device(device_id)
+            apply = baseline
+            if button is not None:
+                button.setTitle_("Showing before — tap to return")
+        else:
+            apply = stashed
+            if button is not None:
+                button.setTitle_("Compare with before")
+        for channel, value in zip(("red", "green", "blue"), apply):
+            self.set_device_channel_gain(device_id, channel, value)
+        self.refresh_device_settings_controls(device_id, controls)
+
     @objc.IBAction
     def openDeviceCalibrationPopover_(self, sender):
         device_id = sender.representedObject()
@@ -6688,6 +6764,11 @@ class StatusBarController(NSObject):
         # user starts matching without hunting for a patch to click.
         self.calibration_test = (device_id, "#FFFFFF")
         self._send_calibration_test()
+        # The before-snapshot the Compare button flips to.
+        baselines = getattr(self, "_calibration_compare_baseline", {})
+        baselines[device_id] = self.settings.channel_gains_for_device(device_id)
+        self._calibration_compare_baseline = baselines
+        getattr(self, "_calibration_compare_stash", {}).pop(device_id, None)
 
     @objc.IBAction
     def toggleVirtualStatusDevice_(self, _sender):
@@ -15208,6 +15289,12 @@ class StatusBarController(NSObject):
         self.last_led_error = None
         self.last_status_read_error = None
         log_status_bar("device connect requested")
+        # First light: the hardware wakes up breathing like a Mac -- one
+        # soft white cycle of the idle breath, then identity takes over.
+        self.play_transition_flourish(
+            "First light",
+            LedAnimationSetting(first_light_program(), FIRST_LIGHT_SECONDS),
+        )
 
     def disconnect_device(self) -> None:
         self.leds_enabled = False
