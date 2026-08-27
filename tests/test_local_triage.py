@@ -275,3 +275,39 @@ def test_resume_with_a_different_current_key_cannot_remove_existing_acknowledgem
     )
 
     assert result is state
+
+
+def test_controller_refresh_prunes_terminal_acknowledgements_and_saves() -> None:
+    """The wiring (2026-08-26): every operator-state refresh reconciles
+    the triage store, which previously had no prune path at all -- every
+    acknowledgement ever made was retained forever."""
+    from types import SimpleNamespace
+
+    from sidepulse.status_bar import StatusBarController
+
+    resolved = _request(phase=RequestPhase.RESOLVED)
+    live = _request(_request_key("request:live"), event_token="event:live")
+    saved = []
+    probe = SimpleNamespace(
+        local_triage_state=LocalTriageState(
+            (
+                LocalAcknowledgement(resolved.key, NOW),
+                LocalAcknowledgement(live.key, NOW),
+            )
+        ),
+        local_triage_dirty=False,
+        operator_triage_saver=saved.append,
+    )
+    state = SimpleNamespace(requests=(resolved, live))
+
+    StatusBarController._prune_resolved_triage(probe, state)
+
+    assert probe.local_triage_state == LocalTriageState(
+        (LocalAcknowledgement(live.key, NOW),)
+    )
+    assert saved == [probe.local_triage_state]
+    assert probe.local_triage_dirty is False
+
+    # A refresh with nothing newly terminal saves nothing.
+    StatusBarController._prune_resolved_triage(probe, state)
+    assert len(saved) == 1

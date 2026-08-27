@@ -360,7 +360,9 @@ from .lid_sleep import (
 from .local_triage import (
     LocalTriageMutationKind,
     LocalTriageState,
+    LocalTriageValidationError,
     apply_local_triage_mutation,
+    reconcile_local_triage,
 )
 from .macos_notifications import (
     MacOSNotificationClient,
@@ -2808,6 +2810,7 @@ class StatusBarController(NSObject):
             snapshot = dataclass_replace(snapshot, statuses=interrupting)
         if getattr(snapshot, "operator_state", None) is not None:
             self.current_operator_state = snapshot.operator_state
+            self._prune_resolved_triage(snapshot.operator_state)
         self.observe_operator_history_events(
             snapshot.operator_events,
             self.current_operator_state,
@@ -8974,6 +8977,34 @@ class StatusBarController(NSObject):
             _replace_mailbox_preference(preferences, preference)
         )
         return True
+
+    def _prune_resolved_triage(self, operator_state) -> None:
+        """Drop acknowledgements whose requests reached terminal truth.
+
+        The store had no other prune path (wired 2026-08-26): every
+        acknowledgement ever made was retained forever, so the triage
+        file only grew. Pruning keys off canonical request phase --
+        exactly resolved/expired, never staleness -- so an ask that
+        merely went quiet keeps its acknowledgement.
+        """
+        try:
+            pruned = reconcile_local_triage(
+                self.local_triage_state,
+                operator_state.requests,
+            )
+        except LocalTriageValidationError as exc:
+            log_status_bar(f"triage prune refused: {exc}")
+            return
+        if pruned is self.local_triage_state:
+            return
+        self.local_triage_state = pruned
+        self.local_triage_dirty = True
+        try:
+            self.operator_triage_saver(pruned)
+        except OSError:
+            pass  # retained in memory; the next save retries
+        else:
+            self.local_triage_dirty = False
 
     def _apply_triage_action(self, payload, state) -> bool:
         request = _request_for_work(state, payload.work_key)
