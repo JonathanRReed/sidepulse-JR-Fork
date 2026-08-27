@@ -5629,6 +5629,99 @@ class StatusBarController(NSObject):
                 f"Renamed \u201c{name}\u201d to \u201c{replacement}\u201d."
             )
 
+    # --- Studio builder (the no-typing composer; view in studio_builder.py)
+
+    def _studio_builder_state(self) -> tuple[list, bool]:
+        steps = getattr(self, "studio_builder_steps", None)
+        if steps is None:
+            from .studio_builder import DEFAULT_STEPS
+
+            steps = [dict(step) for step in DEFAULT_STEPS]
+            self.studio_builder_steps = steps
+        loop = bool(getattr(self, "studio_builder_loop", True))
+        self.studio_builder_loop = loop
+        return steps, loop
+
+    def _apply_studio_builder(self) -> None:
+        """Compile the builder's steps into the editor -- the same text,
+        validation, persistence, and preview path typing would take."""
+        from .studio_builder import compile_builder_program
+
+        steps, loop = self._studio_builder_state()
+        program = compile_builder_program(steps, loop)
+        editor = getattr(self, "studio_editor", None)
+        if editor is None:
+            return
+        editor.setString_(program)
+        self.refresh_studio_problem_label()
+        self._persist_studio_editor_text()
+
+    def _studio_builder_rebuild(self) -> None:
+        from .studio_builder import rebuild_builder_rows
+
+        rebuild_builder_rows(self)
+
+    @objc.IBAction
+    def studioBuilderAddStep_(self, _sender):
+        from .studio_builder import MAX_BUILDER_STEPS
+
+        steps, _loop = self._studio_builder_state()
+        if len(steps) >= MAX_BUILDER_STEPS:
+            self.set_settings_message(
+                f"{MAX_BUILDER_STEPS} steps is the device's whole budget."
+            )
+            return
+        steps.append(dict(steps[-1]) if steps else {"color": "#00E5FF", "ms": 800, "ease": "pulse"})
+        self._studio_builder_rebuild()
+        self._apply_studio_builder()
+
+    @objc.IBAction
+    def studioBuilderRemoveStep_(self, sender):
+        steps, _loop = self._studio_builder_state()
+        index = int(sender.tag())
+        if 0 <= index < len(steps) and len(steps) > 1:
+            steps.pop(index)
+            self._studio_builder_rebuild()
+            self._apply_studio_builder()
+
+    @objc.IBAction
+    def studioBuilderColorChanged_(self, sender):
+        steps, _loop = self._studio_builder_state()
+        index = int(sender.tag())
+        if not 0 <= index < len(steps):
+            return
+        steps[index]["color"] = hex_from_nscolor(sender.color())
+        self._apply_studio_builder()
+
+    @objc.IBAction
+    def studioBuilderDurationChanged_(self, sender):
+        steps, _loop = self._studio_builder_state()
+        index = int(sender.tag())
+        if not 0 <= index < len(steps):
+            return
+        value = int(sender.doubleValue())
+        steps[index]["ms"] = value
+        labels = getattr(self, "_studio_builder_duration_labels", None)
+        if labels and 0 <= index < len(labels) and labels[index] is not None:
+            labels[index].setStringValue_(f"{value}ms")
+        self._apply_studio_builder()
+
+    @objc.IBAction
+    def studioBuilderEaseChanged_(self, sender):
+        steps, _loop = self._studio_builder_state()
+        index = int(sender.tag())
+        item = sender.selectedItem()
+        if not 0 <= index < len(steps) or item is None:
+            return
+        steps[index]["ease"] = str(item.representedObject() or "none")
+        self._apply_studio_builder()
+
+    @objc.IBAction
+    def studioBuilderLoopToggled_(self, sender):
+        self._studio_builder_state()
+        self.studio_builder_loop = checkbox_is_on(sender)
+        self._apply_studio_builder()
+
     @objc.IBAction
     def applyStudioAsPowerUp_(self, _sender):
         """Burns the Studio program into every connected device's

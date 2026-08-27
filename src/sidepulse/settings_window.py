@@ -3268,6 +3268,10 @@ def _add_studio_card(target: StatusBarController, stack) -> None:
             max_width=520.0,
         )
     )
+    from .studio_builder import build_studio_builder
+
+    studio_inner.addArrangedSubview_(build_studio_builder(target))
+    native_ui.add_separator(studio_inner)
     studio_scroll, studio_editor = native_ui.make_text_editor(
         target.settings.studio_program or "#00E5FF 800ms pulse\noff 300ms cosine\nrepeat",
         height=110.0,

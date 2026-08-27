@@ -23943,3 +23943,63 @@ class ChargingHelloTests(unittest.TestCase):
         )
         self.controller.update_battery_power_preview(unplugged)
         self.assertEqual(len(flourishes), 1)
+
+
+class StudioBuilderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_compile_maps_touch_steps_to_the_dsl(self) -> None:
+        from sidepulse.studio_builder import compile_builder_program
+
+        program = compile_builder_program(
+            (
+                {"color": "#00E5FF", "ms": 800, "ease": "pulse"},
+                {"color": "#000000", "ms": 50, "ease": "warp"},
+            ),
+            True,
+        )
+        # Black maps to `off` (a literal #000000 is a firmware parse
+        # error on indexed lines and dead weight elsewhere), durations
+        # clamp to the floor, unknown eases fail closed to a hold.
+        self.assertEqual(
+            program, "#00E5FF 800ms pulse\noff 100ms none\nrepeat"
+        )
+        self.assertNotIn(
+            "repeat", compile_builder_program(({"color": "#111111", "ms": 500, "ease": "ease"},), False)
+        )
+
+    def test_builder_compiles_into_the_editor_and_firmware_accepts_it(self) -> None:
+        """The no-typing path (2026-08-26): rows of controls compile to
+        the same text, validation, and persistence the editor uses --
+        the DSL is an output format now, not the interface."""
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"HOME": tmp}):
+                window = status_bar.build_settings_window(self.controller)
+                self.controller.ensure_all_settings_panes()
+        self.assertIsNotNone(window)
+
+        rows = self.controller._studio_builder_rows_stack
+        self.assertEqual(len(rows.arrangedSubviews()), 2)
+
+        self.controller.studioBuilderAddStep_(None)
+        self.assertEqual(len(rows.arrangedSubviews()), 3)
+        program = str(self.controller.studio_editor.string())
+        self.assertEqual(program.splitlines()[-1], "repeat")
+        self.assertEqual(len(program.splitlines()), 4)
+
+        sender = SimpleNamespace(tag=lambda: 0, doubleValue=lambda: 1200.0)
+        self.controller.studioBuilderDurationChanged_(sender)
+        self.assertIn("1200ms", str(self.controller.studio_editor.string()))
+
+        remove = SimpleNamespace(tag=lambda: 2)
+        self.controller.studioBuilderRemoveStep_(remove)
+        self.assertEqual(len(rows.arrangedSubviews()), 2)
+
+        from sidepulse.animation import parse_animation
+
+        parse_animation(str(self.controller.studio_editor.string()), led_count=8)
