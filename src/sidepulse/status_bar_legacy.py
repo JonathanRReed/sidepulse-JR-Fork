@@ -2455,6 +2455,24 @@ class StatusBarController(NSObject):
             self.settings,
         )
         self.current_attention_projection = projection
+        # Light-row flight recorder: one line whenever the set of rows
+        # allowed to paint the strip changes. Diagnosing "why is the
+        # strip that color" from outside the process is impossible
+        # without this (2026-08-27: four murky hues, five theories,
+        # zero visibility).
+        light_signature = tuple(
+            (row.agent_id, row.lifecycle_mode.value)
+            for row in projection.light_rows
+        )
+        if light_signature != getattr(self, "_light_rows_logged", None):
+            self._light_rows_logged = light_signature
+            log_status_bar(
+                "light rows: "
+                + ("; ".join(
+                    f"{agent_id.rsplit(':', 1)[-1][:14]}={mode}"
+                    for agent_id, mode in light_signature
+                ) or "none")
+            )
         mailbox_projection = (
             projection
             if visible is statuses
