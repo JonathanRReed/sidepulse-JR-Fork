@@ -282,3 +282,39 @@ def test_keychain_write_resolves_the_items_own_account():
         assert seen["args"][seen["args"].index("-a") + 1] == "someone"
     finally:
         module.subprocess.run = original
+
+
+def test_a_background_read_cannot_park_a_worker_thread_for_half_a_minute(tmp_path):
+    """A dialog the user must answer legitimately takes seconds. A
+    BACKGROUND read must not wait on one at all -- 30s of a stalled
+    worker was the hazard (2026-08-27 mining)."""
+    import inspect
+
+    from sidepulse import credentials as module
+
+    seen = {}
+
+    def runner(item, *, timeout):
+        seen["timeout"] = timeout
+        import subprocess
+
+        return subprocess.CompletedProcess([], 1, stdout="", stderr="")
+
+    ledger = KeychainConsentLedger(tmp_path / "consent.json")
+    ledger.record_success(CLAUDE_CODE_KEYCHAIN.service, 1_000.0)
+    original = module._run_security
+    module._run_security = runner
+    try:
+        read_keychain_secret(
+            CLAUDE_CODE_KEYCHAIN, allow_prompt=False, ledger=ledger
+        )
+        background = seen["timeout"]
+        read_keychain_secret(CLAUDE_CODE_KEYCHAIN, allow_prompt=True)
+        foreground = seen["timeout"]
+    finally:
+        module._run_security = original
+
+    assert background <= 5.0, "no dialog is expected, so do not wait for one"
+    assert foreground >= background, "a real prompt gets room to be answered"
+    source = inspect.getsource(module)
+    assert "_SECURITY_ATTRIBUTES_TIMEOUT_SECONDS" in source

@@ -32,7 +32,16 @@ from .private_io import atomic_private_write, read_private_text
 
 # `security` exits 128 when the user dismisses or denies the access dialog.
 _SECURITY_USER_CANCELED = 128
+#: One budget per kind of call, because they block on different things.
+#: A dialog the user must answer legitimately takes seconds; an
+#: attributes probe never prompts at all, and a BACKGROUND read must not
+#: park a worker thread for half a minute if the ACL has drifted and
+#: `security` decides to prompt anyway (2026-08-27 mining).
 _SECURITY_TIMEOUT_SECONDS = 30.0
+_SECURITY_PROMPT_TIMEOUT_SECONDS = 30.0
+_SECURITY_BACKGROUND_TIMEOUT_SECONDS = 2.0
+_SECURITY_ATTRIBUTES_TIMEOUT_SECONDS = 2.0
+_SECURITY_WRITE_TIMEOUT_SECONDS = 10.0
 # Codex writes plain JSON; a real one is a few KB. Anything larger is not it.
 CODEX_AUTH_MAX_BYTES = 256 * 1024
 
@@ -157,7 +166,11 @@ class KeychainConsentLedger:
             pass
 
 
-def _run_security(item: KeychainItem) -> subprocess.CompletedProcess:
+def _run_security(
+    item: KeychainItem,
+    *,
+    timeout: float = _SECURITY_PROMPT_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess:
     arguments = ["/usr/bin/security", "find-generic-password", "-w", "-s", item.service]
     if item.account:
         arguments += ["-a", item.account]
@@ -165,7 +178,7 @@ def _run_security(item: KeychainItem) -> subprocess.CompletedProcess:
         arguments,
         capture_output=True,
         text=True,
-        timeout=_SECURITY_TIMEOUT_SECONDS,
+        timeout=timeout,
         check=False,
     )
 
@@ -197,7 +210,17 @@ def read_keychain_secret(
             return CredentialResult(CredentialOutcome.COOLING_DOWN, retry_at=retry_at)
 
     try:
-        completed = (runner or _run_security)(item)
+        if runner is not None:
+            completed = runner(item)
+        else:
+            completed = _run_security(
+                item,
+                timeout=(
+                    _SECURITY_PROMPT_TIMEOUT_SECONDS
+                    if allow_prompt
+                    else _SECURITY_BACKGROUND_TIMEOUT_SECONDS
+                ),
+            )
     except (OSError, subprocess.SubprocessError):
         return CredentialResult(CredentialOutcome.UNAVAILABLE)
 
@@ -233,7 +256,7 @@ def keychain_account_for(item: KeychainItem) -> str | None:
             ["/usr/bin/security", "find-generic-password", "-s", item.service],
             capture_output=True,
             text=True,
-            timeout=_SECURITY_TIMEOUT_SECONDS,
+            timeout=_SECURITY_ATTRIBUTES_TIMEOUT_SECONDS,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -270,7 +293,7 @@ def _run_security_write(item: KeychainItem, secret: str) -> subprocess.Completed
         ],
         capture_output=True,
         text=True,
-        timeout=_SECURITY_TIMEOUT_SECONDS,
+        timeout=_SECURITY_WRITE_TIMEOUT_SECONDS,
         check=False,
     )
 
