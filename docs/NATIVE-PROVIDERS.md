@@ -99,7 +99,7 @@ On the first Mac:
 
 ```bash
 sidepulse providers sync set-device mac-mini
-sidepulse providers sync set-categories quota,token_usage,reset_events
+sidepulse providers sync set-categories quota,token_usage,agent_activity
 sidepulse providers sync export-pairing --output ~/Desktop/sidepulse-pairing.json
 ```
 

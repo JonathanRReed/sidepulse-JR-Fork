@@ -45,7 +45,7 @@ fi
 section "hooks configured"
 for CONFIG in "$HOME/.claude/settings.json" "$HOME/.codex/hooks.json"; do
   if [ -f "$CONFIG" ]; then
-    COUNT=$(grep -c "hook_entry.py" "$CONFIG" 2>/dev/null || echo 0)
+    COUNT=$(grep -c "hook_entry.py" "$CONFIG" 2>/dev/null) || COUNT=0
     echo "$CONFIG: $COUNT hook_entry references"
   else
     echo "$CONFIG: missing"
