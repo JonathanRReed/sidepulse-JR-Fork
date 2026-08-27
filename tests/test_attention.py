@@ -338,3 +338,126 @@ def test_completed_settles_to_idle_on_the_live_projection_path() -> None:
     assert stale_row.lifecycle_mode is LifecycleMode.IDLE, (
         "done is a moment on the LIVE path too"
     )
+
+
+# --- Delegation: a paused main whose sub-agents still work ------------------
+
+
+def _worker(
+    mode: AgentMode,
+    *,
+    event_name: str,
+    updated_at: datetime = datetime(2026, 8, 12, tzinfo=timezone.utc),
+) -> AgentStatus:
+    return AgentStatus(
+        provider="claude",
+        agent_id="claude:agent:worker-1",
+        display_name="Task worker",
+        mode=mode,
+        updated_at=updated_at,
+        event_name=event_name,
+        session_id="main",
+    )
+
+
+def test_stopped_main_with_working_subagents_projects_as_working() -> None:
+    """Claude fires Stop the moment the main turn ends, even while its
+    sub-agents carry the work -- a live ledger showed a session
+    'completed' for 30+ minutes of continuous delegation."""
+    stopped_main = status(event_name="Stop", mode=AgentMode.COMPLETED)
+    worker = _worker(AgentMode.TOOL_RUNNING, event_name="PreToolUse")
+
+    projection = project_attention(
+        snapshot_with(stopped_main, worker), AgentMonitorSettings()
+    )
+
+    (main_row,) = projection.visible_rows
+    assert main_row.lifecycle_mode is LifecycleMode.ACTIVE
+    assert main_row.source_status.mode is AgentMode.WORKING, (
+        "the dropdown must tell the same story as the light"
+    )
+
+
+def test_stopped_main_with_finished_subagents_stays_completed() -> None:
+    stopped_main = status(event_name="Stop", mode=AgentMode.COMPLETED)
+    finished = _worker(AgentMode.COMPLETED, event_name="SubagentStop")
+
+    projection = project_attention(
+        snapshot_with(stopped_main, finished), AgentMonitorSettings()
+    )
+
+    (main_row,) = projection.visible_rows
+    assert main_row.lifecycle_mode is LifecycleMode.COMPLETED_RECENTLY
+
+
+def test_asking_main_keeps_asking_while_subagents_work() -> None:
+    """The promotion must never mask an ask."""
+    asking_main = status(
+        event_name="Notification", mode=AgentMode.WAITING_FOR_INPUT
+    )
+    worker = _worker(AgentMode.TOOL_RUNNING, event_name="PreToolUse")
+
+    projection = project_attention(
+        snapshot_with(asking_main, worker), AgentMonitorSettings()
+    )
+
+    (main_row,) = projection.visible_rows
+    assert main_row.lifecycle_mode is LifecycleMode.WAITING
+    assert main_row.actionable
+
+
+def test_canonical_completed_parent_with_active_child_projects_active() -> None:
+    source = SourceKey("claude", "hooks", "global", "live_agent_events")
+    parent_key = WorkKey(source, WorkIdentifier("work:parent"))
+    child_key = WorkKey(source, WorkIdentifier("work:child"))
+    watermark = ProviderWatermark(
+        source,
+        WatermarkBasis.PROVIDER_SEQUENCE,
+        1_786_632_000.0,
+        EventToken("event:delegation"),
+        1,
+        10,
+    )
+    parent = CanonicalWorkTruth(
+        parent_key,
+        WorkLifecycle.COMPLETED,
+        watermark,
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        SourceHealth.HEALTHY,
+        SourceFreshness.FRESH,
+        NextActor.PROVIDER,
+        "Claude main",
+        None,
+        (),
+        False,
+    )
+    child = CanonicalWorkTruth(
+        child_key,
+        WorkLifecycle.ACTIVE,
+        watermark,
+        ObservationAuthority.DIRECT_PROVIDER_OBSERVATION,
+        SourceHealth.HEALTHY,
+        SourceFreshness.FRESH,
+        NextActor.PROVIDER,
+        "Task worker",
+        parent_key,
+        (),
+        False,
+    )
+    state = CanonicalOperatorState(
+        1,
+        1,
+        (parent, child),
+        (),
+        ((source, watermark),),
+        (),
+        ClockContinuityState(ClockContinuityStatus.STABLE, None, 0),
+        None,
+    )
+
+    projection = project_attention_from_operator_state(
+        state, (), AgentMonitorSettings()
+    )
+
+    (main_row,) = projection.visible_rows
+    assert main_row.lifecycle_mode is LifecycleMode.ACTIVE

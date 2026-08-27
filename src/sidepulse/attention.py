@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -197,6 +197,7 @@ def project_attention(
         _project_row(status, settings, now=collected_at)
         for status in plausible_statuses
     )
+    rows = _promote_delegating_parents(rows)
     actionable = tuple(
         sorted(
             (row for row in rows if row.actionable),
@@ -260,6 +261,20 @@ def project_attention_from_operator_state(
         raise ValueError("invalid canonical operator events")
     request_by_key = {request.key: request for request in state.requests}
     now_epoch = projection_now_epoch(state)
+    # A main whose own thread paused while its sub-agents carry the work
+    # is still WORKING: Claude fires Stop the moment the main turn ends,
+    # even mid-delegation, and a live ledger showed a session "completed"
+    # for 30+ minutes while its workers streamed tool events under it
+    # (2026-08-27, owner report: three mains running, count said one).
+    # Freshness gates the promotion -- children finishing or going
+    # silent ends it, the mirror of the silence demotion below.
+    delegating_parents = {
+        work.parent_key
+        for work in state.works
+        if work.parent_key is not None
+        and work.lifecycle is WorkLifecycle.ACTIVE
+        and not active_work_went_silent(work, now_epoch)
+    }
     rows: list[ProjectedAgentRow] = []
     for work in state.works:
         requests = tuple(
@@ -312,6 +327,18 @@ def project_attention_from_operator_state(
             and completed_work_no_longer_recent(work, now_epoch)
         ):
             lifecycle = LifecycleMode.IDLE
+        # The delegation promotion. Never touches WAITING or FAILED --
+        # an ask must keep asking and a failure must stay named.
+        if (
+            work.key in delegating_parents
+            and lifecycle
+            in {
+                LifecycleMode.IDLE,
+                LifecycleMode.COMPLETED_RECENTLY,
+                LifecycleMode.UNKNOWN,
+            }
+        ):
+            lifecycle = LifecycleMode.ACTIVE
         source_status = AgentStatus(
             provider=work.key.source_key.provider_id,
             agent_id=(
@@ -389,6 +416,57 @@ def project_attention_from_operator_state(
             else representative.provider if representative is not None else None
         ),
         click_target_agent_id=None,
+    )
+
+
+_PROMOTABLE_PARENT_LIFECYCLES = frozenset(
+    {
+        LifecycleMode.IDLE,
+        LifecycleMode.COMPLETED_RECENTLY,
+        LifecycleMode.UNKNOWN,
+    }
+)
+
+
+def _promote_delegating_parents(
+    rows: tuple[ProjectedAgentRow, ...],
+) -> tuple[ProjectedAgentRow, ...]:
+    """A main whose sub-agents are still working IS still working.
+
+    Claude fires Stop the moment the main turn ends, even mid-delegation:
+    a live ledger showed a session "completed" for 30+ minutes while its
+    workers streamed tool events under it (2026-08-27, owner report --
+    three mains running, the count said one). Only quiet lifecycles are
+    promoted: an ask keeps asking, a failure stays named. The promotion
+    ends by itself when the children finish or go stale, the same
+    self-healing shape as the silence clock. The row's status mode is
+    relabeled Working so the dropdown tells the same story as the light.
+    """
+    delegating_parent_ids = {
+        row.source_status.parent_agent_id
+        for row in rows
+        if row.is_subagent
+        and row.lifecycle_mode is LifecycleMode.ACTIVE
+        and row.source_status.parent_agent_id
+    }
+    if not delegating_parent_ids:
+        return rows
+    return tuple(
+        replace(
+            row,
+            lifecycle_mode=LifecycleMode.ACTIVE,
+            source_status=replace(
+                row.source_status,
+                mode=AgentMode.WORKING,
+            ),
+        )
+        if (
+            not row.is_subagent
+            and row.agent_id in delegating_parent_ids
+            and row.lifecycle_mode in _PROMOTABLE_PARENT_LIFECYCLES
+        )
+        else row
+        for row in rows
     )
 
 
