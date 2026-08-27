@@ -2896,6 +2896,21 @@ class StatusBarController(NSObject):
         # light. Left alone it would answer for whichever light was on
         # when it opened, which is the exact failure it exists to end.
         self.refresh_why_panel()
+        # A watched Profile pane must not freeze at menu-open vintage:
+        # replan transcript scans on the tick while it is visible. The
+        # planner's freshness gates and the JR plane's 120s opportunistic
+        # throttle bound the work, and this is timer-driven -- pane
+        # SELECTION still does no provider work (the pinned lazy law).
+        settings_window = getattr(self, "settings_window", None)
+        if (
+            settings_window is not None
+            and settings_window.isVisible()
+            and getattr(self, "current_settings_pane", None) == "profile"
+        ):
+            try:
+                self.maybe_refresh_usage_summary()
+            except Exception as exc:
+                log_status_bar(f"profile liveness replan failed: {exc}")
         if self.status_item is not None:
             self.update_status_menu(snapshot, state)
         # The settings-lag flight recorder: every refresh_ runs on the
@@ -6757,6 +6772,16 @@ class StatusBarController(NSObject):
     def popoverDidClose_(self, _notification):
         """NSPopover delegate: the calibration popover closed -- stop any
         test color and hand the device straight back to live status."""
+        # The popover is transient: any outside click closes it. Closing
+        # mid-compare must not persist the "before" gains -- the stash
+        # holds the user's real tuning, so put it back before the
+        # popover is forgotten (2026-08-27 audit: three nudges, one
+        # stray click, calibration gone).
+        stashes = getattr(self, "_calibration_compare_stash", {})
+        for device_id in tuple(stashes):
+            stashed = stashes.pop(device_id)
+            for channel, value in zip(("red", "green", "blue"), stashed):
+                self.set_device_channel_gain(device_id, channel, value)
         if self.calibration_test is not None:
             self.calibration_test = None
             self.refresh_(None)
@@ -6874,11 +6899,19 @@ class StatusBarController(NSObject):
         # user starts matching without hunting for a patch to click.
         self.calibration_test = (device_id, "#FFFFFF")
         self._send_calibration_test()
+        # A stash that survived to a fresh open is tuning that never got
+        # restored -- put it back FIRST so the new baseline below is the
+        # real calibration, not the compare view's "before" gains.
+        stashes = getattr(self, "_calibration_compare_stash", {})
+        self._calibration_compare_stash = stashes
+        stranded = stashes.pop(device_id, None)
+        if stranded is not None:
+            for channel, value in zip(("red", "green", "blue"), stranded):
+                self.set_device_channel_gain(device_id, channel, value)
         # The before-snapshot the Compare button flips to.
         baselines = getattr(self, "_calibration_compare_baseline", {})
         baselines[device_id] = self.settings.channel_gains_for_device(device_id)
         self._calibration_compare_baseline = baselines
-        getattr(self, "_calibration_compare_stash", {}).pop(device_id, None)
 
     @objc.IBAction
     def toggleVirtualStatusDevice_(self, _sender):
@@ -12751,15 +12784,23 @@ class StatusBarController(NSObject):
             # and the notch painted one fleet-wide state colour while the
             # strip beside it painted per-agent identity. Two surfaces,
             # two colour languages, same moment.
+            # Once-on-arrival ask crest, same discipline as the hardware
+            # controllers: the latch remembers whether the LAST multi-
+            # agent paint was already asking. Branches that render some
+            # other story clear it, so a returning ask crests again.
+            arrival_fresh = not getattr(self, "_screen_bar_ask_latch", False)
+            self._screen_bar_ask_latch = False
             if self.should_render_multi_agent(resolved_glance, projection):
-                _, program = program_for_projection(
+                bar_state, program = program_for_projection(
                     projection,
                     active_signal=self.active_failure_signal(),
                     led_count=8,
                     colors=colors_for_render,
                     brightness=brightness,
                     relay_elapsed_seconds=relay_elapsed_seconds,
+                    include_attention_arrival=arrival_fresh,
                 )
+                self._screen_bar_ask_latch = bar_state is LedDisplayState.ASK
             elif resolved_glance is not None:
                 preferences = self._accessibility_display_preferences
                 if type(preferences) is not AccessibilityDisplayPreferences:
@@ -12793,23 +12834,27 @@ class StatusBarController(NSObject):
                 )
                 program = apply_brightness(presentation.dsl, brightness)
             elif projection is not None:
-                _, program = program_for_projection(
+                bar_state, program = program_for_projection(
                     projection,
                     active_signal=self.active_failure_signal(),
                     led_count=8,
                     colors=colors_for_render,
                     brightness=brightness,
                     relay_elapsed_seconds=relay_elapsed_seconds,
+                    include_attention_arrival=arrival_fresh,
                 )
+                self._screen_bar_ask_latch = bar_state is LedDisplayState.ASK
             else:
-                _, program = program_for_snapshot(
+                bar_state, program = program_for_snapshot(
                     statuses,
                     led_count=8,
                     colors=colors_for_render,
                     brightness=brightness,
                     fallback_mode=mode,
                     relay_elapsed_seconds=relay_elapsed_seconds,
+                    include_attention_arrival=arrival_fresh,
                 )
+                self._screen_bar_ask_latch = bar_state is LedDisplayState.ASK
             _set_virtual(program, presentation)
         _vt3 = time.monotonic()
         if _vt3 - _vt0 > 0.1:
@@ -13678,6 +13723,7 @@ class StatusBarController(NSObject):
             return
         previous_generation = self._hardware_write_generation
         self._hardware_write_generation += 1
+        previous_keys = self._hardware_device_keys
         self._hardware_device_keys = frozenset(
             self._hardware_worker_key(device) for device in devices
         )
@@ -13685,6 +13731,15 @@ class StatusBarController(NSObject):
         if not self.observe_connected_devices():
             return
         self.rebuild_devices_pane()
+        # First light: the strip just came alive (plugged in, or the app
+        # launched to find it) -- one soft white cycle of the idle
+        # breath, then identity takes over. This is darkness-to-light
+        # only: gaining a SECOND device stays quiet.
+        if not previous_keys and self._hardware_device_keys and self.leds_enabled:
+            self.play_transition_flourish(
+                "First light",
+                LedAnimationSetting(first_light_program(), FIRST_LIGHT_SECONDS),
+            )
         if self.last_snapshot is not None:
             self.refresh_(None)
 
@@ -15399,40 +15454,6 @@ class StatusBarController(NSObject):
     def restoreLedDisplay_(self, token_value):
         restore_led_display(self, token_value)
 
-    def connect_device(self) -> None:
-        self.leds_enabled = True
-        self.reconcile_lid_observation()
-        self.status_bar_devices()
-        self.reset_led_controllers_for_display_change()
-        self.last_led_error = None
-        self.last_status_read_error = None
-        log_status_bar("device connect requested")
-        # First light: the hardware wakes up breathing like a Mac -- one
-        # soft white cycle of the idle breath, then identity takes over.
-        self.play_transition_flourish(
-            "First light",
-            LedAnimationSetting(first_light_program(), FIRST_LIGHT_SECONDS),
-        )
-
-    def disconnect_device(self) -> None:
-        self.leds_enabled = False
-        self.reconcile_lid_observation()
-        targets = self.current_led_targets()
-        if not targets:
-            targets = [
-                device.target for device in self.status_bar_devices()
-                if device.connected and device.device_id != VIRTUAL_DEVICE_ID
-            ]
-        for target in targets:
-            try:
-                result = write_mode_to_leds(AgentMode.IDLE_READY, device_path=target)
-                log_status_bar(f"device disconnected target={result.target}")
-            except Exception as exc:
-                log_status_bar(f"device disconnect error: {exc}")
-        self.reset_led_controllers_for_display_change()
-        self.last_led_error = None
-        self.last_status_read_error = None
-
     def device_connected(self) -> bool:
         connected = [
             device
@@ -16265,6 +16286,9 @@ def menu_content_signature(snapshot, state, target) -> tuple:
         # would still read the old count the next time the menu was opened.
         getattr(target, "_activity_ledger_revision", 0),
         round(getattr(target, "activity_ledger", ActivityLedger()).last_seen_epoch, 3),
+        # The ages those rows RENDER, minute-bucketed -- without them
+        # "4m ago" could sit wrong until some other section changed.
+        _activity_age_signature(target),
         getattr(target.settings, "tips_enabled", True),
         len(getattr(target.settings, "dismissed_tips", ()) or ()),
         # First-run honesty rows: "you are not set up" must disappear the
@@ -16283,6 +16307,7 @@ def remote_ledger_content_signature(target) -> tuple:
     ledger = getattr(target, "current_merged_ledger", None)
     if type(ledger) is not MergedLedger:
         return ()
+    now = datetime.now(timezone.utc)
     return (
         tuple(
             (
@@ -16291,6 +16316,10 @@ def remote_ledger_content_signature(target) -> tuple:
                 row.status.mode.value,
                 row.status.display_name,
                 row.status.stale,
+                # The rendered age ("12m ago") IS screen content; it
+                # buckets at minute granularity, so this costs one
+                # rebuild per minute per aging row, never a timer.
+                relative_age_label(row.status.age_seconds(now)),
             )
             for row in remote_ledger_menu_rows(target)
         ),
@@ -16416,6 +16445,35 @@ def _activity_statuses_by_agent(snapshot) -> dict[str, AgentStatus]:
         if current is None or status.updated_at >= current.updated_at:
             rows[status.agent_id] = status
     return rows
+
+
+def _activity_age_signature(target) -> tuple:
+    """The rendered ages of exactly the rows the ledger submenu shows.
+
+    Same minute-bucketed labels the rows draw, so the menu signature
+    changes precisely when the visible text would (the signature's own
+    contract: content in the signature, never a time bucket)."""
+    restore = getattr(target, "ensure_activity_ledger", None)
+    if not callable(restore):
+        return ()
+    ledger = restore()
+    if type(ledger) is not ActivityLedger or not ledger.entries:
+        return ()
+    now_epoch = time.time()
+    unseen = ledger.unseen
+    seen = tuple(entry for entry in ledger.entries if entry not in unseen)
+    visible_unseen = unseen[:MAX_ACTIVITY_MENU_ROWS]
+    remaining = MAX_ACTIVITY_MENU_ROWS - len(visible_unseen)
+    visible_seen = seen[:remaining] if remaining > 0 else ()
+    return (
+        _activity_boundary_text(ledger, now_epoch),
+        tuple(
+            relative_age_label(
+                max(0.0, now_epoch - entry.occurred_at_epoch)
+            )
+            for entry in (*visible_unseen, *visible_seen)
+        ),
+    )
 
 
 def _activity_boundary_text(ledger: ActivityLedger, now_epoch: float) -> str:
@@ -18828,6 +18886,13 @@ def main() -> int:
     if another_instance_alive():
         print("SidePulse is already running; this instance is exiting.")
         return 0
+    # The Screen Bar's real renderer is patched in by this installer.
+    # The JR entry gets it as an import side-effect, but the legacy
+    # `agent-monitor` console script comes straight here -- without this
+    # the band draws blank in wings-only/compact (2026-08-27 audit).
+    from .screen_bar_runtime import install_screen_bar_runtime
+
+    install_screen_bar_runtime()
     run_status_bar()
     return 0
 

@@ -304,8 +304,18 @@ class ProviderUsageWindowController:
     def _start_refresh_pulse(self) -> None:
         """A gentle pulse while the window is open, so the cards can't
         sit stale for hours; the tick self-invalidates once hidden."""
-        if self._refresh_timer is not None or self.action_target is None:
+        if self.action_target is None:
             return
+        # Replace, never refuse: the hidden-window tick invalidates the
+        # timer but this reference survived, so every reopen after a
+        # hidden tick had no pulse at all (2026-08-27 audit).
+        existing = self._refresh_timer
+        if existing is not None:
+            try:
+                existing.invalidate()
+            except Exception:
+                pass
+            self._refresh_timer = None
         try:
             from Foundation import NSTimer
 

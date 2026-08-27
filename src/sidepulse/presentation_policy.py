@@ -622,6 +622,21 @@ def compose_presentation_program(
             ]
             lines = (settle_text, "; ".join(segments), "repeat")
             cycle_seconds = 0.16 + (base_ms + 330 + 599) / 1000.0
+        # The declared period must be the period the firmware will
+        # actually loop, or phase-resume drifts a little every cycle
+        # (twinkle at 2 LEDs declared 4010ms against a real 1910ms
+        # loop). Measure the program we just wrote through the real
+        # parser; keep the hand-built value only if the parse refuses.
+        try:
+            from .animation import loop_duration_ms, parse_animation
+
+            _measured = loop_duration_ms(
+                parse_animation("\n".join(lines), led_count=led_count)
+            )
+        except Exception:
+            _measured = None
+        if _measured:
+            cycle_seconds = _measured / 1000.0
         cycle_ms = max(1, round(cycle_seconds * 1000.0))
         elapsed = max(0.0, float(presentation_time) - resolved.relay_epoch)
         elapsed_ms = round(elapsed * 1000.0)
@@ -671,6 +686,23 @@ def compose_presentation_program(
         f"{index}:{peak_color} {step_ms}ms pulse {turn * step_ms}ms"
         for turn, index in enumerate(order)
     )
+    # The loop the firmware runs is settle + traversal, not the bare
+    # traversal -- declare the period it will actually repeat (same
+    # honesty rule as the styled shapes above).
+    try:
+        from .animation import loop_duration_ms, parse_animation
+
+        _measured = loop_duration_ms(
+            parse_animation(
+                "\n".join((resets, pulses, "repeat")),
+                led_count=led_count,
+            )
+        )
+    except Exception:
+        _measured = None
+    trusted_period = (
+        _measured / 1000.0 if _measured else RELAY_TRAVERSAL_SECONDS
+    )
     temporal = TemporalProgram(
         frames=tuple(
             TemporalFrame(_mean_intensity(intensities), RELAY_TRAVERSAL_SECONDS / led_count)
@@ -689,7 +721,7 @@ def compose_presentation_program(
         dsl="\n".join((resets, pulses, "repeat")),
         static_fallback_dsl=fallback,
         temporal=temporal,
-        trusted_period_seconds=RELAY_TRAVERSAL_SECONDS,
+        trusted_period_seconds=trusted_period,
         relay_epoch=resolved.relay_epoch,
         next_visual_change_at=resolved.next_visual_change_at,
         playback_anchor=playback_anchor,

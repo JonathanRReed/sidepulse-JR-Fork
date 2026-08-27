@@ -1272,6 +1272,12 @@ class AgentLedController:
         target = resolve_target_path(device_path=self.device_path, file_name=self.file_name)
         led_count = led_count_for_target(target)
         brightness = normalize_brightness(self.brightness)
+        # The ask crest plays exactly once, on ARRIVAL: this controller
+        # is the one thing that knows whether the strip was already
+        # asking (2026-08-27 audit: the tuned crest was only ever
+        # rendered by tests). With no ask in the render the arrival
+        # program IS the base program, so the flag is inert otherwise.
+        arrival_fresh = self.last_state is not LedDisplayState.ASK
         state, program = program_for_snapshot(
             statuses,
             led_count=led_count,
@@ -1279,6 +1285,7 @@ class AgentLedController:
             brightness=brightness,
             fallback_mode=fallback_mode,
             relay_elapsed_seconds=relay_elapsed_seconds,
+            include_attention_arrival=arrival_fresh,
         )
         # Applied before the dedup check below (not after) so both the
         # comparison and self.last_program reflect the exact bytes actually
@@ -1320,6 +1327,8 @@ class AgentLedController:
         from .colors import program_for_projection
 
         target = resolve_target_path(device_path=self.device_path, file_name=self.file_name)
+        # Same once-on-arrival crest discipline as sync_snapshot above.
+        arrival_fresh = self.last_state is not LedDisplayState.ASK
         state, program = program_for_projection(
             projection,
             active_signal=active_signal,
@@ -1327,6 +1336,7 @@ class AgentLedController:
             colors=colors,
             brightness=normalize_brightness(self.brightness),
             relay_elapsed_seconds=relay_elapsed_seconds,
+            include_attention_arrival=arrival_fresh,
         )
         program = self._for_strip(program)
         identity = self._phase_free_identity(

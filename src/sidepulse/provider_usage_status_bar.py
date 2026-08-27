@@ -362,6 +362,24 @@ else:
             if controller is not None:
                 controller.refresh(state)
             refresh_native_usage_summary(self)
+            # Fresh JR data must reach every surface that RENDERS it, or
+            # "Refresh Capacity" fetches and the visible line never moves
+            # until a pane switch (2026-08-27 audit). Both calls are pure
+            # re-renders of state already in hand -- the Capacity pane's
+            # no-implicit-provider-work law is untouched.
+            try:
+                self.refresh_capacity_settings_projection()
+                plan_label = (getattr(self, "settings_fields", None) or {}).get(
+                    "profile_plan_label"
+                )
+                if plan_label is not None:
+                    plan_label.setStringValue_(
+                        self.jr_capacity_settings_text("claude")
+                        or getattr(self, "claude_plan_text", None)
+                        or ""
+                    )
+            except Exception as exc:
+                self._provider_usage_log(f"usage projection refresh failed: {exc}")
             self._menu_signature = None
             if previous_state != state and getattr(self, "_runtime_started", False):
                 self.schedule_event_refresh()
@@ -548,15 +566,21 @@ else:
             from .provider_usage_qol import format_reset_countdown
 
             now = time.time()
-            parts = [
-                f"{lane.label} {lane.remaining_percent:.0f}% left"
-                + (
-                    f" · {format_reset_countdown(lane.reset_at, now=now)}"
-                    if lane.reset_at
-                    else ""
-                )
-                for lane in snapshot.lanes[:3]
-            ]
+            # None-safe: lanes without a readable percent are legal and
+            # real (grok's credits lane; claude windows missing a percent
+            # key) -- an f-string TypeError here killed the whole
+            # settings-refresh pass (2026-08-27 audit).
+            parts = []
+            for lane in snapshot.lanes[:3]:
+                if lane.remaining_percent is None:
+                    part = lane.label
+                else:
+                    part = f"{lane.label} {lane.remaining_percent:.0f}% left"
+                if lane.reset_at:
+                    part += f" · {format_reset_countdown(lane.reset_at, now=now)}"
+                parts.append(part)
+            if not parts:
+                return None
             age_minutes = max(0, int((now - snapshot.observed_at) // 60))
             checked = "just checked" if age_minutes < 1 else f"checked {age_minutes}m ago"
             state_note = (

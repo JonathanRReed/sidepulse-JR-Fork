@@ -294,7 +294,12 @@ def test_semantic_relay_uses_one_epoch_for_two_and_eight_led_surfaces() -> None:
     assert dot.motion is MotionClass.CONTINUOUS
     assert pro.motion is MotionClass.CONTINUOUS
     assert dot.relay_epoch == pro.relay_epoch == 100.0
-    assert dot.trusted_period_seconds == pro.trusted_period_seconds == 1.6
+    # The declared period is the loop the firmware actually runs --
+    # settle prefix included -- so the two builds honestly differ
+    # (settle scales with step). The shared epoch above is the
+    # cross-surface phase contract; the period is per-build truth.
+    assert dot.trusted_period_seconds == 1.696
+    assert pro.trusted_period_seconds == 1.64
     assert _semantic_pulse_indices(dot.dsl)[0] == 1
     assert _semantic_pulse_indices(pro.dsl)[0] == 4
     assert dot.temporal is not None

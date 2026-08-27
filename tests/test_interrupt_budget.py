@@ -868,3 +868,25 @@ def test_reset_celebration_claims_the_strip_and_respects_focus(controller) -> No
         result = validate_firmware_program(program, led_count=led_count)
         assert result.accepted, (led_count, result.reason)
     assert "repeat 3" in reset_celebration_program(255)  # finite by design
+
+
+def test_reset_celebration_claim_outlasts_the_full_program() -> None:
+    """The display claim must cover ALL cycles of the finite program --
+    a hand-kept constant drifted under the 2026-08-26 choreography and
+    the steady status program clipped the third cycle's fade."""
+    from sidepulse.animation import RepeatStep, parse_animation, step_duration_ms
+    from sidepulse.celebrations import (
+        RESET_CELEBRATION_SECONDS,
+        reset_celebration_program,
+    )
+
+    animation = parse_animation(reset_celebration_program(1.0), led_count=8)
+    repeat_at = next(
+        i for i, step in enumerate(animation.steps) if type(step) is RepeatStep
+    )
+    count = animation.steps[repeat_at].count
+    durations = [step_duration_ms(step) for step in animation.steps]
+    runtime = (
+        sum(durations[:repeat_at]) * count + sum(durations[repeat_at + 1 :])
+    ) / 1000.0
+    assert RESET_CELEBRATION_SECONDS >= runtime
