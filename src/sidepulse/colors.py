@@ -452,7 +452,12 @@ BLEND_MODE_TOOLTIPS: dict[str, str] = {
     ),
 }
 
-LAYOUT_CROSSFADE_MS = 450
+# NOTE on layout crossfades: every program swap already eases instead of
+# jump-cutting -- the firmware resumes from the current visible color and
+# each program leads with an eased settle/approach line (see
+# led_status.settle_duration_ms). A dedicated longer bridge for roster
+# layout changes was designed as LAYOUT_CROSSFADE_MS = 450 but never
+# wired; the constant is gone until the bridge is real.
 IDLE_ROLL_SECONDS = 7.0
 IDLE_ROLL_MIN_AGENTS = 3
 
@@ -482,8 +487,14 @@ DEFAULT_URGENCY_ALERT_ENABLED = True
 # and an optional finite arrival that precedes it with at most two full-bar
 # taps. The pure renderer defaults to the base so refresh or reconnection
 # cannot invent an arrival episode; the later episode owner must request it.
-ATTENTION_FLASH_MS = 240
-ATTENTION_FLASH_GAP_MS = 140
+# The arrival is ONE overshoot-and-settle crest (2026-08-26, Dynamic
+# Island grammar: alerts expand past their final size and settle), not
+# repeated flashes: the strip swells to the attention color, breathes
+# down to a 55% hold, and the persistent anchor stands up from there.
+# Urgency arrives once; the anchor carries it after that.
+ATTENTION_CREST_MS = 300
+ATTENTION_CREST_SETTLE_MS = 450
+ATTENTION_CREST_HOLD_FRACTION = 0.55
 ATTENTION_REST_MS = 900
 
 # A quick twinkle-then-bloom when an agent finishes, rather than an
@@ -2913,13 +2924,16 @@ def compose_attention_arrival(
     if not base_program:
         return AttentionMotionPrograms(base_program="", arrival_program="")
 
-    flash = apply_brightness(
-        f"{normalize_hex(attention_color, ASK_AMBER)} {ATTENTION_FLASH_MS}ms",
+    color = normalize_hex(attention_color, ASK_AMBER)
+    crest = apply_brightness(f"{color} {ATTENTION_CREST_MS}ms cosine", brightness)
+    settle = apply_brightness(
+        f"{scale_hex_brightness(color, ATTENTION_CREST_HOLD_FRACTION)} "
+        f"{ATTENTION_CREST_SETTLE_MS}ms cosine",
         brightness,
     )
-    double = [flash, f"off {ATTENTION_FLASH_GAP_MS}ms", flash, f"off {ATTENTION_REST_MS}ms"]
-    single = [flash, f"off {ATTENTION_REST_MS}ms"]
-    for preamble in (double, single):
+    full = [crest, settle]
+    single = [crest]
+    for preamble in (full, single):
         candidate = "\n".join([*preamble, base_program])
         if len(candidate.splitlines()) <= MAX_LED_LINES and len(candidate.encode("utf-8")) <= MAX_LED_BYTES:
             return AttentionMotionPrograms(

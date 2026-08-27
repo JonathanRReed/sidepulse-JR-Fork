@@ -944,3 +944,67 @@ def sidebar_cell_view(label_text: str, symbol: str | None = None) -> NSView:
         ]
     )
     return container
+
+
+def cascade_pane_cards(pane, *, reduce_motion: bool = False) -> None:
+    """Notification Center's staggered arrival, scaled to a settings pane:
+    each card fades in and rises 6pt with a 20ms stagger (2026-08-26).
+
+    Layer transforms only -- Auto Layout constraints are never touched, so
+    a failed animation cannot mis-place a card. Reduce Motion keeps the
+    pane's plain crossfade (the caller's fade) and skips the per-card
+    choreography entirely. Any failure is silently the same as that.
+    """
+    if reduce_motion:
+        return
+    try:
+        import Quartz
+        from AppKit import NSScrollView, NSStackView
+        from Foundation import NSNumber
+
+        stack = None
+        queue = [pane]
+        while queue and stack is None:
+            view = queue.pop(0)
+            if isinstance(view, NSStackView):
+                stack = view
+                break
+            if isinstance(view, NSScrollView):
+                document = view.documentView()
+                if document is not None:
+                    queue.append(document)
+                continue
+            try:
+                queue.extend(list(view.subviews()))
+            except Exception:
+                continue
+        if stack is None:
+            return
+        base = Quartz.CACurrentMediaTime()
+        for index, card in enumerate(list(stack.arrangedSubviews())[:12]):
+            card.setWantsLayer_(True)
+            layer = card.layer()
+            if layer is None:
+                continue
+            begin = base + index * 0.02
+            fade = Quartz.CABasicAnimation.animationWithKeyPath_("opacity")
+            fade.setFromValue_(NSNumber.numberWithDouble_(0.0))
+            fade.setToValue_(NSNumber.numberWithDouble_(1.0))
+            rise = Quartz.CABasicAnimation.animationWithKeyPath_(
+                "transform.translation.y"
+            )
+            rise.setFromValue_(NSNumber.numberWithDouble_(6.0))
+            rise.setToValue_(NSNumber.numberWithDouble_(0.0))
+            for animation in (fade, rise):
+                animation.setDuration_(0.24)
+                animation.setBeginTime_(begin)
+                animation.setFillMode_("backwards")
+                animation.setTimingFunction_(
+                    Quartz.CAMediaTimingFunction.functionWithName_(
+                        "easeOut"
+                    )
+                )
+            layer.addAnimation_forKey_(fade, "sidepulse.card.fade")
+            layer.addAnimation_forKey_(rise, "sidepulse.card.rise")
+    except Exception:
+        pass

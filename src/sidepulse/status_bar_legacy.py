@@ -9606,6 +9606,15 @@ class StatusBarController(NSObject):
                     view.animator().setAlphaValue_(1.0)
 
                 NSAnimationContext.runAnimationGroup_completionHandler_(_fade_in, None)
+                preferences = getattr(
+                    self, "_accessibility_display_preferences", None
+                )
+                native_ui.cascade_pane_cards(
+                    pane,
+                    reduce_motion=bool(
+                        getattr(preferences, "reduce_motion", False)
+                    ),
+                )
             elif key == outgoing_key and outgoing_key is not None:
 
                 def _hide(view=pane, expected=generation):
@@ -11515,6 +11524,16 @@ class StatusBarController(NSObject):
         self.update_battery_power_preview(snapshot)
         return snapshot
 
+    def _reset_celebration_color(self) -> str | None:
+        """The refilled provider's own identity color, when known."""
+        provider = getattr(self, "quota_reset_celebration_provider", None)
+        if not provider:
+            return None
+        try:
+            return self.settings.colors.agent_color(provider)
+        except Exception:
+            return None
+
     def update_battery_power_preview(self, snapshot: BatterySnapshot) -> None:
         plugged = snapshot.is_plugged
         if self.last_power_connected is not None and self.last_power_connected != plugged:
@@ -12440,7 +12459,12 @@ class StatusBarController(NSObject):
         elif display == LED_DISPLAY_ESCALATION:
             _set_virtual(self.escalation_takeover_program(brightness))
         elif display == LED_DISPLAY_RESET_CELEBRATION:
-            _set_virtual(reset_celebration_program(brightness))
+            _set_virtual(
+                reset_celebration_program(
+                    brightness,
+                    color=self._reset_celebration_color(),
+                )
+            )
         elif display == LED_DISPLAY_CONNECTION:
             _set_virtual(
                 notification_blink_program(
@@ -15019,7 +15043,9 @@ class StatusBarController(NSObject):
             ),
             LED_DISPLAY_RESET_CELEBRATION: (
                 lambda brightness, led_count: reset_celebration_program(
-                    brightness, led_count=led_count
+                    brightness,
+                    led_count=led_count,
+                    color=self._reset_celebration_color(),
                 ),
                 LedDisplayState.DONE,
                 lambda device, _snapshot: f"{device.name} Limit reset",

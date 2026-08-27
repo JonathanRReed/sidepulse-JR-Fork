@@ -196,6 +196,10 @@ def celebrate_quota_resets(controller, events, *, log, signal_kind) -> None:
             return
         from .celebrations import RESET_CELEBRATION_SECONDS
 
+        try:
+            controller.quota_reset_celebration_provider = events[0].provider_id
+        except Exception:
+            controller.quota_reset_celebration_provider = None
         controller.quota_reset_celebration_until = max(
             float(
                 getattr(controller, "quota_reset_celebration_until", 0.0) or 0.0

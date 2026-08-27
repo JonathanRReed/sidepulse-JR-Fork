@@ -7519,7 +7519,7 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
             colors_module.matching_preset(recolored), colors_module.PRESET_CALM
         )
 
-    def test_attention_arrival_double_taps_once_then_holds_static_anchor(self) -> None:
+    def test_attention_arrival_crests_once_then_holds_static_anchor(self) -> None:
         settings = ColorSettings.defaults()
         statuses = (
             _status("claude", AgentMode.WAITING_FOR_INPUT),
@@ -7538,9 +7538,16 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         )
         lines = arrival.splitlines()
         ask = settings.mode_color(colors_module.MODE_ASK)
-        self.assertEqual(lines[0], f"{ask} {colors_module.ATTENTION_FLASH_MS}ms")
-        self.assertEqual(lines[1], f"off {colors_module.ATTENTION_FLASH_GAP_MS}ms")
-        self.assertEqual(lines[2], f"{ask} {colors_module.ATTENTION_FLASH_MS}ms")
+        # One overshoot-and-settle crest, never repeated flashes: swell to
+        # the attention color, breathe down to the 55% hold, then the
+        # anchor stands up (Dynamic Island grammar, wired 2026-08-26).
+        self.assertEqual(lines[0], f"{ask} {colors_module.ATTENTION_CREST_MS}ms cosine")
+        hold = colors_module.scale_hex_brightness(
+            ask, colors_module.ATTENTION_CREST_HOLD_FRACTION
+        )
+        self.assertEqual(
+            lines[1], f"{hold} {colors_module.ATTENTION_CREST_SETTLE_MS}ms cosine"
+        )
         self.assertNotIn("repeat", base)
         self.assertNotIn("repeat", arrival)
         self.assertTrue(arrival.endswith(base))
@@ -8079,8 +8086,10 @@ class SpeedOverrideAndUrgencyAlertTests(unittest.TestCase):
         _, program_off = program_for_snapshot(statuses, led_count=8, colors=settings_off)
         ask = colors_module.ColorSettings.defaults().mode_color(colors_module.MODE_ASK)
         self.assertEqual(
-            arrival.splitlines().count(f"{ask} {colors_module.ATTENTION_FLASH_MS}ms"),
-            2,
+            arrival.splitlines().count(
+                f"{ask} {colors_module.ATTENTION_CREST_MS}ms cosine"
+            ),
+            1,
         )
         self.assertNotIn("repeat", base)
         self.assertNotIn("repeat", arrival)
