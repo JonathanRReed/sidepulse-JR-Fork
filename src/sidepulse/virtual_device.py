@@ -214,6 +214,43 @@ WING_RISER_WIDTH = 6.0
 ALCOVE_ACCENT_EDGE_INSET = 6.0
 
 
+def preferred_screen(name: str | None = None):
+    """The screen the Screen Bar belongs on.
+
+    NOT NSScreen.mainScreen(): AppKit defines that as the screen holding
+    the KEY WINDOW, so focusing anything on an external monitor made the
+    bar frame itself against a display with no notch -- one of the two
+    causes of the 2026-08-27 overhang report. Preference order: a screen
+    the owner named (escape hatch for deliberately using an external
+    display), else the first with a safe-area inset (the notched
+    built-in), else today's behavior.
+    """
+    try:
+        screens = list(NSScreen.screens() or ())
+    except Exception:
+        screens = []
+    if name:
+        for screen in screens:
+            try:
+                if str(screen.localizedName()) == str(name):
+                    return screen
+            except Exception:
+                continue
+    for screen in screens:
+        try:
+            if float(screen.safeAreaInsets().top) > 0.0:
+                return screen
+        except Exception:
+            continue
+    try:
+        main = NSScreen.mainScreen()
+    except Exception:
+        main = None
+    if main is not None:
+        return main
+    return screens[0] if screens else None
+
+
 def _screen_bar_edge_inset() -> float:
     """The live drawer's own edge inset, so window padding and band
     inset stop disagreeing by 4pt (runtime EDGE_INSET is 8; the old
@@ -2769,7 +2806,7 @@ class VirtualStatusDevice(NSObject):
             return cached[1]
         refresh = None
         try:
-            screen = NSScreen.mainScreen()
+            screen = preferred_screen()
             maximum = getattr(screen, "maximumFramesPerSecond", None)
             if callable(maximum):
                 value = float(maximum())
@@ -2988,9 +3025,74 @@ class VirtualStatusDevice(NSObject):
                 center.addObserver_selector_name_object_(self, selector, name, None)
             except Exception:
                 self._remove_power_observers()
+                self._remove_screen_geometry_observer()
                 return
             owned[name] = center
         self._power_observers_installed = len(owned) == len(observers)
+
+    def _install_screen_geometry_observer(self) -> None:
+        """Wire screenDidChange_ to real display-configuration changes.
+
+        The handler existed and was fully written but NOTHING registered
+        it, so the Screen Bar never re-derived its geometry after a
+        display change -- half of the 2026-08-27 overhang report (the
+        periodic reposition that used to mask this was removed as a
+        main-thread CPU sink). NSApplicationDidChangeScreenParameters is
+        posted on the DEFAULT centre, not NSWorkspace's, so it needs its
+        own registration.
+        """
+        if getattr(self, "_screen_geometry_observer", None) is not None:
+            return
+        try:
+            from Foundation import NSNotificationCenter
+
+            centre = NSNotificationCenter.defaultCenter()
+            centre.addObserver_selector_name_object_(
+                self,
+                b"screenParametersDidChange:",
+                "NSApplicationDidChangeScreenParametersNotification",
+                None,
+            )
+        except Exception:
+            return
+        self._screen_geometry_observer = centre
+
+    def _remove_screen_geometry_observer(self) -> None:
+        centre = getattr(self, "_screen_geometry_observer", None)
+        if centre is None:
+            return
+        try:
+            centre.removeObserver_name_object_(
+                self, "NSApplicationDidChangeScreenParametersNotification", None
+            )
+        except Exception:
+            pass
+        self._screen_geometry_observer = None
+
+    def screenParametersDidChange_(self, notification) -> None:
+        """Coalesce the burst macOS posts for one display transition."""
+        if self._terminating:
+            return
+        try:
+            from Foundation import NSObject as _NSObject
+
+            _NSObject.cancelPreviousPerformRequestsWithTarget_selector_object_(
+                self, b"applyScreenParameterChange:", None
+            )
+            self.performSelector_withObject_afterDelay_(
+                b"applyScreenParameterChange:", None, 0.3
+            )
+        except Exception:
+            self.applyScreenParameterChange_(notification)
+
+    def applyScreenParameterChange_(self, _object) -> None:
+        if self._terminating:
+            return
+        self.screenDidChange_(None)
+        try:
+            self.reposition()
+        except Exception:
+            pass
 
     def _remove_power_observers(self) -> None:
         owned = getattr(self, "_power_observer_centers", {})
@@ -3238,7 +3340,7 @@ class VirtualStatusDevice(NSObject):
             screen = None
         if screen is None:
             try:
-                screen = NSScreen.mainScreen()
+                screen = preferred_screen()
             except Exception:
                 return
         hide = (
@@ -3289,6 +3391,7 @@ class VirtualStatusDevice(NSObject):
         if not was_visible:
             self._display_link_setup_failed = False
         self._install_power_observers()
+        self._install_screen_geometry_observer()
         if (
             self.timer is None
             and self.display_link is None
@@ -3308,6 +3411,7 @@ class VirtualStatusDevice(NSObject):
         if self.window is not None:
             self.window.orderOut_(None)
         self._remove_power_observers()
+        self._remove_screen_geometry_observer()
         # A later explicit show occurs in a fresh visible lifecycle and
         # re-registers observers before its first ongoing frame loop.
         self._display_asleep = False
@@ -3324,6 +3428,7 @@ class VirtualStatusDevice(NSObject):
         self._stop_sampler()
         self._stop_alcove_observer()
         self._remove_power_observers()
+        self._remove_screen_geometry_observer()
         self._remove_space_observer()
         if self._announcer_pill is not None:
             try:
@@ -3577,7 +3682,7 @@ class VirtualStatusDevice(NSObject):
         return True
 
     def reposition(self):
-        screen = NSScreen.mainScreen()
+        screen = preferred_screen()
         if screen is None or self.window is None:
             return
         render_screen_values = _screen_capture_values(screen)
