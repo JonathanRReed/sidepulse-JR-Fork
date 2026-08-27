@@ -133,8 +133,46 @@ def _default_collectors() -> dict[str, Collector]:
     }
 
 
-def _interval_for(snapshots: tuple[ProviderUsageSnapshot, ...], observed_at: float) -> float:
-    interval = 300.0
+#: Attention ladder: how recently the owner looked at the menu decides
+#: the base cadence. CodexBar's cadence deliberately does NOT consider
+#: quota level -- a nearly-empty meter is not a reason to poll harder,
+#: it is a reason the number matters, and polling every 30s unattended
+#: burned battery for nobody (2026-08-27 mining).
+_MENU_AGE_LADDER: tuple[tuple[float, float], ...] = (
+    (300.0, 120.0),
+    (3600.0, 300.0),
+    (14400.0, 900.0),
+)
+_IDLE_INTERVAL_SECONDS = 1800.0
+#: Low Power Mode / serious thermals: one cadence, generously slow.
+_CONSTRAINED_INTERVAL_SECONDS = 1800.0
+#: Our one deliberate divergence: JR-BAR celebrates quota resets, so it
+#: must actually SEE the boundary cross. 120s, not CodexBar's ordinary
+#: cadence and not the old 30s hammer.
+_RESET_WATCH_WINDOW_SECONDS = 600.0
+_RESET_WATCH_INTERVAL_SECONDS = 120.0
+
+
+def _interval_for(
+    snapshots: tuple[ProviderUsageSnapshot, ...],
+    observed_at: float,
+    *,
+    menu_last_opened_at: float | None = None,
+    constrained: bool = False,
+) -> float:
+    """Seconds until the next refresh. Pure, so it stays testable."""
+    if constrained:
+        return _CONSTRAINED_INTERVAL_SECONDS
+    # None means "not opened since launch" -- an INFINITE age, not an
+    # age measured from the epoch (which read as 'looked at it recently'
+    # for every timestamp after 1970 and pinned the ladder to 900s).
+    interval = _IDLE_INTERVAL_SECONDS
+    if menu_last_opened_at is not None:
+        age = float(observed_at) - float(menu_last_opened_at)
+        for ceiling, candidate in _MENU_AGE_LADDER:
+            if age <= ceiling:
+                interval = candidate
+                break
     for snapshot in snapshots:
         if snapshot.state in {
             ProviderSourceState.NEEDS_CONSENT,
@@ -145,17 +183,26 @@ def _interval_for(snapshots: tuple[ProviderUsageSnapshot, ...], observed_at: flo
         }:
             interval = min(interval, 120.0)
         lane = most_constrained_lane(snapshot)
-        if lane is None:
+        if lane is None or lane.reset_at is None:
             continue
-        if lane.remaining_percent is not None and lane.remaining_percent <= 10.0:
-            interval = min(interval, 30.0)
-        elif lane.remaining_percent is not None and lane.remaining_percent <= 25.0:
-            interval = min(interval, 60.0)
-        if lane.reset_at is not None:
-            until_reset = lane.reset_at - observed_at
-            if 0.0 <= until_reset <= 10 * 60:
-                interval = min(interval, 30.0)
+        until_reset = lane.reset_at - observed_at
+        if 0.0 <= until_reset <= _RESET_WATCH_WINDOW_SECONDS:
+            interval = min(interval, _RESET_WATCH_INTERVAL_SECONDS)
     return interval
+
+
+def _machine_is_constrained() -> bool:
+    """Low Power Mode or serious thermal pressure, best effort."""
+    try:
+        from Foundation import NSProcessInfo
+
+        info = NSProcessInfo.processInfo()
+        if bool(info.isLowPowerModeEnabled()):
+            return True
+        # NSProcessInfoThermalStateSerious == 2
+        return int(info.thermalState()) >= 2
+    except Exception:
+        return False
 
 
 class ProviderUsageService:
@@ -202,6 +249,14 @@ class ProviderUsageService:
         # gate, because a person just clicked something.
         self._forced_providers: set[str] = set()
         self._rerun_requested = False
+        #: When the owner last opened the menu -- the cadence ladder's
+        #: only attention signal. None means 'not since launch'.
+        self._menu_last_opened_at: float | None = None
+
+    def note_menu_opened(self, *, now: float | None = None) -> None:
+        """Record a visit; the cadence ladder keys off how long ago."""
+        with self._lock:
+            self._menu_last_opened_at = self._clock() if now is None else float(now)
 
     def snapshot(self) -> ProviderUsageState:
         with self._lock:
@@ -380,7 +435,13 @@ class ProviderUsageService:
         state = ProviderUsageState(
             snapshots=ordered,
             refreshed_at=observed_at,
-            next_refresh_at=observed_at + _interval_for(ordered, observed_at),
+            next_refresh_at=observed_at
+            + _interval_for(
+                ordered,
+                observed_at,
+                menu_last_opened_at=getattr(self, "_menu_last_opened_at", None),
+                constrained=_machine_is_constrained(),
+            ),
             refreshing=False,
         )
         with self._lock:

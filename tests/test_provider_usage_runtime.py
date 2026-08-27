@@ -132,7 +132,11 @@ def test_collector_exception_becomes_actionable_error(tmp_path):
     assert result.action_label == "Retry"
 
 
-def test_adaptive_refresh_accelerates_for_low_capacity(tmp_path):
+def test_a_low_meter_is_not_a_reason_to_poll_harder(tmp_path):
+    """Quota level must not drive cadence. A nearly-empty meter is not a
+    reason to poll every 30s -- it is a reason the number matters. The
+    ladder keys off ATTENTION instead (2026-08-27, mined from CodexBar,
+    whose cadence deliberately excludes quota)."""
     settings = default_provider_usage_settings()
     service = ProviderUsageService(
         settings_loader=lambda: settings,
@@ -146,7 +150,39 @@ def test_adaptive_refresh_accelerates_for_low_capacity(tmp_path):
         clock=lambda: 1000,
     )
     state = service.refresh_now(providers=("codex",))
-    assert state.next_refresh_at == 1030
+    assert state.next_refresh_at == 1000 + 1800.0, "unattended: the idle rung"
+
+    service.note_menu_opened(now=1000)
+    state = service.refresh_now(providers=("codex",))
+    assert state.next_refresh_at == 1000 + 120.0, "just looked: the fast rung"
+
+
+def test_the_cadence_ladder_is_pure_and_ordered():
+    from sidepulse.provider_usage_runtime import _interval_for
+
+    assert _interval_for((), 10_000.0, menu_last_opened_at=9_900.0) == 120.0
+    assert _interval_for((), 10_000.0, menu_last_opened_at=9_000.0) == 300.0
+    assert _interval_for((), 10_000.0, menu_last_opened_at=6_000.0) == 900.0
+    assert _interval_for((), 10_000.0, menu_last_opened_at=None) == 1800.0
+    assert (
+        _interval_for((), 10_000.0, menu_last_opened_at=9_990.0, constrained=True)
+        == 1800.0
+    ), "Low Power Mode outranks a fresh visit"
+
+
+def test_an_imminent_reset_is_still_watched_closely(tmp_path):
+    """Our one deliberate divergence: we celebrate resets, so we have to
+    see the boundary cross -- 120s, not the old 30s hammer."""
+    from sidepulse.provider_usage_runtime import _interval_for
+
+    soon = snapshot("codex", remaining=50, observed=1000)
+    lane = soon.lanes[0]
+    from dataclasses import replace as dataclass_replace
+
+    soon = dataclass_replace(
+        soon, lanes=(dataclass_replace(lane, reset_at=1000 + 120.0),)
+    )
+    assert _interval_for((soon,), 1000.0, menu_last_opened_at=None) == 120.0
 
 
 def test_request_runs_off_caller_thread_and_coalesces(tmp_path):

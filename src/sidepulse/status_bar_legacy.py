@@ -4719,6 +4719,15 @@ class StatusBarController(NSObject):
         # (mirrors T3's lastVisitedAt read/unread model).
         opened_at = datetime.now(timezone.utc)
         self.menu_last_opened_at = opened_at
+        # The refresh cadence is an ATTENTION ladder now: a recently
+        # opened menu polls at 2 minutes, a long-untouched one at 30.
+        # The service reads this stamp (monotonic, matching its clock).
+        service = getattr(self, "_sidepulse_provider_usage_service", None)
+        if service is not None:
+            try:
+                service.note_menu_opened(now=time.time())
+            except Exception:
+                pass
         # The same visit, for the same reason, on the "what did I miss"
         # ledger. The menu the user is looking at was already built --
         # `update_status_menu` refuses to rebuild while it is open -- so this
