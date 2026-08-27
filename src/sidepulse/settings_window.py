@@ -1043,10 +1043,16 @@ def _build_devices_pane(target: StatusBarController):
         calibrate_button = native_ui.make_button("Calibrate…", target, "openDeviceCalibrationPopover:")
         calibrate_button.setRepresentedObject_(device.device_id)
         red, green, blue = device.channel_gains
-        calibration_label = native_ui.make_label(
+        # Wrapping and bounded, like the alcove row beside it: the
+        # worst-case summary ("Auto-Brightness on, but this Mac won't
+        # report screen brightness · R95% G100% B87%") crushed the
+        # Calibrate… button (2026-08-27 audit, same class as the
+        # animation-picker chevron bug).
+        calibration_label = native_ui.make_wrapping_label(
             calibration_summary_text(device.auto_brightness_enabled, red, green, blue),
             secondary=True,
             size=11.0,
+            max_width=300.0,
         )
         color_row_controls = native_ui.make_stack(orientation="horizontal", spacing=10.0)
         color_row_controls.addArrangedSubview_(calibrate_button)
@@ -3102,10 +3108,11 @@ def _build_remote_peers_card(target: StatusBarController):
     )
     inner.addArrangedSubview_(messages_row)
     native_ui.add_separator(inner)
-    status_label = native_ui.make_label(
+    status_label = native_ui.make_wrapping_label(
         remote_peer_status_text(target),
         secondary=True,
         size=11.0,
+        max_width=380.0,
     )
     controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     controls.addArrangedSubview_(status_label)
@@ -3189,10 +3196,11 @@ def _build_cloud_agents_card(target: StatusBarController):
     )
     inner.addArrangedSubview_(enabled_row)
     native_ui.add_separator(inner)
-    address_label = native_ui.make_label(
+    address_label = native_ui.make_wrapping_label(
         cloud_ingest_status_text(target),
         secondary=True,
         size=11.0,
+        max_width=420.0,
     )
     inner.addArrangedSubview_(native_ui.make_row("Listening", address_label))
     return (

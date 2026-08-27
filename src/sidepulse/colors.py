@@ -1951,8 +1951,16 @@ def _motion_segments(
     delay_ms: int = 0,
     chase_delay_ms: int = 0,
     provider: str | None = None,
+    compact: bool = False,
 ) -> tuple[str, str]:
     """One LED's (reset line segment, motion line segment) for this state.
+
+    ``compact`` is the shared-strip byte discipline: heartbeat is the one
+    motion that emits TWO segments per LED, and on an 8-LED strip with
+    two-plus agents that overflowed the firmware's 512-byte budget in
+    every non-Cycle blend -- the write was refused and the strip froze
+    on its stale program (2026-08-27 audit). Compact keeps the beat's
+    signature (one quick swell, long dark rest) in a single segment.
 
     Every shape is two segments on the same two lines, so the caller's program
     keeps its exact two-line-plus-repeat structure no matter which states are
@@ -2009,6 +2017,8 @@ def _motion_segments(
         # Lub-dub: two quick swells, then the rest of the cycle dark.
         beat_ms = max(1, cycle_ms // 6)
         gap_ms = max(1, cycle_ms // 10)
+        if compact:
+            return floor_segment, f"{led_index}:{peak} {beat_ms}ms pulse{tail}"
         return floor_segment, (
             f"{led_index}:{peak} {beat_ms}ms pulse{tail}; "
             f"{led_index}:{peak} {beat_ms}ms pulse {delay_ms + beat_ms + gap_ms}ms"
@@ -2343,6 +2353,7 @@ def _round_robin_program(
             settle_ms=settle_ms,
             chase_delay_ms=(index * stagger_ms) % duration_ms,
             provider=agent.provider,
+            compact=(len(agents) >= 2 and led_count >= 4),
         )
         reset_segments.append(reset)
         pulse_segments.append(pulse)
@@ -2420,6 +2431,7 @@ def _relay_program(
             settle_ms=settle_ms,
             delay_ms=turn * step_ms,
             provider=agent.provider,
+            compact=(len(agents) >= 2 and led_count >= 4),
         )
         reset_segments.append(reset)
         pulse_segments.append(pulse)
@@ -2515,6 +2527,7 @@ def _spatial_split_program(
                 settle_ms=settle_ms,
                 chase_delay_ms=(position * stagger_ms) % max(1, duration_ms),
                 provider=agent.provider,
+                compact=(len(agents) >= 2 and led_count >= 4),
             )
             segments.append(motion)
             reset_segments.append(reset)

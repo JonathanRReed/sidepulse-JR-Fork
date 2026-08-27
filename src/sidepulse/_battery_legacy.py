@@ -318,7 +318,9 @@ def program_for_battery(
     percent = max(0, min(100, int(snapshot.percent)))
     fill = battery_fill(percent, count)
     pulse_index = min(fill.full, count - 1)
-    transition = max(0, int(transition_ms))
+    # Both bounds: the DSL caps a duration at 65535ms, and an
+    # over-cap literal is a firmware parse error (solid red).
+    transition = min(65_535, max(0, int(transition_ms)))
 
     if not snapshot.is_plugged or snapshot.is_charged:
         color = battery_color(percent)

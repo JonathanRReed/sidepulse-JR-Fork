@@ -24003,3 +24003,37 @@ class StudioBuilderTests(unittest.TestCase):
         from sidepulse.animation import parse_animation
 
         parse_animation(str(self.controller.studio_editor.string()), led_count=8)
+
+
+class SharedStripHeartbeatBudgetTests(unittest.TestCase):
+    def test_heartbeat_fits_the_firmware_budget_in_every_shared_blend(self) -> None:
+        """Heartbeat is the one motion emitting two segments per LED; on
+        an 8-LED strip with two-plus agents that overflowed 512 bytes in
+        every non-Cycle blend, so the write was refused and the strip
+        froze on its stale program (2026-08-27 audit). Shared strips now
+        compact it to one beat per cycle; the 2-LED Dot keeps the full
+        lub-dub."""
+        settings = colors_module.ColorSettings.defaults()
+        for provider in ("claude", "codex", "devin"):
+            settings = settings.with_agent_animation(provider, "heartbeat")
+        statuses = tuple(
+            _status(provider, AgentMode.WORKING)
+            for provider in ("claude", "codex", "devin")
+        )
+        for blend in colors_module.BLEND_MODE_CHOICES:
+            blended = settings.with_blend_mode(blend)
+            for count in (2, 3):
+                _state, program = colors_module.program_for_snapshot(
+                    statuses[:count], led_count=8, colors=blended, brightness=255
+                )
+                self.assertLessEqual(
+                    len(program.encode("utf-8")), 512, (blend, count)
+                )
+                self.assertLessEqual(len(program.splitlines()), 20, (blend, count))
+        dot_settings = settings.with_blend_mode(
+            colors_module.BLEND_MODE_SPATIAL
+        )
+        _state, dot = colors_module.program_for_snapshot(
+            statuses[:2], led_count=2, colors=dot_settings, brightness=255
+        )
+        self.assertLessEqual(len(dot.encode("utf-8")), 512)
