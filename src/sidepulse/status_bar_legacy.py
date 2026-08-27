@@ -374,7 +374,9 @@ from .mailbox import (
     project_mailbox,
 )
 from .mailbox_preference_store import (
+    MailboxSnoozePreset,
     load_mailbox_preference_document,
+    resolve_mailbox_snooze_preset,
     save_mailbox_preferences_v2,
 )
 from .mailbox_preferences import (
@@ -8932,18 +8934,33 @@ class StatusBarController(NSObject):
             self._publish_mailbox_preferences(moved)
             return True
         elif payload.kind is OperatorActionKind.SNOOZE:
-            duration = {
-                "15-minutes": 900.0,
-                "1-hour": 3_600.0,
-                "tomorrow": 86_400.0,
-            }.get(payload.snooze_preset)
-            if duration is None:
-                return False
             now = time.time()
+            if payload.snooze_preset == "tomorrow":
+                # "Until tomorrow" means tomorrow MORNING in the user's
+                # timezone, not exactly-86,400-seconds-later (a 4 PM
+                # snooze that wakes at 4 PM tomorrow missed the entire
+                # workday it promised to protect, and a flat day is an
+                # hour off across DST). The store's resolver has computed
+                # this correctly, with tests, since it was written -- the
+                # inline dict here just never called it.
+                snoozed_until = resolve_mailbox_snooze_preset(
+                    MailboxSnoozePreset.TOMORROW_MORNING,
+                    now=now,
+                )
+                if snoozed_until is None:
+                    snoozed_until = now + 86_400.0
+            else:
+                duration = {
+                    "15-minutes": 900.0,
+                    "1-hour": 3_600.0,
+                }.get(payload.snooze_preset)
+                if duration is None:
+                    return False
+                snoozed_until = now + duration
             preference = dataclass_replace(
                 preference,
                 snoozed_at=now,
-                snoozed_until=now + duration,
+                snoozed_until=snoozed_until,
             )
         elif payload.kind is OperatorActionKind.UNSNOOZE:
             preference = dataclass_replace(

@@ -15526,6 +15526,42 @@ class SnoozeScopeControllerTests(unittest.TestCase):
             idle_visible_seconds=3600.0,
         )
 
+    def test_snooze_until_tomorrow_lands_on_tomorrow_morning_local(self) -> None:
+        """The inline "tomorrow" preset added a flat 86,400s -- a 4 PM
+        snooze woke at 4 PM, missing the entire morning it promised (and
+        drifting an hour across DST). The action now routes through the
+        store's timezone-correct resolver (wired 2026-08-26)."""
+        from datetime import datetime as _datetime
+
+        from sidepulse import status_bar_legacy
+        from sidepulse.agent_browser_window import (
+            AgentBrowserActionPayload,
+            OperatorActionKind,
+        )
+
+        key = self._work_key("main")
+        published = []
+        self.controller.mailbox_preferences = ()
+        self.controller._publish_mailbox_preferences = published.append
+        with patch.object(
+            status_bar_legacy, "_family_work_key", lambda _state, _work_key: key
+        ):
+            handled = self.controller._apply_preference_action(
+                AgentBrowserActionPayload(
+                    work_key=key,
+                    generation=0,
+                    kind=OperatorActionKind.SNOOZE,
+                    snooze_preset="tomorrow",
+                )
+            )
+
+        self.assertTrue(handled)
+        (preference,) = published[-1]
+        woken = _datetime.fromtimestamp(preference.snoozed_until)
+        self.assertEqual((woken.hour, woken.minute), (9, 0))
+        self.assertGreater(preference.snoozed_until, preference.snoozed_at)
+        self.assertLess(preference.snoozed_until - preference.snoozed_at, 36 * 3_600.0)
+
     def test_snoozed_working_session_stops_claiming_the_lights(self) -> None:
         self.controller.mailbox_preferences = self._snooze_preferences("main")
         projection = self.controller.update_attention_projection(

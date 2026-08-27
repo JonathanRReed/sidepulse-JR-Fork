@@ -379,7 +379,7 @@ def test_injected_root_expands_snooze_presets_without_nested_action_menu() -> No
     ] == [
         "Snooze 15 Minutes",
         "Snooze 1 Hour",
-        "Snooze Until Tomorrow",
+        "Snooze Until Tomorrow Morning",
     ]
     for index in range(submenu.numberOfItems()):
         action = submenu.itemAtIndex_(index)
@@ -560,7 +560,7 @@ def test_action_menu_is_shallow_and_uses_exact_typed_payload_allowlist() -> None
         "Pin",
         "Snooze 15 Minutes",
         "Snooze 1 Hour",
-        "Snooze Until Tomorrow",
+        "Snooze Until Tomorrow Morning",
         "I'm on It",
     ]
     for index in range(menu.numberOfItems()):

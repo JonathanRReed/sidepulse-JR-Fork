@@ -41,7 +41,7 @@ from .provider_facts import WorkKey
 SNOOZE_PRESETS: Final = (
     ("15-minutes", "Snooze 15 Minutes"),
     ("1-hour", "Snooze 1 Hour"),
-    ("tomorrow", "Snooze Until Tomorrow"),
+    ("tomorrow", "Snooze Until Tomorrow Morning"),
 )
 _SNOOZE_PRESET_KEYS: Final = frozenset(key for key, _title in SNOOZE_PRESETS)
 
