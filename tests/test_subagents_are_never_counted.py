@@ -541,3 +541,31 @@ def test_an_idle_only_fleet_keeps_its_ambient_presence() -> None:
     )
     assert state is LedDisplayState.IDLE
     assert program.strip(), "idle presence still renders"
+
+
+def test_a_resting_companion_keeps_its_whisper_while_slots_are_free() -> None:
+    """Slot pressure, not mere activity, is what evicts idle rows."""
+    from sidepulse.colors import program_for_snapshot
+
+    statuses = (
+        _main("busy", AgentMode.WORKING),
+        replace(
+            _main("resting", AgentMode.IDLE_READY),
+            agent_id="claude:session:resting",
+            session_id="resting",
+        ),
+    )
+
+    _, program = program_for_snapshot(
+        statuses, led_count=8, colors=ColorSettings.defaults(), brightness=255
+    )
+    working_line = next(line for line in program.splitlines() if "pulse" in line)
+    peaks = {
+        segment.split("#", 1)[1][:6]
+        for segment in working_line.split("; ")
+        if "#" in segment
+    }
+    assert len(peaks) == 2, (
+        "two sessions on eight LEDs both keep their slots; "
+        f"saw peaks {peaks}"
+    )
