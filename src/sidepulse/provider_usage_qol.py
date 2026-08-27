@@ -54,6 +54,37 @@ def _event_id(provider_id: str, lane_id: str, old_reset_at: float) -> str:
     return f"{provider_id}:{lane_id}:{digest}"
 
 
+def merged_edge_baseline(previous, current):
+    """The next edge comparison's BEFORE: last COMPARABLE reading per
+    provider.
+
+    Edge detectors skip a before-snapshot that is not READY/STALE -- so
+    a vendor incident's degraded snapshot, published between two good
+    readings, used to WIPE the pre-reset baseline and swallow the
+    crossing (2026-08-27: the owner's Codex refill went uncelebrated
+    behind exactly that interlude). A degraded or missing current
+    snapshot keeps the provider's previous baseline instead.
+    """
+    from dataclasses import replace as dataclass_replace
+
+    comparable = {ProviderSourceState.READY, ProviderSourceState.STALE}
+    before = _snapshot_map(previous.snapshots)
+    kept = []
+    for snapshot in current.snapshots:
+        held = before.get(snapshot.provider_id)
+        if snapshot.state in comparable or held is None:
+            kept.append(snapshot)
+        else:
+            kept.append(held)
+    current_ids = {snapshot.provider_id for snapshot in current.snapshots}
+    kept.extend(
+        snapshot
+        for provider_id, snapshot in before.items()
+        if provider_id not in current_ids
+    )
+    return dataclass_replace(current, snapshots=tuple(kept))
+
+
 def detect_reset_events(
     previous: tuple[ProviderUsageSnapshot, ...],
     current: tuple[ProviderUsageSnapshot, ...],

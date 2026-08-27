@@ -16,7 +16,11 @@ from .provider_usage_event_store import (
     save_seen_reset_events,
 )
 from .provider_usage_menu import menu_bar_quota_glance, project_usage_menu
-from .provider_usage_qol import detect_reset_events, threshold_crossings
+from .provider_usage_qol import (
+    detect_reset_events,
+    merged_edge_baseline,
+    threshold_crossings,
+)
 from .provider_usage_runtime import ProviderUsageService, ProviderUsageState
 from .provider_usage_settings import load_provider_usage_settings
 from .provider_usage_store import load_provider_usage_state, save_provider_usage_state
@@ -294,7 +298,12 @@ else:
                 "_sidepulse_provider_usage_edge_baseline",
                 ProviderUsageState((), None, None, False),
             )
-            self._sidepulse_provider_usage_edge_baseline = state
+            # Last COMPARABLE reading per provider -- a degraded
+            # (vendor-incident) publish must not wipe the pre-reset
+            # baseline the detectors compare against.
+            self._sidepulse_provider_usage_edge_baseline = (
+                merged_edge_baseline(previous_state, state)
+            )
             self._sidepulse_provider_usage_state = state
             # Percent history: every provider's "how much is left", so the
             # settings chart can show ALL of them.
@@ -784,6 +793,15 @@ else:
                 notification,
             )
             self._sidepulse_seen_reset_events = load_seen_reset_events()
+            # Seed the edge baseline from the persisted store: a reset
+            # that passes while the app is down (or restarting) is still
+            # an edge against the last persisted reading. An empty
+            # launch baseline made the first publish blind.
+            from .provider_usage_store import load_provider_usage_state
+
+            self._sidepulse_provider_usage_edge_baseline = (
+                load_provider_usage_state()
+            )
             self._request_provider_usage(force=True)
             return result
 

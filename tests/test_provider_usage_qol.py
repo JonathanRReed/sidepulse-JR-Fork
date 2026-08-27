@@ -208,3 +208,50 @@ def test_reconnect_outcome_reporter_tells_the_truth():
     state.snapshots[0].observed_at = 50.0
     report_reconnect_outcome(controller, state, log=logs.append)
     assert controller._sidepulse_reconnect_watch == ("grok", 100.0)
+
+
+def test_degraded_interlude_does_not_wipe_the_reset_baseline():
+    """A vendor incident's degraded snapshot, published between two good
+    readings, must not swallow the reset crossing (the owner's Codex
+    refill went uncelebrated behind exactly that interlude)."""
+    from sidepulse.provider_usage_qol import merged_edge_baseline
+    from sidepulse.provider_usage_runtime import ProviderUsageState
+
+    good_before = snapshot(990, (lane(5, 1000),))
+    degraded = snapshot(
+        995, (), state=ProviderSourceState.UNAVAILABLE
+    )
+    baseline = merged_edge_baseline(
+        ProviderUsageState((good_before,), None, None, False),
+        ProviderUsageState((degraded,), None, None, False),
+    )
+    assert baseline.snapshots == (good_before,), (
+        "the degraded publish keeps the last comparable reading"
+    )
+
+    recovered = snapshot(1001, (lane(100, 2000),))
+    events = detect_reset_events(
+        baseline.snapshots, (recovered,), seen_event_ids=frozenset()
+    )
+    assert len(events) == 1, "the crossing survives the incident"
+
+
+def test_comparable_publish_replaces_the_baseline_and_absent_rows_persist():
+    from sidepulse.provider_usage_qol import merged_edge_baseline
+    from sidepulse.provider_usage_runtime import ProviderUsageState
+
+    old = snapshot(990, (lane(5, 1000),))
+    fresh = snapshot(1001, (lane(100, 2000),))
+    replaced = merged_edge_baseline(
+        ProviderUsageState((old,), None, None, False),
+        ProviderUsageState((fresh,), None, None, False),
+    )
+    assert replaced.snapshots == (fresh,)
+
+    vanished = merged_edge_baseline(
+        ProviderUsageState((old,), None, None, False),
+        ProviderUsageState((), None, None, False),
+    )
+    assert vanished.snapshots == (old,), (
+        "a provider missing from the publish keeps its baseline"
+    )
