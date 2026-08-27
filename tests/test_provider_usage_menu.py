@@ -420,17 +420,29 @@ def test_jr_plane_owns_the_usage_menu_row() -> None:
     """The legacy build used to construct its usage card only for the JR
     facade's build_menu wrapper to remove it and insert its own row --
     full card construction as dead weight in every rebuild (fixed
-    2026-08-26). The base class keeps the card for non-JR builds."""
+    2026-08-26). The base class keeps the card for non-JR builds.
+
+    The facade side is asserted at SOURCE level on purpose: importing
+    provider_usage_status_bar patches the whole process (settings
+    navigation, screen-bar runtime, build_menu), which is why no test in
+    this suite imports it in-process -- doing so here once broke 42
+    settings-window tests downstream.
+    """
+    from pathlib import Path
     from types import SimpleNamespace
 
-    from sidepulse.provider_usage_status_bar import (
-        JRProviderUsageStatusBarController,
-    )
     from sidepulse.status_bar import StatusBarController
 
     probe = SimpleNamespace()
     assert StatusBarController.jr_plane_owns_usage_menu_item(probe) is False
-    assert (
-        JRProviderUsageStatusBarController.jr_plane_owns_usage_menu_item(probe)
-        is True
-    )
+
+    facade = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "sidepulse"
+        / "provider_usage_status_bar.py"
+    ).read_text()
+    marker = "def jr_plane_owns_usage_menu_item(self) -> bool:"
+    assert marker in facade
+    body = facade.split(marker, 1)[1].split("def ", 1)[0]
+    assert "return True" in body
