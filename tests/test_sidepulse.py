@@ -1745,9 +1745,14 @@ for (const event of [
     def test_compact_mode_toggle_updates_the_view_and_redraws(self) -> None:
         try:
             from sidepulse import virtual_device
+            from sidepulse.screen_bar_runtime import install_screen_bar_runtime
         except (ImportError, SystemExit) as exc:
             self.skipTest(str(exc))
 
+        # The draw bodies live in screen_bar_runtime and are installed onto
+        # the view class at facade import; a cold suite must install them
+        # explicitly (the in-class originals were deleted 2026-08-26).
+        install_screen_bar_runtime()
         view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (220.0, 37.0)))
         self.assertFalse(view.compact_mode)
         view.setCompactMode_(True)
@@ -1899,9 +1904,11 @@ for (const event of [
     def test_wrap_mode_drawing_does_not_raise(self) -> None:
         try:
             from sidepulse import virtual_device
+            from sidepulse.screen_bar_runtime import install_screen_bar_runtime
         except (ImportError, SystemExit) as exc:
             self.skipTest(str(exc))
 
+        install_screen_bar_runtime()
         view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (400.0, 37.0)))
         view.setNotchWidth_(220.0)
         view.setState_brightness_(virtual_device.LedDisplayState.WORKING, 255)
