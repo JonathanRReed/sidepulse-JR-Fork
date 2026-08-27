@@ -645,6 +645,7 @@ def virtual_window_frame_for_screen(
     wing_length: float | None = None,
     alcove_total_width: float | None = None,
     alcove_center_x: float | None = None,
+    alcove_total_height: float | None = None,
 ):
     """The Screen Bar window's full frame. With ``wrap_menu_bar`` on, the
     window widens symmetrically to include room for the wing glow on each
@@ -682,7 +683,16 @@ def virtual_window_frame_for_screen(
     notch_width = min(notch_width, frame.size.width - 8.0)
     wing = min(wing, max(0.0, (frame.size.width - notch_width) / 2.0 - 4.0))
     width = notch_width + 2.0 * wing
-    height = window_height_for_notch_depth(notch_depth_for_screen(screen))
+    depth = notch_depth_for_screen(screen)
+    if alcove_total_width is not None and alcove_total_height is not None:
+        # Follow the capsule's measured DEPTH too. The window used to
+        # keep hardware-notch height while an expanded Alcove capsule
+        # ran twice as tall, so the status band rendered mid-capsule as
+        # a detached smear ("it looks bad", reported live 2026-08-27).
+        # With the observed height, the band hugs the capsule's real
+        # bottom edge exactly as it hugs the notch when not following.
+        depth = max(depth, float(alcove_total_height))
+    height = window_height_for_notch_depth(depth)
     center_x = (
         float(alcove_center_x)
         if alcove_total_width is not None and alcove_center_x is not None
@@ -2603,12 +2613,42 @@ class VirtualStatusDevice(NSObject):
                 self.wraps_menu_bar
                 and getattr(self, "follow_alcove_width", True)
             ),
-            alcove_relevant=bool(self._alcove_relevant),
+            alcove_relevant=self._alcove_follow_relevant(),
             pointer_interaction_relevant=bool(
                 self._pointer_interaction_relevant
             ),
             frame_interval=getattr(self, "_frame_interval_current", None),
         )
+
+    def _alcove_follow_relevant(self) -> bool:
+        """Presence-fresh relevance for the follow cadence.
+
+        reposition() computes the same flag, but reposition only RUNS
+        when something else already moved the bar -- so an Alcove
+        launched against an idle bar never started its own 1.5s follow
+        cadence until an unrelated settings click repositioned
+        (42-90s to follow, reported live 2026-08-27). The probe read
+        here is the cached answer (the worker refreshes it off-main),
+        so this costs nothing and closes the chicken-and-egg.
+        """
+        if self._alcove_relevant:
+            return True
+        if not (
+            self.wraps_menu_bar
+            and getattr(self, "follow_alcove_width", True)
+            and getattr(self, "wing_length_override", None) is None
+        ):
+            return False
+        probe = getattr(self, "_alcove_presence_probe", None)
+        if probe is None:
+            return False
+        try:
+            if probe.running(now=time.monotonic()):
+                self._alcove_relevant = True
+                return True
+        except Exception:
+            return False
+        return False
 
     def _publish_presentation_schedule(self) -> None:
         reconcile = self._presentation_schedule_reconciler
@@ -3740,6 +3780,11 @@ class VirtualStatusDevice(NSObject):
             wing_length=wing_override,
             alcove_total_width=follow_width,
             alcove_center_x=follow_center_x,
+            alcove_total_height=(
+                follow_observation.height
+                if follow_observation is not None
+                else None
+            ),
         )
         current = self.window.frame()
         frame_changed = (

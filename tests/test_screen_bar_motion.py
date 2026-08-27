@@ -1775,3 +1775,75 @@ def test_announcer_pill_entrance_springs_from_its_top_anchor(monkeypatch) -> Non
     pill._animate_entrance()
     assert layer.animationForKey_("sidepulse.pill.entrance") is None
     pill.close()
+
+
+def test_follow_window_height_tracks_the_capsules_measured_depth() -> None:
+    """An expanded Alcove capsule runs far taller than the hardware
+    notch; keeping hardware-notch height rendered the band mid-capsule
+    as a detached smear (fixed 2026-08-27)."""
+    from sidepulse import virtual_device
+    from sidepulse.screen_bar_runtime import install_screen_bar_runtime
+
+    install_screen_bar_runtime()
+    screen = SimpleNamespace(
+        frame=lambda: SimpleNamespace(
+            origin=SimpleNamespace(x=0.0, y=0.0),
+            size=SimpleNamespace(width=1512.0, height=982.0),
+        ),
+        safeAreaInsets=lambda: SimpleNamespace(top=32.0),
+        auxiliaryTopLeftArea=lambda: SimpleNamespace(
+            origin=SimpleNamespace(x=0.0, y=0.0),
+            size=SimpleNamespace(width=640.0, height=24.0),
+        ),
+        auxiliaryTopRightArea=lambda: SimpleNamespace(
+            origin=SimpleNamespace(x=872.0, y=0.0),
+            size=SimpleNamespace(width=640.0, height=24.0),
+        ),
+    )
+    baseline = virtual_device.virtual_window_frame_for_screen(
+        screen, wrap_menu_bar=True, alcove_total_width=286.0, alcove_center_x=756.0
+    )
+    expanded = virtual_device.virtual_window_frame_for_screen(
+        screen,
+        wrap_menu_bar=True,
+        alcove_total_width=286.0,
+        alcove_center_x=756.0,
+        alcove_total_height=78.0,
+    )
+    assert expanded[1][1] == 78.0 + virtual_device.LED_BAND_HEIGHT
+    assert expanded[1][1] > baseline[1][1]
+    # A collapsed capsule can never lift the band above the hardware notch.
+    collapsed = virtual_device.virtual_window_frame_for_screen(
+        screen,
+        wrap_menu_bar=True,
+        alcove_total_width=200.0,
+        alcove_center_x=756.0,
+        alcove_total_height=10.0,
+    )
+    assert collapsed[1][1] == baseline[1][1]
+
+
+def test_alcove_relevance_wakes_from_a_cached_presence_read() -> None:
+    """A launched Alcove against an idle bar starts its own follow
+    cadence: the schedule inputs refresh relevance from the probe's
+    cached answer instead of waiting for an unrelated reposition
+    (fixed 2026-08-27)."""
+    from sidepulse.virtual_device import VirtualStatusDevice
+
+    device = VirtualStatusDevice.alloc().init()
+    device.wraps_menu_bar = True
+    device.follow_alcove_width = True
+    device.wing_length_override = None
+    device._alcove_relevant = False
+    device._alcove_presence_probe = SimpleNamespace(running=lambda now: True)
+
+    assert device._alcove_follow_relevant() is True
+    assert device._alcove_relevant is True
+
+    quiet = VirtualStatusDevice.alloc().init()
+    quiet.wraps_menu_bar = True
+    quiet.follow_alcove_width = True
+    quiet.wing_length_override = None
+    quiet._alcove_relevant = False
+    quiet._alcove_presence_probe = SimpleNamespace(running=lambda now: False)
+    assert quiet._alcove_follow_relevant() is False
