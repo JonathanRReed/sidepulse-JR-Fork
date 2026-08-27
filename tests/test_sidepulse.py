@@ -2605,7 +2605,7 @@ for (const event of [
 
         window = status_bar.build_setup_window(target)
 
-        self.assertEqual(window.title(), "Welcome to SidePulse")
+        self.assertEqual(window.title(), "Welcome to JR-BAR")
         self.assertIn("launch", target.setup_buttons)
         self.assertIn("eject_guard", target.setup_buttons)
         self.assertIn("eject_guard_uninstall", target.setup_buttons)
