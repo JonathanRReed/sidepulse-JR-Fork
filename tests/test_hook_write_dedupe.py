@@ -32,7 +32,6 @@ def test_hook_log_main_appends_and_notifies_once_per_event_token(
         "send_refresh_hint",
         lambda value, event_name=None: hints.append(value),
     )
-    monkeypatch.setattr(hook, "write_hook_status_audit", lambda value: None)
     monkeypatch.setattr(hook.sys, "stdin", SimpleNamespace(read=lambda: "{}"))
 
     assert hook.hook_log_main("grok", log_path) == 0

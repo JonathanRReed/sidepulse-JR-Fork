@@ -99,12 +99,6 @@ def infer_provider_from_hook_line(provider: str, line: dict[str, Any]) -> str:
     return provider
 
 
-def write_hook_status_audit(
-    _record: NormalizedProviderRecord | InertProviderRecord,
-) -> None:
-    """Compatibility no-op until history consumes canonical semantic events."""
-
-
 def _hook_source(provider: str) -> NegotiatedProviderSource | None:
     return next(
         (
@@ -212,7 +206,6 @@ def hook_log_main(provider: str, log_path: Path) -> int:
                 hint,
                 event_name=_hook_event_name_from_line(line),
             )
-        write_hook_status_audit(record)
     except Exception:
         return 0
     finally:

@@ -3496,8 +3496,6 @@ def _build_debug_pane(target: StatusBarController):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
     outer, inner = native_ui.make_card()
 
-    status_label = native_ui.make_label("", secondary=True, size=12.0)
-    inner.addArrangedSubview_(status_label)
     # The settings-file path lives here with the rest of the diagnostic
     # detail — not as a permanent footer under every pane, where it read
     # as debug output leaking into a settings window.
@@ -3514,7 +3512,7 @@ def _build_debug_pane(target: StatusBarController):
     )
 
     stack.addArrangedSubview_(outer)
-    fields = {"debug_log_status": status_label, "settings_path": settings_path_label}
+    fields = {"settings_path": settings_path_label}
     return native_ui.wrap_in_scroll_pane(stack), fields
 
 

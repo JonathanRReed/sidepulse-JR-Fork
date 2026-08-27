@@ -160,9 +160,6 @@ from .animation_store import (
 from .app_bundle import default_app_bundle_path, running_inside_bundle
 from .attention import AttentionProjection, LifecycleMode, project_attention
 from .audit import (
-    default_status_audit_log_path,
-    export_status_audit_csv,
-    export_status_audit_html,
     remove_orphaned_state_files,
     trim_oversized_logs,
     trim_oversized_process_logs,
@@ -10457,10 +10454,6 @@ class StatusBarController(NSObject):
             self.settings_fields.get("settings_path"),
             f"Settings: {default_settings_path()}",
         )
-        set_field_value(
-            self.settings_fields.get("debug_log_status"),
-            debug_log_status_text(),
-        )
         set_checkbox_state(
             self.settings_buttons.get("screen_bar_wraps_menu_bar"),
             self.settings.virtual_status_device_wraps_menu_bar,
@@ -10855,20 +10848,6 @@ class StatusBarController(NSObject):
             label.animator().setAlphaValue_(0.0)
 
         NSAnimationContext.runAnimationGroup_completionHandler_(_animate, None)
-
-    def export_debug_log(self, format_name: str) -> None:
-        path = choose_debug_export_path(format_name)
-        if path is None:
-            return
-        try:
-            if format_name == "csv":
-                count = export_status_audit_csv(path)
-            else:
-                count = export_status_audit_html(path)
-        except Exception as exc:
-            self.set_settings_message(f"Debug export failed: {exc}")
-            return
-        self.set_settings_message(f"Exported {count} debug events to {path}.")
 
     @objc.IBAction
     def exportOperatorHistory_(self, _sender) -> None:
@@ -17353,21 +17332,6 @@ def build_why_panel_window(target: StatusBarController) -> NSWindow:
 
 
 
-def choose_debug_export_path(format_name: str) -> Path | None:
-    extension = "csv" if format_name == "csv" else "html"
-    panel = NSSavePanel.savePanel()
-    panel.setTitle_("Export SidePulse Debug Log")
-    panel.setNameFieldStringValue_(f"sidepulse-agent-debug.{extension}")
-    if hasattr(panel, "setAllowedFileTypes_"):
-        panel.setAllowedFileTypes_([extension])
-    if panel.runModal() != 1:
-        return None
-    url = panel.URL()
-    if url is None:
-        return None
-    return Path(str(url.path()))
-
-
 def choose_operator_export_path(kind: str) -> Path | None:
     if kind not in {"history", "diagnostics"}:
         return None
@@ -17386,26 +17350,6 @@ def choose_operator_export_path(kind: str) -> Path | None:
     if url is None:
         return None
     return Path(str(url.path()))
-
-
-def debug_log_status_text() -> str:
-    path = default_status_audit_log_path()
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return f"Log: {path} (empty)"
-    return f"Log: {path} ({format_byte_count(size)})"
-
-
-def format_byte_count(size: int) -> str:
-    units = ("B", "KB", "MB", "GB")
-    value = float(size)
-    for unit in units:
-        if value < 1024 or unit == units[-1]:
-            if unit == "B":
-                return f"{int(value)} {unit}"
-            return f"{value:.1f} {unit}"
-        value /= 1024
 
 
 # --- Settings window: sidebar + detail pane ---------------------------

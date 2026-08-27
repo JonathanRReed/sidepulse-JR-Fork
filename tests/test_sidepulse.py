@@ -23,12 +23,6 @@ from sidepulse import cli as cli_module
 from sidepulse import collector as collector_module
 from sidepulse import colors as colors_module
 from sidepulse.agent_browser_window import AgentBrowserActionPayload
-from sidepulse.audit import (
-    append_status_audit_record,
-    export_status_audit_csv,
-    export_status_audit_html,
-    read_status_audit_records,
-)
 from sidepulse.battery import (
     BATTERY_CHARGING_MINT,
     BatteryLedController,
@@ -1059,42 +1053,6 @@ for (const event of [
             self.assertEqual(path, grok)
             self.assertEqual(line["sessionId"], "grok-session")
             self.assertEqual(line["agent_origin"], "Grok CLI")
-
-    def test_status_audit_log_exports_csv_and_html(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            log = base / "event-status.jsonl"
-            record = parse_log_line(
-                "grok",
-                json.dumps(
-                    {
-                        "hookEventName": "notification",
-                        "sessionId": "grok-session",
-                        "workspaceRoot": "/tmp/project",
-                        "notificationType": "idle_prompt",
-                        "message": "Turn complete",
-                        "timestamp": "2026-07-18T21:55:14Z",
-                    }
-                ),
-            )
-            self.assertIsNotNone(record)
-            status = collector_module.status_from_event(record)
-            self.assertIsNotNone(status)
-
-            append_status_audit_record(record, status, path=log)
-            records = read_status_audit_records(log)
-
-            self.assertEqual(len(records), 1)
-            self.assertEqual(records[0]["hook_event"], "Notification")
-            self.assertEqual(records[0]["status"], "completed")
-            csv_path = base / "debug.csv"
-            html_path = base / "debug.html"
-            self.assertEqual(export_status_audit_csv(csv_path, source=log), 1)
-            self.assertEqual(export_status_audit_html(html_path, source=log), 1)
-            self.assertIn("hook_event,status", csv_path.read_text())
-            self.assertIn("SidePulse Agent Debug Log", html_path.read_text())
-            self.assertEqual(stat.S_IMODE(csv_path.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(html_path.stat().st_mode), 0o600)
 
     def test_hook_event_server_refuses_and_reports_a_legacy_hook(self) -> None:
         """A pre-hint hook is refused as an ingestion source, and named.
@@ -2694,7 +2652,6 @@ for (const event of [
                 target.ensure_all_settings_panes()
 
         self.assertEqual(window.title(), "SidePulse Settings: Profile")
-        self.assertIn("debug_log_status", target.settings_fields)
         self.assertIn("devin_session_opener", target.settings_fields)
         self.assertIn("closed_animation_program", target.settings_fields)
         self.assertIn("closed_animation_duration", target.settings_fields)
@@ -10907,62 +10864,6 @@ class PrivateStateSecurityTests(unittest.TestCase):
 
         return stat.S_IMODE(path.lstat().st_mode)
 
-    def test_audit_omits_prompt_fallback_and_raw_event_copy(self) -> None:
-        from sidepulse.audit import status_audit_record
-
-        prompt_event = parse_log_line(
-            "claude",
-            json.dumps(
-                {
-                    "hook_event_name": "UserPromptSubmit",
-                    "session_id": "private-session",
-                    "prompt": "private prompt body",
-                    "authorization": "Bearer private-token",
-                    "logged_at": "2026-08-12T12:00:00Z",
-                }
-            ),
-        )
-        self.assertIsNotNone(prompt_event)
-        prompt_record = status_audit_record(prompt_event, None)
-        self.assertEqual(prompt_record["message"], "")
-        self.assertEqual(prompt_record["raw_preview"], "")
-
-        notification = parse_log_line(
-            "claude",
-            json.dumps(
-                {
-                    "hook_event_name": "Notification",
-                    "session_id": "ask-session",
-                    "notification_type": "idle_prompt",
-                    "message": "Claude is waiting for your input",
-                    "logged_at": "2026-08-12T12:01:00Z",
-                }
-            ),
-        )
-        self.assertIsNotNone(notification)
-        notification_record = status_audit_record(notification, None)
-        self.assertEqual(
-            notification_record["message"],
-            "Claude is waiting for your input",
-        )
-        self.assertEqual(notification_record["raw_preview"], "")
-
-        assistant_body = parse_log_line(
-            "claude",
-            json.dumps(
-                {
-                    "hook_event_name": "Stop",
-                    "session_id": "completion-session",
-                    "last_assistant_message": "private assistant response",
-                    "logged_at": "2026-08-12T12:02:00Z",
-                }
-            ),
-        )
-        self.assertIsNotNone(assistant_body)
-        assistant_record = status_audit_record(assistant_body, None)
-        self.assertEqual(assistant_record["message"], "")
-        self.assertEqual(assistant_record["raw_preview"], "")
-
     def test_sensitive_entrypoints_create_owner_only_files(self) -> None:
         from sidepulse import usage_stats
 
@@ -10998,11 +10899,6 @@ class PrivateStateSecurityTests(unittest.TestCase):
                 self.assertEqual(event["authorization"], "[REDACTED]")
                 self.assertEqual(event["last_assistant_message"], "[REDACTED]")
 
-                audit_path = base / "audit" / "event-status.jsonl"
-                parsed = parse_log_line("codex", json.dumps(hook_obj))
-                self.assertIsNotNone(parsed)
-                append_status_audit_record(parsed, None, path=audit_path)
-
                 latest_path = base / "state" / "latest.json"
                 monitor = LiveAgentMonitor(latest_state_path=latest_path)
                 live_event = parse_log_line(
@@ -11031,7 +10927,6 @@ class PrivateStateSecurityTests(unittest.TestCase):
             for directory in (
                 settings_path.parent,
                 hook_path.parent,
-                audit_path.parent,
                 latest_path.parent,
                 cache_path.parent,
             ):
@@ -11039,7 +10934,6 @@ class PrivateStateSecurityTests(unittest.TestCase):
             for path in (
                 settings_path,
                 hook_path,
-                audit_path,
                 latest_path,
                 cache_path,
             ):
@@ -11317,7 +11211,7 @@ class PrivateStateSecurityTests(unittest.TestCase):
             self.assertIsNotNone(completed_status)
             self.assertEqual(completed_status.mode, AgentMode.COMPLETED)
 
-    def test_hook_log_main_redacts_before_ipc_storage_and_audit_fanout(self) -> None:
+    def test_hook_log_main_redacts_before_ipc_and_storage(self) -> None:
         import io
 
         from sidepulse.hook import hook_log_main
@@ -11344,24 +11238,17 @@ class PrivateStateSecurityTests(unittest.TestCase):
                 observations.append(("hint", log.read_text(), hint))
                 return True
 
-            def observe_audit(record):
-                observations.append(("audit", log.read_text(), record))
-
             with (
                 patch("sidepulse.hook.sys.stdin", io.StringIO(payload)),
                 patch(
                     "sidepulse.hook.send_refresh_hint",
                     side_effect=observe_hint,
                 ),
-                patch(
-                    "sidepulse.hook.write_hook_status_audit",
-                    side_effect=observe_audit,
-                ),
             ):
                 self.assertEqual(hook_log_main("claude", log), 0)
 
             stored = json.loads(log.read_text())
-            self.assertEqual([stage for stage, _text, _value in observations], ["hint", "audit"])
+            self.assertEqual([stage for stage, _text, _value in observations], ["hint"])
             self.assertTrue(all(json.loads(text) == stored for _stage, text, _value in observations))
             self.assertEqual(stored["record_kind"], "normalized")
             self.assertEqual(stored["provider_id"], "claude")
@@ -11386,7 +11273,7 @@ class PrivateStateSecurityTests(unittest.TestCase):
                 "authorization",
             ):
                 self.assertNotIn(forbidden, serialized)
-            self.assertNotIn("private", repr(observations[1][2]).lower())
+            self.assertNotIn("private", repr(observations[0][2]).lower())
 
     def test_cursor_hook_main_persists_only_opaque_identity_and_returns_json(self) -> None:
         import io
