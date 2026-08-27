@@ -49,6 +49,10 @@ CLAUDE_REMOTE_QUOTA_NO_WINDOWS = "claude_remote_quota_no_windows"
 CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN = "claude_remote_quota_needs_sign_in"
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+#: Claude Code's own public OAuth client (PKCE, no secret) -- the same
+#: id CodexBar uses to renew the shared sign-in.
+CLAUDE_CODE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CLAUDE_OAUTH_BETA_HEADER = "oauth-2025-04-20"
 CLAUDE_CODE_VERSION_FALLBACK = "2.1.0"
 # 10, not 30: this endpoint answers in well under a second when it
@@ -154,11 +158,10 @@ def credential_needs_sign_in(raw: object) -> bool:
     valid `refreshToken` present. Claude Code mints access tokens on demand
     rather than caching them.
 
-    We deliberately do NOT perform that refresh ourselves. The refresh token
-    rotates on use, so minting our own token would invalidate the one Claude
-    Code holds and break the user's `claude` login -- trading a status
-    readout for their actual tooling. Refresh belongs to the app that owns
-    the credential; our job is to say so clearly and re-read afterwards.
+    Renewal is possible from here -- see `refresh_claude_payload`, which
+    does what CodexBar does: refresh with Claude Code's own public client
+    and WRITE THE ROTATED TOKENS BACK so `claude` keeps working. This
+    predicate only answers "is the stored access token usable as-is".
     """
     if not isinstance(raw, str) or not raw.strip():
         return False
@@ -176,6 +179,124 @@ def credential_needs_sign_in(raw: object) -> bool:
     refresh = oauth.get("refreshToken")
     has_refresh = isinstance(refresh, str) and bool(refresh.strip())
     return has_refresh and not has_access
+
+
+def refreshable_credential(raw: object) -> bool:
+    """True when the Keychain payload holds a refresh token at all."""
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return False
+    oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
+    refresh = oauth.get("refreshToken") if isinstance(oauth, dict) else None
+    return isinstance(refresh, str) and bool(refresh.strip())
+
+
+def refresh_claude_payload(
+    raw: str,
+    *,
+    now: float,
+    opener=None,
+    timeout: float = CLAUDE_USAGE_TIMEOUT_SECONDS,
+) -> tuple[str, ClaudeOAuthCredential]:
+    """Renew Claude Code's sign-in the way CodexBar does (2026-08-27
+    owner call: "literally copy their version").
+
+    POSTs the stored refresh token to Anthropic's token endpoint under
+    Claude Code's own public client id and returns the REBUILT Keychain
+    payload (every unrelated field preserved) plus the new credential.
+
+    THE CONTRACT THAT KEEPS `claude` ALIVE: the refresh token rotates on
+    use. The caller MUST write the returned payload back to the Keychain
+    item -- holding the new tokens privately would strand Claude Code on
+    a dead refresh token and sign the user out of their actual tooling.
+    Failures raise ClaudeQuotaUnavailableError with a reason code only.
+    """
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN) from None
+    oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
+    refresh_token = oauth.get("refreshToken") if isinstance(oauth, dict) else None
+    if not isinstance(refresh_token, str) or not refresh_token.strip():
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN)
+
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request
+
+    request = Request(
+        CLAUDE_OAUTH_TOKEN_URL,
+        method="POST",
+        data=json.dumps(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token.strip(),
+                "client_id": CLAUDE_CODE_OAUTH_CLIENT_ID,
+            }
+        ).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": _claude_code_user_agent(),
+        },
+    )
+    try:
+        with (opener or _default_opener)(request, timeout) as response:
+            status = getattr(response, "status", 200)
+            if status != 200:
+                raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR)
+            body = response.read(CLAUDE_USAGE_MAX_BYTES + 1)
+    except HTTPError as error:
+        if error.code in {400, 401, 403}:
+            # A refused refresh means the token is spent or revoked:
+            # only a fresh `claude` sign-in can recover.
+            raise ClaudeQuotaUnavailableError(
+                CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN
+            ) from None
+        if error.code == 429:
+            raise ClaudeQuotaUnavailableError(
+                CLAUDE_REMOTE_QUOTA_RATE_LIMITED
+            ) from None
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR) from None
+    except (OSError, URLError, TimeoutError):
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NETWORK) from None
+    try:
+        answer = json.loads(body.decode("utf-8"))
+    except (UnicodeError, ValueError):
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR) from None
+    access = answer.get("access_token") if isinstance(answer, dict) else None
+    if not isinstance(access, str) or not access.strip():
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR)
+    rotated = answer.get("refresh_token")
+    expires_in = answer.get("expires_in")
+    expires_at_ms = None
+    if (
+        not isinstance(expires_in, bool)
+        and isinstance(expires_in, (int, float))
+        and math.isfinite(float(expires_in))
+        and expires_in > 0
+    ):
+        expires_at_ms = int((now + float(expires_in)) * 1000.0)
+    rebuilt = dict(payload)
+    rebuilt_oauth = dict(oauth)
+    rebuilt_oauth["accessToken"] = access.strip()
+    if isinstance(rotated, str) and rotated.strip():
+        rebuilt_oauth["refreshToken"] = rotated.strip()
+    if expires_at_ms is not None:
+        rebuilt_oauth["expiresAt"] = expires_at_ms
+    rebuilt["claudeAiOauth"] = rebuilt_oauth
+    credential = ClaudeOAuthCredential(
+        access_token=access.strip(),
+        expires_at=expires_at_ms / 1000.0 if expires_at_ms is not None else None,
+        subscription_type=(
+            rebuilt_oauth.get("subscriptionType")
+            if isinstance(rebuilt_oauth.get("subscriptionType"), str)
+            else None
+        ),
+    )
+    return json.dumps(rebuilt, separators=(",", ":")), credential
 
 
 def _claude_code_user_agent() -> str:

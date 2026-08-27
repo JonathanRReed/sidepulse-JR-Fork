@@ -122,6 +122,31 @@ class KeychainConsentLedger:
             pass
         return deadline
 
+    def record_success(self, service: str, now: float) -> None:
+        """A consented read succeeded: remember the standing grant.
+
+        macOS makes later reads by this same signed binary silent once
+        the user clicks Always Allow -- this stamp is what authorizes
+        BACKGROUND re-reads (allow_prompt=False) to try at all. Cleared
+        by a later denial, so a revoked grant falls back to
+        foreground-only on the next refusal.
+        """
+        payload = self._read()
+        payload[service] = {"granted_at": float(now)}
+        try:
+            atomic_private_write(self.path, json.dumps(payload, separators=(",", ":")))
+        except OSError:
+            pass
+
+    def standing_grant(self, service: str) -> bool:
+        entry = self._read().get(service)
+        if not isinstance(entry, dict):
+            return False
+        try:
+            return float(entry.get("granted_at", 0.0)) > 0.0
+        except (TypeError, ValueError):
+            return False
+
     def clear(self, service: str) -> None:
         payload = self._read()
         if payload.pop(service, None) is None:
@@ -160,7 +185,11 @@ def read_keychain_secret(
     call site has to state, in code, that a dialog is expected right now.
     """
     reference = time.time() if now is None else float(now)
-    if not allow_prompt:
+    if not allow_prompt and not (
+        ledger is not None and ledger.standing_grant(item.service)
+    ):
+        # No standing grant on record: a background read could surprise
+        # the user with a Keychain dialog, so it is refused outright.
         return CredentialResult(CredentialOutcome.PROMPT_NOT_ALLOWED)
     if ledger is not None:
         retry_at = ledger.retry_at(item.service, reference)
@@ -177,7 +206,7 @@ def read_keychain_secret(
         if not secret:
             return CredentialResult(CredentialOutcome.NOT_FOUND)
         if ledger is not None:
-            ledger.clear(item.service)
+            ledger.record_success(item.service, reference)
         return CredentialResult(CredentialOutcome.OK, secret=secret)
     if completed.returncode == _SECURITY_USER_CANCELED:
         deadline = (
@@ -187,6 +216,49 @@ def read_keychain_secret(
         )
         return CredentialResult(CredentialOutcome.DENIED, retry_at=deadline)
     return CredentialResult(CredentialOutcome.NOT_FOUND)
+
+
+def _run_security_write(item: KeychainItem, secret: str) -> subprocess.CompletedProcess:
+    arguments = [
+        "/usr/bin/security",
+        "add-generic-password",
+        "-U",
+        "-s",
+        item.service,
+        "-w",
+        secret,
+    ]
+    if item.account:
+        arguments += ["-a", item.account]
+    return subprocess.run(
+        arguments,
+        capture_output=True,
+        text=True,
+        timeout=_SECURITY_TIMEOUT_SECONDS,
+        check=False,
+    )
+
+
+def write_keychain_secret(
+    item: KeychainItem,
+    secret: str,
+    *,
+    runner=None,
+) -> bool:
+    """Update one Keychain item in place (`add-generic-password -U`).
+
+    Exists for exactly one caller today: writing Claude Code's ROTATED
+    OAuth tokens back after a refresh, so `claude` itself keeps working
+    -- the CodexBar contract. The secret rides argv to the system
+    `security` tool, the same channel the read path already uses.
+    """
+    if not isinstance(secret, str) or not secret:
+        return False
+    try:
+        completed = (runner or _run_security_write)(item, secret)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
 
 
 @dataclass(frozen=True, slots=True)

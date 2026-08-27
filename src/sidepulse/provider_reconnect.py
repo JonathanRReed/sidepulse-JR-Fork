@@ -190,6 +190,8 @@ def repair_claude_credential(
     *,
     now: float,
     keychain_payload_reader: Callable[[], object],
+    keychain_writer: Callable[[str], bool] | None = None,
+    refresher=None,
 ) -> RepairResult:
     """User-initiated Claude reconnect that cannot claim a false success.
 
@@ -203,6 +205,7 @@ def repair_claude_credential(
     from .claude_quota import (
         credential_from_keychain_payload,
         credential_needs_sign_in,
+        refreshable_credential,
     )
 
     raw = keychain_payload_reader()
@@ -212,28 +215,38 @@ def repair_claude_credential(
             RepairOutcome.UNAVAILABLE,
             "Claude Code's sign-in was not found in the Keychain.",
         )
-    if credential_needs_sign_in(raw):
-        return RepairResult(
-            "claude",
-            RepairOutcome.NEEDS_SIGN_IN,
-            "Claude Code is signed out (it holds a refresh token but no "
-            "usable access token). Run `claude` in a terminal so it signs "
-            "itself back in, then click Reconnect Claude.",
-        )
     credential = credential_from_keychain_payload(raw)
-    if credential is None:
-        return RepairResult(
-            "claude",
-            RepairOutcome.NEEDS_SIGN_IN,
-            "Claude Code's stored sign-in is empty — run `claude` in a "
-            "terminal and sign in, then click Reconnect Claude.",
+    needs_renewal = (
+        credential_needs_sign_in(raw)
+        or credential is None
+        or credential.is_expired(now)
+    )
+    if needs_renewal:
+        # The CodexBar move (2026-08-27 owner call): renew with Claude
+        # Code's own public client and write the ROTATED tokens back so
+        # `claude` keeps working, instead of sending the human to a
+        # terminal for something a POST can do.
+        if not refreshable_credential(raw):
+            return RepairResult(
+                "claude",
+                RepairOutcome.NEEDS_SIGN_IN,
+                "Claude Code's stored sign-in is empty — run `claude` in a "
+                "terminal and sign in, then click Reconnect Claude.",
+            )
+        renewed = _renew_claude_from_payload(
+            raw,
+            credential_store,
+            now=now,
+            keychain_writer=keychain_writer,
+            refresher=refresher,
         )
-    if credential.is_expired(now):
+        if renewed is not None:
+            return renewed
         return RepairResult(
             "claude",
             RepairOutcome.NEEDS_SIGN_IN,
-            "Claude Code's sign-in has expired. Run `claude` in a terminal "
-            "(it refreshes its own sign-in), then click Reconnect Claude.",
+            "Claude Code's sign-in could not be renewed — run `claude` in "
+            "a terminal and sign in, then click Reconnect Claude.",
         )
     stored = None
     try:
@@ -255,6 +268,105 @@ def repair_claude_credential(
         "Claude usage connected with a fresh sign-in — refreshing now.",
         changed=True,
     )
+
+
+def _default_claude_keychain_writer(payload: str) -> bool:
+    from .credentials import CLAUDE_CODE_KEYCHAIN, write_keychain_secret
+
+    return write_keychain_secret(CLAUDE_CODE_KEYCHAIN, payload)
+
+
+def _renew_claude_from_payload(
+    raw: str,
+    credential_store,
+    *,
+    now: float,
+    keychain_writer: Callable[[str], bool] | None,
+    refresher,
+) -> RepairResult | None:
+    """One refresh attempt; None means the caller should fall back.
+
+    Write-back happens BEFORE our own store is updated: if the Keychain
+    write fails we abort with the fallback message rather than hold
+    rotated tokens Claude Code will never see (that is the failure mode
+    the old code's docstring feared -- a status readout that costs the
+    user their actual tooling).
+    """
+    from .claude_quota import ClaudeQuotaUnavailableError, refresh_claude_payload
+
+    refresh = refresher or refresh_claude_payload
+    try:
+        new_payload, credential = refresh(raw, now=now)
+    except ClaudeQuotaUnavailableError:
+        return None
+    # The refresh CONSUMED the old refresh token the moment it
+    # succeeded -- from here the only honest move is forward. Write the
+    # rotated tokens back for Claude Code first; if that write fails,
+    # still keep our access token (it works until expiry) and say
+    # plainly that `claude` may need a fresh sign-in.
+    writer = keychain_writer or _default_claude_keychain_writer
+    wrote_back = writer(new_payload)
+    try:
+        credential_store.set("claude", "oauth-token", credential.access_token)
+    except Exception:
+        return None
+    if wrote_back:
+        return RepairResult(
+            "claude",
+            RepairOutcome.REPAIRED,
+            "Claude Code's sign-in was renewed (rotated tokens written "
+            "back) — refreshing now.",
+            changed=True,
+        )
+    return RepairResult(
+        "claude",
+        RepairOutcome.REPAIRED,
+        "Claude usage was renewed, but writing the rotated sign-in back "
+        "to the Keychain failed — if `claude` logs out, sign in again "
+        "there.",
+        changed=True,
+    )
+
+
+def renew_claude_credential_in_background(
+    credential_store,
+    *,
+    home: Path,
+    now: float,
+) -> bool:
+    """Silent Claude renewal for the collect loop, grok-repair style.
+
+    Reads the Keychain WITHOUT prompt allowance -- the read only runs
+    when a prior consented read recorded a standing grant, so no dialog
+    can surprise the user from a background thread. True means the
+    credential changed and a fresh collect is worth it right now.
+    """
+    del home  # signature symmetry with the other background repairs
+    try:
+        from .credentials import (
+            CLAUDE_CODE_KEYCHAIN,
+            KeychainConsentLedger,
+            read_keychain_secret,
+        )
+        from .providers import default_state_dir
+
+        result = read_keychain_secret(
+            CLAUDE_CODE_KEYCHAIN,
+            allow_prompt=False,
+            ledger=KeychainConsentLedger(
+                default_state_dir() / "keychain-consent.json"
+            ),
+        )
+        if not result.ok or result.secret is None:
+            return False
+        repair = repair_claude_credential(
+            credential_store,
+            now=now,
+            keychain_payload_reader=lambda: result.secret,
+        )
+        return bool(repair.changed)
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------

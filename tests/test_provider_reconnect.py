@@ -99,7 +99,49 @@ def claude_payload(*, access="tok", expires_at=None, refresh="refresh-token"):
     return json.dumps({"claudeAiOauth": oauth})
 
 
-def test_repair_claude_rejects_expired_token():
+def _failing_refresher(raw, *, now):
+    from sidepulse.claude_quota import ClaudeQuotaUnavailableError
+
+    raise ClaudeQuotaUnavailableError("claude_remote_quota_network")
+
+
+def test_repair_claude_renews_an_expired_token_and_writes_back():
+    """The CodexBar contract: refresh with Claude Code's client, write
+    the ROTATED tokens back so `claude` itself keeps working."""
+    from sidepulse.claude_quota import ClaudeOAuthCredential
+
+    store = FakeStore()
+    written = []
+
+    def refresher(raw, *, now):
+        return (
+            '{"claudeAiOauth":{"accessToken":"fresh"}}',
+            ClaudeOAuthCredential(access_token="fresh", expires_at=now + 3600),
+        )
+
+    result = repair_claude_credential(
+        store,
+        now=2_000_000_000.0,
+        keychain_payload_reader=lambda: claude_payload(
+            access="a" * 32, expires_at=1_000_000_000.0
+        ),
+        keychain_writer=lambda payload: (written.append(payload), True)[1],
+        refresher=refresher,
+    )
+    assert result.outcome is RepairOutcome.REPAIRED
+    assert result.changed
+    assert written == ['{"claudeAiOauth":{"accessToken":"fresh"}}'], (
+        "write-back precedes everything; without it Claude Code is "
+        "stranded on a spent refresh token"
+    )
+    assert store.secrets[("claude", "oauth-token")] == "fresh"
+
+
+def test_repair_claude_keeps_the_token_when_write_back_fails():
+    """A successful refresh already consumed the old refresh token --
+    dropping the new one would strand BOTH apps. Keep ours, say so."""
+    from sidepulse.claude_quota import ClaudeOAuthCredential
+
     store = FakeStore()
     result = repair_claude_credential(
         store,
@@ -107,10 +149,31 @@ def test_repair_claude_rejects_expired_token():
         keychain_payload_reader=lambda: claude_payload(
             access="a" * 32, expires_at=1_000_000_000.0
         ),
+        keychain_writer=lambda payload: False,
+        refresher=lambda raw, *, now: (
+            "{}",
+            ClaudeOAuthCredential(access_token="fresh"),
+        ),
+    )
+    assert result.outcome is RepairOutcome.REPAIRED
+    assert store.secrets[("claude", "oauth-token")] == "fresh"
+    assert "Keychain failed" in result.message
+
+
+def test_repair_claude_falls_back_when_refresh_is_refused():
+    store = FakeStore()
+    result = repair_claude_credential(
+        store,
+        now=2_000_000_000.0,
+        keychain_payload_reader=lambda: claude_payload(
+            access="a" * 32, expires_at=1_000_000_000.0
+        ),
+        keychain_writer=lambda payload: True,
+        refresher=_failing_refresher,
     )
     assert result.outcome is RepairOutcome.NEEDS_SIGN_IN
     assert not store.stored
-    assert "expired" in result.message
+    assert "could not be renewed" in result.message
 
 
 def test_repair_claude_rejects_signed_out_shape():
@@ -119,9 +182,29 @@ def test_repair_claude_rejects_signed_out_shape():
         store,
         now=1000.0,
         keychain_payload_reader=lambda: claude_payload(access=""),
+        keychain_writer=lambda payload: True,
+        refresher=_failing_refresher,
     )
     assert result.outcome is RepairOutcome.NEEDS_SIGN_IN
     assert not store.stored
+
+
+def test_repair_claude_without_a_refresh_token_never_attempts_renewal():
+    store = FakeStore()
+
+    def exploding_refresher(raw, *, now):
+        raise AssertionError("no refresh token, nothing to try")
+
+    result = repair_claude_credential(
+        store,
+        now=2_000_000_000.0,
+        keychain_payload_reader=lambda: claude_payload(
+            access="", refresh="", expires_at=None
+        ),
+        refresher=exploding_refresher,
+    )
+    assert result.outcome is RepairOutcome.NEEDS_SIGN_IN
+    assert "empty" in result.message
 
 
 def test_repair_claude_stores_fresh_token_and_reports_change():

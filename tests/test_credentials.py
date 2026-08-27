@@ -175,3 +175,70 @@ def test_malformed_codex_auth_is_absence_not_a_crash(tmp_path: Path, payload: st
 
 def test_missing_codex_auth_is_absence(tmp_path: Path) -> None:
     assert read_codex_tokens(tmp_path / "nope.json") is None
+
+
+# --- Standing consent: background reads only after a granted foreground one
+
+
+def _ok_runner(item):
+    import subprocess
+
+    return subprocess.CompletedProcess([], 0, stdout="secret-payload\n", stderr="")
+
+
+def test_background_read_is_refused_without_a_standing_grant(tmp_path):
+    ledger = KeychainConsentLedger(tmp_path / "consent.json")
+
+    def runner(item):
+        raise AssertionError("no grant on record: security must not run")
+
+    result = read_keychain_secret(
+        CLAUDE_CODE_KEYCHAIN,
+        allow_prompt=False,
+        ledger=ledger,
+        runner=runner,
+    )
+    assert result.outcome is CredentialOutcome.PROMPT_NOT_ALLOWED
+
+
+def test_a_granted_foreground_read_authorizes_background_reads(tmp_path):
+    ledger = KeychainConsentLedger(tmp_path / "consent.json")
+    first = read_keychain_secret(
+        CLAUDE_CODE_KEYCHAIN,
+        allow_prompt=True,
+        ledger=ledger,
+        runner=_ok_runner,
+    )
+    assert first.ok
+    assert ledger.standing_grant(CLAUDE_CODE_KEYCHAIN.service)
+
+    background = read_keychain_secret(
+        CLAUDE_CODE_KEYCHAIN,
+        allow_prompt=False,
+        ledger=ledger,
+        runner=_ok_runner,
+    )
+    assert background.ok
+    assert background.secret == "secret-payload"
+
+
+def test_a_denial_revokes_the_standing_grant(tmp_path):
+    import subprocess
+
+    ledger = KeychainConsentLedger(tmp_path / "consent.json")
+    ledger.record_success(CLAUDE_CODE_KEYCHAIN.service, 1_000.0)
+
+    def cancels(item):
+        return subprocess.CompletedProcess([], 128, stdout="", stderr="")
+
+    denied = read_keychain_secret(
+        CLAUDE_CODE_KEYCHAIN,
+        allow_prompt=True,
+        ledger=ledger,
+        runner=cancels,
+        now=2_000.0,
+    )
+    assert denied.outcome is CredentialOutcome.DENIED
+    assert not ledger.standing_grant(CLAUDE_CODE_KEYCHAIN.service), (
+        "a revoked grant falls back to foreground-only"
+    )

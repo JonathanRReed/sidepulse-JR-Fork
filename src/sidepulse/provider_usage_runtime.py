@@ -12,6 +12,7 @@ from .provider_reconnect import (
     FailureGate,
     credential_fingerprint,
     note_failure,
+    renew_claude_credential_in_background,
     repair_grok_credential,
     should_collect,
 )
@@ -260,6 +261,19 @@ class ProviderUsageService:
                 continue
             gate = self._failure_gates.get(provider_id, FailureGate())
             fingerprint = credential_fingerprint(self._home, provider_id)
+            if provider_id == "claude" and gate.terminal:
+                # A terminal Claude auth gate has no credential FILE to
+                # fingerprint (the sign-in lives in the Keychain), so
+                # left alone it never lifts. Try the silent CodexBar
+                # renewal -- standing consent only, never a dialog --
+                # and treat success as the changed-credential signal.
+                if renew_claude_credential_in_background(
+                    self._credentials,
+                    home=self._home,
+                    now=observed_at,
+                ):
+                    gate = FailureGate()
+                    self._failure_gates.pop(provider_id, None)
             previous = previous_by_provider.get(provider_id)
             if previous is not None and not should_collect(
                 gate,
