@@ -1370,10 +1370,6 @@ for (const event of [
             virtual_device.virtual_window_frame_for_screen(screen),
             ((640.0, 945.0), (232.0, 37.0)),
         )
-        self.assertEqual(
-            virtual_device.led_band_rect(232.0),
-            ((0.0, 0.0), (232.0, 5.0)),
-        )
 
     def test_virtual_screen_bar_on_notchless_display_is_led_band_only(self) -> None:
         try:

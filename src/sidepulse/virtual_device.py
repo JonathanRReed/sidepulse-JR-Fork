@@ -58,11 +58,9 @@ from .render_policy import (
     GlowGeometryKey,
     GlowPaintKey,
     RenderDriverKind,
-    alcove_bracket_corner_radius,
     choose_render_schedule,
     display_link_fps,
     presentation_hold_seconds,
-    rounded_silhouette,
     runtime_render_environment,
 )
 from .screen_bar_pipeline import (
@@ -214,10 +212,6 @@ WING_RISER_WIDTH = 6.0
 # Graphics clips bloom and stroke antialiasing at a window edge, which made
 # both corner risers look squared off or missing on the installed app.
 ALCOVE_ACCENT_EDGE_INSET = 6.0
-# In wings-only (Alcove) mode the bracket is SidePulse's entire visible
-# presence, so its horizontal stroke keeps at least this fraction of the
-# edge color all the way out to where it meets the riser.
-WINGS_ONLY_TAPER_FLOOR = 0.55
 WING_RISER_SOLID_FRACTION = 0.45
 LED_BLEND_RADIUS_LEDS = 1.5
 BLEND_COLUMN_WIDTH = 2.0
@@ -278,33 +272,6 @@ def virtual_display_state_for_projection(projection, active_signal=None) -> LedD
     from .led_status import display_state_for_projection
 
     return display_state_for_projection(projection, active_signal)
-
-
-def measured_notch_bounds(screen, below_window_number: int = 0, max_width: float | None = None):
-    """The hardware notch's EXACT horizontal bounds, measured from the
-    screen's own pixels: the notch is the only pure-black (0, 0, 0) run
-    in the menu bar's top rows (the menu bar itself never composites to
-    true black -- measured (1, 1, 1) even over a black wallpaper).
-    Verified against the 14-inch panel: pixels say 663..849 (186.0pt)
-    where the aux-area slot said 185 -- this is the ground truth the
-    user actually sees, needs no per-model lookup table, and works on
-    future Macs unseen. ``below_window_number`` excludes SidePulse's
-    own bar window from the composite so it can never contaminate the
-    measurement. Returns (x, width) in points, or None (no notch, or
-    anything unexpected -- callers fall back to the aux-area slot)."""
-    try:
-        runs, scale, frame_x = _captured_notch_runs(
-            screen, rows=2, below_window_number=below_window_number
-        )
-        # Row 1, as it always was: row 0 can carry a top-edge artifact.
-        silhouette = _validated_notch_silhouette(
-            runs[1:2] or runs[:1], scale, frame_x, max_width=max_width
-        )
-        if silhouette is None:
-            return None
-        return (silhouette[0], silhouette[1])
-    except Exception:
-        return None
 
 
 def measured_notch_silhouette(
@@ -971,16 +938,6 @@ def _alcove_window_values(screen_x: float, screen_width: float):
     return window_number, window_x, window_y, window_width
 
 
-def led_band_rect(width: float):
-    return ((0.0, 0.0), (float(width), LED_BAND_HEIGHT))
-
-
-def alcove_accent_horizontal_bounds(width: float) -> tuple[float, float]:
-    bounded_width = max(0.0, float(width))
-    inset = min(ALCOVE_ACCENT_EDGE_INSET, bounded_width / 2.0)
-    return inset, max(inset, bounded_width - inset)
-
-
 def _legibility_boost(color, floor: float):
     """The bracket is a STATUS surface: any lit LED renders at least
     this visible on it, whatever fade floors and Focus dimming did to
@@ -1488,38 +1445,6 @@ class VirtualLedView(NSView):
         notch_width = total_width if self.notch_width is None else min(self.notch_width, total_width)
         wing_offset = max(0.0, (total_width - notch_width) / 2.0)
         return notch_width, wing_offset
-
-    def _alcove_body_path(self, width, height):
-        observed = self.alcove_silhouette
-        if observed is None:
-            return None
-        center_x, observed_width, observed_height, contour = observed
-        left = center_x - observed_width / 2.0
-        x_offset = max(0.0, (float(width) - observed_width) / 2.0)
-        maximum_y = max(point[1] for point in contour)
-        local_contour = tuple(
-            (
-                x_offset + point[0] - left,
-                max(0.0, min(float(height), maximum_y - point[1])),
-            )
-            for point in contour
-        )
-        silhouette = rounded_silhouette(
-            center_x=float(width) / 2.0,
-            width=min(float(width), observed_width),
-            height=min(float(height), observed_height),
-            contour=local_contour,
-            requested_radius=alcove_bracket_corner_radius(
-                observed_width,
-                observed_height,
-            ),
-        )
-        path = NSBezierPath.bezierPath()
-        path.moveToPoint_(silhouette.points[0])
-        for point in silhouette.points[1:]:
-            path.lineToPoint_(point)
-        path.closePath()
-        return path
 
     def setState_brightness_startedAt_(self, state, brightness, started_at):
         if state != self.state:
@@ -2032,128 +1957,6 @@ class VirtualLedView(NSView):
         alpha = max(c[3] for c in lit)
         return (red, green, blue, alpha)
 
-    def _draw_wings_only(self):
-        """The Alcove coexistence render: a continuous, unmissable LED
-        underline across the WHOLE bar -- through the gap, over the
-        bottom edge of Alcove's backdrop -- plus the wing glow and the
-        risers at each end. The earlier wings-only attempt drew nothing
-        in the gap and left only faint wing stubs; over Alcove's huge
-        dark backdrop that read as "the app disappeared". The underline
-        is the bar's identity now: always visible, colored by the live
-        agent state, and the risers turn it into the |____| bracket.
-        Painted in the single identity color (_bar_identity_color), not
-        the spatial per-LED layout."""
-        colors = self._bracket_colors(self._colors_for_draw_cached())
-        width = self.bounds().size.width
-        left_bound, right_bound = alcove_accent_horizontal_bounds(width)
-        # Never paint past the CURRENT capsule. The window frame can run a
-        # beat stale (reposition cadence, granted-frame lag), and a stale
-        # WIDE frame put glowing corners on the wallpaper beside Alcove;
-        # in steady state this clamp is exactly the existing bounds.
-        if self.alcove_silhouette is not None:
-            observed_width = float(self.alcove_silhouette[1])
-            half = max(0.0, min(right_bound - left_bound, observed_width)) / 2.0
-            mid = width / 2.0
-            left_bound = max(left_bound, mid - half)
-            right_bound = min(right_bound, mid + half)
-        height = self.bounds().size.height
-        notch_width, wing_offset = self._notch_geometry()
-        led_width = notch_width / LED_COUNT
-        glow_height = min(LED_GLOW_HEIGHT, max(0.0, height - LED_BAND_HEIGHT))
-        cg_context = current_cg_context()
-
-        # One rounded-rect clip softens every corner of the bracket at
-        # once: the underline's ends curve up into the risers and the
-        # riser tops get a cap -- no hard right angles anywhere.
-        NSGraphicsContext.saveGraphicsState()
-        observed_height = (
-            self.alcove_silhouette[2]
-            if self.alcove_silhouette is not None
-            else height
-        )
-        bracket_radius = alcove_bracket_corner_radius(width, observed_height)
-        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            ((left_bound, 0.0), (right_bound - left_bound, height)),
-            bracket_radius,
-            bracket_radius,
-        ).addClip()
-        observed_body = self._alcove_body_path(width, height)
-        if observed_body is not None:
-            observed_body.addClip()
-
-        # The full-width underline: clip to the LED band (plus a whisper
-        # of bloom above it) so the gap region shows a clean bright line
-        # rather than the full-height glow that belongs to the wings.
-        # Taper floor 1.0 -- the underline is ONE continuous line at one
-        # intensity. With the wings' 0.55 floor here, the section under
-        # the notch rendered hot while the wings faded, and the seam
-        # between the two read as a rendering bug, not a design.
-        underline_base = (
-            max(0.0, height - observed_height - 1.0)
-            if self.alcove_silhouette is not None
-            else 0.0
-        )
-        NSGraphicsContext.saveGraphicsState()
-        NSBezierPath.bezierPathWithRect_(
-            (
-                (left_bound, underline_base),
-                (right_bound - left_bound, LED_BAND_HEIGHT + 3.0),
-            )
-        ).addClip()
-        self._fill_glow_row(
-            cg_context, colors, led_width, notch_width, glow_height, height,
-            x_start=left_bound, x_end=right_bound, wing_offset=wing_offset,
-            wing_taper_floor=1.0,
-        )
-        NSGraphicsContext.restoreGraphicsState()
-
-        if wing_offset > 0.0:
-            for x_start, x_end in (
-                (left_bound, wing_offset),
-                (wing_offset + notch_width, right_bound),
-            ):
-                if x_end <= x_start:
-                    continue
-                NSGraphicsContext.saveGraphicsState()
-                NSBezierPath.bezierPathWithRect_(((x_start, 0.0), (x_end - x_start, height))).addClip()
-                self._fill_glow_row(
-                    cg_context, colors, led_width, notch_width, glow_height, height,
-                    x_start=x_start, x_end=x_end, wing_offset=wing_offset,
-                    wing_taper_floor=WINGS_ONLY_TAPER_FLOOR,
-                )
-                NSGraphicsContext.restoreGraphicsState()
-        # The uprights are BOOKENDS, not LEDs: sampling the edge LED made
-        # each riser pulse whenever LED 0/7 pulsed -- a full-height corner
-        # blinking on its own read as "the sides flash and look longer
-        # than the rest". The identity blend breathes with the WHOLE bar.
-        riser_color = self._bar_identity_color(colors)
-        breath = self._riser_breath()
-        riser_color = (*riser_color[:3], riser_color[3] * breath)
-        # Risers at the window's own ends, even with zero wing -- the
-        # bracket's uprights must never be able to vanish.
-        self._draw_wing_riser(
-            cg_context,
-            riser_color,
-            left_bound,
-            min(left_bound + WING_RISER_WIDTH, right_bound),
-            height,
-            outer_on_left=True,
-        )
-        self._draw_wing_riser(
-            cg_context,
-            riser_color,
-            max(left_bound, right_bound - WING_RISER_WIDTH),
-            right_bound,
-            height,
-            outer_on_left=False,
-        )
-        self._draw_standing_gauges(
-            cg_context,
-            height,
-            edge_inset=left_bound,
-        )
-        NSGraphicsContext.restoreGraphicsState()
-
     def _fill_glow_row(self, cg_context, colors, led_width, notch_width, glow_height, _height, *, x_start, x_end, wing_offset, wing_taper_floor=0.0):
         """Draws the 4-layer LED glow (bloom / soft falloff / core /
         hotline) across [x_start, x_end) -- see glow_color_for_column
@@ -2335,38 +2138,6 @@ class VirtualLedView(NSView):
                     ((soft_rect_x, y_start), (soft_width, y_end - y_start)),
                     (*soft_color[:3], soft_color[3] * taper),
                 )
-
-    def _draw_compact_accent(self) -> None:
-        """When another notch app (e.g. Alcove) is occupying the notch's
-        own black shape, don't draw a second competing black backdrop --
-        just a clean, thin colored line at the same position the normal
-        bar would use, reading as a status accent rather than a floating
-        widget. No body fill, no glow layers, no edge highlights.
-        Painted in the single identity color -- see _bar_identity_color
-        for why a spatial per-LED accent was mostly invisible."""
-        colors = self._bracket_colors(self._colors_for_draw_cached())
-        width = self.bounds().size.width
-        cg_context = current_cg_context()
-        notch_width, wing_offset = self._notch_geometry()
-        led_width = notch_width / LED_COUNT
-
-        NSGraphicsContext.saveGraphicsState()
-        column_x = 0.0
-        while column_x < width:
-            column_width = min(BLEND_COLUMN_WIDTH, width - column_x)
-            center_x = column_x + column_width / 2.0
-            red, green, blue, alpha = glow_color_for_column(colors, led_width, notch_width, wing_offset, center_x)
-            if max(red, green, blue, alpha) > 0.001:
-                fill_rect_with_cg(
-                    cg_context,
-                    ((column_x, 0.0), (column_width, COMPACT_ACCENT_HEIGHT)),
-                    tone_mapped_led_color(
-                        red, green, blue, alpha, boost=LED_CORE_BOOST, alpha_scale=0.95
-                    ),
-                )
-            column_x += column_width
-        NSGraphicsContext.restoreGraphicsState()
-
 
 class _AnnouncerPillView(NSView):
     def initWithFrame_(self, frame):
@@ -3720,7 +3491,7 @@ class VirtualStatusDevice(NSObject):
         if gap_override is None:
             # Pixel-exact notch, measured once per screen configuration
             # (the notch can't change at runtime) -- see
-            # measured_notch_bounds for why this beats a model table.
+            # measured_notch_silhouette for why this beats a model table.
             # Guards, each one earned: never measure while Alcove is up
             # (its capsule composites pure black over the very rows the
             # scan reads -- 266pt "notch" over a 186pt panel), cap by the
@@ -3849,8 +3620,8 @@ class VirtualStatusDevice(NSObject):
             if observation is not None:
                 follow_observation = observation
                 # Widen by the stroke inset on BOTH sides. The bracket is
-                # drawn ALCOVE_ACCENT_EDGE_INSET in from each window edge
-                # (alcove_accent_horizontal_bounds), so sizing the window
+                # drawn ALCOVE_ACCENT_EDGE_INSET in from each window edge,
+                # so sizing the window
                 # to the raw capsule width put the stroke 6pt inside
                 # Alcove's real corners on each side -- visible every day
                 # as a bracket that does not quite touch.

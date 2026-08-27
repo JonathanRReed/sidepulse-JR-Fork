@@ -27,16 +27,6 @@ def _real_window_presentation(monkeypatch):
     )
 
 
-def test_alcove_accent_stays_inside_the_window_corners() -> None:
-    from sidepulse.virtual_device import alcove_accent_horizontal_bounds
-
-    left, right = alcove_accent_horizontal_bounds(213.0)
-
-    assert left >= 6.0
-    assert right <= 207.0
-    assert left < right
-
-
 def test_alcove_idle_pulse_keeps_a_visible_floor_between_breaths() -> None:
     from sidepulse.virtual_device import VirtualLedView
 
