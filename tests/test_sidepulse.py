@@ -3919,14 +3919,17 @@ for (const event of [
             LedDisplayState.IDLE,
         )
 
-        # The leading settle line eases to "off"/floor via a short cosine
-        # transition (settle_duration_ms()) rather than a bare, un-eased
-        # snap -- see led_status.settle_duration_ms for why: a bare
-        # assignment reads as the animation abruptly stopping whenever a
-        # real status change interrupts an in-progress pulse.
+        # Idle breathes like Apple's sleep light (patent US6658577B2):
+        # asymmetric -- inhale faster than exhale -- with a dark dwell
+        # between breaths, ~11 cycles/min. The leading approach line
+        # eases to the floor rather than snapping (settle discipline).
         self.assertEqual(
             program_for_display_state(LedDisplayState.IDLE),
-            "off 160ms cosine\n#020204 6s pulse\nrepeat",
+            "off 160ms cosine\n"
+            "#020204 1900ms cosine\n"
+            "off 2550ms cosine\n"
+            "off 850ms none\n"
+            "repeat",
         )
         # Done rests dark: the celebration flourish is the completion cue.
         self.assertEqual(program_for_display_state(LedDisplayState.DONE), "off")
@@ -3974,7 +3977,11 @@ for (const event of [
             idle = apply_strip_transfer_to_hex("#020204", (1.0, 1.0, 1.0))
             self.assertEqual(
                 (device / "LEDS.LED").read_text(),
-                f"off 160ms cosine\n{idle} 6s pulse\nrepeat",
+                "off 160ms cosine\n"
+                f"{idle} 1900ms cosine\n"
+                "off 2550ms cosine\n"
+                "off 850ms none\n"
+                "repeat",
             )
 
             write_mode_to_leds(AgentMode.COMPLETED, device_path=device, brightness=64)
@@ -8146,7 +8153,8 @@ class AnimationStyleTests(unittest.TestCase):
         working = program_for_display_state(LedDisplayState.WORKING, led_count=8, brightness=255)
         self.assertIn("pulse", working)
         idle = program_for_display_state(LedDisplayState.IDLE, led_count=8, brightness=255)
-        self.assertIn("pulse", idle)
+        # Idle's default is the asymmetric breath now, not a pulse line.
+        self.assertIn("850ms none", idle)
 
 
 class PreviewLedColorsTests(unittest.TestCase):

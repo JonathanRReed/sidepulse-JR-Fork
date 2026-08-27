@@ -351,13 +351,25 @@ def compose_presentation_program(
         peak_color = _scaled_color(normalized_color, ceiling_fraction)
         settle_text = f"{floor_color} 160ms cosine"
         if motion_style == "breathe":
-            cycle_ms = round(RELAY_TRAVERSAL_SECONDS * 2000.0)
+            # The human-rate asymmetric breath (led_status.IDLE_BREATH_*):
+            # the previous 3.2s symmetric pulse was 18.75 breaths/min --
+            # nearly double a resting sleep rate, which read as anxious
+            # rather than calm on a solo working agent.
+            from .led_status import (
+                IDLE_BREATH_CYCLE_MS,
+                IDLE_BREATH_DWELL_MS,
+                IDLE_BREATH_EXHALE_MS,
+                IDLE_BREATH_INHALE_MS,
+            )
+
             lines = (
                 settle_text,
-                f"{peak_color} {cycle_ms}ms pulse",
+                f"{peak_color} {IDLE_BREATH_INHALE_MS}ms cosine",
+                f"{floor_color} {IDLE_BREATH_EXHALE_MS}ms cosine",
+                f"{floor_color} {IDLE_BREATH_DWELL_MS}ms none",
                 "repeat",
             )
-            cycle_seconds = 0.16 + cycle_ms / 1000.0
+            cycle_seconds = IDLE_BREATH_CYCLE_MS / 1000.0
         elif motion_style == "blink":
             half_ms = round(RELAY_TRAVERSAL_SECONDS * 500.0)
             lines = (

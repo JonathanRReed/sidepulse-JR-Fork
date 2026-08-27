@@ -428,6 +428,23 @@ _STATE_DURATION_MS: dict[LedDisplayState, int] = {
 # write (the device always starts a new program from the *current* visible
 # color) has a known baseline to pulse from -- see settle_duration_ms()'s
 # docstring for why this must never be a bare, un-eased color assignment.
+# The idle breath, tuned to Apple's own sleep light rather than a sine:
+# the patent (US6658577B2) chose the resting human breath rate on
+# purpose, and the measured curve on a real MacBook is ASYMMETRIC --
+# inhale faster than exhale, with a dark dwell between breaths, at
+# ~11-12 cycles/min. A symmetric 6s sinusoid (10/min, no dwell) is
+# precisely what read as "mechanical" here for four versions.
+IDLE_BREATH_APPROACH_MS = 160
+IDLE_BREATH_INHALE_MS = 1900
+IDLE_BREATH_EXHALE_MS = 2550
+IDLE_BREATH_DWELL_MS = 850
+IDLE_BREATH_CYCLE_MS = (
+    IDLE_BREATH_APPROACH_MS
+    + IDLE_BREATH_INHALE_MS
+    + IDLE_BREATH_EXHALE_MS
+    + IDLE_BREATH_DWELL_MS
+)
+
 SETTLE_MIN_MS = 40
 SETTLE_MAX_MS = 160
 SETTLE_FRACTION = 0.12
@@ -481,8 +498,21 @@ def _render_full_strip(
         return rolling_program(peak, led_count=led_count, floor=floor)
     # Default: pulse. The settle line eases to the floor rather than
     # snapping to it -- see settle_duration_ms().
+    floor_color = _pulse_floor_color(color, floor)
+    if state is LedDisplayState.IDLE:
+        # The asymmetric breath (constants above): approach, inhale,
+        # slower exhale, dwell. One cycle is ~5.46s, ~11 breaths/min.
+        return "\n".join(
+            [
+                f"{floor_color} {IDLE_BREATH_APPROACH_MS}ms cosine",
+                f"{peak} {IDLE_BREATH_INHALE_MS}ms cosine",
+                f"{floor_color} {IDLE_BREATH_EXHALE_MS}ms cosine",
+                f"{floor_color} {IDLE_BREATH_DWELL_MS}ms none",
+                "repeat",
+            ]
+        )
     settle_ms = settle_duration_ms(_STATE_DURATION_MS[state])
-    settle_line = f"{_pulse_floor_color(color, floor)} {settle_ms}ms cosine"
+    settle_line = f"{floor_color} {settle_ms}ms cosine"
     return "\n".join([settle_line, f"{peak} {duration} pulse", "repeat"])
 
 
@@ -501,6 +531,22 @@ DONE_CELEBRATION_BLOOM_MS = 280
 # carries "ready for review".
 DONE_CELEBRATION_BASK_MS = 1400
 DONE_CELEBRATION_FADE_MS = 900
+# The crest: the bloom overshoots its final color once and settles back
+# -- the Face ID checkmark's physics, not a linear arrive-and-stop.
+# Expressive exactly once, then quiet.
+DONE_CELEBRATION_CREST_MS = 240
+DONE_CELEBRATION_CREST_SETTLE_MS = 200
+DONE_CELEBRATION_CREST_FACTOR = 1.12
+
+
+def _crest_color(hex_color: str, factor: float = DONE_CELEBRATION_CREST_FACTOR) -> str:
+    """Overdrive a color's channels past 100%, clamped at full scale."""
+    cleaned = hex_color.lstrip("#")
+    try:
+        channels = [int(cleaned[i : i + 2], 16) for i in (0, 2, 4)]
+    except (ValueError, IndexError):
+        return hex_color
+    return "#" + "".join(f"{min(255, round(value * factor)):02X}" for value in channels)
 
 
 def _done_celebration_program(done_color: str, led_count: int) -> str:
@@ -522,6 +568,8 @@ def _done_celebration_program(done_color: str, led_count: int) -> str:
             "; ".join(segments),
             f"off {DONE_CELEBRATION_PAUSE_MS}ms none",
             f"{done_color} {DONE_CELEBRATION_BLOOM_MS}ms cosine",
+            f"{_crest_color(done_color)} {DONE_CELEBRATION_CREST_MS}ms cosine",
+            f"{done_color} {DONE_CELEBRATION_CREST_SETTLE_MS}ms cosine",
             f"{done_color} {DONE_CELEBRATION_BASK_MS}ms none",
             f"off {DONE_CELEBRATION_FADE_MS}ms cosine",
         ]
