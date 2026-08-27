@@ -3156,6 +3156,17 @@ class StatusBarController(NSObject):
                 self.request_usage_refresh(plan.invocations)
             else:
                 self.request_usage_refresh(plan.invocations, reason=reason)
+        # Providers the JR plane owns are DISABLED above on purpose (one
+        # scheduler per endpoint) -- but disabling the legacy poll must
+        # not orphan the refresh entirely, which is exactly what made
+        # "Refresh Capacity" a dead button for Claude (2026-08-27).
+        jr_owned = tuple(
+            provider_id
+            for provider_id in states
+            if self.jr_plane_owns_capacity(provider_id)
+        )
+        if jr_owned:
+            self.request_jr_usage_refresh(jr_owned, force=(reason == "manual"))
 
     def request_usage_refresh(
         self,
@@ -3449,6 +3460,24 @@ class StatusBarController(NSObject):
         class predates that plane and owns its own capacity reads."""
         del provider_id
         return False
+
+    def request_jr_usage_refresh(
+        self,
+        providers: tuple[str, ...],
+        *,
+        force: bool = False,
+    ) -> None:
+        """Overridden by the JR provider-usage controller: providers the
+        JR plane owns refresh through ITS scheduler when the legacy
+        planner would have polled them. Base: nothing owns, nothing to do.
+        """
+        del providers, force
+
+    def jr_capacity_settings_text(self, provider_id: str) -> str | None:
+        """Overridden by the JR controller: the live settings-pane line
+        for a JR-owned provider. Base: None (legacy text applies)."""
+        del provider_id
+        return None
 
     def jr_plane_owns_usage_menu_item(self) -> bool:
         """Overridden by the JR provider-usage controller. When True, the
@@ -4548,7 +4577,11 @@ class StatusBarController(NSObject):
             )
         plan_label = fields.get("profile_plan_label")
         if plan_label is not None:
-            plan_label.setStringValue_(self.claude_plan_text or "")
+            plan_label.setStringValue_(
+                self.jr_capacity_settings_text("claude")
+                or self.claude_plan_text
+                or ""
+            )
         self.update_usage_menu_fields(monotonic_now=now, epoch_now=reset_now)
         self.schedule_capacity_timers(epoch_now=reset_now)
 
@@ -10679,6 +10712,9 @@ class StatusBarController(NSObject):
         if current_pane == "installed_agents":
             self.refresh_installed_agents_settings_projection()
         if current_pane == "capacity":
+            # The pane on screen must not depend on someone opening the
+            # dropdown to trigger a poll; the planners rate-limit.
+            self.maybe_refresh_usage_summary()
             self.refresh_capacity_settings_projection()
         set_field_value(
             self.settings_fields.get("settings_path"),
@@ -13138,12 +13174,16 @@ class StatusBarController(NSObject):
         codex = live_fields.get("codex")
         if codex is not None:
             codex.setStringValue_(
-                getattr(self, "codex_summary_text", None) or "Not observed yet"
+                self.jr_capacity_settings_text("codex")
+                or getattr(self, "codex_summary_text", None)
+                or "Not observed yet"
             )
         claude = live_fields.get("claude")
         if claude is not None:
             claude.setStringValue_(
-                getattr(self, "claude_plan_text", None) or "Not observed yet"
+                self.jr_capacity_settings_text("claude")
+                or getattr(self, "claude_plan_text", None)
+                or "Not observed yet"
             )
 
     def reconcile_installed_agent_inventory(self) -> None:

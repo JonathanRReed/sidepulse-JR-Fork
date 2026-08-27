@@ -66,4 +66,175 @@ def remove_redundant_separators(menu) -> None:
         index -= 1
 
 
-__all__ = ["menu_index", "remove_legacy_usage_item", "remove_redundant_separators"]
+def disabled_usage_item(title: str, *, alert: bool = False):
+    from AppKit import NSMenuItem
+
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        title,
+        None,
+        "",
+    )
+    item.setEnabled_(False)
+    if alert:
+        # A lane past its low-remaining threshold gets amber, not just a
+        # shorter meter -- peripheral vision again.
+        try:
+            from AppKit import (
+                NSAttributedString,
+                NSColor,
+                NSFont,
+                NSFontAttributeName,
+                NSForegroundColorAttributeName,
+            )
+
+            item.setAttributedTitle_(
+                NSAttributedString.alloc().initWithString_attributes_(
+                    title,
+                    {
+                        NSForegroundColorAttributeName: NSColor.systemOrangeColor(),
+                        NSFontAttributeName: NSFont.menuFontOfSize_(13.0),
+                    },
+                )
+            )
+        except Exception:
+            pass
+    return item
+
+
+def native_usage_menu_item(target):
+    """Build the JR usage row (moved from the facade 2026-08-27 for its
+    size ratchet; function-level imports keep the load order safe)."""
+    import time
+
+    from . import status_bar as _host
+    from .provider_usage_menu import project_usage_menu
+    from .provider_usage_runtime import ProviderUsageState
+    from .provider_usage_settings import load_provider_usage_settings
+    from .status_feeds import incident_row_title, shared_status_feed_poller
+
+    _legacy = getattr(_host, "_legacy", _host)
+
+    state = getattr(
+        target,
+        "_sidepulse_provider_usage_state",
+        ProviderUsageState((), None, None, False),
+    )
+    try:
+        settings = load_provider_usage_settings().settings
+        display = settings.menu_display
+        hidden = settings.hidden_menu_providers()
+        thresholds = {
+            preference.provider_id: preference.threshold_remaining
+            for preference in settings.providers
+        }
+    except Exception:
+        display, hidden, thresholds = None, frozenset(), None
+    projection = project_usage_menu(
+        state,
+        now=time.time(),
+        display=display,
+        hidden_providers=hidden,
+        thresholds=thresholds,
+    )
+    item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        projection.title,
+        None,
+        "",
+    )
+    submenu = _legacy.NSMenu.alloc().init()
+    submenu.setAutoenablesItems_(False)
+    # Vendor incidents outrank everything below: "the provider is down"
+    # must never read as "your quota fetch broke".
+    poller = shared_status_feed_poller()
+    poller.start()
+    incidents = poller.current()
+    for provider_id in sorted(incidents):
+        incident = incidents[provider_id]
+        row = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            incident_row_title(incident), "openProviderStatusPage:", ""
+        )
+        row.setTarget_(target)
+        row.setRepresentedObject_(incident.page_url)
+        submenu.addItem_(row)
+    if incidents:
+        submenu.addItem_(_legacy.NSMenuItem.separatorItem())
+    if not projection.rows:
+        # An empty submenu has two very different causes: nothing is
+        # connected, or everything is curated out. Diagnosing the wrong
+        # one ("connect sources" when sources ARE collecting) sends the
+        # user to the wrong fix.
+        if state.snapshots and hidden:
+            submenu.addItem_(
+                disabled_usage_item(
+                    "All providers hidden — choose some in Settings → Usage"
+                )
+            )
+        else:
+            submenu.addItem_(
+                disabled_usage_item("Open Usage Center to connect provider sources")
+            )
+    for row in projection.rows:
+        row_title = row.title
+        if row.provider_id in incidents:
+            row_title = f"{row_title} · ⚠ vendor incident"
+        provider_item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            row_title,
+            None,
+            "",
+        )
+        provider_menu = _legacy.NSMenu.alloc().init()
+        provider_menu.setAutoenablesItems_(False)
+        lane_lines = getattr(row, "lane_lines", ())
+        alert_indexes = set(getattr(row, "alert_lane_indexes", ()))
+        if lane_lines:
+            for index, line in enumerate(lane_lines):
+                provider_menu.addItem_(
+                    disabled_usage_item(line, alert=index in alert_indexes)
+                )
+        elif row.detail:
+            provider_menu.addItem_(disabled_usage_item(row.detail))
+        if row.usage_detail:
+            if lane_lines or row.detail:
+                provider_menu.addItem_(_legacy.NSMenuItem.separatorItem())
+            provider_menu.addItem_(disabled_usage_item(row.usage_detail))
+        if row.action_label:
+            provider_menu.addItem_(_legacy.NSMenuItem.separatorItem())
+            action = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                row.action_label,
+                "performProviderUsageAction:",
+                "",
+            )
+            action.setTarget_(target)
+            action.setRepresentedObject_(
+                {"provider_id": row.provider_id, "action": row.action_label}
+            )
+            provider_menu.addItem_(action)
+        provider_item.setSubmenu_(provider_menu)
+        submenu.addItem_(provider_item)
+    submenu.addItem_(_legacy.NSMenuItem.separatorItem())
+    open_center = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Open Usage Center…",
+        "openProviderUsageCenter:",
+        "",
+    )
+    open_center.setTarget_(target)
+    submenu.addItem_(open_center)
+    refresh = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Refresh Usage",
+        "refreshProviderUsage:",
+        "",
+    )
+    refresh.setTarget_(target)
+    submenu.addItem_(refresh)
+    item.setSubmenu_(submenu)
+    target._sidepulse_provider_usage_menu_item = item
+    return item
+
+
+__all__ = [
+    "disabled_usage_item",
+    "menu_index",
+    "native_usage_menu_item",
+    "remove_legacy_usage_item",
+    "remove_redundant_separators",
+]

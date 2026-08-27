@@ -29,7 +29,6 @@ from .settings_category_runtime import (
     select_page,
     show_category,
 )
-from .status_feeds import incident_row_title, shared_status_feed_poller
 from .usage_event_hooks import (
     detect_usage_hook_events,
     hook_path_message,
@@ -37,6 +36,7 @@ from .usage_event_hooks import (
 )
 from .usage_menu_injection import (
     menu_index,
+    native_usage_menu_item,
     remove_legacy_usage_item,
     remove_redundant_separators,
 )
@@ -50,161 +50,10 @@ _BaseStatusBarController = _legacy.StatusBarController
 _original_build_menu = _legacy.build_menu
 
 
-def _disabled_item(title: str, *, alert: bool = False):
-    item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        title,
-        None,
-        "",
-    )
-    item.setEnabled_(False)
-    if alert:
-        # A lane past its low-remaining threshold gets amber, not just a
-        # shorter meter -- peripheral vision again.
-        try:
-            from AppKit import (
-                NSAttributedString,
-                NSColor,
-                NSFont,
-                NSFontAttributeName,
-                NSForegroundColorAttributeName,
-            )
-
-            item.setAttributedTitle_(
-                NSAttributedString.alloc().initWithString_attributes_(
-                    title,
-                    {
-                        NSForegroundColorAttributeName: NSColor.systemOrangeColor(),
-                        NSFontAttributeName: NSFont.menuFontOfSize_(13.0),
-                    },
-                )
-            )
-        except Exception:
-            pass
-    return item
-
-
-def _native_usage_menu_item(target):
-    state = getattr(
-        target,
-        "_sidepulse_provider_usage_state",
-        ProviderUsageState((), None, None, False),
-    )
-    try:
-        settings = load_provider_usage_settings().settings
-        display = settings.menu_display
-        hidden = settings.hidden_menu_providers()
-        thresholds = {
-            preference.provider_id: preference.threshold_remaining
-            for preference in settings.providers
-        }
-    except Exception:
-        display, hidden, thresholds = None, frozenset(), None
-    projection = project_usage_menu(
-        state,
-        now=time.time(),
-        display=display,
-        hidden_providers=hidden,
-        thresholds=thresholds,
-    )
-    item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        projection.title,
-        None,
-        "",
-    )
-    submenu = _legacy.NSMenu.alloc().init()
-    submenu.setAutoenablesItems_(False)
-    # Vendor incidents outrank everything below: "the provider is down"
-    # must never read as "your quota fetch broke".
-    poller = shared_status_feed_poller()
-    poller.start()
-    incidents = poller.current()
-    for provider_id in sorted(incidents):
-        incident = incidents[provider_id]
-        row = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            incident_row_title(incident), "openProviderStatusPage:", ""
-        )
-        row.setTarget_(target)
-        row.setRepresentedObject_(incident.page_url)
-        submenu.addItem_(row)
-    if incidents:
-        submenu.addItem_(_legacy.NSMenuItem.separatorItem())
-    if not projection.rows:
-        # An empty submenu has two very different causes: nothing is
-        # connected, or everything is curated out. Diagnosing the wrong
-        # one ("connect sources" when sources ARE collecting) sends the
-        # user to the wrong fix.
-        if state.snapshots and hidden:
-            submenu.addItem_(
-                _disabled_item(
-                    "All providers hidden — choose some in Settings → Usage"
-                )
-            )
-        else:
-            submenu.addItem_(
-                _disabled_item("Open Usage Center to connect provider sources")
-            )
-    for row in projection.rows:
-        row_title = row.title
-        if row.provider_id in incidents:
-            row_title = f"{row_title} · ⚠ vendor incident"
-        provider_item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            row_title,
-            None,
-            "",
-        )
-        provider_menu = _legacy.NSMenu.alloc().init()
-        provider_menu.setAutoenablesItems_(False)
-        lane_lines = getattr(row, "lane_lines", ())
-        alert_indexes = set(getattr(row, "alert_lane_indexes", ()))
-        if lane_lines:
-            for index, line in enumerate(lane_lines):
-                provider_menu.addItem_(
-                    _disabled_item(line, alert=index in alert_indexes)
-                )
-        elif row.detail:
-            provider_menu.addItem_(_disabled_item(row.detail))
-        if row.usage_detail:
-            if lane_lines or row.detail:
-                provider_menu.addItem_(_legacy.NSMenuItem.separatorItem())
-            provider_menu.addItem_(_disabled_item(row.usage_detail))
-        if row.action_label:
-            provider_menu.addItem_(_legacy.NSMenuItem.separatorItem())
-            action = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                row.action_label,
-                "performProviderUsageAction:",
-                "",
-            )
-            action.setTarget_(target)
-            action.setRepresentedObject_(
-                {"provider_id": row.provider_id, "action": row.action_label}
-            )
-            provider_menu.addItem_(action)
-        provider_item.setSubmenu_(provider_menu)
-        submenu.addItem_(provider_item)
-    submenu.addItem_(_legacy.NSMenuItem.separatorItem())
-    open_center = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Open Usage Center…",
-        "openProviderUsageCenter:",
-        "",
-    )
-    open_center.setTarget_(target)
-    submenu.addItem_(open_center)
-    refresh = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Refresh Usage",
-        "refreshProviderUsage:",
-        "",
-    )
-    refresh.setTarget_(target)
-    submenu.addItem_(refresh)
-    item.setSubmenu_(submenu)
-    target._sidepulse_provider_usage_menu_item = item
-    return item
-
-
 def build_menu(snapshot, state, target):
     menu = _original_build_menu(snapshot, state, target)
     remove_legacy_usage_item(menu, target)
-    native_item = _native_usage_menu_item(target)
+    native_item = native_usage_menu_item(target)
     # Prefix match covers both the plain "Devices" title and the compact
     # facade's retitled "Devices · N connected" row.
     index = menu_index(menu, "Devices")
@@ -672,6 +521,48 @@ else:
                     _legacy.signals_module, "SIGNAL_QUOTA", None
                 ),
             )
+
+        def request_jr_usage_refresh(self, providers, *, force=False):
+            # The 429 lesson stands: never let a settings tick turn into
+            # a poll storm. Manual refresh forces; opportunistic requests
+            # pass through at most every 2 minutes.
+            now = time.monotonic()
+            last = getattr(self, "_jr_usage_refresh_at", 0.0)
+            if not force and now - last < 120.0:
+                return
+            self._jr_usage_refresh_at = now
+            self._request_provider_usage(force=force, providers=tuple(providers))
+
+        def jr_capacity_settings_text(self, provider_id):
+            state = getattr(self, "_sidepulse_provider_usage_state", None)
+            snapshot = next(
+                (
+                    row
+                    for row in getattr(state, "snapshots", ())
+                    if row.provider_id == provider_id
+                ),
+                None,
+            )
+            if snapshot is None or not snapshot.lanes:
+                return None
+            from .provider_usage_qol import format_reset_countdown
+
+            now = time.time()
+            parts = [
+                f"{lane.label} {lane.remaining_percent:.0f}% left"
+                + (
+                    f" · {format_reset_countdown(lane.reset_at, now=now)}"
+                    if lane.reset_at
+                    else ""
+                )
+                for lane in snapshot.lanes[:3]
+            ]
+            age_minutes = max(0, int((now - snapshot.observed_at) // 60))
+            checked = "just checked" if age_minutes < 1 else f"checked {age_minutes}m ago"
+            state_note = (
+                "" if snapshot.state.value == "ready" else f" · {snapshot.state.value}"
+            )
+            return " · ".join(parts) + f" · {checked}{state_note}"
 
         def jr_plane_owns_usage_menu_item(self) -> bool:
             # The legacy build constructs its usage card only to have the
