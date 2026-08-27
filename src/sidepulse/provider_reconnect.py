@@ -341,18 +341,59 @@ def repair_claude_credential(
 #: a 429 wall (observed 2026-08-27). Doubling from 1 minute to an hour.
 CLAUDE_RENEWAL_BACKOFF_SECONDS: tuple[float, ...] = (60.0, 300.0, 900.0, 3600.0)
 
-#: {"attempts": int, "next_at": float} -- in-memory, like FailureGate.
+#: {"attempts": int, "next_at": float}. PERSISTED: a relaunch that
+#: forgot the ladder walked straight back into a rate-limited token
+#: endpoint, which is how a 429 becomes a Cloudflare 1010 ban.
 _CLAUDE_RENEWAL_STATE: dict[str, float] = {"attempts": 0.0, "next_at": 0.0}
+_RENEWAL_STATE_LOADED = False
+
+
+def _renewal_state_path() -> Path:
+    from .providers import default_state_dir
+
+    return default_state_dir() / "claude-refresh-gate.json"
+
+
+def _load_renewal_state() -> None:
+    global _RENEWAL_STATE_LOADED
+    if _RENEWAL_STATE_LOADED:
+        return
+    _RENEWAL_STATE_LOADED = True
+    try:
+        from .private_io import read_private_text
+
+        document = json.loads(read_private_text(_renewal_state_path(), max_bytes=64 * 1024))
+        renewal = document.get("renewal") if isinstance(document, dict) else None
+        if isinstance(renewal, dict):
+            _CLAUDE_RENEWAL_STATE["attempts"] = float(renewal.get("attempts", 0.0))
+            _CLAUDE_RENEWAL_STATE["next_at"] = float(renewal.get("next_at", 0.0))
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def _save_renewal_state() -> None:
+    try:
+        from .private_io import atomic_private_write
+
+        atomic_private_write(
+            _renewal_state_path(),
+            json.dumps({"renewal": dict(_CLAUDE_RENEWAL_STATE)}, separators=(",", ":")),
+        )
+    except OSError:
+        pass
 
 
 def claude_renewal_allowed(now: float) -> bool:
+    _load_renewal_state()
     return now >= _CLAUDE_RENEWAL_STATE["next_at"]
 
 
 def note_claude_renewal(*, now: float, succeeded: bool) -> None:
+    _load_renewal_state()
     if succeeded:
         _CLAUDE_RENEWAL_STATE["attempts"] = 0.0
         _CLAUDE_RENEWAL_STATE["next_at"] = 0.0
+        _save_renewal_state()
         return
     attempts = int(_CLAUDE_RENEWAL_STATE["attempts"])
     delay = CLAUDE_RENEWAL_BACKOFF_SECONDS[
@@ -360,6 +401,7 @@ def note_claude_renewal(*, now: float, succeeded: bool) -> None:
     ]
     _CLAUDE_RENEWAL_STATE["attempts"] = float(attempts + 1)
     _CLAUDE_RENEWAL_STATE["next_at"] = now + delay
+    _save_renewal_state()
 
 
 def _remember_claude_expiry(credential_store, expires_at: float | None) -> None:
@@ -629,6 +671,26 @@ class FailureGate:
     #: matching, the user signed in and the gate lifts immediately.
     terminal_fingerprint: tuple | None = None
     terminal: bool = False
+    #: SHA-256 of the refresh token that failed. Never the token itself.
+    #: A different lineage means the user signed in again, so the block
+    #: is about a credential that no longer exists.
+    terminal_token_hash: str | None = None
+
+
+def refresh_token_lineage(raw: object) -> str | None:
+    """A stable, non-reversible id for the refresh token in a payload."""
+    import hashlib
+
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        oauth = json.loads(raw).get("claudeAiOauth")
+    except (AttributeError, ValueError):
+        return None
+    token = oauth.get("refreshToken") if isinstance(oauth, dict) else None
+    if not isinstance(token, str) or not token.strip():
+        return None
+    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
 
 
 def note_failure(
@@ -637,6 +699,7 @@ def note_failure(
     now: float,
     terminal: bool,
     fingerprint: tuple | None,
+    token_hash: str | None = None,
 ) -> FailureGate:
     if terminal:
         # An auth failure retries only when the credential source
@@ -647,6 +710,7 @@ def note_failure(
             strikes=gate.strikes,
             terminal_fingerprint=fingerprint,
             terminal=True,
+            terminal_token_hash=token_hash or gate.terminal_token_hash,
         )
     strikes = min(gate.strikes + 1, len(TRANSIENT_BACKOFF_SECONDS))
     return FailureGate(
@@ -661,6 +725,7 @@ def should_collect(
     now: float,
     fingerprint: tuple | None,
     forced: bool,
+    token_hash: str | None = None,
 ) -> bool:
     """May this provider's collector run right now?
 
@@ -669,6 +734,12 @@ def should_collect(
     captured at failure time. A transient gate waits out its ladder.
     """
     if forced:
+        return True
+    if gate.terminal and token_hash is not None and (
+        token_hash != gate.terminal_token_hash
+    ):
+        # A different refresh-token lineage: whatever we were blocked on
+        # is gone, so the block is meaningless.
         return True
     if gate.terminal and fingerprint != gate.terminal_fingerprint:
         return True

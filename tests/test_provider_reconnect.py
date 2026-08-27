@@ -494,3 +494,48 @@ def test_a_stored_expiry_drives_proactive_renewal():
     assert claude_token_is_stale(Store(None), now=1000.0), "unknown = stale"
     assert claude_token_is_stale(Store("1200"), now=1000.0), "inside the margin"
     assert not claude_token_is_stale(Store("9000"), now=1000.0)
+
+
+def test_a_relaunch_does_not_re_attack_a_rate_limited_endpoint(tmp_path, monkeypatch):
+    """The ladder is persisted. Forgetting it on relaunch is how a 429
+    becomes a Cloudflare 1010 ban (2026-08-27)."""
+    from sidepulse import provider_reconnect as module
+
+    monkeypatch.setattr(module, "_renewal_state_path", lambda: tmp_path / "gate.json")
+    module._RENEWAL_STATE_LOADED = False
+    module._CLAUDE_RENEWAL_STATE.update(attempts=0.0, next_at=0.0)
+
+    module.note_claude_renewal(now=1000.0, succeeded=False)
+    assert not module.claude_renewal_allowed(1030.0)
+
+    # A fresh process: in-memory state is gone, the file is not.
+    module._RENEWAL_STATE_LOADED = False
+    module._CLAUDE_RENEWAL_STATE.update(attempts=0.0, next_at=0.0)
+    assert not module.claude_renewal_allowed(1030.0), "the backoff survived"
+    assert module.claude_renewal_allowed(1100.0)
+
+
+def test_a_new_sign_in_lifts_the_terminal_block_immediately():
+    """Keyed to the refresh-token lineage: once the user signs in again,
+    the credential we were blocked on no longer exists."""
+    from sidepulse.provider_reconnect import (
+        FailureGate,
+        note_failure,
+        refresh_token_lineage,
+        should_collect,
+    )
+
+    old_hash = refresh_token_lineage('{"claudeAiOauth":{"refreshToken":"spent"}}')
+    new_hash = refresh_token_lineage('{"claudeAiOauth":{"refreshToken":"fresh"}}')
+    assert old_hash and new_hash and old_hash != new_hash
+    assert "spent" not in old_hash, "the token itself is never stored"
+
+    gate = note_failure(
+        FailureGate(), now=1000.0, terminal=True, fingerprint=None, token_hash=old_hash
+    )
+    assert not should_collect(
+        gate, now=1001.0, fingerprint=None, forced=False, token_hash=old_hash
+    )
+    assert should_collect(
+        gate, now=1001.0, fingerprint=None, forced=False, token_hash=new_hash
+    )
