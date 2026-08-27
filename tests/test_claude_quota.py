@@ -144,3 +144,54 @@ def test_the_token_request_is_form_encoded_through_the_apple_stack():
     source = inspect.getsource(claude_quota.post_form_via_apple_stack)
     assert "NSURLSession" in source
     assert "application/x-www-form-urlencoded" in source
+
+
+def test_only_invalid_grant_is_terminal_on_the_token_endpoint():
+    """400/401 also carry invalid_request / invalid_client -- transient
+    faults that say nothing about the sign-in. Treating every 400 as
+    'go re-login' wedges the provider behind a terminal gate."""
+    import pytest
+
+    from sidepulse.claude_quota import (
+        CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN,
+        CLAUDE_REMOTE_QUOTA_REFRESH_REJECTED,
+        ClaudeQuotaUnavailableError,
+        refresh_claude_payload,
+    )
+
+    cases = (
+        (400, b'{"error":"invalid_grant"}', CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN),
+        (400, b'{"error":"invalid_request"}', CLAUDE_REMOTE_QUOTA_REFRESH_REJECTED),
+        (401, b'{"error":"invalid_client"}', CLAUDE_REMOTE_QUOTA_REFRESH_REJECTED),
+        (400, b"not json at all", CLAUDE_REMOTE_QUOTA_REFRESH_REJECTED),
+        (400, b'{"error":{"type":"invalid_grant"}}', CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN),
+    )
+    for status, body, expected in cases:
+        with pytest.raises(ClaudeQuotaUnavailableError) as caught:
+            refresh_claude_payload(
+                '{"claudeAiOauth":{"refreshToken":"tok"}}',
+                now=1_000.0,
+                poster=lambda url, fields, *, timeout, _s=status, _b=body: (_s, _b),
+            )
+        assert str(caught.value) == expected, (status, body)
+
+
+def test_a_refresh_without_a_lifetime_is_refused():
+    """Accepting it would write back the OLD expiresAt, read as expired
+    next cycle, and rotate the refresh token every pass forever."""
+    import json as json_module
+
+    import pytest
+
+    from sidepulse.claude_quota import (
+        ClaudeQuotaUnavailableError,
+        refresh_claude_payload,
+    )
+
+    body = json_module.dumps({"access_token": "minted"}).encode()
+    with pytest.raises(ClaudeQuotaUnavailableError):
+        refresh_claude_payload(
+            '{"claudeAiOauth":{"refreshToken":"tok","expiresAt":1}}',
+            now=1_000.0,
+            poster=lambda url, fields, *, timeout: (200, body),
+        )

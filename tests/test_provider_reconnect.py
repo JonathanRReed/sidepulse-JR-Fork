@@ -451,3 +451,46 @@ def test_repair_grok_defers_to_a_server_rejection(tmp_path):
         RepairOutcome.REPAIRED,
         RepairOutcome.ALREADY_HEALTHY,
     )
+
+
+def test_the_claude_gate_can_lift_when_the_keychain_item_changes():
+    """The gate fingerprinted ~/.claude/.credentials.json, which does not
+    exist on a Keychain-only machine -- so None == None forever and a
+    fresh `claude login` was invisible to it."""
+    from sidepulse import provider_reconnect
+
+    provider_reconnect._KEYCHAIN_FINGERPRINT_CACHE.clear()
+    before = provider_reconnect.keychain_fingerprint("svc", now=0.0)
+    provider_reconnect._KEYCHAIN_FINGERPRINT_CACHE["svc"] = (
+        0.0,
+        (("keychain", "svc", "STAMP-A", "CREATED"),),
+    )
+    cached = provider_reconnect.keychain_fingerprint("svc", now=30.0)
+    assert cached == (("keychain", "svc", "STAMP-A", "CREATED"),), (
+        "probes are throttled to 60s"
+    )
+    provider_reconnect._KEYCHAIN_FINGERPRINT_CACHE["svc"] = (
+        0.0,
+        (("keychain", "svc", "STAMP-B", "CREATED"),),
+    )
+    assert provider_reconnect.keychain_fingerprint("svc", now=30.0) != cached
+    assert isinstance(before, tuple)
+
+
+def test_a_stored_expiry_drives_proactive_renewal():
+    from sidepulse.provider_reconnect import claude_token_is_stale
+
+    class Store:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self, provider_id, account):
+            class Read:
+                available = self.value is not None
+                secret = self.value
+
+            return Read()
+
+    assert claude_token_is_stale(Store(None), now=1000.0), "unknown = stale"
+    assert claude_token_is_stale(Store("1200"), now=1000.0), "inside the margin"
+    assert not claude_token_is_stale(Store("9000"), now=1000.0)

@@ -77,12 +77,63 @@ class RepairResult:
 # Credential-source fingerprints: "did the user just sign in somewhere?"
 
 
-def credential_fingerprint(home: Path, provider_id: str) -> tuple | None:
-    """A cheap identity for the provider's credential source file(s).
+#: Providers whose sign-in lives in the Keychain rather than a file.
+#: Their fingerprint has to come from the item's ATTRIBUTES, or a
+#: terminal gate can never lift (2026-08-27: this machine has no
+#: ~/.claude/.credentials.json at all, so Claude's fingerprint was
+#: None -> None forever and `claude login` was invisible to the gate).
+KEYCHAIN_SOURCE_SERVICES: dict[str, str] = {"claude": "Claude Code-credentials"}
 
-    None means "no source file exists". Any change in the tuple -- the
-    file appearing, growing, or being rewritten -- is the signal that
-    re-trying a terminally-failed provider is worth it again.
+#: The attributes probe is cheap but not free; CodexBar throttles its
+#: equivalent check to 60s and so do we.
+_KEYCHAIN_FINGERPRINT_TTL_SECONDS = 60.0
+_KEYCHAIN_FINGERPRINT_CACHE: dict[str, tuple[float, tuple]] = {}
+
+
+def keychain_fingerprint(service: str, *, now: float | None = None) -> tuple:
+    """Modification/creation stamps of a Keychain item, no secret read.
+
+    `security find-generic-password` WITHOUT -w returns attributes only,
+    so this raises no consent dialog and costs no password access.
+    """
+    import subprocess
+    import time as _time
+
+    stamp = _time.monotonic() if now is None else float(now)
+    cached = _KEYCHAIN_FINGERPRINT_CACHE.get(service)
+    if cached is not None and stamp - cached[0] < _KEYCHAIN_FINGERPRINT_TTL_SECONDS:
+        return cached[1]
+    parts: tuple = ()
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/security", "find-generic-password", "-s", service],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        if completed.returncode == 0:
+            found: dict[str, str] = {}
+            for line in (completed.stdout or "").splitlines():
+                stripped = line.strip()
+                for key in ("mdat", "cdat"):
+                    if stripped.startswith(f'"{key}"'):
+                        _, _, value = stripped.partition("=")
+                        found[key] = value.strip().strip('"')
+            parts = (("keychain", service, found.get("mdat"), found.get("cdat")),)
+    except (OSError, subprocess.SubprocessError):
+        parts = ()
+    _KEYCHAIN_FINGERPRINT_CACHE[service] = (stamp, parts)
+    return parts
+
+
+def credential_fingerprint(home: Path, provider_id: str) -> tuple | None:
+    """A cheap identity for the provider's credential source.
+
+    None means "no source exists at all". Any change in the tuple -- a
+    file appearing, growing or being rewritten, or a Keychain item being
+    re-saved by the tool that owns it -- is the signal that re-trying a
+    terminally-failed provider is worth it again.
     """
     parts: list[tuple] = []
     for relative in CREDENTIAL_SOURCE_FILES.get(provider_id, ()):
@@ -92,6 +143,9 @@ def credential_fingerprint(home: Path, provider_id: str) -> tuple | None:
         except OSError:
             continue
         parts.append((relative, int(info.st_mtime_ns), int(info.st_size), int(info.st_ino)))
+    service = KEYCHAIN_SOURCE_SERVICES.get(provider_id)
+    if service:
+        parts.extend(keychain_fingerprint(service))
     return tuple(parts) or None
 
 
@@ -222,10 +276,12 @@ def repair_claude_credential(
         or credential.is_expired(now)
     )
     if needs_renewal:
-        # The CodexBar move (2026-08-27 owner call): renew with Claude
-        # Code's own public client and write the ROTATED tokens back so
-        # `claude` keeps working, instead of sending the human to a
-        # terminal for something a POST can do.
+        # Renew with Claude Code's own public client and write the
+        # ROTATED tokens back so `claude` keeps working, instead of
+        # sending the human to a terminal for something a POST can do.
+        # (CodexBar takes the opposite route -- it delegates CLI-owned
+        # refreshes to `claude` itself and never writes that Keychain
+        # item. See the note in claude_quota.refresh_claude_payload.)
         if not refreshable_credential(raw):
             return RepairResult(
                 "claude",
@@ -271,6 +327,7 @@ def repair_claude_credential(
             "refreshing now.",
         )
     credential_store.set("claude", "oauth-token", credential.access_token)
+    _remember_claude_expiry(credential_store, credential.expires_at)
     return RepairResult(
         "claude",
         RepairOutcome.REPAIRED,
@@ -303,6 +360,41 @@ def note_claude_renewal(*, now: float, succeeded: bool) -> None:
     ]
     _CLAUDE_RENEWAL_STATE["attempts"] = float(attempts + 1)
     _CLAUDE_RENEWAL_STATE["next_at"] = now + delay
+
+
+def _remember_claude_expiry(credential_store, expires_at: float | None) -> None:
+    """Persist the access token's lifetime beside the token itself.
+
+    Without it the collector cannot know the token is stale and only
+    learns so from a 401 -- which surfaces to the owner as a "reconnect"
+    row once every token lifetime (2026-08-27 report). Best effort: a
+    store that refuses the write just returns us to reactive behavior.
+    """
+    if expires_at is None:
+        return
+    try:
+        credential_store.set(
+            "claude", "oauth-expires-at", str(int(float(expires_at)))
+        )
+    except Exception:
+        pass
+
+
+def claude_token_is_stale(credential_store, *, now: float, margin: float = 300.0) -> bool:
+    """True when the stored Claude token is expired or nearly so.
+
+    A missing or unreadable stamp counts as stale: better one extra
+    renewal than a guaranteed 401 (CodexBar treats an absent expiresAt
+    the same way in loadRecordWithAutoRefresh).
+    """
+    try:
+        read = credential_store.get("claude", "oauth-expires-at")
+        raw = read.secret if getattr(read, "available", False) else None
+        if raw is None:
+            return True
+        return float(now) + float(margin) >= float(raw)
+    except Exception:
+        return True
 
 
 def _default_claude_keychain_writer(payload: str) -> bool:
@@ -359,6 +451,7 @@ def _renew_claude_from_payload(
     wrote_back = writer(new_payload)
     try:
         credential_store.set("claude", "oauth-token", credential.access_token)
+        _remember_claude_expiry(credential_store, credential.expires_at)
     except Exception:
         return None
     if wrote_back:

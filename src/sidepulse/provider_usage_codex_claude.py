@@ -259,6 +259,21 @@ def collect_claude(
 ) -> ProviderUsageSnapshot:
     del preference
     local = local_scanner(Path(home), observed_at)
+    # Renew BEFORE asking, not after a 401. The reactive path made the
+    # dropdown flash "reconnect" once per token lifetime while the fix
+    # was already automatic (2026-08-27 owner report).
+    try:
+        from .provider_reconnect import (
+            claude_token_is_stale,
+            renew_claude_credential_in_background,
+        )
+
+        if claude_token_is_stale(credentials, now=observed_at):
+            renew_claude_credential_in_background(
+                credentials, home=Path(home), now=observed_at
+            )
+    except Exception:
+        pass
     access_token = _credential(credentials, "claude", "oauth-token")
     if access_token is None:
         return _with_local_usage(

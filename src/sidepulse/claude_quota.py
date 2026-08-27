@@ -47,6 +47,9 @@ CLAUDE_REMOTE_QUOTA_SERVER_ERROR = "claude_remote_quota_server_error"
 CLAUDE_REMOTE_QUOTA_NETWORK = "claude_remote_quota_network"
 CLAUDE_REMOTE_QUOTA_NO_WINDOWS = "claude_remote_quota_no_windows"
 CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN = "claude_remote_quota_needs_sign_in"
+#: A 400/401 that is NOT invalid_grant: the request or the client was
+#: refused, which says nothing about whether the sign-in still works.
+CLAUDE_REMOTE_QUOTA_REFRESH_REJECTED = "claude_remote_quota_refresh_rejected"
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 #: Verified against the installed CodexBar binary (2026-08-27): the
@@ -196,6 +199,24 @@ def refreshable_credential(raw: object) -> bool:
     return isinstance(refresh, str) and bool(refresh.strip())
 
 
+def _oauth_error_code(body: bytes) -> str | None:
+    """The OAuth 2.0 `error` field, lowercased, or None.
+
+    Never returns the description: the body can name the account, and
+    this module's contract is reason codes only, never server prose.
+    """
+    try:
+        document = json.loads(bytes(body).decode("utf-8"))
+    except (AttributeError, UnicodeError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    code = document.get("error")
+    if isinstance(code, dict):  # {"error": {"type": ...}} shape
+        code = code.get("type")
+    return code.strip().lower() if isinstance(code, str) else None
+
+
 def refresh_token_expired(raw: object, now: float) -> bool:
     """True when the REFRESH token itself is spent.
 
@@ -284,8 +305,7 @@ def refresh_claude_payload(
     poster=None,
     timeout: float = CLAUDE_USAGE_TIMEOUT_SECONDS,
 ) -> tuple[str, ClaudeOAuthCredential]:
-    """Renew Claude Code's sign-in the way CodexBar does (2026-08-27
-    owner call: "literally copy their version").
+    """Renew Claude Code's own rotating sign-in.
 
     POSTs the stored refresh token to Anthropic's token endpoint under
     Claude Code's own public client id and returns the REBUILT Keychain
@@ -295,6 +315,15 @@ def refresh_claude_payload(
     use. The caller MUST write the returned payload back to the Keychain
     item -- holding the new tokens privately would strand Claude Code on
     a dead refresh token and sign the user out of their actual tooling.
+
+    NOTE ON PRECEDENT (corrected 2026-08-27): CodexBar does NOT do this.
+    For Claude-CLI-owned credentials it DELEGATES refresh back to the
+    CLI (running `claude /status` in a PTY and watching the Keychain
+    item's stamp change), and direct-refreshes only its own credentials
+    into its own cache -- so it never writes that item. We diverge
+    deliberately: no PTY subprocess and no hard dependency on `claude`
+    being installed, at the cost of owning the write-back above. Their
+    delegated path is reported unreliable in steipete/CodexBar#1287.
     Failures raise ClaudeQuotaUnavailableError with a reason code only.
     """
     try:
@@ -322,10 +351,17 @@ def refresh_claude_payload(
     except Exception:
         raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NETWORK) from None
     if status in {400, 401}:
-        # invalid_grant: the refresh token is spent or revoked, and only
-        # a fresh `claude` sign-in recovers. 403 is NOT here -- that is
-        # Cloudflare refusing the CLIENT, not the credential.
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN)
+        # ONLY invalid_grant is terminal. The same statuses also carry
+        # invalid_request / unsupported_grant_type / invalid_client --
+        # transient or client-side faults that say nothing about the
+        # sign-in. Treating every 400 as "go re-login" is what wedges a
+        # provider behind a terminal gate for an hour (CodexBar makes
+        # exactly this distinction in refreshFailureDisposition).
+        # 403 is not here either: that is Cloudflare refusing the
+        # CLIENT, not the credential.
+        if _oauth_error_code(body) == "invalid_grant":
+            raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN)
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_REFRESH_REJECTED)
     if status == 429:
         raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_RATE_LIMITED)
     if status != 200:
@@ -347,6 +383,11 @@ def refresh_claude_payload(
         and expires_in > 0
     ):
         expires_at_ms = int((now + float(expires_in)) * 1000.0)
+    if expires_at_ms is None:
+        # Without a lifetime we would write back the OLD expiresAt, read
+        # it as already expired next cycle, and refresh again forever --
+        # burning a refresh-token rotation every pass. Refuse instead.
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR)
     rebuilt = dict(payload)
     rebuilt_oauth = dict(oauth)
     rebuilt_oauth["accessToken"] = access.strip()
