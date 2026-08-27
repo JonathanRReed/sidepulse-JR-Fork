@@ -2345,6 +2345,12 @@ class StatusBarController(NSObject):
         self._notification_client_for_use().set_delegate(self)
         self.start_notification_authorization_refresh()
         NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        # An accessory app never shows a main menu, but AppKit still
+        # routes Cmd-C/V/W/Z through one -- without it, every shortcut
+        # in every window this app owns was dead.
+        from .main_menu import install_main_menu
+
+        install_main_menu()
         self.load_operator_local_state()
         self.trim_oversized_state_logs()
         log_status_bar("launching status item")
