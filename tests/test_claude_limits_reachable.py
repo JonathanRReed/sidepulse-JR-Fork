@@ -61,7 +61,10 @@ def test_the_fetch_is_no_longer_a_stub() -> None:
     }
     windows = claude_quota.fetch_windows(
         access_token="tok",
-        opener=lambda request, timeout: _Response(json.dumps(payload).encode()),
+        requester=lambda url, *, method, headers, body=None, timeout: (
+            200,
+            json.dumps(payload).encode(),
+        ),
     )
     assert [window["label"] for window in windows] == ["5-hour", "weekly", "Opus only"]
 
