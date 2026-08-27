@@ -16452,11 +16452,11 @@ def _activity_age_signature(target) -> tuple:
 
     Same minute-bucketed labels the rows draw, so the menu signature
     changes precisely when the visible text would (the signature's own
-    contract: content in the signature, never a time bucket)."""
-    restore = getattr(target, "ensure_activity_ledger", None)
-    if not callable(restore):
-        return ()
-    ledger = restore()
+    contract: content in the signature, never a time bucket). Reads the
+    ledger PASSIVELY -- calling ensure_activity_ledger here would
+    restore-and-bump the revision as a side effect of hashing, making
+    two identical signatures differ."""
+    ledger = getattr(target, "activity_ledger", None)
     if type(ledger) is not ActivityLedger or not ledger.entries:
         return ()
     now_epoch = time.time()
