@@ -1775,27 +1775,43 @@ def _active_agents(statuses: tuple[AgentStatus, ...], colors: ColorSettings) -> 
     return agents
 
 
-def _agents_for_strip(
-    agents: list[_ActiveAgent],
-    led_count: int,
-) -> list[_ActiveAgent]:
+def _under_pressure_keep_engaged(items, led_count: int, is_idle) -> list:
     """Under slot pressure, idle sessions yield their slots to work.
 
     A resting session's whisper is real information and keeps its slot
     while everyone fits. But a workspace retains sessions long after
     their work ends (a live Devin plane listed 13 idle sessions from
     that morning), and once sessions outnumber LEDs every idle row's
-    8%-luminance identity whisper buried the actual work in
-    unattributable murk (2026-08-27 owner report). More sessions than
-    LEDs -> engaged rows (working / asking / done / failed) take the
-    strip; an idle-only fleet keeps its ambient breathing either way.
+    whisper buried the actual work in unattributable murk (2026-08-27
+    owner report). More sessions than LEDs -> engaged rows (working /
+    asking / done / failed) take the strip; an idle-only fleet keeps
+    its ambient breathing either way.
+
+    This runs BEFORE identity assignment on purpose: spreading the
+    identity palette across the whole retained fleet handed the few
+    engaged agents arbitrary far-from-brand hues (the murk's second
+    half). The agents that claim slots are the agents the palette is
+    for.
     """
-    if len(agents) <= led_count:
-        return agents
-    engaged = [
-        agent for agent in agents if agent.state is not LedDisplayState.IDLE
-    ]
-    return engaged or agents
+    items = list(items)
+    if len(items) <= led_count:
+        return items
+    engaged = [item for item in items if not is_idle(item)]
+    return engaged or items
+
+
+def _statuses_for_strip(
+    statuses: tuple[AgentStatus, ...],
+    led_count: int,
+) -> tuple[AgentStatus, ...]:
+    return tuple(
+        _under_pressure_keep_engaged(
+            statuses,
+            led_count,
+            lambda status: display_state_for_mode(status.mode)
+            is LedDisplayState.IDLE,
+        )
+    )
 
 
 def _representative_state(agents: list[_ActiveAgent]) -> LedDisplayState:
@@ -2679,7 +2695,7 @@ def program_for_snapshot(
         )
         return state, program
 
-    agents = _agents_for_strip(_active_agents(statuses, settings), led_count)
+    agents = _active_agents(_statuses_for_strip(statuses, led_count), settings)
 
     if settings.blend_mode == BLEND_MODE_CLASSIC:
         aggregate_mode = max(statuses, key=lambda status: -status.priority).mode
@@ -2806,6 +2822,12 @@ def program_for_projection(
         )
 
     ordered = sorted(rows, key=lambda row: _stable_agent_sort_key(row.source_status))
+    ordered = _under_pressure_keep_engaged(
+        ordered,
+        led_count,
+        lambda row: row.lifecycle_mode
+        in {LifecycleMode.IDLE, LifecycleMode.UNKNOWN},
+    )
     identity: dict[str, str] = {}
     if len(ordered) > 1:
         groups = identity_groups_for_statuses(
@@ -2851,7 +2873,6 @@ def program_for_projection(
         )
         for row in ordered
     ]
-    agents = _agents_for_strip(agents, led_count)
     if settings.blend_mode == BLEND_MODE_CLASSIC:
         program = program_for_display_state(
             state,
@@ -3111,7 +3132,7 @@ def preview_led_colors(
             base = base if ceiling >= 1.0 else scale_hex_brightness(base, ceiling)
         return [base] * led_count
 
-    agents = _agents_for_strip(_active_agents(statuses, settings), led_count)
+    agents = _active_agents(_statuses_for_strip(statuses, led_count), settings)
 
     if len(agents) == 1:
         return [_peak_color_for_agent(agents[0], settings)] * led_count
