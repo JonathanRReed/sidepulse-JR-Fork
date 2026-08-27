@@ -6,7 +6,7 @@ import json
 import math
 import os
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from enum import Enum
@@ -61,13 +61,6 @@ class MailboxPreferenceDocument:
     degraded: bool
 
 
-@dataclass(frozen=True, slots=True)
-class MailboxMigrationResult:
-    preferences: tuple[MailboxPreference, ...]
-    unresolved_count: int
-    may_write_v2: bool
-
-
 def load_mailbox_preference_document(path: Path) -> MailboxPreferenceDocument:
     """Decode only strict v1 legacy or source-scoped v2 documents."""
     degraded = MailboxPreferenceDocument(0, (), (), True)
@@ -104,54 +97,6 @@ def load_mailbox_preference_document(path: Path) -> MailboxPreferenceDocument:
         return MailboxPreferenceDocument(2, preferences, (), False)
     except _InvalidPreference:
         return degraded
-
-
-def resolve_legacy_mailbox_preferences(
-    document: MailboxPreferenceDocument,
-    authoritative_matches: Mapping[str, tuple[WorkKey, ...]],
-) -> MailboxMigrationResult:
-    """Resolve v1 IDs only when the current registry provides one exact key."""
-    if type(document) is not MailboxPreferenceDocument or document.degraded:
-        return MailboxMigrationResult((), len(document.legacy_preferences), False)
-    if document.version == 2:
-        return MailboxMigrationResult(document.preferences, 0, False)
-    if document.version != 1 or not isinstance(authoritative_matches, Mapping):
-        return MailboxMigrationResult((), len(document.legacy_preferences), False)
-
-    resolved: list[MailboxPreference] = []
-    seen_keys: set[WorkKey] = set()
-    unresolved = 0
-    for legacy in document.legacy_preferences:
-        matches = authoritative_matches.get(legacy.agent_id, ())
-        if not (
-            type(matches) is tuple
-            and len(matches) == 1
-            and type(matches[0]) is WorkKey
-            and matches[0] not in seen_keys
-        ):
-            unresolved += 1
-            continue
-        preference = MailboxPreference(
-            work_key=matches[0],
-            mode=legacy.mode,
-            pin_order=legacy.pin_order,
-            snoozed_at=legacy.snoozed_at,
-            snoozed_until=legacy.snoozed_until,
-            last_visited_at=legacy.last_visited_at,
-        )
-        try:
-            _v2_payload_from_preference(preference)
-        except _InvalidPreference:
-            unresolved += 1
-            continue
-        seen_keys.add(matches[0])
-        resolved.append(preference)
-    may_write = (
-        unresolved == 0
-        and len(resolved) == len(document.legacy_preferences)
-        and len(resolved) <= _MAX_PREFERENCES
-    )
-    return MailboxMigrationResult(tuple(resolved), unresolved, may_write)
 
 
 def save_mailbox_preferences_v2(
@@ -229,78 +174,6 @@ def _reject_json_constant(_value: str) -> None:
     raise _InvalidPreference
 
 
-def load_mailbox_preferences(path: Path) -> tuple[LegacyMailboxPreference, ...]:
-    """Load one strict store, returning a visible fallback on any unsafe input."""
-    try:
-        raw = read_private_text(Path(path), max_bytes=_MAX_STORE_BYTES)
-    except (OSError, UnicodeError):
-        return ()
-    if len(raw.encode("utf-8")) > _MAX_STORE_BYTES:
-        return ()
-    try:
-        document = json.loads(raw)
-    except (RecursionError, TypeError, ValueError):
-        return ()
-    if not isinstance(document, dict) or frozenset(document) != _DOCUMENT_KEYS:
-        return ()
-    version = document.get("version")
-    entries = document.get("preferences")
-    if (
-        not isinstance(version, int)
-        or isinstance(version, bool)
-        or version != _STORE_VERSION
-        or not isinstance(entries, list)
-        or len(entries) > _MAX_PREFERENCES
-    ):
-        return ()
-    loaded: list[LegacyMailboxPreference] = []
-    seen_ids: set[str] = set()
-    try:
-        for entry in entries:
-            preference = _preference_from_payload(entry)
-            if preference.agent_id in seen_ids:
-                raise _InvalidPreference
-            seen_ids.add(preference.agent_id)
-            loaded.append(preference)
-    except _InvalidPreference:
-        return ()
-    return tuple(loaded)
-
-
-def save_mailbox_preferences(
-    path: Path,
-    preferences: Iterable[LegacyMailboxPreference],
-) -> None:
-    """Atomically save the first 100 canonical preferences in their pure order."""
-    try:
-        iterator = iter(preferences)
-    except TypeError as error:
-        raise ValueError("invalid mailbox preferences") from error
-    payloads: list[dict[str, object]] = []
-    seen_ids: set[str] = set()
-    try:
-        for preference in islice(iterator, _MAX_PREFERENCES):
-            payload = _payload_from_preference(preference)
-            agent_id = payload["agent_id"]
-            if not isinstance(agent_id, str) or agent_id in seen_ids:
-                raise _InvalidPreference
-            seen_ids.add(agent_id)
-            payloads.append(payload)
-    except _InvalidPreference as error:
-        raise ValueError("invalid mailbox preference") from error
-    document = {
-        "version": _STORE_VERSION,
-        "preferences": payloads,
-    }
-    serialized = json.dumps(
-        document,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    atomic_private_write(Path(path), f"{serialized}\n")
-
-
 def resolve_mailbox_snooze_preset(
     preset: MailboxSnoozePreset | str,
     *,
@@ -351,42 +224,6 @@ def resolve_mailbox_snooze_preset(
     if resolved is None or resolved <= current_epoch:
         return None
     return resolved
-
-
-def _payload_from_preference(preference: object) -> dict[str, object]:
-    if not isinstance(preference, LegacyMailboxPreference):
-        raise _InvalidPreference
-    agent_id = _valid_agent_id(preference.agent_id)
-    if agent_id is None:
-        raise _InvalidPreference
-    if not isinstance(preference.mode, MailboxPreferenceMode):
-        raise _InvalidPreference
-    pin_order = _valid_pin_order(preference.pin_order)
-    if preference.pin_order is not None and pin_order is None:
-        raise _InvalidPreference
-    if preference.mode != MailboxPreferenceMode.PINNED and pin_order is not None:
-        raise _InvalidPreference
-    snoozed_at = _valid_epoch(preference.snoozed_at)
-    snoozed_until = _valid_epoch(preference.snoozed_until)
-    if preference.snoozed_at is not None and snoozed_at is None:
-        raise _InvalidPreference
-    if preference.snoozed_until is not None and snoozed_until is None:
-        raise _InvalidPreference
-    if (snoozed_at is None) != (snoozed_until is None):
-        raise _InvalidPreference
-    if snoozed_at is not None and snoozed_until <= snoozed_at:
-        raise _InvalidPreference
-    last_visited_at = _valid_epoch(preference.last_visited_at)
-    if preference.last_visited_at is not None and last_visited_at is None:
-        raise _InvalidPreference
-    return {
-        "agent_id": agent_id,
-        "mode": preference.mode.value,
-        "pin_order": pin_order,
-        "snoozed_at": snoozed_at,
-        "snoozed_until": snoozed_until,
-        "last_visited_at": last_visited_at,
-    }
 
 
 def _preference_from_payload(payload: object) -> LegacyMailboxPreference:

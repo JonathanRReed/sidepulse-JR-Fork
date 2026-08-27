@@ -14,14 +14,10 @@ import pytest
 from sidepulse.capacity_types import SourceKey
 from sidepulse.mailbox_preference_store import (
     LegacyMailboxPreference,
-    MailboxMigrationResult,
     MailboxPreferenceDocument,
     MailboxSnoozePreset,
     load_mailbox_preference_document,
-    load_mailbox_preferences,
-    resolve_legacy_mailbox_preferences,
     resolve_mailbox_snooze_preset,
-    save_mailbox_preferences,
     save_mailbox_preferences_v2,
 )
 from sidepulse.mailbox_preferences import (
@@ -72,45 +68,11 @@ def _swap_parent_when_opening(
     return held_parent, swapping_open
 
 
-def test_store_round_trip_creates_private_versioned_allowlisted_json(
-    tmp_path: Path,
-) -> None:
-    target = tmp_path / "state" / "mailbox-preferences.json"
-    preferences = (
-        MailboxPreference(
-            agent_id="codex:session:alpha",
-            mode=MailboxPreferenceMode.PINNED,
-            pin_order=7,
-            snoozed_at=1_786_536_000.25,
-            snoozed_until=1_786_539_600.25,
-            last_visited_at=1_786_535_900.5,
-        ),
-        MailboxPreference(
-            agent_id="claude:session:beta",
-            mode=MailboxPreferenceMode.WATCHED,
-        ),
-    )
+def _v2_preference(work_id: str, **changes) -> CanonicalMailboxPreference:
+    from dataclasses import replace as dataclass_replace
 
-    save_mailbox_preferences(target, preferences)
-
-    assert load_mailbox_preferences(target) == preferences
-    assert _mode(target.parent) == 0o700
-    assert _mode(target) == 0o600
-    document = _stored_document(target)
-    assert set(document) == {"preferences", "version"}
-    assert document["version"] == 1
-    assert all(
-        set(entry)
-        == {
-            "agent_id",
-            "last_visited_at",
-            "mode",
-            "pin_order",
-            "snoozed_at",
-            "snoozed_until",
-        }
-        for entry in document["preferences"]
-    )
+    preference = CanonicalMailboxPreference(_work_key(work_id))
+    return dataclass_replace(preference, **changes) if changes else preference
 
 
 def test_load_tightens_broad_owned_modes_without_changing_data(tmp_path: Path) -> None:
@@ -136,15 +98,16 @@ def test_load_tightens_broad_owned_modes_without_changing_data(tmp_path: Path) -
     target.parent.chmod(0o777)
     target.chmod(0o644)
 
-    loaded = load_mailbox_preferences(target)
+    document = load_mailbox_preference_document(target)
 
-    assert loaded == (
+    assert document.legacy_preferences == (
         MailboxPreference(
             agent_id="codex:session:broad",
             mode=MailboxPreferenceMode.WATCHED,
             last_visited_at=1_786_536_000.0,
         ),
     )
+    assert not document.degraded
     assert _mode(target.parent) == 0o700
     assert _mode(target) == 0o600
 
@@ -167,13 +130,10 @@ def test_store_refuses_linked_leaves(
         os.link(outside, target)
 
     if operation == "load":
-        assert load_mailbox_preferences(target) == ()
+        assert load_mailbox_preference_document(target).degraded
     else:
         with pytest.raises(OSError):
-            save_mailbox_preferences(
-                target,
-                (MailboxPreference("codex:session:safe", MailboxPreferenceMode.WATCHED),),
-            )
+            save_mailbox_preferences_v2(target, (_v2_preference("work:safe"),))
 
     assert outside.read_text() == "outside stays unchanged"
     assert _mode(outside) == 0o644
@@ -184,14 +144,12 @@ def test_load_uses_held_parent_when_path_is_swapped(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     target = parent / "mailbox-preferences.json"
-    inside = MailboxPreference("codex:session:inside", MailboxPreferenceMode.WATCHED)
-    outside_preference = MailboxPreference(
-        "codex:session:outside",
-        MailboxPreferenceMode.PINNED,
-        pin_order=0,
+    inside = _v2_preference("work:inside")
+    outside_preference = _v2_preference(
+        "work:outside", mode=MailboxPreferenceMode.PINNED, pin_order=0
     )
-    save_mailbox_preferences(target, (inside,))
-    save_mailbox_preferences(outside / target.name, (outside_preference,))
+    save_mailbox_preferences_v2(target, (inside,))
+    save_mailbox_preferences_v2(outside / target.name, (outside_preference,))
     held_parent, swapping_open = _swap_parent_when_opening(
         parent,
         outside,
@@ -199,11 +157,13 @@ def test_load_uses_held_parent_when_path_is_swapped(tmp_path: Path) -> None:
     )
 
     with patch("sidepulse.private_io.os.open", side_effect=swapping_open):
-        loaded = load_mailbox_preferences(target)
+        loaded = load_mailbox_preference_document(target)
 
-    assert loaded == (inside,)
-    assert load_mailbox_preferences(held_parent / target.name) == (inside,)
-    assert load_mailbox_preferences(outside / target.name) == (outside_preference,)
+    assert loaded.preferences == (inside,)
+    assert load_mailbox_preference_document(held_parent / target.name).preferences == (inside,)
+    assert load_mailbox_preference_document(outside / target.name).preferences == (
+        outside_preference,
+    )
 
 
 def test_save_uses_held_parent_when_path_is_swapped(tmp_path: Path) -> None:
@@ -211,19 +171,27 @@ def test_save_uses_held_parent_when_path_is_swapped(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     target = parent / "mailbox-preferences.json"
-    old = MailboxPreference("codex:session:old", MailboxPreferenceMode.WATCHED)
-    new = MailboxPreference("codex:session:new", MailboxPreferenceMode.WATCHED)
-    save_mailbox_preferences(target, (old,))
+    old = _v2_preference("work:old")
+    new = _v2_preference("work:new")
+    save_mailbox_preferences_v2(target, (old,))
     held_parent, swapping_open = _swap_parent_when_opening(
         parent,
         outside,
         lambda leaf: leaf.startswith(f"{target.name}.") and leaf.endswith(".tmp"),
     )
 
-    with patch("sidepulse.private_io.os.open", side_effect=swapping_open):
-        save_mailbox_preferences(target, (new,))
+    # The write itself goes through the HELD parent descriptor (the swap
+    # gains the attacker nothing), and v2 is stricter than the deleted v1
+    # writer after that: its post-write verification re-resolves the path,
+    # sees the swapped (symlinked) parent, and reports failure instead of
+    # trusting a read it can no longer attribute.
+    with (
+        patch("sidepulse.private_io.os.open", side_effect=swapping_open),
+        pytest.raises(OSError),
+    ):
+        save_mailbox_preferences_v2(target, (new,))
 
-    assert load_mailbox_preferences(held_parent / target.name) == (new,)
+    assert load_mailbox_preference_document(held_parent / target.name).preferences == (new,)
     assert list(outside.iterdir()) == []
 
 
@@ -231,7 +199,6 @@ def test_save_uses_held_parent_when_path_is_swapped(tmp_path: Path) -> None:
     "payload",
     (
         "{",
-        json.dumps({"version": 2, "preferences": []}),
         json.dumps({"version": True, "preferences": []}),
         json.dumps({"version": 1, "preferences": {}}),
         json.dumps({"version": 1, "preferences": [None]}),
@@ -291,7 +258,7 @@ def test_corrupt_unsupported_nonlist_and_invalid_entry_data_fail_visible(
     target.parent.mkdir()
     target.write_text(payload)
 
-    assert load_mailbox_preferences(target) == ()
+    assert load_mailbox_preference_document(target).degraded
 
 
 def test_oversized_valid_json_fails_visible(tmp_path: Path) -> None:
@@ -314,7 +281,7 @@ def test_oversized_valid_json_fails_visible(tmp_path: Path) -> None:
     )
     target.write_text(" " * 1_048_577 + valid)
 
-    assert load_mailbox_preferences(target) == ()
+    assert load_mailbox_preference_document(target).degraded
 
 
 def test_oversized_store_is_refused_from_opened_size_before_payload_read(
@@ -333,74 +300,9 @@ def test_oversized_store_is_refused_from_opened_size_before_payload_read(
         return chunk
 
     with patch("sidepulse.private_io.os.read", side_effect=observing_read):
-        assert load_mailbox_preferences(target) == ()
+        assert load_mailbox_preference_document(target).degraded
 
     assert payload_bytes_read == 0
-
-
-def test_failed_atomic_replace_preserves_previous_store_and_removes_scratch(
-    tmp_path: Path,
-) -> None:
-    target = tmp_path / "state" / "mailbox-preferences.json"
-    old = MailboxPreference("codex:session:old", MailboxPreferenceMode.WATCHED)
-    new = MailboxPreference("codex:session:new", MailboxPreferenceMode.PINNED, 2)
-    save_mailbox_preferences(target, (old,))
-    previous_bytes = target.read_bytes()
-
-    with (
-        patch("sidepulse.private_io.os.replace", side_effect=OSError("private replace failed")),
-        pytest.raises(OSError, match="private replace failed"),
-    ):
-        save_mailbox_preferences(target, (new,))
-
-    assert target.read_bytes() == previous_bytes
-    assert load_mailbox_preferences(target) == (old,)
-    assert list(target.parent.glob(f"{target.name}.*.tmp")) == []
-
-
-@dataclass(frozen=True, slots=True)
-class _ExtendedMailboxPreference(MailboxPreference):
-    prompt: str = ""
-    command: str = ""
-    raw_error: str = ""
-
-
-def test_save_uses_an_explicit_allowlist_and_excludes_secret_shaped_attributes(
-    tmp_path: Path,
-) -> None:
-    target = tmp_path / "state" / "mailbox-preferences.json"
-    secret = "Bearer sk-private /Users/jonathan/Secret command"
-    preference = _ExtendedMailboxPreference(
-        agent_id="codex:session:allowlisted",
-        mode=MailboxPreferenceMode.WATCHED,
-        prompt=secret,
-        command=secret,
-        raw_error=secret,
-    )
-
-    save_mailbox_preferences(target, (preference,))
-
-    raw = target.read_text()
-    assert secret not in raw
-    assert "prompt" not in raw
-    assert "command" not in raw
-    assert "raw_error" not in raw
-    assert load_mailbox_preferences(target) == (
-        MailboxPreference(
-            agent_id="codex:session:allowlisted",
-            mode=MailboxPreferenceMode.WATCHED,
-        ),
-    )
-
-
-def test_invalid_secret_shaped_identity_is_not_written(tmp_path: Path) -> None:
-    target = tmp_path / "state" / "mailbox-preferences.json"
-    secret = "Bearer-sk-private-/Users/jonathan/Secret"
-
-    with pytest.raises(ValueError, match="invalid mailbox preference"):
-        save_mailbox_preferences(target, (MailboxPreference(secret),))
-
-    assert not target.exists()
 
 
 def test_save_caps_at_first_one_hundred_canonical_preferences_deterministically(
@@ -408,27 +310,21 @@ def test_save_caps_at_first_one_hundred_canonical_preferences_deterministically(
 ) -> None:
     target = tmp_path / "state" / "mailbox-preferences.json"
     preferences = tuple(
-        MailboxPreference(
-            agent_id=f"codex:session:{index:03d}",
-            mode=MailboxPreferenceMode.WATCHED,
-            last_visited_at=float(index),
-        )
+        _v2_preference(f"work:{index:03d}", last_visited_at=float(index))
         for index in range(105)
     )
 
-    save_mailbox_preferences(target, preferences)
+    save_mailbox_preferences_v2(target, preferences)
     first_bytes = target.read_bytes()
     first_document = _stored_document(target)
-    save_mailbox_preferences(target, preferences)
+    save_mailbox_preferences_v2(target, preferences)
 
     assert target.read_bytes() == first_bytes
     assert len(first_document["preferences"]) == 100
-    assert [entry["agent_id"] for entry in first_document["preferences"]] == [
-        f"codex:session:{index:03d}" for index in range(100)
-    ]
-    assert tuple(item.agent_id for item in load_mailbox_preferences(target)) == tuple(
-        f"codex:session:{index:03d}" for index in range(100)
-    )
+    assert tuple(
+        item.work_key.work_id.value
+        for item in load_mailbox_preference_document(target).preferences
+    ) == tuple(f"work:{index:03d}" for index in range(100))
 
 
 @pytest.mark.parametrize(
@@ -736,132 +632,35 @@ def test_strict_v1_document_decodes_only_legacy_fields(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("matches", "unresolved_count"),
-    (
-        ({}, 1),
-        ({"codex:session:legacy": ()}, 1),
-        (
-            {
-                "codex:session:legacy": (
-                    _work_key("first"),
-                    _work_key("second"),
-                )
-            },
-            1,
-        ),
-    ),
-)
-def test_legacy_zero_or_ambiguous_matches_never_authorize_v2_write(
-    matches: dict[str, tuple[WorkKey, ...]],
-    unresolved_count: int,
-) -> None:
-    document = MailboxPreferenceDocument(
-        1,
-        (),
-        (LegacyMailboxPreference("codex:session:legacy", MailboxPreferenceMode.WATCHED),),
-        False,
-    )
+def _seed_v1_store(target: Path) -> bytes:
+    """Write a strict v1 document the way the deleted v1 saver did."""
+    from sidepulse.private_io import atomic_private_write
 
-    result = resolve_legacy_mailbox_preferences(document, matches)
-
-    assert result == MailboxMigrationResult((), unresolved_count, False)
-
-
-def test_unique_legacy_matches_migrate_in_memory_without_legacy_id() -> None:
-    first_key = _work_key("first")
-    second_key = _work_key("second")
-    document = MailboxPreferenceDocument(
-        1,
-        (),
-        (
-            LegacyMailboxPreference(
-                "codex:session:first",
-                MailboxPreferenceMode.PINNED,
-                7,
-                None,
-                None,
-                1_786_536_000.0,
-            ),
-            LegacyMailboxPreference(
-                "codex:session:second",
-                MailboxPreferenceMode.WATCHED,
-            ),
-        ),
-        False,
-    )
-
-    result = resolve_legacy_mailbox_preferences(
-        document,
-        {
-            "codex:session:first": (first_key,),
-            "codex:session:second": (second_key,),
-        },
-    )
-
-    assert result == MailboxMigrationResult(
-        (
-            CanonicalMailboxPreference(
-                first_key,
-                MailboxPreferenceMode.PINNED,
-                7,
-                last_visited_at=1_786_536_000.0,
-            ),
-            CanonicalMailboxPreference(second_key, MailboxPreferenceMode.WATCHED),
-        ),
-        0,
-        True,
-    )
-
-
-def test_resolved_work_key_collision_blocks_write_and_marks_record_unresolved() -> None:
-    shared_key = _work_key("shared")
-    document = MailboxPreferenceDocument(
-        1,
-        (),
-        (
-            LegacyMailboxPreference("codex:session:first", MailboxPreferenceMode.WATCHED),
-            LegacyMailboxPreference("codex:session:second", MailboxPreferenceMode.PINNED, 1),
-        ),
-        False,
-    )
-
-    result = resolve_legacy_mailbox_preferences(
-        document,
-        {
-            "codex:session:first": (shared_key,),
-            "codex:session:second": (shared_key,),
-        },
-    )
-
-    assert result.preferences == (
-        CanonicalMailboxPreference(shared_key, MailboxPreferenceMode.WATCHED),
-    )
-    assert result.unresolved_count == 1
-    assert result.may_write_v2 is False
-
-
-def test_unresolved_migration_leaves_v1_bytes_unchanged(tmp_path: Path) -> None:
-    target = tmp_path / "state" / "mailbox-preferences.json"
-    save_mailbox_preferences(
+    atomic_private_write(
         target,
-        (LegacyMailboxPreference("codex:session:legacy", MailboxPreferenceMode.WATCHED),),
+        json.dumps(
+            {
+                "version": 1,
+                "preferences": [
+                    {
+                        "agent_id": "codex:session:legacy",
+                        "mode": "watched",
+                        "pin_order": None,
+                        "snoozed_at": None,
+                        "snoozed_until": None,
+                        "last_visited_at": None,
+                    }
+                ],
+            }
+        )
+        + "\n",
     )
-    before = target.read_bytes()
-    document = load_mailbox_preference_document(target)
-    result = resolve_legacy_mailbox_preferences(document, {})
-
-    assert result.may_write_v2 is False
-    assert target.read_bytes() == before
+    return target.read_bytes()
 
 
 def test_failed_v2_replace_preserves_exact_v1_bytes(tmp_path: Path) -> None:
     target = tmp_path / "state" / "mailbox-preferences.json"
-    save_mailbox_preferences(
-        target,
-        (LegacyMailboxPreference("codex:session:legacy", MailboxPreferenceMode.WATCHED),),
-    )
-    before = target.read_bytes()
+    before = _seed_v1_store(target)
 
     with (
         patch("sidepulse.private_io.os.replace", side_effect=OSError("replace failed")),
@@ -879,11 +678,7 @@ def test_v2_save_rereads_and_restores_previous_bytes_on_verification_failure(
     tmp_path: Path,
 ) -> None:
     target = tmp_path / "state" / "mailbox-preferences.json"
-    save_mailbox_preferences(
-        target,
-        (LegacyMailboxPreference("codex:session:legacy", MailboxPreferenceMode.WATCHED),),
-    )
-    before = target.read_bytes()
+    before = _seed_v1_store(target)
     wrong = MailboxPreferenceDocument(2, (), (), False)
 
     with (
