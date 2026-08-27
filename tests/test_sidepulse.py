@@ -2587,7 +2587,7 @@ for (const event of [
                 # assert across the full control map.
                 target.ensure_all_settings_panes()
 
-        self.assertEqual(window.title(), "SidePulse Settings: Profile")
+        self.assertEqual(window.title(), "JR-BAR Settings: Profile")
         self.assertIn("devin_session_opener", target.settings_fields)
         self.assertIn("closed_animation_program", target.settings_fields)
         self.assertIn("closed_animation_duration", target.settings_fields)
@@ -9820,7 +9820,7 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
 
         self.controller.select_settings_pane("history")
         self.assertIn("history", self.controller.settings_panes)
-        self.assertEqual(self.controller.settings_window.title(), "SidePulse Settings: History")
+        self.assertEqual(self.controller.settings_window.title(), "JR-BAR Settings: History")
         controls = self.controller.settings_fields["history_retention_controls"]
         self.assertEqual(tuple(controls), (0, 7, 30, 90))
         self.assertTrue(all(control.accessibilityRole() == "AXRadioButton" for control in controls.values()))
@@ -9829,7 +9829,7 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
         self.controller.settings_window.performClose_(None)
         self.controller.show_settings_window()
         self.assertEqual(self.controller.current_settings_pane, "history")
-        self.assertEqual(self.controller.settings_window.title(), "SidePulse Settings: History")
+        self.assertEqual(self.controller.settings_window.title(), "JR-BAR Settings: History")
 
     def test_history_discloses_exact_fields_before_opt_in_and_supports_three_ranges(self) -> None:
         self._build_history()
@@ -20732,7 +20732,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(button.setTitle_.call_args.args[0], "")
         self.assertEqual(
             button.setToolTip_.call_args.args[0],
-            "SidePulse Agent Monitor: Done",
+            "JR-BAR Agent Monitor: Done",
         )
 
         glance = ResolvedGlance(
@@ -22230,7 +22230,7 @@ class LatestFeatureSettingsCompositionTests(unittest.TestCase):
         )
         self.assertEqual(
             self.controller.settings_window.title(),
-            "SidePulse Settings: Installed Agents",
+            "JR-BAR Settings: Installed Agents",
         )
         self.controller.refresh_installed_agent_inventory.assert_called_once_with()
         rendered = "\n".join(self._descendant_text(pane))
@@ -23205,7 +23205,7 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
         self.assertNotIn("In Progress", titles)
         self.assertNotIn("Ready for Review", titles)
         self.assertNotIn("Recent", titles)
-        self.assertEqual(titles[-1], "Quit SidePulse")
+        self.assertEqual(titles[-1], "Quit JR-BAR")
 
     def test_status_menu_open_marks_visit_and_only_plans_capacity_refresh(self) -> None:
         snapshot = self._canonical_snapshot(1)

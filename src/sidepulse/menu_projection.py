@@ -208,7 +208,7 @@ def project_root_menu(inputs: MenuProjectionInputs) -> RootMenuProjection:
                 action="clearCompleted:",
             )
         )
-    rows.append(MenuRow("quit", "Quit SidePulse", MenuRowKind.ACTION, action="quit:"))
+    rows.append(MenuRow("quit", "Quit JR-BAR", MenuRowKind.ACTION, action="quit:"))
     return RootMenuProjection(tuple(rows))
 
 

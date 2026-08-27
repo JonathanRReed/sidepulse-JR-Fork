@@ -2368,7 +2368,7 @@ class StatusBarController(NSObject):
         button = self.status_item.button()
         button.setTitle_(" Idle")
         button.setImage_(image_for_symbol(STATE_IDLE.symbol, STATE_IDLE.label))
-        button.setToolTip_("SidePulse Agent Monitor: Idle")
+        button.setToolTip_("JR-BAR Agent Monitor: Idle")
         log_status_bar("status item created")
 
         self._runtime_started = True
@@ -8663,7 +8663,7 @@ class StatusBarController(NSObject):
         button.setToolTip_(
             text.help
             if shown is self.current_state
-            else f"SidePulse Agent Monitor: {shown.label}"
+            else f"JR-BAR Agent Monitor: {shown.label}"
         )
 
     def set_status(
@@ -8738,7 +8738,7 @@ class StatusBarController(NSObject):
             image_for_symbol(shown.symbol, shown.label)
             or image_for_symbol(state.symbol, state.label)
         )
-        button.setToolTip_(f"SidePulse Agent Monitor: {shown.label}")
+        button.setToolTip_(f"JR-BAR Agent Monitor: {shown.label}")
         if type(glance) is ResolvedGlance:
             self._apply_status_accessibility_text(
                 glance,
@@ -9828,7 +9828,7 @@ class StatusBarController(NSObject):
         self.current_settings_pane = selected_key
         if self.settings_window is not None:
             self.settings_window.setTitle_(
-                f"SidePulse Settings: {dict(SETTINGS_SIDEBAR_ITEMS)[selected_key]}"
+                f"JR-BAR Settings: {dict(SETTINGS_SIDEBAR_ITEMS)[selected_key]}"
             )
         self.reconcile_device_runtime()
         self.reconcile_installed_agent_inventory()
@@ -17346,7 +17346,7 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
         menu.addItem_(tip_item)
 
     quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Quit SidePulse",
+        "Quit JR-BAR",
         "quit:",
         "q",
     )

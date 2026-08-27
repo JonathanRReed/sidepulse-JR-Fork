@@ -49,7 +49,7 @@ def build_setup_window(target):
         NSBackingStoreBuffered,
         False,
     )
-    window.setTitle_("Welcome to SidePulse")
+    window.setTitle_("Welcome to JR-BAR")
     window.setReleasedWhenClosed_(False)
     window.center()
 
@@ -65,7 +65,7 @@ def build_setup_window(target):
 
     # Hero: the product introduces itself by DOING the thing -- a live
     # LED strip playing the full-team demo, not a paragraph about LEDs.
-    title = native_ui.make_label("SidePulse", size=27.0, bold=True)
+    title = native_ui.make_label("JR-BAR", size=27.0, bold=True)
     hero_title_holder = native_ui.make_stack(orientation="vertical", spacing=0.0)
     hero_title_holder.addArrangedSubview_(title)
     stack.addArrangedSubview_(hero_title_holder)

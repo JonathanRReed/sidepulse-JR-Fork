@@ -66,8 +66,12 @@ def _build_payload(settings) -> tuple[dict, str | None]:
         except Exception:
             registry_ids = provider_ids
         try:
+            # default_state_dir() already ENDS in agent-monitor; the
+            # doubled path looked in .../agent-monitor/agent-monitor and
+            # silently emptied the Sessions graph for every hook-ledger
+            # provider (2026-08-27 readiness audit).
             extra_sessions = ledger_session_days(
-                default_state_dir() / "agent-monitor",
+                default_state_dir(),
                 since_epoch=period_start.timestamp(),
                 provider_ids=registry_ids,
             )

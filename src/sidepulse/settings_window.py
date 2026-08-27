@@ -3507,7 +3507,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
         ((0, 0), (width, height)), style, NSBackingStoreBuffered, False,
     )
-    window.setTitle_("SidePulse Settings: Profile")
+    window.setTitle_("JR-BAR Settings: Profile")
     window.setDelegate_(target)
     window.setReleasedWhenClosed_(False)
     window.center()

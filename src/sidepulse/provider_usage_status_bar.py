@@ -141,7 +141,7 @@ else:
             self._settings_active_category = category.key
             show_category(self, category.key, requested)
             if self.settings_window is not None:
-                self.settings_window.setTitle_(f"SidePulse Settings: {category.label}")
+                self.settings_window.setTitle_(f"JR-BAR Settings: {category.label}")
             self.reconcile_device_runtime()
             self.reconcile_installed_agent_inventory()
             if self.current_settings_pane == "color_studio":
@@ -158,7 +158,7 @@ else:
             show_category(self, category.key, page.key)
             self._settings_active_category = category.key
             if self.settings_window is not None:
-                self.settings_window.setTitle_(f"SidePulse Settings: {category.label}")
+                self.settings_window.setTitle_(f"JR-BAR Settings: {category.label}")
             self.reconcile_device_runtime()
             self.reconcile_installed_agent_inventory()
             if page.key == "color_studio":
@@ -185,7 +185,7 @@ else:
                 show_category(self, category.key, requested)
                 self._settings_active_category = category.key
                 if self.settings_window is not None:
-                    self.settings_window.setTitle_(f"SidePulse Settings: {category.label}")
+                    self.settings_window.setTitle_(f"JR-BAR Settings: {category.label}")
                 self.refresh_settings_window()
 
         def show_settings_window(self) -> None:

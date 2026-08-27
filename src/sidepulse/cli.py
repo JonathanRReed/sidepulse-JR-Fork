@@ -126,6 +126,11 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not install or start the status-bar app.",
     )
+    setup.add_argument(
+        "--no-sd-eject-guard",
+        action="store_true",
+        help="Skip the SD eject guard (needs clang; only useful with the LED bar).",
+    )
     setup.set_defaults(func=cmd_sidepulse_setup)
 
     write = subparsers.add_parser(
@@ -553,6 +558,26 @@ def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
     results = install_hook_results(args)
     print_install_results(results, dry_run=args.dry_run)
 
+    # The menu-bar app installs FIRST and the eject guard is best-effort:
+    # the guard needs clang (Xcode Command Line Tools), and a fresh Mac
+    # without them used to abort setup right here -- hooks installed, no
+    # app, a confusing half-state (2026-08-27 readiness audit).
+    if not args.no_status_bar:
+        if args.dry_run:
+            print("status-bar: would install and start")
+        else:
+            from .status_bar_launch import install_launch_agent
+
+            result = install_launch_agent(start=True)
+            action = "installed" if result.changed else "already installed"
+            if result.started:
+                action += " and started"
+            print(f"status-bar: {action}")
+            print(f"  plist: {result.plist_path}")
+
+    if args.no_sd_eject_guard:
+        return 0
+
     from .sd_eject_guard_launch import (
         SD_EJECT_GUARD_DISPLAY_NAME,
         SdEjectGuardInstallError,
@@ -566,24 +591,14 @@ def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
         )
     except (SdEjectGuardInstallError, OSError, subprocess.CalledProcessError) as exc:
         print(f"{SD_EJECT_GUARD_DISPLAY_NAME}: {exc}", file=sys.stderr)
-        return 1
+        print(
+            f"{SD_EJECT_GUARD_DISPLAY_NAME}: skipped (it protects the "
+            "LED bar's SD card during ejects; install Xcode Command "
+            "Line Tools and re-run `sidepulse setup` to add it).",
+            file=sys.stderr,
+        )
+        return 0
     print_sd_eject_guard_result(guard_result)
-
-    if args.no_status_bar:
-        return 0
-
-    if args.dry_run:
-        print("status-bar: would install and start")
-        return 0
-
-    from .status_bar_launch import install_launch_agent
-
-    result = install_launch_agent(start=True)
-    action = "installed" if result.changed else "already installed"
-    if result.started:
-        action += " and started"
-    print(f"status-bar: {action}")
-    print(f"  plist: {result.plist_path}")
     return 0
 
 

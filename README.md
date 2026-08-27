@@ -51,13 +51,21 @@ ported behavior by behavior instead.
 ## Quick start
 
 ```sh
-python3 -m pip install -e .
+./scripts/install-user.sh
 sidepulse setup
 ```
 
-`sidepulse setup` walks through hook installation per provider,
-installs SidePulse Pro Eject Prevention, and writes the status-bar
-LaunchAgent so the menu-bar app starts now and at login. (The sealed
+The install script builds an isolated Python environment under
+`~/.local/share/sidepulse` and links the `sidepulse` command into
+`~/.local/bin` — it works on a stock Mac, where the system `python3`
+is too old for a bare `pip install -e .` and Homebrew Python refuses
+system-wide installs (PEP 668).
+
+`sidepulse setup` walks through hook installation per provider, writes
+the status-bar LaunchAgent so the menu-bar app starts now and at
+login, and then tries to add SidePulse Pro Eject Prevention (skipped
+gracefully when Xcode Command Line Tools are absent; pass
+`--no-sd-eject-guard` if you have no LED bar). (The sealed
 production "SidePulse.app" comes from the signed PKG built by
 `packaging/build_macos_pkg.sh`.)
 The menu-bar app's own Setup window covers the same ground with
@@ -147,7 +155,7 @@ The LED control DSL is described in [`LEDS_FORMAT.md`](LEDS_FORMAT.md).
 
 ### TLDR
 ```sh
-python3 -m pip install -e .
+./scripts/install-user.sh
 sidepulse setup
 ```
 

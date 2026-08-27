@@ -24,7 +24,7 @@ def build_main_menu() -> NSMenu:
     # for an accessory app, it only anchors key routing.
     app_slot = NSMenuItem.alloc().init()
     app_menu = NSMenu.alloc().init()
-    app_menu.addItem_(_item("Quit SidePulse", "terminate:", "q"))
+    app_menu.addItem_(_item("Quit JR-BAR", "terminate:", "q"))
     app_slot.setSubmenu_(app_menu)
     main.addItem_(app_slot)
 

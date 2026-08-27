@@ -299,7 +299,7 @@ def _compact_existing_menu(menu, snapshot, target):
                 "Plug in a SidePulse, or add the Screen Bar below",
             }
             or title.startswith("Sleep warning:")
-            or (title.startswith("SidePulse") and title != "Quit SidePulse")
+            or (title.startswith("SidePulse") and title != "Quit JR-BAR")
         ):
             _normalise_device_item_title(item)
             device_items.append(item)
