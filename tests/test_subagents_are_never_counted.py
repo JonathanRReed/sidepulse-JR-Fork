@@ -404,3 +404,85 @@ def test_the_menu_bar_title_is_a_ledger_not_a_spoken_sentence() -> None:
     assert "," not in title
     spoken = status_item_accessibility(state, glance).value
     assert "," in spoken and len(spoken) > len(title)
+
+
+def test_collector_refreshes_a_delegating_parents_presence() -> None:
+    """A fresh child event is evidence of the parent's presence.
+
+    The projection-level promotion was not enough: active_count, the
+    presence horizon and the staleness windows all read raw status
+    modes at the COLLECTOR level, so a main silent for an hour while
+    its workers streamed events aged out entirely -- the count said
+    one, and the strip painted orphan murk (2026-08-27 owner report).
+    """
+    from sidepulse.collector import _reconcile_delegating_parents
+
+    hour_old = _NOW - timedelta(seconds=3700)
+    stopped_main = replace(
+        _main("main", AgentMode.COMPLETED), updated_at=hour_old
+    )
+    busy_child = _worker(1, AgentMode.TOOL_RUNNING)
+
+    reconciled = _reconcile_delegating_parents(
+        (stopped_main, busy_child), _NOW + timedelta(seconds=5)
+    )
+
+    parent = next(row for row in reconciled if not row.is_subagent)
+    assert parent.mode is AgentMode.WORKING
+    assert parent.updated_at == busy_child.updated_at, (
+        "the parent's clock advances to its freshest child, so the "
+        "presence horizon and staleness windows see a live session"
+    )
+    assert aggregate_status(reconciled).active_count == 1
+
+
+def test_collector_leaves_a_parent_with_finished_children_alone() -> None:
+    from sidepulse.collector import _reconcile_delegating_parents
+
+    stopped_main = _main("main", AgentMode.COMPLETED)
+    finished_child = _worker(1, AgentMode.COMPLETED)
+
+    reconciled = _reconcile_delegating_parents(
+        (stopped_main, finished_child), _NOW + timedelta(seconds=5)
+    )
+
+    assert reconciled == (stopped_main, finished_child)
+
+
+def test_collector_never_rewrites_an_asking_or_failed_parent() -> None:
+    from sidepulse.collector import _reconcile_delegating_parents
+
+    asking = _main("asker", AgentMode.WAITING_FOR_INPUT)
+    failed = replace(
+        _main("failer", AgentMode.BLOCKED_ERROR), session_id="failer"
+    )
+    children = (
+        replace(_worker(1, AgentMode.TOOL_RUNNING), session_id="asker"),
+        replace(_worker(2, AgentMode.TOOL_RUNNING), session_id="failer"),
+    )
+
+    reconciled = _reconcile_delegating_parents(
+        (asking, failed, *children), _NOW + timedelta(seconds=5)
+    )
+
+    assert reconciled[0].mode is AgentMode.WAITING_FOR_INPUT
+    assert reconciled[1].mode is AgentMode.BLOCKED_ERROR
+
+
+def test_a_stale_child_stops_vouching_for_its_parent() -> None:
+    from sidepulse.collector import (
+        DELEGATION_CHILD_FRESH_SECONDS,
+        _reconcile_delegating_parents,
+    )
+
+    stopped_main = _main("main", AgentMode.COMPLETED)
+    wedged_child = replace(
+        _worker(1, AgentMode.TOOL_RUNNING),
+        updated_at=_NOW - timedelta(seconds=DELEGATION_CHILD_FRESH_SECONDS + 60),
+    )
+
+    reconciled = _reconcile_delegating_parents(
+        (stopped_main, wedged_child), _NOW
+    )
+
+    assert reconciled[0].mode is AgentMode.COMPLETED

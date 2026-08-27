@@ -1364,14 +1364,31 @@ def parse_log_line(provider: str, line: str) -> HookEvent | None:
 
     normalized_raw = normalize_event_payload(raw, event_name, logged_at)
 
+    session_id = _first_string(normalized_raw, "session_id", "sessionId")
+    agent_id = _first_string(normalized_raw, "agent_id", "agentId")
+    # Normalized ledger records carry identity as WORK ids: the work IS
+    # the session for a main, and the agent for a sub-agent (whose
+    # parent_work_id names its session). Reading only session_id/agent_id
+    # collapsed every session into one provider:unknown row -- one
+    # working agent per provider however many were running, flapping
+    # completed whenever any of them stopped (2026-08-27 owner report).
+    work_id = _first_string(raw, "provider_work_id")
+    if work_id:
+        parent_id = _first_string(raw, "parent_work_id")
+        if parent_id:
+            agent_id = agent_id or work_id
+            session_id = session_id or parent_id
+        else:
+            session_id = session_id or work_id
+
     return HookEvent(
         provider=provider,
         logged_at=parse_datetime(logged_at),
         event_name=event_name,
         raw=normalized_raw,
-        session_id=_first_string(normalized_raw, "session_id", "sessionId"),
+        session_id=session_id,
         turn_id=_first_string(normalized_raw, "turn_id", "turnId"),
-        agent_id=_first_string(normalized_raw, "agent_id", "agentId"),
+        agent_id=agent_id,
         cwd=_first_string(normalized_raw, "cwd", "workspaceRoot"),
         tool_name=_first_string(normalized_raw, "tool_name", "toolName"),
         message=_first_string(normalized_raw, "message", "last_assistant_message", "lastAssistantMessage"),
