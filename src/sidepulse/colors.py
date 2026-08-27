@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -453,7 +452,6 @@ BLEND_MODE_TOOLTIPS: dict[str, str] = {
     ),
 }
 
-LAYOUT_DEBOUNCE_SECONDS = 1.5
 LAYOUT_CROSSFADE_MS = 450
 IDLE_ROLL_SECONDS = 7.0
 IDLE_ROLL_MIN_AGENTS = 3
@@ -3272,74 +3270,6 @@ def preview_statuses_for_scenario(scenario: str) -> tuple[AgentStatus, ...]:
         return demo_statuses_for_preview()
     return builder(datetime.now(timezone.utc))
 
-
-# --- Layout stability (debounce + crossfade bookkeeping) --------------------
-
-
-def _layout_signature(statuses: tuple[AgentStatus, ...]) -> tuple[tuple[str, str], ...]:
-    return tuple((status.provider, display_state_for_mode(status.mode).value) for status in statuses)
-
-
-class AgentLayoutStabilizer:
-    """Debounces spatial reshuffles so a momentary priority blip doesn't
-    reshuffle LED positions immediately; a new ranking must hold for
-    ``LAYOUT_DEBOUNCE_SECONDS`` before it's committed. Colors/animations for
-    already-assigned agents are never delayed by this -- only the
-    *positions/sizes* are, via the caller re-rendering with the last
-    committed ordering until the debounce window elapses.
-    """
-
-    def __init__(self, *, debounce_seconds: float = LAYOUT_DEBOUNCE_SECONDS, clock=time.monotonic) -> None:
-        self.debounce_seconds = debounce_seconds
-        self._clock = clock
-        self._committed_signature: tuple[tuple[str, str], ...] | None = None
-        self._committed_order: tuple[AgentStatus, ...] = ()
-        self._pending_signature: tuple[tuple[str, str], ...] | None = None
-        self._pending_since: float | None = None
-
-    def reset(self) -> None:
-        self._committed_signature = None
-        self._committed_order = ()
-        self._pending_signature = None
-        self._pending_since = None
-
-    def stabilize(self, statuses: tuple[AgentStatus, ...]) -> tuple[AgentStatus, ...]:
-        """Returns the ordering to render this tick: either the newly
-        committed one, or the previously committed one while a new
-        candidate is still within its debounce window."""
-        signature = _layout_signature(statuses)
-
-        if signature == self._committed_signature:
-            self._pending_signature = None
-            self._pending_since = None
-            return self._committed_order
-
-        now = self._clock()
-        if signature != self._pending_signature:
-            self._pending_signature = signature
-            self._pending_since = now
-            # No committed layout yet at all (first tick ever) -- commit
-            # immediately rather than showing nothing for the debounce window.
-            if self._committed_signature is None:
-                self._commit(statuses, signature)
-            return self._committed_order
-
-        assert self._pending_since is not None
-        if now - self._pending_since >= self.debounce_seconds:
-            self._commit(statuses, signature)
-        return self._committed_order
-
-    def _commit(self, statuses: tuple[AgentStatus, ...], signature: tuple[tuple[str, str], ...]) -> None:
-        self._committed_signature = signature
-        self._committed_order = statuses
-        self._pending_signature = None
-        self._pending_since = None
-
-
-# --- Palettes -------------------------------------------------------
-# A two-seed OKLCH derivation in the spirit of T3 Code's themePalette:
-# perceptually even steps, chroma reduced until the color fits sRGB --
-# derived sets stay legible by construction.
 
 def _oklch_to_linear_srgb(lightness: float, chroma: float, hue_degrees: float):
     hue = math.radians(hue_degrees)

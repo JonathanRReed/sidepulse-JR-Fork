@@ -51,7 +51,6 @@ from sidepulse.colors import (
     DEFAULT_CYCLE_SPEED_SECONDS,
     MAX_CYCLE_SPEED_SECONDS,
     MIN_CYCLE_SPEED_SECONDS,
-    AgentLayoutStabilizer,
     ColorSettings,
     default_agent_color,
     normalize_hex,
@@ -7487,67 +7486,6 @@ class ColorSettingsTests(unittest.TestCase):
             _identity_color(statuses, "codex"), 0.2
         )
         self.assertIn(working_floor_color, reset_line)
-
-
-class AgentLayoutStabilizerTests(unittest.TestCase):
-    def _clock(self):
-        state = {"t": 0.0}
-
-        def now() -> float:
-            return state["t"]
-
-        def advance(dt: float) -> None:
-            state["t"] += dt
-
-        now.advance = advance  # type: ignore[attr-defined]
-        return now
-
-    def test_first_layout_commits_immediately(self) -> None:
-        clock = self._clock()
-        stabilizer = AgentLayoutStabilizer(clock=clock)
-        layout = (_status("codex", AgentMode.WORKING),)
-        result = stabilizer.stabilize(layout)
-        self.assertEqual([status.provider for status in result], ["codex"])
-
-    def test_reshuffle_is_debounced_until_it_holds(self) -> None:
-        clock = self._clock()
-        stabilizer = AgentLayoutStabilizer(clock=clock, debounce_seconds=1.5)
-        a = (_status("codex", AgentMode.WORKING),)
-        b = (_status("codex", AgentMode.WORKING), _status("devin", AgentMode.BLOCKED_ERROR))
-
-        stabilizer.stabilize(a)
-        result = stabilizer.stabilize(b)
-        self.assertEqual([s.provider for s in result], ["codex"], "should not reshuffle immediately")
-
-        clock.advance(1.0)
-        result = stabilizer.stabilize(b)
-        self.assertEqual([s.provider for s in result], ["codex"], "still within debounce window")
-
-        clock.advance(0.6)
-        result = stabilizer.stabilize(b)
-        self.assertEqual(
-            [s.provider for s in result], ["codex", "devin"], "should commit after debounce window elapses"
-        )
-
-    def test_brief_blip_and_revert_within_window_does_not_commit(self) -> None:
-        clock = self._clock()
-        stabilizer = AgentLayoutStabilizer(clock=clock, debounce_seconds=1.5)
-        a = (_status("codex", AgentMode.WORKING),)
-        b = (_status("codex", AgentMode.WORKING), _status("devin", AgentMode.BLOCKED_ERROR))
-
-        stabilizer.stabilize(a)
-        stabilizer.stabilize(b)
-        clock.advance(1.5)
-        stabilizer.stabilize(b)
-        result_after_commit = stabilizer.stabilize(b)
-        self.assertEqual([s.provider for s in result_after_commit], ["codex", "devin"])
-
-        # blip back to `a`, then straight back to `b` -- should not have
-        # reshuffled away from the already-committed `b` in between.
-        stabilizer.stabilize(a)
-        clock.advance(0.3)
-        result = stabilizer.stabilize(b)
-        self.assertEqual([s.provider for s in result], ["codex", "devin"])
 
 
 class RoundRobinAndPaletteTests(unittest.TestCase):

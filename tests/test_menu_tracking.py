@@ -28,14 +28,11 @@ from sidepulse.agent_browser_window import (
 from sidepulse.capacity_types import SourceKey
 from sidepulse.mailbox import MailboxSectionKind
 from sidepulse.menu_tracking import (
-    DeferredMenuPublication,
     ExactBoundarySchedule,
     MenuItemState,
     MenuPublicationKind,
     StableNativeMenuRegistry,
-    VisitEvidenceKind,
     plan_menu_publication,
-    visit_evidence_confirms_row,
 )
 from sidepulse.navigation_policy import OperatorActionDescriptor, OperatorActionKind
 from sidepulse.provider_facts import (
@@ -142,41 +139,6 @@ def test_one_hundred_row_copy_burst_patches_without_reordering() -> None:
     assert publication.patches == current
 
 
-def test_deferred_publication_keeps_only_latest_state_and_rebuilds_once() -> None:
-    initial = (_item("first"),)
-    deferred = DeferredMenuPublication(initial)
-    second = (_item("first"), _item("second", order=1))
-    latest = (_item("latest"),)
-
-    assert deferred.publish(second, tracking=True).kind is MenuPublicationKind.DEFER_REBUILD
-    assert deferred.publish(latest, tracking=True).kind is MenuPublicationKind.DEFER_REBUILD
-    assert deferred.take_deferred_after_close() == latest
-    assert deferred.take_deferred_after_close() is None
-
-
-def test_woke_edge_is_retained_until_the_deferred_state_is_published() -> None:
-    initial = (_item("row", title="Snoozed"),)
-    woke = (
-        replace(
-            initial[0],
-            title="Woke",
-            measured_width=52,
-            accessibility_value="Woke",
-        ),
-    )
-    deferred = DeferredMenuPublication(initial)
-
-    deferred.publish(woke, tracking=True, irreversible_item_keys=frozenset({"row"}))
-    superseding = (replace(initial[0], title="Active"),)
-    deferred.publish(superseding, tracking=True)
-
-    pending = deferred.take_deferred_after_close()
-    assert pending is not None
-    assert pending[0].title == "Woke"
-    deferred.mark_published(pending)
-    assert deferred.irreversible_item_keys == frozenset()
-
-
 def test_exact_boundary_schedule_rejects_early_and_stale_callbacks() -> None:
     schedule = ExactBoundarySchedule()
     first = schedule.replace(101.25)
@@ -194,33 +156,6 @@ def test_exact_next_copy_boundary_is_preserved_without_bucket_rounding() -> None
 
     assert token.deadline_epoch == 1_800_000_012.345678
     assert schedule.deadline_epoch == 1_800_000_012.345678
-
-
-def test_visit_requires_reveal_plus_real_row_focus_or_activation() -> None:
-    assert not visit_evidence_confirms_row(
-        VisitEvidenceKind.ROOT_OPEN,
-        revealed=False,
-    )
-    assert not visit_evidence_confirms_row(
-        VisitEvidenceKind.SHELF_REVEALED,
-        revealed=True,
-    )
-    assert not visit_evidence_confirms_row(
-        VisitEvidenceKind.ROW_FOCUSED,
-        revealed=False,
-    )
-    assert visit_evidence_confirms_row(
-        VisitEvidenceKind.ROW_FOCUSED,
-        revealed=True,
-    )
-    assert visit_evidence_confirms_row(
-        VisitEvidenceKind.ROW_ACTIVATED,
-        revealed=True,
-    )
-    assert visit_evidence_confirms_row(
-        VisitEvidenceKind.BROWSER_ROW_FOCUSED,
-        revealed=True,
-    )
 
 
 def test_native_registry_patches_real_item_without_replacing_highlighted_identity() -> None:

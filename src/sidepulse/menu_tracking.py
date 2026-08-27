@@ -137,53 +137,6 @@ def plan_menu_publication(
     return MenuPublication(MenuPublicationKind.PATCH_IN_PLACE, patches, None)
 
 
-class DeferredMenuPublication:
-    """Coalesce structural updates and retain irreversible visible edges."""
-
-    def __init__(self, published: tuple[MenuItemState, ...]) -> None:
-        self._published = published
-        self._pending: tuple[MenuItemState, ...] | None = None
-        self._irreversible: dict[str, MenuItemState] = {}
-
-    @property
-    def irreversible_item_keys(self) -> frozenset[str]:
-        return frozenset(self._irreversible)
-
-    @property
-    def published(self) -> tuple[MenuItemState, ...]:
-        return self._published
-
-    def publish(
-        self,
-        current: tuple[MenuItemState, ...],
-        *,
-        tracking: bool,
-        irreversible_item_keys: frozenset[str] = frozenset(),
-    ) -> MenuPublication:
-        for item in current:
-            if item.item_key in irreversible_item_keys:
-                self._irreversible[item.item_key] = item
-        retained = tuple(self._irreversible.get(item.item_key, item) for item in current)
-        plan = plan_menu_publication(self._published, retained, tracking=tracking)
-        if tracking and plan.kind is MenuPublicationKind.DEFER_REBUILD:
-            self._pending = retained
-        elif not tracking:
-            self.mark_published(retained)
-        return plan
-
-    def take_deferred_after_close(self) -> tuple[MenuItemState, ...] | None:
-        pending = self._pending
-        self._pending = None
-        return pending
-
-    def mark_published(self, current: tuple[MenuItemState, ...]) -> None:
-        self._published = current
-        published_keys = {item.item_key for item in current}
-        for key in tuple(self._irreversible):
-            if key in published_keys:
-                del self._irreversible[key]
-
-
 class StableNativeMenuRegistry:
     """Own one native item per stable key and apply only safe copy patches."""
 
@@ -292,16 +245,3 @@ class ExactBoundarySchedule:
             return False
         self._token = None
         return True
-
-
-def visit_evidence_confirms_row(
-    evidence: VisitEvidenceKind,
-    *,
-    revealed: bool,
-) -> bool:
-    """Require a revealed surface plus row-level focus or activation."""
-    return bool(revealed) and evidence in {
-        VisitEvidenceKind.ROW_FOCUSED,
-        VisitEvidenceKind.ROW_ACTIVATED,
-        VisitEvidenceKind.BROWSER_ROW_FOCUSED,
-    }
