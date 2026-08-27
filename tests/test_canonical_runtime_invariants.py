@@ -23,15 +23,6 @@ from sidepulse.capacity_types import (
     SourceKey,
 )
 from sidepulse.collector import LiveAgentMonitor, RestoreHealth
-from sidepulse.delivery_ledger import (
-    DeliveryChannel,
-    DeliveryDiagnostic,
-    DeliveryDisposition,
-    DeliveryKey,
-    DeliveryLedger,
-    DeliveryReceipt,
-    record_delivery,
-)
 from sidepulse.hook import write_normalized_hook_record
 from sidepulse.ipc import (
     MAX_HINT_BYTES,
@@ -110,7 +101,6 @@ class _StepReceipt:
     request_phases: tuple[str, ...]
     event_kinds: tuple[str, ...]
     interruption_classes: tuple[str, ...]
-    delivery_dispositions: tuple[str, ...]
     source_health: tuple[str, ...]
     refresh_invocations: tuple[str, ...]
     reset_lanes: tuple[str, ...]
@@ -231,7 +221,6 @@ def _receipt(
     monitor: LiveAgentMonitor,
     *,
     events=(),
-    ledger: DeliveryLedger = DeliveryLedger(()),
     health_extra: tuple[str, ...] = (),
     refresh_invocations: tuple[str, ...] = (),
     reset_lanes: tuple[str, ...] = (),
@@ -263,9 +252,6 @@ def _receipt(
         request_phases=tuple(request.phase.value for request in state.requests),
         event_kinds=tuple(event.kind.value for event in events),
         interruption_classes=tuple(event.interruption_class.value for event in events),
-        delivery_dispositions=tuple(
-            item.disposition.value for item in ledger.receipts
-        ),
         source_health=tuple(
             sorted(
                 {
@@ -418,33 +404,6 @@ def _run_composed_fixture(root: Path) -> tuple[_StepReceipt, ...]:
         )
     )
 
-    request_event = monitor.operator_state.requests[0].semantic_event_key
-    ledger = DeliveryLedger(())
-    for channel, disposition, diagnostic in (
-        (DeliveryChannel.MAILBOX_CUE, DeliveryDisposition.DELIVERED, None),
-        (
-            DeliveryChannel.SYSTEM_NOTIFICATION,
-            DeliveryDisposition.SUPPRESSED_QUIET,
-            None,
-        ),
-        (
-            DeliveryChannel.SOUND,
-            DeliveryDisposition.FAILED,
-            DeliveryDiagnostic.CHANNEL_UNAVAILABLE,
-        ),
-    ):
-        ledger = record_delivery(
-            ledger,
-            DeliveryReceipt(
-                DeliveryKey(request_event, channel, 0),
-                disposition,
-                _BASE + 7.0,
-                1,
-                diagnostic,
-            ),
-        )
-    receipts.append(_receipt(4, monitor, ledger=ledger))
-
     older = _ingest(
         monitor,
         _batch(
@@ -456,7 +415,7 @@ def _run_composed_fixture(root: Path) -> tuple[_StepReceipt, ...]:
         clock=_clock(7.0, 107.0),
     )
     receipts.append(
-        _receipt(5, monitor, events=older.events, ledger=ledger, invalidations=older.invalidations)
+        _receipt(4, monitor, events=older.events, invalidations=older.invalidations)
     )
 
     completed = _ingest(
@@ -472,10 +431,9 @@ def _run_composed_fixture(root: Path) -> tuple[_StepReceipt, ...]:
     )
     receipts.append(
         _receipt(
-            6,
+            5,
             monitor,
             events=completed.events,
-            ledger=ledger,
             invalidations=completed.invalidations,
         )
     )
@@ -493,10 +451,9 @@ def _run_composed_fixture(root: Path) -> tuple[_StepReceipt, ...]:
     )
     receipts.append(
         _receipt(
-            7,
+            6,
             monitor,
             events=rollback.events,
-            ledger=ledger,
             invalidations=rollback.invalidations,
         )
     )
@@ -514,10 +471,9 @@ def _run_composed_fixture(root: Path) -> tuple[_StepReceipt, ...]:
     )
     receipts.append(
         _receipt(
-            8,
+            7,
             monitor,
             events=stale.events,
-            ledger=ledger,
             invalidations=stale.invalidations,
         )
     )
@@ -527,14 +483,9 @@ def _run_composed_fixture(root: Path) -> tuple[_StepReceipt, ...]:
         latest_state_path=state_path,
         clock_sampler=lambda: _clock(4.0, 110.0),
     )
-    # The delivery ledger is carried across the restart in memory. It used to
-    # round-trip through `delivery_ledger_store`, which no caller in the app
-    # ever reached: nothing constructs a `DeliveryLedger` outside this file,
-    # because `plan_deliveries` -- the only consumer -- is never invoked.
-    ledger_restore = ledger
     restart_snapshot = monitor.snapshot()
     assert restart_snapshot.operator_events == ()
-    receipts.append(_receipt(9, monitor, ledger=ledger_restore, restarted=True))
+    receipts.append(_receipt(8, monitor, restarted=True))
 
     step10_events = []
     step10_invalidations: set[InvalidationDomain] = set()
@@ -627,10 +578,9 @@ def _run_composed_fixture(root: Path) -> tuple[_StepReceipt, ...]:
     assert monitor.operator_state.clock_continuity.status is ClockContinuityStatus.STABLE
     receipts.append(
         _receipt(
-            10,
+            9,
             monitor,
             events=tuple(step10_events),
-            ledger=ledger_restore,
             invalidations=frozenset(step10_invalidations),
         )
     )
@@ -672,9 +622,8 @@ def _run_composed_fixture(root: Path) -> tuple[_StepReceipt, ...]:
     assert duplicate.lane_keys == ()
     receipts.append(
         _receipt(
-            11,
+            10,
             monitor,
-            ledger=ledger_restore,
             reset_lanes=tuple(item.opaque_scope for item in reset.lane_keys),
         )
     )
@@ -751,17 +700,6 @@ def _privacy_surfaces(root: Path) -> tuple[object, ...]:
         clock_sampler=lambda: _clock(1.0, 101.0),
     ).snapshot()
 
-    event_key = snapshot.operator_state.requests[0].semantic_event_key
-    ledger = record_delivery(
-        DeliveryLedger(()),
-        DeliveryReceipt(
-            DeliveryKey(event_key, DeliveryChannel.MAILBOX_CUE, 0),
-            DeliveryDisposition.DELIVERED,
-            _BASE,
-            1,
-            None,
-        ),
-    )
     authority_evidence, authority_persistence = _authority_privacy_evidence(
         root,
         source,
@@ -775,7 +713,6 @@ def _privacy_surfaces(root: Path) -> tuple[object, ...]:
         monitor.operator_state,
         snapshot,
         restored,
-        ledger,
         normalized_path.read_text(),
         state_path.read_text(),
         authority_evidence,
@@ -1147,18 +1084,16 @@ def _run_scale_fixture() -> _ScaleReceipt:
     )
 
 
-def test_exact_eleven_step_canonical_runtime_sequence(tmp_path: Path) -> None:
+def test_exact_ten_step_canonical_runtime_sequence(tmp_path: Path) -> None:
     """A broken cross-module contract must change an exact numbered receipt."""
     receipts = _run_composed_fixture(tmp_path)
 
-    quiet_receipts = ("delivered", "failed", "suppressed_quiet")
     healthy = ("claude:healthy", "codex:healthy", "devin:healthy")
     expected = (
         _StepReceipt(
             1,
             2,
             ("stale_hold",),
-            (),
             (),
             (),
             ("claude:healthy", "codex:healthy"),
@@ -1173,7 +1108,6 @@ def test_exact_eleven_step_canonical_runtime_sequence(tmp_path: Path) -> None:
             ("stale_hold",),
             (),
             (),
-            (),
             ("claude:healthy", "codex:healthy"),
             (),
             (),
@@ -1186,7 +1120,6 @@ def test_exact_eleven_step_canonical_runtime_sequence(tmp_path: Path) -> None:
             ("live_unacknowledged",),
             ("became_active", "became_active"),
             ("ambient", "ambient"),
-            (),
             (*healthy, "futureai:partial"),
             (),
             (),
@@ -1204,20 +1137,6 @@ def test_exact_eleven_step_canonical_runtime_sequence(tmp_path: Path) -> None:
             ("live_unacknowledged",),
             (),
             (),
-            quiet_receipts,
-            healthy,
-            (),
-            (),
-            (),
-            False,
-        ),
-        _StepReceipt(
-            5,
-            3,
-            ("live_unacknowledged",),
-            (),
-            (),
-            quiet_receipts,
             healthy,
             (),
             (),
@@ -1225,12 +1144,11 @@ def test_exact_eleven_step_canonical_runtime_sequence(tmp_path: Path) -> None:
             False,
         ),
         _StepReceipt(
-            6,
+            5,
             3,
             ("live_unacknowledged",),
             ("completed",),
             ("courtesy",),
-            quiet_receipts,
             healthy,
             (),
             (),
@@ -1239,12 +1157,11 @@ def test_exact_eleven_step_canonical_runtime_sequence(tmp_path: Path) -> None:
             ("work:codex:work:codex|completed|7",),
         ),
         _StepReceipt(
-            7,
+            6,
             3,
             ("stale_hold",),
             (),
             (),
-            quiet_receipts,
             healthy,
             (),
             (),
@@ -1252,12 +1169,11 @@ def test_exact_eleven_step_canonical_runtime_sequence(tmp_path: Path) -> None:
             False,
         ),
         _StepReceipt(
-            8,
+            7,
             3,
             ("stale_hold",),
             ("source_degraded",),
             ("ambient",),
-            quiet_receipts,
             ("claude:timed_out", "codex:healthy", "devin:healthy"),
             (),
             (),
@@ -1266,12 +1182,11 @@ def test_exact_eleven_step_canonical_runtime_sequence(tmp_path: Path) -> None:
             ("work:claude:work:claude|source_degraded|7",),
         ),
         _StepReceipt(
-            9,
+            8,
             3,
             ("stale_hold",),
             (),
             (),
-            quiet_receipts,
             ("claude:timed_out", "codex:healthy", "devin:healthy"),
             (),
             (),
@@ -1279,12 +1194,11 @@ def test_exact_eleven_step_canonical_runtime_sequence(tmp_path: Path) -> None:
             True,
         ),
         _StepReceipt(
-            10,
+            9,
             3,
             ("resolved",),
             ("became_idle", "source_recovered", "request_resolved"),
             ("ambient", "courtesy", "ambient"),
-            quiet_receipts,
             healthy,
             (),
             (),
@@ -1297,12 +1211,11 @@ def test_exact_eleven_step_canonical_runtime_sequence(tmp_path: Path) -> None:
             ),
         ),
         _StepReceipt(
-            11,
+            10,
             3,
             ("resolved",),
             (),
             (),
-            quiet_receipts,
             healthy,
             (),
             ("scope:default",),

@@ -5,6 +5,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from sidepulse.presentation_policy import MotionClass
+from sidepulse.presentation_scheduler import plan_presentation_schedule
+from sidepulse.render_policy import (
+    RenderDriverKind,
+    RenderEnvironment,
+    alcove_bracket_corner_radius,
+    choose_render_schedule,
+)
+
 
 @pytest.fixture(autouse=True)
 def _real_window_presentation(monkeypatch):
@@ -16,15 +25,6 @@ def _real_window_presentation(monkeypatch):
         "sidepulse.window_presentation.desktop_takeover_suppressed",
         lambda: False,
     )
-
-from sidepulse.presentation_policy import MotionClass
-from sidepulse.presentation_scheduler import plan_presentation_schedule
-from sidepulse.render_policy import (
-    RenderDriverKind,
-    RenderEnvironment,
-    alcove_bracket_corner_radius,
-    choose_render_schedule,
-)
 
 
 def test_alcove_accent_stays_inside_the_window_corners() -> None:

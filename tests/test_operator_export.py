@@ -77,7 +77,6 @@ def _debug_export(**changes: object) -> DebugExportV1:
         "app_version": "0.1.0",
         "build_trust": "source_checkout",
         "provider_health_counts": (("healthy", 2), ("partial", 1)),
-        "delivery_disposition_counts": (("delivered", 4), ("failed", 1)),
         "device_health_counts": (("healthy", 1), ("not_updating", 1)),
         "history_health": "healthy",
     }
@@ -135,7 +134,6 @@ def test_debug_export_has_exact_deterministic_versioned_schema() -> None:
     reordered = encode_debug_export(
         _debug_export(
             provider_health_counts=(("partial", 1), ("healthy", 2)),
-            delivery_disposition_counts=(("failed", 1), ("delivered", 4)),
             device_health_counts=(("not_updating", 1), ("healthy", 1)),
         )
     )
@@ -146,7 +144,6 @@ def test_debug_export_has_exact_deterministic_versioned_schema() -> None:
     assert set(document) == {
         "app_version",
         "build_trust",
-        "delivery_disposition_counts",
         "device_health_counts",
         "document",
         "generated_at",
@@ -173,7 +170,6 @@ def test_export_dto_field_manifests_are_exact_and_distinct() -> None:
         "app_version",
         "build_trust",
         "provider_health_counts",
-        "delivery_disposition_counts",
         "device_health_counts",
         "history_health",
     )
@@ -255,7 +251,6 @@ def test_debug_export_rejects_private_shaped_app_versions(app_version: str) -> N
         ("build_trust", "credential_dump"),
         ("history_health", "raw_error"),
         ("provider_health_counts", (("session_id", 1),)),
-        ("delivery_disposition_counts", (("prompt_body", 1),)),
         ("device_health_counts", (("private_path", 1),)),
     ),
 )

@@ -8028,8 +8028,6 @@ class StatusBarController(NSObject):
             event_key=event_key,
             interruption_class=interruption_class,
             request_key=request_key,
-            deliveries=(),
-            static_visibility_required=False,
         )
         copy = generic_notification_copy(route)
         delivered = self._notification_client_for_use().deliver(
@@ -10934,7 +10932,6 @@ class StatusBarController(NSObject):
             app_version,
             "unknown" if running_inside_bundle() else "source_checkout",
             tuple(sorted(health_counts.items())),
-            (),
             device_counts,
             history_health,
         )

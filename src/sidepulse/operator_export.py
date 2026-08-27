@@ -77,18 +77,6 @@ _PROVIDER_HEALTH_VALUES: Final = frozenset(
         "unsupported",
     }
 )
-_DELIVERY_DISPOSITION_VALUES: Final = frozenset(
-    {
-        "delivered",
-        "disabled",
-        "expired",
-        "failed",
-        "pending",
-        "superseded",
-        "suppressed_policy",
-        "suppressed_quiet",
-    }
-)
 _DEVICE_HEALTH_VALUES: Final = frozenset(
     {
         "degraded",
@@ -208,7 +196,6 @@ class DebugExportV1:
     app_version: str
     build_trust: str
     provider_health_counts: tuple[tuple[str, int], ...]
-    delivery_disposition_counts: tuple[tuple[str, int], ...]
     device_health_counts: tuple[tuple[str, int], ...]
     history_health: str
 
@@ -231,14 +218,6 @@ class DebugExportV1:
             _validate_count_pairs(
                 self.provider_health_counts,
                 allowlist=_PROVIDER_HEALTH_VALUES,
-            ),
-        )
-        object.__setattr__(
-            self,
-            "delivery_disposition_counts",
-            _validate_count_pairs(
-                self.delivery_disposition_counts,
-                allowlist=_DELIVERY_DISPOSITION_VALUES,
             ),
         )
         object.__setattr__(
@@ -316,7 +295,6 @@ def encode_debug_export(export: DebugExportV1) -> bytes:
         {
             "app_version": export.app_version,
             "build_trust": export.build_trust,
-            "delivery_disposition_counts": [list(item) for item in export.delivery_disposition_counts],
             "device_health_counts": [list(item) for item in export.device_health_counts],
             "document": DEBUG_EXPORT_DOCUMENT,
             "generated_at": export.generated_at,

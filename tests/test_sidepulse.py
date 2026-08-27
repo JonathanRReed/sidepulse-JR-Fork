@@ -10106,7 +10106,6 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
             "app_version",
             "build_trust",
             "provider_health_counts",
-            "delivery_disposition_counts",
             "device_health_counts",
             "history_health",
         ):

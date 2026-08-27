@@ -390,18 +390,18 @@ def test_the_store_never_writes_more_than_its_byte_cap(tmp_path: Path) -> None:
 def test_trimming_activity_can_never_evict_a_delivery_receipt(
     tmp_path: Path,
 ) -> None:
-    """Why this is not built into `delivery_ledger`.
+    """Why this was never built into the (since-deleted) `delivery_ledger`.
 
-    That ledger is write-once dedup state: evicting an old receipt re-arms a
+    That ledger was write-once dedup state: evicting an old receipt re-arms a
     notification that already fired. This one MUST evict by age. Sharing one
     document would make trimming the display feed silently re-fire delivered
-    cues, so they are two files and this pins that they are.
+    cues, so they were two files, and this pins that the activity writer
+    stays out of the delivery path even now that nothing writes it.
     """
-    # A stand-in document at the delivery ledger's path. It used to be
-    # written by `delivery_ledger_store`, which had no caller in the app --
-    # `plan_deliveries` is the ledger's only consumer and is never invoked --
-    # so the store is gone. The claim under test is unchanged: the activity
-    # writer must not touch that path, whatever wrote it.
+    # A stand-in document at the old delivery ledger's path. Its module and
+    # store are deleted (2026-08-26; production never constructed a ledger).
+    # The claim under test is unchanged: the activity writer must not touch
+    # that path, whatever wrote it.
     delivery_path = tmp_path / "delivery-ledger.json"
     delivery_path.write_text('{"version": 1, "receipts": []}', encoding="utf-8")
     before = delivery_path.read_text(encoding="utf-8")

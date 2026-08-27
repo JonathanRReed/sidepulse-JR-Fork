@@ -1,14 +1,13 @@
 """Strict private persistence for the bounded recent-activity ledger.
 
-Deliberately NOT the delivery ledger, and the reasoning is worth keeping:
+Deliberately NOT a delivery ledger, and the reasoning is worth keeping:
 
-``delivery_ledger`` answers "have we already delivered this cue?". It is
-write-once dedup state whose whole value is that it is never trimmed by
-time -- evicting an old receipt makes a stale notification fire again. It is
-also content-free on purpose (its store's docstring says "metadata-only"),
-keyed by ``SemanticEventKey``, ordered by delivery key rather than by time,
-and guarded by a state machine that raises on any transition that is not a
-legal delivery progression.
+``delivery_ledger`` (deleted 2026-08-26; production never constructed one)
+answered "have we already delivered this cue?" -- write-once dedup state
+whose whole value was that it was never trimmed by time, because evicting an
+old receipt makes a stale notification fire again. This ledger is the
+opposite: a bounded display feed that MUST evict by age. If a delivery
+ledger ever returns, it stays a separate document for exactly that reason.
 
 This ledger answers "what did I miss?". It is a time-ordered display feed
 that MUST be trimmed by time, that must carry the session's display name to

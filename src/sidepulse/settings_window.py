@@ -281,9 +281,8 @@ def _build_history_pane(target: StatusBarController):
         "sidepulse-diagnostics.json, up to 512 KiB. Each export is a "
         "separate local file. History contains retention_days and the "
         "stored fields above. Diagnostics contains app_version, build_trust, "
-        "provider_health_counts, delivery_disposition_counts, "
-        "device_health_counts, and history_health. No upload or sharing "
-        "route is used.",
+        "provider_health_counts, device_health_counts, and history_health. "
+        "No upload or sharing route is used.",
         secondary=True,
         size=11.0 * scale,
         max_width=560.0,

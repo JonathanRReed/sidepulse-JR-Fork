@@ -21,12 +21,12 @@ this product does not have.
 
 KNOWN THIS RATCHET CANNOT SEE: it measures IMPORTS, not CALLS. A module
 imported at the top of a live file passes even when nothing ever calls into
-it. `delivery_ledger` is the live example -- `interruption_policy` imports it
-for `plan_deliveries`, and `plan_deliveries` has no caller anywhere in the
-app, so a ~700-line delivery-planning subsystem reads as reachable here and
-is as dormant as anything this list ever held. Deciding it means deciding
-whether the notification path should adopt it, which is an owner call about
-the locked interrupt budget, not a cleanup.
+it. `delivery_ledger` was the live example -- `interruption_policy` imported
+it for a planner nothing invoked, so a ~700-line delivery-planning subsystem
+read as reachable here while being as dormant as anything this list ever
+held. The owner decided it on 2026-08-26: the planner, the ledger, and the
+quiet plane were deleted, and `interruption_policy` shrank to the
+notification-identity surface the app actually calls.
 """
 
 from __future__ import annotations
