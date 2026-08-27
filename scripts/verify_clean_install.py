@@ -65,7 +65,6 @@ for module in (
     "sidepulse.integration_cli",
     "sidepulse.integration_compatibility",
     "sidepulse.integration_settings",
-    "sidepulse.runtime_truth",
     "sidepulse.status_bar_launch",
     "sidepulse.t3_compat",
     "agent_monitor.hook_entry",

@@ -38,7 +38,6 @@ PURE_PRODUCTION_MODULES = {
     "performance_metrics.py",
     "presentation_compiler.py",
     "refresh_admission.py",
-    "runtime_truth.py",
     "screen_bar_design.py",
     "settings_navigation.py",
     "t3_compat.py",
