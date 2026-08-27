@@ -38,7 +38,41 @@ def _rounded_status_band(view, *, bracket_allowed: bool) -> None:
     colors = view._bracket_colors(view._colors_for_draw_cached())
     width = float(view.bounds().size.width)
     height = float(view.bounds().size.height)
-    left, right = design.rounded_band_bounds(width, preferred_width=width)
+    # Hug the CAPSULE, not the window. Alcove's capsule tucks in at its
+    # rounded bottom corners, so a band sized from the window (or from
+    # the capsule's WIDEST row) pokes out past it and reads as a wider
+    # shadow box behind the app (2026-08-27 owner screenshot). The
+    # bottom contour row is the width that matters at the row the band
+    # actually occupies.
+    preferred = width
+    lift = 0.0
+    silhouette = getattr(view, "alcove_silhouette", None)
+    if silhouette is not None:
+        try:
+            _center, sil_width, sil_height, contour = silhouette
+            if contour:
+                bottom_y = max(point[1] for point in contour)
+                bottom_xs = [
+                    point[0]
+                    for point in contour
+                    if point[1] >= bottom_y - 0.5
+                ]
+                bottom_width = (
+                    max(bottom_xs) - min(bottom_xs)
+                    if len(bottom_xs) >= 2
+                    else float(sil_width)
+                )
+            else:
+                bottom_width = float(sil_width)
+            if bottom_width > 0.0:
+                preferred = min(width, bottom_width)
+            # Same lift the classic drawer uses: the band kisses the
+            # capsule's lower edge instead of the window bottom.
+            lift = max(0.0, height - float(sil_height) - 1.0)
+        except (TypeError, ValueError):
+            preferred = width
+            lift = 0.0
+    left, right = design.rounded_band_bounds(width, preferred_width=preferred)
     band_width = max(0.0, right - left)
     if band_width <= 0.0 or height <= 0.0:
         return
@@ -47,7 +81,7 @@ def _rounded_status_band(view, *, bracket_allowed: bool) -> None:
         design.BAND_HEIGHT,
         max(1.0, height - design.VERTICAL_INSET),
     )
-    y = min(design.VERTICAL_INSET, max(0.0, height - band_height))
+    y = min(lift + design.VERTICAL_INSET, max(0.0, height - band_height))
     radius = min(design.CORNER_RADIUS, band_height / 2.0, band_width / 2.0)
     identity = _visible_identity(view, colors)
     red, green, blue, alpha = identity

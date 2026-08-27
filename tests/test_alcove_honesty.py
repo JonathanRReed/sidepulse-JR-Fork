@@ -677,7 +677,10 @@ def test_a_granted_permission_still_follows_the_capsule(monkeypatch) -> None:
     _publish_capsule(device)
     device.reposition()
 
-    inset = module.ALCOVE_ACCENT_EDGE_INSET
+    # The follow window pads by the LIVE drawer's edge inset now,
+    # so window margin and band inset agree (was the deleted
+    # bracket drawer's 6pt against the runtime's 8pt).
+    inset = module._screen_bar_edge_inset()
     assert device.window.current.size.width == pytest.approx(272.0 + 2 * inset)
     assert device.window.current.origin.x == pytest.approx(464.0 - inset)
     assert device.view.silhouettes[-1] == (600.0, 272.0, 32.0, _CONTOUR)

@@ -212,6 +212,18 @@ WING_RISER_WIDTH = 6.0
 # Graphics clips bloom and stroke antialiasing at a window edge, which made
 # both corner risers look squared off or missing on the installed app.
 ALCOVE_ACCENT_EDGE_INSET = 6.0
+
+
+def _screen_bar_edge_inset() -> float:
+    """The live drawer's own edge inset, so window padding and band
+    inset stop disagreeing by 4pt (runtime EDGE_INSET is 8; the old
+    6 belonged to the deleted bracket drawer)."""
+    try:
+        from .screen_bar_design import EDGE_INSET
+
+        return float(EDGE_INSET)
+    except Exception:
+        return ALCOVE_ACCENT_EDGE_INSET
 WING_RISER_SOLID_FRACTION = 0.45
 LED_BLEND_RADIUS_LEDS = 1.5
 BLEND_COLUMN_WIDTH = 2.0
@@ -672,7 +684,10 @@ def virtual_window_frame_for_screen(
     # least"). A manual wing length still wins upstream (the tracker
     # never runs); with no reading this stays None and classic
     # geometry holds. The screen caps below still apply.
-    if wrap_menu_bar and alcove_total_width is not None:
+    # Width follows Alcove in BOTH modes -- height and center already
+    # did, and the wrap-only gate here is why "minimal settings" drew a
+    # fixed-width band overhanging a narrower capsule (2026-08-27).
+    if alcove_total_width is not None:
         target = max(140.0, float(alcove_total_width))
         if target >= notch_width:
             wing = (target - notch_width) / 2.0
@@ -3731,12 +3746,12 @@ class VirtualStatusDevice(NSObject):
             if observation is not None:
                 follow_observation = observation
                 # Widen by the stroke inset on BOTH sides. The bracket is
-                # drawn ALCOVE_ACCENT_EDGE_INSET in from each window edge,
+                # drawn the runtime band's edge inset in from each side,
                 # so sizing the window
                 # to the raw capsule width put the stroke 6pt inside
                 # Alcove's real corners on each side -- visible every day
                 # as a bracket that does not quite touch.
-                follow_width = observation.width + 2.0 * ALCOVE_ACCENT_EDGE_INSET
+                follow_width = observation.width + 2.0 * _screen_bar_edge_inset()
                 follow_center_x = observation.center_x
             # Why there is no geometry, said once per transition. The
             # main-thread lookup losing the window outranks a stale worker

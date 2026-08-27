@@ -17318,12 +17318,14 @@ class AlcoveFollowTests(unittest.TestCase):
             ),
             base,
         )
-        # Without wrap the parameter is inert.
+        # Width follows Alcove in BOTH modes now (2026-08-27: the
+        # wrap-only gate left "minimal settings" drawing a fixed-width
+        # band overhanging a narrower capsule).
         self.assertEqual(
             virtual_device.virtual_window_frame_for_screen(
                 screen, wrap_menu_bar=False, alcove_total_width=900.0
-            ),
-            virtual_device.virtual_window_frame_for_screen(screen),
+            )[1][0],
+            900.0,
         )
 
     def test_alcove_width_still_caps_at_the_screen(self) -> None:

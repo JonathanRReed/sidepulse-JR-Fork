@@ -953,7 +953,10 @@ def test_reposition_submits_plain_alcove_request_and_applies_validated_center(
     # The follow window is one stroke inset wider on EACH side, so the
     # drawn bracket lands on Alcove's real corners instead of 6pt inside
     # them: origin moves out by the inset, width grows by twice it.
-    inset = virtual_device.ALCOVE_ACCENT_EDGE_INSET
+    # The follow window pads by the LIVE drawer's edge inset now,
+    # so window margin and band inset agree (was the deleted
+    # bracket drawer's 6pt against the runtime's 8pt).
+    inset = virtual_device._screen_bar_edge_inset()
     assert device.window.current.origin.x == pytest.approx(464.0 - inset)
     assert device.window.current.size.width == pytest.approx(272.0 + 2 * inset)
     assert device.view.silhouettes[-1] == (600.0, 272.0, 32.0, contour)
@@ -1847,3 +1850,42 @@ def test_alcove_relevance_wakes_from_a_cached_presence_read() -> None:
     quiet._alcove_relevant = False
     quiet._alcove_presence_probe = SimpleNamespace(running=lambda now: False)
     assert quiet._alcove_follow_relevant() is False
+
+
+def test_compact_mode_width_follows_the_capsule_too() -> None:
+    """Wrap OFF is the default ("minimal settings"), and its window used
+    to stay at raw hardware-slot width while height and center followed
+    Alcove -- a fixed 232pt band overhanging a ~200pt capsule read as a
+    wider shadow box behind the app (2026-08-27 owner screenshot)."""
+    from sidepulse import virtual_device
+    from sidepulse.screen_bar_runtime import install_screen_bar_runtime
+
+    install_screen_bar_runtime()
+    screen = SimpleNamespace(
+        frame=lambda: SimpleNamespace(
+            origin=SimpleNamespace(x=0.0, y=0.0),
+            size=SimpleNamespace(width=1512.0, height=982.0),
+        ),
+        safeAreaInsets=lambda: SimpleNamespace(top=32.0),
+        auxiliaryTopLeftArea=lambda: SimpleNamespace(
+            origin=SimpleNamespace(x=0.0, y=0.0),
+            size=SimpleNamespace(width=640.0, height=24.0),
+        ),
+        auxiliaryTopRightArea=lambda: SimpleNamespace(
+            origin=SimpleNamespace(x=872.0, y=0.0),
+            size=SimpleNamespace(width=640.0, height=24.0),
+        ),
+    )
+    followed = virtual_device.virtual_window_frame_for_screen(
+        screen,
+        wrap_menu_bar=False,
+        alcove_total_width=204.0,
+        alcove_center_x=756.0,
+    )
+    bare = virtual_device.virtual_window_frame_for_screen(
+        screen, wrap_menu_bar=False
+    )
+    # The caller (reposition) pads observation.width by the drawer's
+    # edge inset before passing it here; the frame honors the total.
+    assert followed[1][0] == 204.0
+    assert followed[1][0] != bare[1][0]
