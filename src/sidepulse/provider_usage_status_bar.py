@@ -566,6 +566,7 @@ else:
             # every other quota effect.
             self._alert_new_critical_pace(previous_state, state)
             self._alert_connection_loss(previous_state, state)
+            self._report_reconnect_outcome(state)
             controller = getattr(self, "_sidepulse_provider_usage_window", None)
             if controller is not None:
                 controller.refresh(state)
@@ -729,6 +730,21 @@ else:
                     _legacy.signals_module, "SIGNAL_QUOTA", None
                 ),
             )
+
+        def jr_plane_owns_capacity(self, provider_id: str) -> bool:
+            """The JR usage plane polls the Claude usage ENDPOINT
+            itself (ProviderUsageService), so the legacy capacity
+            scheduler must not hit the same remote with the same token
+            on a second cadence -- the double-poll was the documented
+            429 mechanism. Claude only for now: codex's legacy source
+            is a LOCAL read (no rate-limit hazard) that still feeds the
+            Overview labels until coalescence step 3 migrates them."""
+            return provider_id == "claude"
+
+        def _report_reconnect_outcome(self, state) -> None:
+            from .provider_usage_feedback import report_reconnect_outcome
+
+            report_reconnect_outcome(self, state, log=_legacy.log_status_bar)
 
         def _celebrate_quota_resets(self, events) -> None:
             from .provider_usage_feedback import celebrate_quota_resets

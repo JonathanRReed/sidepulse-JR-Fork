@@ -163,3 +163,48 @@ def test_reset_event_fires_on_a_replenishment_jump_despite_poisoned_clocks():
     # A small drift up is NOT a reset on this path.
     small = snapshot(2100, (lane(40, 19500),))
     assert detect_reset_events((before,), (small,), seen_event_ids=frozenset()) == ()
+
+
+def test_reconnect_outcome_reporter_tells_the_truth():
+    """The click's banner can only describe the attempt; the OUTCOME
+    arrives with the forced refresh. The reporter must say ready when
+    ready and name the fix when the server still rejects."""
+    from types import SimpleNamespace
+
+    from sidepulse.provider_usage_feedback import report_reconnect_outcome
+
+    logs = []
+    messages = []
+
+    def make_controller(snapshot_state, reason=None, action=None):
+        controller = SimpleNamespace()
+        controller._sidepulse_reconnect_watch = ("grok", 100.0)
+        controller._sidepulse_provider_usage_window = None
+        controller.set_settings_message = messages.append
+        state = SimpleNamespace(
+            snapshots=(
+                SimpleNamespace(
+                    provider_id="grok",
+                    observed_at=200.0,
+                    state=SimpleNamespace(value=snapshot_state),
+                    reason_code=reason,
+                    action_label=action,
+                ),
+            )
+        )
+        return controller, state
+
+    controller, state = make_controller("ready")
+    report_reconnect_outcome(controller, state, log=logs.append)
+    assert controller._sidepulse_reconnect_watch is None
+    assert "reconnected" in messages[-1]
+
+    controller, state = make_controller("stale", reason="authentication_required")
+    report_reconnect_outcome(controller, state, log=logs.append)
+    assert "grok login" in messages[-1]
+
+    # A refresh that predates the click keeps the watch armed.
+    controller, state = make_controller("ready")
+    state.snapshots[0].observed_at = 50.0
+    report_reconnect_outcome(controller, state, log=logs.append)
+    assert controller._sidepulse_reconnect_watch == ("grok", 100.0)

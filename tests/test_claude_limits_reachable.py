@@ -154,10 +154,24 @@ def test_the_coordinator_follows_the_setting_rather_than_a_hardcoded_name() -> N
 
     class _Probe:
         settings = AgentMonitorSettings()
+        jr_plane_owns_capacity = StatusBarController.jr_plane_owns_capacity
 
     decide = StatusBarController._capacity_source_enabled
     assert decide(_Probe(), "claude") is False
     assert decide(_Probe(), "codex") is True
+
+    # Coalescence step 1 (2026-08-26): when the JR usage plane owns a
+    # provider, the legacy source is off no matter what the setting says —
+    # one scheduler per endpoint. The base controller owns nothing; only
+    # the JR facade claims providers.
+    class _JrOwned(_Probe):
+        settings = AgentMonitorSettings().with_claude_plan_limits_enabled(True)
+
+        def jr_plane_owns_capacity(self, provider_id: str) -> bool:
+            return provider_id == "claude"
+
+    assert decide(_JrOwned(), "claude") is False
+    assert decide(_JrOwned(), "codex") is True
 
 
 def test_the_scheduler_follows_the_setting_too() -> None:
@@ -175,6 +189,7 @@ def test_the_scheduler_follows_the_setting_too() -> None:
             self.settings = settings
 
         _capacity_source_enabled = StatusBarController._capacity_source_enabled
+        jr_plane_owns_capacity = StatusBarController.jr_plane_owns_capacity
 
     row_enabled = StatusBarController._capacity_row_enabled
     off = _Probe(AgentMonitorSettings())

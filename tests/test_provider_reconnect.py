@@ -288,3 +288,24 @@ def test_connection_loss_transitions_edge_only():
         )
         == ()
     )
+
+
+def test_repair_grok_defers_to_a_server_rejection(tmp_path):
+    """The server is the authority on a token, not the file's own
+    expiry stamp. Clicked live three times (2026-08-26): the file held
+    a valid-looking session, the server 401'd it, and every click said
+    "signed in — refreshing now" while nothing could change."""
+    write_grok_auth(tmp_path)
+    store = FakeStore()
+    result = repair_grok_credential(
+        store, home=tmp_path, now=1000.0, server_rejected=True
+    )
+    assert result.outcome is RepairOutcome.NEEDS_SIGN_IN
+    assert "grok login" in result.message
+    assert "rejecting" in result.message
+    # Without the rejection context the healthy message stands.
+    healthy = repair_grok_credential(store, home=tmp_path, now=1000.0)
+    assert healthy.outcome in (
+        RepairOutcome.REPAIRED,
+        RepairOutcome.ALREADY_HEALTHY,
+    )

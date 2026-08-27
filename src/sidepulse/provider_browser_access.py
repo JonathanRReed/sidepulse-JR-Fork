@@ -27,6 +27,8 @@ in on its own, so that stage is normally never reached.
 
 from __future__ import annotations
 
+import time
+
 from .provider_usage_settings import (
     load_provider_usage_settings,
     save_provider_usage_settings,
@@ -132,6 +134,7 @@ def handle_provider_usage_action(
     clipboard_reader=_clipboard_text,
     url_opener=_open_url,
     session_importer=None,
+    reason_code: str | None = None,
 ) -> str | None:
     """Perform one staged action. Returns the user-facing message, or
     None when this action is not part of the browser-access flow (the
@@ -214,6 +217,10 @@ def handle_provider_usage_action(
                 credential_store,
                 home=_Path.home(),
                 now=_time.time(),
+                # The collector's last verdict rides along: a 401 means
+                # the file token the repair is about to bless is the
+                # very token the server just rejected.
+                server_rejected=reason_code == "authentication_required",
             )
             return result.message
         except Exception:
@@ -307,7 +314,10 @@ def run_provider_usage_action(controller, provider_id: str) -> bool:
     from .provider_credential_store import ProviderCredentialStore
 
     message = handle_provider_usage_action(
-        provider_id, label, credential_store=ProviderCredentialStore()
+        provider_id,
+        label,
+        credential_store=ProviderCredentialStore(),
+        reason_code=getattr(snapshot, "reason_code", None),
     )
     if message is None:
         return False
@@ -327,6 +337,13 @@ def run_provider_usage_action(controller, provider_id: str) -> bool:
             pass
     try:
         controller._request_provider_usage(force=True, providers=(provider_id,))
+    except Exception:
+        pass
+    # The click's REAL outcome arrives with the refresh it just forced;
+    # arm the one-shot reporter so the banner tells the truth about what
+    # actually happened instead of only what was attempted.
+    try:
+        controller._sidepulse_reconnect_watch = (provider_id, time.time())
     except Exception:
         pass
     return True

@@ -3419,11 +3419,25 @@ class StatusBarController(NSObject):
 
         Claude was hardcoded off here -- the last of four independent kill
         switches that each, alone, made Claude limits unreachable. It is now
-        the user's opt-in that decides, and nothing else.
+        the user's opt-in that decides -- UNLESS the JR usage plane owns
+        the provider (coalescence step 1, 2026-08-26): two schedulers
+        polling the same api.anthropic.com usage endpoint with the same
+        subscription token is how the owner spent an afternoon rate
+        limited. The JR plane is presentation authority for these
+        providers; the legacy plane's card was already deleted at
+        runtime, so nothing user-visible changes.
         """
+        if self.jr_plane_owns_capacity(provider_id):
+            return False
         if provider_id == "claude":
             return bool(self.settings.claude_plan_limits_enabled)
         return True
+
+    def jr_plane_owns_capacity(self, provider_id: str) -> bool:
+        """Overridden by the JR provider-usage controller. The base
+        class predates that plane and owns its own capacity reads."""
+        del provider_id
+        return False
 
     def _capacity_row_enabled(self, provider_id: str) -> bool:
         """Whether this provider's capacity row is one the user asked to see.
@@ -6195,7 +6209,9 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def toggleUsageGraphProvider_(self, sender):
         provider_id = str(sender.identifier() or "")
-        if provider_id not in {"claude", "codex"}:
+        # Any registry provider (the guard was hard-coded to two while
+        # the setter accepted the registry -- half-merged, 2026-08-26).
+        if provider_id not in set(HOOK_PROVIDERS) | {"claude", "codex"}:
             return
         selected = list(self.settings.usage_graph_providers)
         if checkbox_is_on(sender):
@@ -6208,7 +6224,9 @@ class StatusBarController(NSObject):
             self.set_settings_message("Keep at least one usage source selected.")
             return
         ordered = tuple(
-            value for value in ("claude", "codex") if value in selected
+            value
+            for value in dict.fromkeys(("claude", "codex", *HOOK_PROVIDERS))
+            if value in selected
         )
         self.settings = self.settings.with_usage_graph_providers(ordered)
         save_settings(self.settings)

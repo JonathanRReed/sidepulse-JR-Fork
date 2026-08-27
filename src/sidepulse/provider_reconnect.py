@@ -125,6 +125,7 @@ def repair_grok_credential(
     *,
     home: Path,
     now: float,
+    server_rejected: bool = False,
 ) -> RepairResult:
     """Make the collector's next read match reality. Background-safe.
 
@@ -142,6 +143,23 @@ def repair_grok_credential(
         except Exception:
             cleared = False
         who = f" as {email}" if email else ""
+        if server_rejected:
+            # The SERVER is the authority on a token, not the file's own
+            # expiry stamp. This exact file token is what the collector
+            # sends, and the collector's last answer was 401 -- so
+            # "signed in, refreshing now" was a politer version of the
+            # old lie (clicked live, three times, 2026-08-26). Only
+            # `grok login` can mint a fresh one; the credential-file
+            # watch retries the moment it changes.
+            return RepairResult(
+                "grok",
+                RepairOutcome.NEEDS_SIGN_IN,
+                f"The grok CLI holds a sign-in{who}, but the server is "
+                "rejecting it (revoked or rotated). Run `grok login` in a "
+                "terminal — SidePulse retries automatically the moment the "
+                "CLI saves a fresh sign-in.",
+                changed=cleared,
+            )
         return RepairResult(
             "grok",
             RepairOutcome.REPAIRED if cleared else RepairOutcome.ALREADY_HEALTHY,

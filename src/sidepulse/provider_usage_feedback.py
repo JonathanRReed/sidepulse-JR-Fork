@@ -227,6 +227,68 @@ def celebrate_quota_resets(controller, events, *, log, signal_kind) -> None:
             pass
 
 
+def report_reconnect_outcome(controller, state, *, log) -> None:
+    """One-shot truth about what a reconnect click actually achieved.
+
+    The click's message could only describe the ATTEMPT; the outcome
+    arrives with the forced refresh a moment later. Clicked live
+    (grok, three times, 2026-08-26): every click said "signed in --
+    refreshing now" while the server kept rejecting the token and the
+    card never changed. This closes the loop."""
+    try:
+        watch = getattr(controller, "_sidepulse_reconnect_watch", None)
+        if not watch:
+            return
+        provider_id, clicked_at = watch
+        snapshot = next(
+            (
+                item
+                for item in getattr(state, "snapshots", ())
+                if item.provider_id == provider_id
+            ),
+            None,
+        )
+        if snapshot is None or float(
+            getattr(snapshot, "observed_at", 0.0) or 0.0
+        ) < float(clicked_at):
+            return  # the forced refresh has not landed yet; keep waiting
+        controller._sidepulse_reconnect_watch = None
+        from .provider_usage_platform import provider_descriptor
+
+        label = provider_descriptor(provider_id).label
+        value = getattr(snapshot.state, "value", str(snapshot.state))
+        if value == "ready":
+            message = f"{label} reconnected — live numbers are in."
+        elif getattr(snapshot, "reason_code", None) == "authentication_required":
+            message = (
+                f"{label} is still being rejected by the server — its own "
+                f"CLI has to mint a fresh sign-in (for Grok: `grok login`). "
+                "SidePulse retries the moment that happens."
+            )
+        else:
+            action = getattr(snapshot, "action_label", None)
+            message = f"{label} is still {value.replace('_', ' ')}" + (
+                f" — {action}." if action else "."
+            )
+        log(f"reconnect outcome: {provider_id} -> {value}")
+        window = getattr(controller, "_sidepulse_provider_usage_window", None)
+        if window is not None:
+            try:
+                if window.window.isVisible():
+                    window.show_message(message)
+            except Exception:
+                pass
+        try:
+            controller.set_settings_message(message)
+        except Exception:
+            pass
+    except Exception as exc:
+        try:
+            log(f"reconnect outcome: {exc}")
+        except Exception:
+            pass
+
+
 def connect_claude_usage(controller, *, log) -> None:
     """The Claude connect flow behind the Connect/Reconnect click.
 
