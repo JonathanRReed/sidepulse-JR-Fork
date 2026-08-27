@@ -218,20 +218,56 @@ def read_keychain_secret(
     return CredentialResult(CredentialOutcome.NOT_FOUND)
 
 
-def _run_security_write(item: KeychainItem, secret: str) -> subprocess.CompletedProcess:
-    arguments = [
-        "/usr/bin/security",
-        "add-generic-password",
-        "-U",
-        "-s",
-        item.service,
-        "-w",
-        secret,
-    ]
+def keychain_account_for(item: KeychainItem) -> str | None:
+    """The account the existing item is filed under.
+
+    `add-generic-password` REQUIRES -a; Claude Code files its item under
+    the macOS short user name, which this app has no business assuming.
+    Read it off the item itself (attributes only -- no password, so no
+    consent prompt).
+    """
     if item.account:
-        arguments += ["-a", item.account]
+        return item.account
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/security", "find-generic-password", "-s", item.service],
+            capture_output=True,
+            text=True,
+            timeout=_SECURITY_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    for line in (completed.stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith('"acct"'):
+            _, _, value = stripped.partition("=")
+            account = value.strip().strip('"')
+            return account or None
+    return None
+
+
+def _run_security_write(item: KeychainItem, secret: str) -> subprocess.CompletedProcess:
+    account = keychain_account_for(item)
+    if not account:
+        # Without an account the tool prints usage and exits nonzero --
+        # a silent no-op that looked like a permission failure
+        # (2026-08-27: the write-back never ran at all).
+        raise ValueError("keychain item has no account to update")
     return subprocess.run(
-        arguments,
+        [
+            "/usr/bin/security",
+            "add-generic-password",
+            "-U",
+            "-s",
+            item.service,
+            "-a",
+            account,
+            "-w",
+            secret,
+        ],
         capture_output=True,
         text=True,
         timeout=_SECURITY_TIMEOUT_SECONDS,
@@ -256,7 +292,7 @@ def write_keychain_secret(
         return False
     try:
         completed = (runner or _run_security_write)(item, secret)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return False
     return completed.returncode == 0
 

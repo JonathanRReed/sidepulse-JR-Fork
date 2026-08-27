@@ -242,3 +242,43 @@ def test_a_denial_revokes_the_standing_grant(tmp_path):
     assert not ledger.standing_grant(CLAUDE_CODE_KEYCHAIN.service), (
         "a revoked grant falls back to foreground-only"
     )
+
+
+def test_keychain_write_resolves_the_items_own_account():
+    """add-generic-password REQUIRES -a. Claude Code files its item under
+    the macOS short user name, so the account is read off the item --
+    omitting it made every write-back a silent usage-error no-op."""
+    import subprocess
+
+    from sidepulse.credentials import _run_security_write, keychain_account_for
+
+    def finder(args, **kwargs):
+        assert args[:3] == ["/usr/bin/security", "find-generic-password", "-s"]
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout='    "acct"<blob>="someone"\n    "svce"<blob>="Claude Code-credentials"\n',
+        )
+
+    import sidepulse.credentials as module
+
+    original = module.subprocess.run
+    module.subprocess.run = finder
+    try:
+        assert keychain_account_for(CLAUDE_CODE_KEYCHAIN) == "someone"
+        seen = {}
+
+        def writer(args, **kwargs):
+            seen["args"] = args
+            return subprocess.CompletedProcess(args, 0, stdout="")
+
+        module.subprocess.run = lambda args, **kw: (
+            finder(args, **kw)
+            if args[1] == "find-generic-password"
+            else writer(args, **kw)
+        )
+        _run_security_write(CLAUDE_CODE_KEYCHAIN, "payload")
+        assert "-a" in seen["args"]
+        assert seen["args"][seen["args"].index("-a") + 1] == "someone"
+    finally:
+        module.subprocess.run = original

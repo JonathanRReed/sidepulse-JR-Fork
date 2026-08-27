@@ -49,7 +49,9 @@ CLAUDE_REMOTE_QUOTA_NO_WINDOWS = "claude_remote_quota_no_windows"
 CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN = "claude_remote_quota_needs_sign_in"
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-CLAUDE_OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+#: Verified against the installed CodexBar binary (2026-08-27): the
+#: token host is platform.claude.com, NOT console.anthropic.com.
+CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 #: Claude Code's own public OAuth client (PKCE, no secret) -- the same
 #: id CodexBar uses to renew the shared sign-in.
 CLAUDE_CODE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -194,11 +196,92 @@ def refreshable_credential(raw: object) -> bool:
     return isinstance(refresh, str) and bool(refresh.strip())
 
 
+def refresh_token_expired(raw: object, now: float) -> bool:
+    """True when the REFRESH token itself is spent.
+
+    Claude Code stores `refreshTokenExpiresAt` (ms) beside the access
+    token. Only when that has passed is a human sign-in genuinely
+    required -- an expired ACCESS token is just renewal work
+    (2026-08-27: a live credential had 20 days of refresh validity left
+    while the app was telling the owner to sign in again).
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return True
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return True
+    oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
+    if not isinstance(oauth, dict):
+        return True
+    value = oauth.get("refreshTokenExpiresAt")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        # Absent is not evidence of expiry -- let the server decide.
+        return False
+    seconds = float(value) / 1000.0 if float(value) > 1e11 else float(value)
+    return math.isfinite(seconds) and now >= seconds
+
+
+def post_form_via_apple_stack(
+    url: str,
+    fields: dict[str, str],
+    *,
+    timeout: float,
+) -> tuple[int, bytes]:
+    """POST a form through NSURLSession, not urllib.
+
+    The token endpoint sits behind Cloudflare, which fingerprints the
+    client: urllib is answered with 429s and finally a 1010 ban, while
+    the same request through Apple's networking stack succeeds
+    (verified live 2026-08-27, and it is why CodexBar -- a URLSession
+    app -- never hit this wall). The app is already PyObjC, so the
+    honest fix is to use the platform's own client.
+    """
+    import threading
+    from urllib.parse import urlencode
+
+    from Foundation import (
+        NSURL,
+        NSData,
+        NSMutableURLRequest,
+        NSURLSession,
+    )
+
+    body = urlencode(fields).encode("utf-8")
+    request = NSMutableURLRequest.requestWithURL_(NSURL.URLWithString_(url))
+    request.setHTTPMethod_("POST")
+    request.setValue_forHTTPHeaderField_(
+        "application/x-www-form-urlencoded; charset=utf-8", "Content-Type"
+    )
+    request.setValue_forHTTPHeaderField_("application/json", "Accept")
+    request.setHTTPBody_(NSData.dataWithBytes_length_(body, len(body)))
+
+    finished = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def handler(data, response, error) -> None:
+        outcome["status"] = (
+            int(response.statusCode()) if response is not None else 0
+        )
+        outcome["body"] = bytes(data) if data is not None else b""
+        outcome["error"] = error is not None
+        finished.set()
+
+    NSURLSession.sharedSession().dataTaskWithRequest_completionHandler_(
+        request, handler
+    ).resume()
+    if not finished.wait(max(1.0, float(timeout))):
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NETWORK)
+    if outcome.get("error") or not outcome.get("status"):
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NETWORK)
+    return int(outcome["status"]), bytes(outcome["body"])
+
+
 def refresh_claude_payload(
     raw: str,
     *,
     now: float,
-    opener=None,
+    poster=None,
     timeout: float = CLAUDE_USAGE_TIMEOUT_SECONDS,
 ) -> tuple[str, ClaudeOAuthCredential]:
     """Renew Claude Code's sign-in the way CodexBar does (2026-08-27
@@ -223,45 +306,30 @@ def refresh_claude_payload(
     if not isinstance(refresh_token, str) or not refresh_token.strip():
         raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN)
 
-    from urllib.error import HTTPError, URLError
-    from urllib.request import Request
-
-    request = Request(
-        CLAUDE_OAUTH_TOKEN_URL,
-        method="POST",
-        data=json.dumps(
+    transport = poster or post_form_via_apple_stack
+    try:
+        status, body = transport(
+            CLAUDE_OAUTH_TOKEN_URL,
             {
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token.strip(),
                 "client_id": CLAUDE_CODE_OAUTH_CLIENT_ID,
-            }
-        ).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": _claude_code_user_agent(),
-        },
-    )
-    try:
-        with (opener or _default_opener)(request, timeout) as response:
-            status = getattr(response, "status", 200)
-            if status != 200:
-                raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR)
-            body = response.read(CLAUDE_USAGE_MAX_BYTES + 1)
-    except HTTPError as error:
-        if error.code in {400, 401, 403}:
-            # A refused refresh means the token is spent or revoked:
-            # only a fresh `claude` sign-in can recover.
-            raise ClaudeQuotaUnavailableError(
-                CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN
-            ) from None
-        if error.code == 429:
-            raise ClaudeQuotaUnavailableError(
-                CLAUDE_REMOTE_QUOTA_RATE_LIMITED
-            ) from None
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR) from None
-    except (OSError, URLError, TimeoutError):
+            },
+            timeout=timeout,
+        )
+    except ClaudeQuotaUnavailableError:
+        raise
+    except Exception:
         raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NETWORK) from None
+    if status in {400, 401}:
+        # invalid_grant: the refresh token is spent or revoked, and only
+        # a fresh `claude` sign-in recovers. 403 is NOT here -- that is
+        # Cloudflare refusing the CLIENT, not the credential.
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN)
+    if status == 429:
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_RATE_LIMITED)
+    if status != 200:
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR)
     try:
         answer = json.loads(body.decode("utf-8"))
     except (UnicodeError, ValueError):

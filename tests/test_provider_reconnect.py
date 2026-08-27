@@ -160,7 +160,13 @@ def test_repair_claude_keeps_the_token_when_write_back_fails():
     assert "Keychain failed" in result.message
 
 
-def test_repair_claude_falls_back_when_refresh_is_refused():
+def test_a_rate_limited_renewal_never_reads_as_a_dead_sign_in():
+    """429 is the token endpoint saying 'later', not 'sign in again' --
+    the owner was sent to a terminal for a transient limit while their
+    refresh token still had 20 days on it (2026-08-27)."""
+    from sidepulse.provider_reconnect import note_claude_renewal
+
+    note_claude_renewal(now=0.0, succeeded=True)  # clear any backoff
     store = FakeStore()
     result = repair_claude_credential(
         store,
@@ -171,12 +177,65 @@ def test_repair_claude_falls_back_when_refresh_is_refused():
         keychain_writer=lambda payload: True,
         refresher=_failing_refresher,
     )
-    assert result.outcome is RepairOutcome.NEEDS_SIGN_IN
+    assert result.outcome is RepairOutcome.UNAVAILABLE
     assert not store.stored
-    assert "could not be renewed" in result.message
+    assert "rate limited" in result.message
+    assert "sign in" not in result.message.lower()
+
+
+def test_a_spent_refresh_token_does_ask_for_a_sign_in():
+    from sidepulse.claude_quota import (
+        CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN,
+        ClaudeQuotaUnavailableError,
+    )
+
+    def refused(raw, *, now):
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN)
+
+    store = FakeStore()
+    payload = json.dumps(
+        {
+            "claudeAiOauth": {
+                "accessToken": "a" * 32,
+                "refreshToken": "spent",
+                "expiresAt": 1_000_000_000_000,
+                "refreshTokenExpiresAt": 1_500_000_000_000,
+            }
+        }
+    )
+    result = repair_claude_credential(
+        store,
+        now=2_000_000_000.0,
+        keychain_payload_reader=lambda: payload,
+        keychain_writer=lambda payload: True,
+        refresher=refused,
+    )
+    assert result.outcome is RepairOutcome.NEEDS_SIGN_IN
+    assert "fully expired" in result.message
+
+
+def test_renewal_backs_off_instead_of_hammering_the_token_endpoint():
+    """A renewal on every collect cycle is what produced the 429 wall."""
+    from sidepulse.provider_reconnect import (
+        claude_renewal_allowed,
+        note_claude_renewal,
+    )
+
+    note_claude_renewal(now=1000.0, succeeded=True)
+    assert claude_renewal_allowed(1000.0)
+    note_claude_renewal(now=1000.0, succeeded=False)
+    assert not claude_renewal_allowed(1030.0), "a minute of quiet, minimum"
+    assert claude_renewal_allowed(1100.0)
+    note_claude_renewal(now=1100.0, succeeded=False)
+    assert not claude_renewal_allowed(1300.0), "the ladder doubles"
+    note_claude_renewal(now=1400.0, succeeded=True)
+    assert claude_renewal_allowed(1400.0), "success clears the ladder"
 
 
 def test_repair_claude_rejects_signed_out_shape():
+    from sidepulse.provider_reconnect import note_claude_renewal
+
+    note_claude_renewal(now=0.0, succeeded=True)
     store = FakeStore()
     result = repair_claude_credential(
         store,
@@ -185,7 +244,7 @@ def test_repair_claude_rejects_signed_out_shape():
         keychain_writer=lambda payload: True,
         refresher=_failing_refresher,
     )
-    assert result.outcome is RepairOutcome.NEEDS_SIGN_IN
+    assert result.outcome is RepairOutcome.UNAVAILABLE
     assert not store.stored
 
 

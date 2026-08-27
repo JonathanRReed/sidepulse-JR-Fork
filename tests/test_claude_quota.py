@@ -40,27 +40,28 @@ def test_refresh_rebuilds_the_payload_and_preserves_unknown_fields():
     )
     seen_requests = []
 
-    def opener(request, timeout):
-        seen_requests.append(json_module.loads(request.data.decode("utf-8")))
-        return _FakeResponse(
-            json_module.dumps(
-                {
-                    "access_token": "minted",
-                    "refresh_token": "rotated",
-                    "expires_in": 3600,
-                }
-            ).encode("utf-8")
-        )
+    def poster(url, fields, *, timeout):
+        seen_requests.append((url, dict(fields)))
+        return 200, json_module.dumps(
+            {
+                "access_token": "minted",
+                "refresh_token": "rotated",
+                "expires_in": 3600,
+            }
+        ).encode("utf-8")
 
     new_payload, credential = refresh_claude_payload(
-        raw, now=1_000.0, opener=opener
+        raw, now=1_000.0, poster=poster
     )
     assert seen_requests == [
-        {
-            "grant_type": "refresh_token",
-            "refresh_token": "spendable",
-            "client_id": CLAUDE_CODE_OAUTH_CLIENT_ID,
-        }
+        (
+            "https://platform.claude.com/v1/oauth/token",
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": "spendable",
+                "client_id": CLAUDE_CODE_OAUTH_CLIENT_ID,
+            },
+        )
     ]
     rebuilt = json_module.loads(new_payload)
     oauth = rebuilt["claudeAiOauth"]
@@ -74,9 +75,7 @@ def test_refresh_rebuilds_the_payload_and_preserves_unknown_fields():
     assert credential.subscription_type == "max"
 
 
-def test_refresh_refusal_maps_to_needs_sign_in():
-    from urllib.error import HTTPError
-
+def test_a_spent_refresh_token_maps_to_needs_sign_in():
     import pytest
 
     from sidepulse.claude_quota import (
@@ -85,16 +84,38 @@ def test_refresh_refusal_maps_to_needs_sign_in():
         refresh_claude_payload,
     )
 
-    def opener(request, timeout):
-        raise HTTPError(request.full_url, 400, "invalid_grant", None, None)
-
     with pytest.raises(ClaudeQuotaUnavailableError) as caught:
         refresh_claude_payload(
             '{"claudeAiOauth":{"refreshToken":"spent"}}',
             now=1_000.0,
-            opener=opener,
+            poster=lambda url, fields, *, timeout: (400, b'{"error":"invalid_grant"}'),
         )
     assert str(caught.value) == CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN
+
+
+def test_a_blocked_client_is_never_mistaken_for_a_dead_credential():
+    """Cloudflare answers a fingerprinted client with 403/429. Neither
+    says anything about the SIGN-IN, and treating them as invalid_grant
+    is what sent the owner to a terminal for a network problem."""
+    import pytest
+
+    from sidepulse.claude_quota import (
+        CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN,
+        CLAUDE_REMOTE_QUOTA_RATE_LIMITED,
+        ClaudeQuotaUnavailableError,
+        refresh_claude_payload,
+    )
+
+    for status, expected in ((429, CLAUDE_REMOTE_QUOTA_RATE_LIMITED), (403, None)):
+        with pytest.raises(ClaudeQuotaUnavailableError) as caught:
+            refresh_claude_payload(
+                '{"claudeAiOauth":{"refreshToken":"fine"}}',
+                now=1_000.0,
+                poster=lambda url, fields, *, timeout, _s=status: (_s, b"blocked"),
+            )
+        assert str(caught.value) != CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN
+        if expected:
+            assert str(caught.value) == expected
 
 
 def test_refresh_without_a_refresh_token_never_calls_the_network():
@@ -105,10 +126,21 @@ def test_refresh_without_a_refresh_token_never_calls_the_network():
         refresh_claude_payload,
     )
 
-    def opener(request, timeout):
+    def poster(url, fields, *, timeout):
         raise AssertionError("must not reach the network")
 
     with pytest.raises(ClaudeQuotaUnavailableError):
         refresh_claude_payload(
-            '{"claudeAiOauth":{"accessToken":"only"}}', now=1.0, opener=opener
+            '{"claudeAiOauth":{"accessToken":"only"}}', now=1.0, poster=poster
         )
+
+
+def test_the_token_request_is_form_encoded_through_the_apple_stack():
+    """Source-level contract: JSON over urllib is what Cloudflare bans."""
+    import inspect
+
+    from sidepulse import claude_quota
+
+    source = inspect.getsource(claude_quota.post_form_via_apple_stack)
+    assert "NSURLSession" in source
+    assert "application/x-www-form-urlencoded" in source

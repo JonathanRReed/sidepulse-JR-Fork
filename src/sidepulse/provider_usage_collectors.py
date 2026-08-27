@@ -115,6 +115,24 @@ def _failure(
     )
 
 
+#: Who actually owns each sign-in. "Reconnect X" is only honest where
+#: this app can repair the credential itself; where a CLI owns it, the
+#: row must name the command that works (2026-08-27: a rejected Grok
+#: token showed "Reconnect Grok", which repairs nothing).
+_AUTH_ACTION_BY_PROVIDER: dict[str, str] = {
+    "grok": "Run grok login",
+    "codex": "Run codex login",
+    "antigravity": "Open Antigravity or run agy",
+}
+
+
+def _auth_action(provider_id: str) -> str:
+    return _AUTH_ACTION_BY_PROVIDER.get(
+        provider_id,
+        f"Reconnect {provider_id.replace('-', ' ').title()}",
+    )
+
+
 def _http_failure(provider_id: str, observed_at: float, error: ProviderHttpError) -> ProviderUsageSnapshot:
     if error.status in {401, 403}:
         return _failure(
@@ -122,7 +140,7 @@ def _http_failure(provider_id: str, observed_at: float, error: ProviderHttpError
             observed_at=observed_at,
             state=ProviderSourceState.NEEDS_SIGN_IN,
             reason="authentication_required",
-            action=f"Reconnect {provider_id.replace('-', ' ').title()}",
+            action=_auth_action(provider_id),
         )
     if error.status == 429:
         return _failure(

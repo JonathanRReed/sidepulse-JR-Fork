@@ -242,11 +242,20 @@ def repair_claude_credential(
         )
         if renewed is not None:
             return renewed
+        from .claude_quota import refresh_token_expired
+
+        if refresh_token_expired(raw, now):
+            return RepairResult(
+                "claude",
+                RepairOutcome.NEEDS_SIGN_IN,
+                "Claude Code's sign-in has fully expired — run `claude` in "
+                "a terminal and sign in, then click Reconnect Claude.",
+            )
         return RepairResult(
             "claude",
-            RepairOutcome.NEEDS_SIGN_IN,
-            "Claude Code's sign-in could not be renewed — run `claude` in "
-            "a terminal and sign in, then click Reconnect Claude.",
+            RepairOutcome.UNAVAILABLE,
+            "Claude's sign-in could not be renewed just now — the last "
+            "known numbers stand and it retries on its own.",
         )
     stored = None
     try:
@@ -268,6 +277,32 @@ def repair_claude_credential(
         "Claude usage connected with a fresh sign-in — refreshing now.",
         changed=True,
     )
+
+
+#: Renewal attempt spacing. The token endpoint rate-limits hard, and a
+#: renewal that retries every collect cycle turns one expired token into
+#: a 429 wall (observed 2026-08-27). Doubling from 1 minute to an hour.
+CLAUDE_RENEWAL_BACKOFF_SECONDS: tuple[float, ...] = (60.0, 300.0, 900.0, 3600.0)
+
+#: {"attempts": int, "next_at": float} -- in-memory, like FailureGate.
+_CLAUDE_RENEWAL_STATE: dict[str, float] = {"attempts": 0.0, "next_at": 0.0}
+
+
+def claude_renewal_allowed(now: float) -> bool:
+    return now >= _CLAUDE_RENEWAL_STATE["next_at"]
+
+
+def note_claude_renewal(*, now: float, succeeded: bool) -> None:
+    if succeeded:
+        _CLAUDE_RENEWAL_STATE["attempts"] = 0.0
+        _CLAUDE_RENEWAL_STATE["next_at"] = 0.0
+        return
+    attempts = int(_CLAUDE_RENEWAL_STATE["attempts"])
+    delay = CLAUDE_RENEWAL_BACKOFF_SECONDS[
+        min(attempts, len(CLAUDE_RENEWAL_BACKOFF_SECONDS) - 1)
+    ]
+    _CLAUDE_RENEWAL_STATE["attempts"] = float(attempts + 1)
+    _CLAUDE_RENEWAL_STATE["next_at"] = now + delay
 
 
 def _default_claude_keychain_writer(payload: str) -> bool:
@@ -292,18 +327,34 @@ def _renew_claude_from_payload(
     the old code's docstring feared -- a status readout that costs the
     user their actual tooling).
     """
-    from .claude_quota import ClaudeQuotaUnavailableError, refresh_claude_payload
+    from .claude_quota import (
+        CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN,
+        ClaudeQuotaUnavailableError,
+        refresh_claude_payload,
+    )
 
     refresh = refresher or refresh_claude_payload
     try:
         new_payload, credential = refresh(raw, now=now)
-    except ClaudeQuotaUnavailableError:
-        return None
+    except ClaudeQuotaUnavailableError as error:
+        note_claude_renewal(now=now, succeeded=False)
+        if str(error) == CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN:
+            return None
+        # Rate limited, offline, server trouble: the sign-in is fine and
+        # the last-known numbers stay on screen. Saying "sign in again"
+        # here sent the owner to a terminal for a 429 (2026-08-27).
+        return RepairResult(
+            "claude",
+            RepairOutcome.UNAVAILABLE,
+            "Claude's sign-in renewal was rate limited or unreachable — "
+            "the last known numbers stand and it retries on its own.",
+        )
     # The refresh CONSUMED the old refresh token the moment it
     # succeeded -- from here the only honest move is forward. Write the
     # rotated tokens back for Claude Code first; if that write fails,
     # still keep our access token (it works until expiry) and say
     # plainly that `claude` may need a fresh sign-in.
+    note_claude_renewal(now=now, succeeded=True)
     writer = keychain_writer or _default_claude_keychain_writer
     wrote_back = writer(new_payload)
     try:
@@ -342,6 +393,8 @@ def renew_claude_credential_in_background(
     credential changed and a fresh collect is worth it right now.
     """
     del home  # signature symmetry with the other background repairs
+    if not claude_renewal_allowed(now):
+        return False
     try:
         from .credentials import (
             CLAUDE_CODE_KEYCHAIN,
