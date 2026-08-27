@@ -46,8 +46,18 @@ def test_attention_arrival_is_explicit_finite_motion_over_a_static_base() -> Non
         colors=settings,
         include_attention_arrival=True,
     )
-    attention_tap = "#123456 240ms"
-    assert arrival.splitlines().count(attention_tap) == 2
+    # One overshoot-and-settle crest (2026-08-26): swell to the attention
+    # color, breathe down to the 55% hold -- never a repeated flash.
+    lines = arrival.splitlines()
+    assert lines.count("#123456 300ms cosine") == 1
+    from sidepulse.colors import (
+        ATTENTION_CREST_HOLD_FRACTION,
+        ATTENTION_CREST_SETTLE_MS,
+        scale_hex_brightness,
+    )
+
+    hold = scale_hex_brightness("#123456", ATTENTION_CREST_HOLD_FRACTION)
+    assert lines.count(f"{hold} {ATTENTION_CREST_SETTLE_MS}ms cosine") == 1
     assert "repeat" not in arrival
     assert arrival.endswith(base)
 
@@ -86,7 +96,7 @@ def test_every_attention_render_path_settles_to_a_static_anchor(
     )
 
     assert "repeat" not in base
-    assert arrival.splitlines().count("#123456 240ms") == 2
+    assert arrival.splitlines().count("#123456 300ms cosine") == 1
     assert "repeat" not in arrival
     assert arrival.endswith(base)
 
@@ -122,7 +132,7 @@ def test_projection_attention_uses_the_same_finite_arrival_contract() -> None:
     )
 
     assert "repeat" not in base
-    assert arrival.splitlines().count("#123456 240ms") == 2
+    assert arrival.splitlines().count("#123456 300ms cosine") == 1
     assert "repeat" not in arrival
     assert arrival.endswith(base)
 

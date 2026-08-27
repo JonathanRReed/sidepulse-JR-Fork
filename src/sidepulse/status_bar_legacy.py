@@ -4724,14 +4724,6 @@ class StatusBarController(NSObject):
         self.close_status_menu()
 
     @objc.IBAction
-    def openSessionWithAction_(self, sender):
-        payload = sender.representedObject()
-        if not isinstance(payload, dict):
-            return
-        self.open_session(payload.get("status"), payload.get("action"), remember=True)
-        self.close_status_menu()
-
-    @objc.IBAction
     def setProviderOpenPreference_(self, sender):
         selected = sender.selectedItem()
         payload = selected.representedObject() if selected is not None else None
@@ -5321,20 +5313,12 @@ class StatusBarController(NSObject):
             f"Focus rule saved: {item.title() if item is not None else 'No profile'}."
         )
 
-    @objc.IBAction
-    def setSessionIdentityColor_(self, sender):
-        payload = sender.representedObject() or {}
-        agent_id = str(payload.get("agent_id") or "")
-        if not agent_id:
-            return
-        color = payload.get("color")
-        self.settings = self.settings.with_colors(
-            self.settings.colors.with_session_color(
-                agent_id, str(color) if color is not None else None
-            )
-        )
-        save_settings(self.settings)
-        self.refresh_(None)
+    # NOTE: per-session identity-color OVERRIDES lost their only writer
+    # when the pre-mailbox session options menu was deleted (2026-08-26).
+    # Reads are still honored everywhere (colors.session_color); the next
+    # writer surface is an owner call -- most likely an Agent Browser
+    # action, which means extending the typed OperatorActionDescriptor
+    # allowlist rather than resurrecting a right-click submenu.
 
     @objc.IBAction
     def toggleReminderAlerts_(self, sender):
