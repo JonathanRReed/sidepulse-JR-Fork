@@ -621,3 +621,25 @@ def test_background_projection_replaces_current_action_descriptors_atomically() 
     item = controller.action_menu_for_selected_row().itemAtIndex_(0)
     assert item.isEnabled() is False
     assert controller.performBrowserAction_(item) is False
+
+
+def test_browser_window_routes_bare_keys_to_the_command_vocabulary() -> None:
+    """The window subclass is the wire (2026-08-26): handle_key_command
+    existed with no keyDown_ ever calling it, so Return/Escape/Cmd-F
+    only ever beeped in the shipped window."""
+    from sidepulse.agent_browser_window import (
+        _KEY_NAMES,
+        AgentBrowserWindowController,
+        _AgentBrowserWindow,
+    )
+
+    controller = AgentBrowserWindowController.alloc().init()
+    try:
+        assert controller.window.isKindOfClass_(_AgentBrowserWindow)
+        assert controller.window.delegate() is controller
+        # The mapping covers exactly the vocabulary handle_key_command
+        # dispatches without a modifier.
+        assert set(_KEY_NAMES.values()) == {"up", "down", "return", "enter", "escape"}
+        assert "\uf700" in _KEY_NAMES and "\uf701" in _KEY_NAMES
+    finally:
+        controller.window.close()

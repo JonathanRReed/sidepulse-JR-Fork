@@ -17,6 +17,7 @@ from AppKit import (
     NSBackingStoreBuffered,
     NSBezelStyleRounded,
     NSButton,
+    NSEventModifierFlagCommand,
     NSMenu,
     NSMenuItem,
     NSScrollView,
@@ -220,6 +221,52 @@ def _button(title: str, target: object, action: str) -> NSButton:
     return button
 
 
+# The window's key vocabulary, mapped from AppKit function-key characters
+# to handle_key_command's names. Arrow keys are listed for completeness but
+# rarely reach the window: a focused table consumes them natively.
+_KEY_NAMES = {
+    "\uf700": "up",
+    "\uf701": "down",
+    "\r": "return",
+    "\x03": "enter",
+    "\x1b": "escape",
+}
+
+
+class _AgentBrowserWindow(NSWindow):
+    """Routes bare keys to the controller's bounded command vocabulary.
+
+    handle_key_command existed, tested, with no keyDown_ ever calling it
+    (wired 2026-08-26): Return-to-open, Escape-to-close, and Cmd-F all
+    read as designed keyboard flow in the tests while the shipped window
+    only ever beeped.
+    """
+
+    def keyDown_(self, event):
+        controller = self.delegate()
+        characters = str(event.charactersIgnoringModifiers() or "")
+        key = _KEY_NAMES.get(characters[:1])
+        if (
+            controller is not None
+            and key is not None
+            and not event.modifierFlags() & NSEventModifierFlagCommand
+            and controller.handle_key_command(key)
+        ):
+            return
+        objc.super(_AgentBrowserWindow, self).keyDown_(event)
+
+    def performKeyEquivalent_(self, event):
+        controller = self.delegate()
+        characters = str(event.charactersIgnoringModifiers() or "")
+        if (
+            controller is not None
+            and event.modifierFlags() & NSEventModifierFlagCommand
+            and controller.handle_key_command(characters, command=True)
+        ):
+            return True
+        return objc.super(_AgentBrowserWindow, self).performKeyEquivalent_(event)
+
+
 class AgentBrowserWindowController(NSObject):
     """One reusable ordinary window backed only by injected pure documents."""
 
@@ -250,7 +297,7 @@ class AgentBrowserWindowController(NSObject):
             | NSWindowStyleMaskMiniaturizable
             | NSWindowStyleMaskResizable
         )
-        self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        self.window = _AgentBrowserWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             ((0.0, 0.0), (width, height)),
             style,
             NSBackingStoreBuffered,
