@@ -33,6 +33,26 @@ BATTERY_HIGH_GREEN = "#00FF66"
 BATTERY_CHARGING_MINT = "#80FFC8"
 BATTERY_OFF = "#000000"
 DEFAULT_POWER_CHANGE_PREVIEW_SECONDS = 7.0
+# The plug-in hello (MagSafe grammar: expressive exactly once, then the
+# steady trickle). Mint rises LED-by-LED from the SD-slot end, the whole
+# strip crests once, and the finite program ends -- the 7s power-change
+# preview's steady fill takes over from there.
+CHARGING_HELLO_SECONDS = 1.4
+
+
+def charging_hello_program(led_count: int = 8) -> str:
+    count = max(1, min(8, int(led_count)))
+    rise = "; ".join(
+        f"{index}:{BATTERY_CHARGING_MINT} 240ms cosine {index * 60}ms"
+        for index in range(count)
+    )
+    return "\n".join(
+        [
+            "off 120ms cosine",
+            rise,
+            f"{BATTERY_CHARGING_MINT} 320ms pulse",
+        ]
+    )
 
 
 @dataclass(frozen=True)

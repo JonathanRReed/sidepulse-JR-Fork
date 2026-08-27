@@ -1747,3 +1747,31 @@ def test_show_never_fronts_the_bar_over_a_full_screen_space():
     device.show()
     window.orderFrontRegardless.assert_called()
     window.orderOut_.assert_not_called()
+
+
+def test_announcer_pill_entrance_springs_from_its_top_anchor(monkeypatch) -> None:
+    """The pill used to teleport: frame set, orderFrontRegardless, done.
+    Its entrance is now a top-anchored spring + fade (wired 2026-08-26,
+    Dynamic Island grammar), and Reduce Motion keeps the instant show."""
+    from sidepulse.virtual_device import AnnouncerPill
+
+    pill = AnnouncerPill()
+    pill._ensure_window()
+    pill._animate_entrance()
+
+    layer = pill.view.layer()
+    assert layer is not None
+    assert layer.animationForKey_("sidepulse.pill.entrance") is not None
+    assert layer.animationForKey_("sidepulse.pill.fade") is not None
+    assert tuple(layer.anchorPoint()) == (0.5, 1.0)
+
+    # Reduce Motion: no animation is queued at all.
+
+    layer.removeAllAnimations()
+    monkeypatch.setattr(
+        "sidepulse.accessibility_display.read_accessibility_display_preferences",
+        lambda: type("P", (), {"reduce_motion": True})(),
+    )
+    pill._animate_entrance()
+    assert layer.animationForKey_("sidepulse.pill.entrance") is None
+    pill.close()

@@ -23900,3 +23900,37 @@ class SessionHeardSuffixTests(unittest.TestCase):
         self.assertEqual(
             session_heard_suffix(self._status(2.5 * 3600), self.now), " · 2h ago"
         )
+
+
+class ChargingHelloTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_controller(self)
+
+    def test_plug_in_plays_one_finite_mint_hello(self) -> None:
+        """The MagSafe grammar (wired 2026-08-26): mint rises LED-by-LED,
+        the strip crests once, the finite program ends, and the steady
+        preview fill takes over. Plug-in only -- unplugging is not an
+        event worth celebrating."""
+        from sidepulse.battery import BatterySnapshot, charging_hello_program
+
+        program = charging_hello_program(8)
+        self.assertNotIn("repeat", program)
+        self.assertEqual(program.count("240ms cosine"), 8)
+        self.assertIn("320ms pulse", program)
+
+        flourishes: list[tuple[str, str]] = []
+        self.controller.play_transition_flourish = (
+            lambda label, animation: flourishes.append((label, animation.program))
+        )
+        self.controller.last_power_connected = False
+        plugged = BatterySnapshot(
+            percent=50, is_charging=True, is_charged=False, is_plugged=True
+        )
+        self.controller.update_battery_power_preview(plugged)
+        self.assertEqual([label for label, _program in flourishes], ["Charging hello"])
+
+        unplugged = BatterySnapshot(
+            percent=50, is_charging=False, is_charged=False, is_plugged=False
+        )
+        self.controller.update_battery_power_preview(unplugged)
+        self.assertEqual(len(flourishes), 1)

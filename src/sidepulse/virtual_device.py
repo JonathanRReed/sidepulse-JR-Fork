@@ -2228,8 +2228,28 @@ class AnnouncerPill:
 
     def hide(self) -> None:
         self.text = None
-        if self.window is not None:
-            self.window.orderOut_(None)
+        window = self.window
+        if window is None:
+            return
+        if not window.isVisible():
+            window.orderOut_(None)
+            return
+        # Exits are always shorter than entrances: a quick fade out
+        # instead of a blink-out. Any failure falls back to the blink.
+        try:
+            from AppKit import NSAnimationContext
+
+            def _animate(context):
+                context.setDuration_(0.18)
+                window.animator().setAlphaValue_(0.0)
+
+            def _finish():
+                window.orderOut_(None)
+                window.setAlphaValue_(1.0)
+
+            NSAnimationContext.runAnimationGroup_completionHandler_(_animate, _finish)
+        except Exception:
+            window.orderOut_(None)
 
     def update(
         self,
@@ -2271,6 +2291,57 @@ class AnnouncerPill:
             from .window_presentation import present_window
 
             present_window(self.window, key=False)
+            self._animate_entrance()
+
+    def _animate_entrance(self) -> None:
+        """The Dynamic Island's arrival, scaled to a pill: it hangs FROM
+        the notch, so it scales up from its top-center anchor with a
+        small spring settle and a fade -- never a teleport. Failure here
+        must never break the pill itself, and Reduce Motion keeps the
+        instant appearance (which is exactly what that setting asks for).
+        """
+        try:
+            from .accessibility_display import read_accessibility_display_preferences
+
+            if read_accessibility_display_preferences().reduce_motion:
+                return
+        except Exception:
+            pass
+        try:
+            import Quartz
+            from Foundation import NSNumber
+
+            view = self.view
+            if view is None:
+                return
+            view.setWantsLayer_(True)
+            layer = view.layer()
+            if layer is None:
+                return
+            bounds = view.bounds()
+            # Anchor at top-center so the scale grows DOWN from the notch;
+            # re-pin position so changing the anchor doesn't shift the view.
+            layer.setAnchorPoint_((0.5, 1.0))
+            layer.setPosition_(
+                (bounds.size.width / 2.0, bounds.size.height)
+            )
+            spring = Quartz.CASpringAnimation.animationWithKeyPath_("transform.scale")
+            spring.setMass_(1.0)
+            spring.setStiffness_(190.0)
+            spring.setDamping_(20.0)
+            spring.setFromValue_(NSNumber.numberWithDouble_(0.94))
+            spring.setToValue_(NSNumber.numberWithDouble_(1.0))
+            spring.setDuration_(spring.settlingDuration())
+            fade = Quartz.CABasicAnimation.animationWithKeyPath_("opacity")
+            fade.setFromValue_(NSNumber.numberWithDouble_(0.0))
+            fade.setToValue_(NSNumber.numberWithDouble_(1.0))
+            fade.setDuration_(0.2)
+            layer.addAnimation_forKey_(spring, "sidepulse.pill.entrance")
+            layer.addAnimation_forKey_(fade, "sidepulse.pill.fade")
+        except Exception:
+            # A missing Quartz symbol or layer quirk costs the flourish,
+            # never the words.
+            pass
 
     def close(self) -> None:
         if self.window is not None:

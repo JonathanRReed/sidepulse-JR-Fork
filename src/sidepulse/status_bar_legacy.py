@@ -166,8 +166,10 @@ from .audit import (
     trim_oversized_process_logs,
 )
 from .battery import (
+    CHARGING_HELLO_SECONDS,
     BatteryLedController,
     BatterySnapshot,
+    charging_hello_program,
     format_watts,
     program_for_battery,
     read_battery_snapshot,
@@ -11524,6 +11526,18 @@ class StatusBarController(NSObject):
                 log_status_bar(
                     f"battery preview power={'plugged' if plugged else 'unplugged'}"
                 )
+                if plugged:
+                    # The MagSafe moment: one finite mint hello -- rise
+                    # LED-by-LED, crest once -- then the preview's steady
+                    # fill takes over. Plug-in only; unplugging is not an
+                    # event worth celebrating.
+                    self.play_transition_flourish(
+                        "Charging hello",
+                        LedAnimationSetting(
+                            charging_hello_program(),
+                            CHARGING_HELLO_SECONDS,
+                        ),
+                    )
         self.last_power_connected = plugged
 
     def active_led_display_kind(self, snapshot: BatterySnapshot | None) -> str:
@@ -15092,13 +15106,24 @@ class StatusBarController(NSObject):
         *,
         animation: LedAnimationSetting | None = None,
     ) -> None:
+        animation = animation or self.settings.lid_animation(kind)
+        self.play_transition_flourish(LID_ANIMATION_LABELS[kind], animation)
+
+    def play_transition_flourish(
+        self,
+        label: str,
+        animation: LedAnimationSetting,
+    ) -> None:
+        """One finite, expressive moment on the physical strip -- a lid
+        open/close look, the charging hello -- then back to live status.
+        The grammar every such moment shares: quiet always, expressive
+        exactly once, then quiet again."""
         if not self.leds_enabled:
             return
-        animation = animation or self.settings.lid_animation(kind)
         try:
             validate_lid_animation(animation)
         except DeviceWriteError as exc:
-            self.set_settings_message(f"{LID_ANIMATION_LABELS[kind]} animation invalid: {exc}")
+            self.set_settings_message(f"{label} animation invalid: {exc}")
             return
 
         devices = [
@@ -15113,20 +15138,19 @@ class StatusBarController(NSObject):
         duration = animation.duration_seconds + LID_ANIMATION_RESTORE_FUDGE_SECONDS
         self.led_animation_until_monotonic = time.monotonic() + duration
         thread = threading.Thread(
-            target=self.play_lid_animation_worker,
-            args=(kind, animation, devices, token),
+            target=self.play_transition_flourish_worker,
+            args=(label, animation, devices, token),
             daemon=True,
         )
         thread.start()
 
-    def play_lid_animation_worker(
+    def play_transition_flourish_worker(
         self,
-        kind: str,
+        label: str,
         animation: LedAnimationSetting,
         devices: list[StatusBarDevice],
         token: int,
     ) -> None:
-        label = LID_ANIMATION_LABELS[kind]
         for device in devices:
             try:
                 program = program_for_lid_animation(animation, brightness=device.brightness)
