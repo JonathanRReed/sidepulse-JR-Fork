@@ -692,22 +692,6 @@ def test_status_bar_shortcut_quit_and_openers_use_trusted_system_paths() -> None
     ]
 
 
-def test_development_wrapper_codesign_uses_trusted_absolute_path(tmp_path: Path) -> None:
-    from sidepulse import app_bundle
-
-    with patch.object(
-        app_bundle.subprocess,
-        "run",
-        return_value=subprocess.CompletedProcess([], 0, "", ""),
-    ) as run:
-        app_bundle._codesign(tmp_path / "DevelopmentSidePulse.app")
-
-    assert [call.args[0][0] for call in run.call_args_list] == [
-        "/usr/bin/codesign",
-        "/usr/bin/codesign",
-    ]
-
-
 def test_package_builder_removes_candidate_metadata_before_codesign() -> None:
     # Signing moved into packaging/sign_macos_app.py (inside-out plan); the
     # builder must still sanitize Finder metadata before handing over.

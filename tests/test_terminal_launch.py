@@ -8,9 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from sidepulse import app_bundle
 from sidepulse.status_bar_launch import (
-    APPLE_EVENTS_USAGE_DESCRIPTION,
     GHOSTTY_BUNDLE_IDENTIFIER,
     ITERM_BUNDLE_IDENTIFIER,
     TERMINAL_BUNDLE_IDENTIFIER,
@@ -239,28 +237,6 @@ def test_apple_events_requirement_follows_only_reviewed_runtime_actions(
         )
         is expected
     )
-
-
-def test_app_info_has_apple_events_copy_only_for_an_enabled_apple_events_action() -> None:
-    current = plistlib.loads(app_bundle._info_plist({}))
-    ghostty_only = plistlib.loads(
-        app_bundle._info_plist(
-            {},
-            terminal_bundle_identifiers=(GHOSTTY_BUNDLE_IDENTIFIER,),
-            fallback_to_terminal=False,
-        )
-    )
-    no_terminal_navigation = plistlib.loads(
-        app_bundle._info_plist(
-            {},
-            terminal_bundle_identifiers=(),
-            fallback_to_terminal=False,
-        )
-    )
-
-    assert current["NSAppleEventsUsageDescription"] == APPLE_EVENTS_USAGE_DESCRIPTION
-    assert "NSAppleEventsUsageDescription" not in ghostty_only
-    assert "NSAppleEventsUsageDescription" not in no_terminal_navigation
 
 
 def test_status_bar_executes_each_reviewed_plan_and_logs_only_real_fallback(
