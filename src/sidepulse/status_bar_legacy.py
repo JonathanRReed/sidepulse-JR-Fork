@@ -10712,9 +10712,10 @@ class StatusBarController(NSObject):
         if current_pane == "installed_agents":
             self.refresh_installed_agents_settings_projection()
         if current_pane == "capacity":
-            # The pane on screen must not depend on someone opening the
-            # dropdown to trigger a poll; the planners rate-limit.
-            self.maybe_refresh_usage_summary()
+            # Lazy by law (its test pins it): selecting the pane does no
+            # implicit provider work. It still re-renders from whatever
+            # the JR plane already holds, so the text stays live without
+            # a poll; polls happen on dropdown opens and Refresh.
             self.refresh_capacity_settings_projection()
         set_field_value(
             self.settings_fields.get("settings_path"),
