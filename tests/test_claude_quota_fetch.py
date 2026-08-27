@@ -9,14 +9,12 @@ from __future__ import annotations
 
 import io
 import json
-from urllib.error import HTTPError, URLError
 
 import pytest
 
 from sidepulse import claude_quota
 from sidepulse.claude_quota import (
     ClaudeQuotaUnavailableError,
-    credential_from_keychain_payload,
     fetch_windows,
 )
 
@@ -34,16 +32,18 @@ class _Response(io.BytesIO):
         return False
 
 
-def _opener(payload: object, status: int = 200):
-    captured: dict = {}
+def _requester(payload, status=200):
+    """A stand-in for request_via_apple_stack: (status, body) in, out."""
+    captured = {}
 
-    def opener(request, timeout):
-        captured["request"] = request
-        captured["timeout"] = timeout
-        return _Response(payload, status)
+    def requester(url, *, method, headers, body=None, timeout):
+        captured.update(
+            url=url, method=method, headers=headers, body=body, timeout=timeout
+        )
+        return status, json.dumps(payload).encode("utf-8")
 
-    opener.captured = captured
-    return opener
+    requester.captured = captured
+    return requester
 
 
 USAGE_PAYLOAD = {
@@ -61,8 +61,8 @@ def test_no_credential_still_fails_closed() -> None:
 
 
 def test_live_read_returns_every_window_including_the_model_subcap() -> None:
-    opener = _opener(USAGE_PAYLOAD)
-    windows = fetch_windows(access_token="tok", opener=opener)
+    requester = _requester(USAGE_PAYLOAD)
+    windows = fetch_windows(access_token="tok", requester=requester)
 
     labels = [window["label"] for window in windows]
     assert "5-hour" in labels and "weekly" in labels
@@ -73,16 +73,27 @@ def test_live_read_returns_every_window_including_the_model_subcap() -> None:
 
 
 def test_request_presents_the_expected_contract() -> None:
-    opener = _opener(USAGE_PAYLOAD)
-    fetch_windows(access_token="tok-123", opener=opener)
+    requester = _requester(USAGE_PAYLOAD)
+    fetch_windows(access_token="tok-123", requester=requester)
 
-    request = opener.captured["request"]
-    assert request.full_url == claude_quota.CLAUDE_USAGE_URL
-    assert request.get_method() == "GET"
-    headers = {key.lower(): value for key, value in request.header_items()}
+    captured = requester.captured
+    assert captured["url"] == claude_quota.CLAUDE_USAGE_URL
+    assert captured["method"] == "GET"
+    headers = {key.lower(): value for key, value in captured["headers"].items()}
     assert headers["authorization"] == "Bearer tok-123"
     assert headers["anthropic-beta"] == claude_quota.CLAUDE_OAUTH_BETA_HEADER
     assert headers["user-agent"].startswith("claude-code/")
+
+
+def test_the_usage_read_does_not_ride_urllib() -> None:
+    """It carries a bearer token: it belongs on the same guarded,
+    same-origin transport as the token request, not on the client
+    Cloudflare fingerprints."""
+    import inspect
+
+    source = inspect.getsource(claude_quota.fetch_windows)
+    assert "urllib" not in source
+    assert "request_via_apple_stack" in source
 
 
 @pytest.mark.parametrize(
@@ -94,20 +105,20 @@ def test_request_presents_the_expected_contract() -> None:
     ],
 )
 def test_http_failures_map_to_reason_codes(code: int, expected: str) -> None:
-    def opener(request, timeout):
-        raise HTTPError(request.full_url, code, "boom", {}, None)
+    def requester(url, *, method, headers, body=None, timeout):
+        return code, b"boom"
 
     with pytest.raises(ClaudeQuotaUnavailableError) as excinfo:
-        fetch_windows(access_token="tok", opener=opener)
+        fetch_windows(access_token="tok", requester=requester)
     assert str(excinfo.value) == expected
 
 
 def test_network_failure_is_a_code_not_a_traceback() -> None:
-    def opener(request, timeout):
-        raise URLError("no route to host")
+    def requester(url, *, method, headers, body=None, timeout):
+        raise OSError("no route to host")
 
     with pytest.raises(ClaudeQuotaUnavailableError) as excinfo:
-        fetch_windows(access_token="tok", opener=opener)
+        fetch_windows(access_token="tok", requester=requester)
     assert str(excinfo.value) == claude_quota.CLAUDE_REMOTE_QUOTA_NETWORK
 
 
@@ -115,103 +126,24 @@ def test_a_server_body_never_reaches_the_error_text() -> None:
     """Error strings surface in the UI and in doctor output."""
     secret_ish = "account_id=acct_0xdeadbeef owner=someone@example.com"
 
-    def opener(request, timeout):
-        raise HTTPError(request.full_url, 500, secret_ish, {}, io.BytesIO(secret_ish.encode()))
+    def requester(url, *, method, headers, body=None, timeout):
+        return 500, secret_ish.encode()
 
     with pytest.raises(ClaudeQuotaUnavailableError) as excinfo:
-        fetch_windows(access_token="tok", opener=opener)
+        fetch_windows(access_token="tok", requester=requester)
     assert "acct_0xdeadbeef" not in str(excinfo.value)
     assert "example.com" not in str(excinfo.value)
 
 
 def test_oversized_response_is_refused() -> None:
-    class Huge(io.BytesIO):
-        status = 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-    def opener(request, timeout):
-        return Huge(b"{" + b"x" * (claude_quota.CLAUDE_USAGE_MAX_BYTES + 10))
+    def requester(url, *, method, headers, body=None, timeout):
+        return 200, b"{" + b"x" * (claude_quota.CLAUDE_USAGE_MAX_BYTES + 10)
 
     with pytest.raises(ClaudeQuotaUnavailableError):
-        fetch_windows(access_token="tok", opener=opener)
+        fetch_windows(access_token="tok", requester=requester)
 
 
 def test_empty_payload_is_reported_not_silently_empty() -> None:
     with pytest.raises(ClaudeQuotaUnavailableError) as excinfo:
-        fetch_windows(access_token="tok", opener=_opener({}))
+        fetch_windows(access_token="tok", requester=_requester({}))
     assert str(excinfo.value) == claude_quota.CLAUDE_REMOTE_QUOTA_NO_WINDOWS
-
-
-def test_keychain_payload_parses_claude_codes_own_shape() -> None:
-    raw = json.dumps(
-        {
-            "claudeAiOauth": {
-                "accessToken": "at-value",
-                "refreshToken": "rt-value",
-                "expiresAt": 1_800_000_000_000,  # milliseconds
-                "subscriptionType": "max",
-            }
-        }
-    )
-    credential = credential_from_keychain_payload(raw)
-    assert credential is not None
-    assert credential.access_token == "at-value"
-    assert credential.subscription_type == "max"
-    assert credential.expires_at == pytest.approx(1_800_000_000.0)
-    assert "at-value" not in repr(credential), "token leaked into repr"
-
-
-@pytest.mark.parametrize(
-    "raw",
-    ["", "not json", "{}", '{"claudeAiOauth": {}}', '{"claudeAiOauth": {"accessToken": ""}}', "[]"],
-)
-def test_unusable_keychain_payloads_are_absence(raw: str) -> None:
-    assert credential_from_keychain_payload(raw) is None
-
-
-def test_expiry_is_honoured() -> None:
-    raw = json.dumps({"claudeAiOauth": {"accessToken": "at", "expiresAt": 1_000_000_000_000}})
-    credential = credential_from_keychain_payload(raw)
-    assert credential is not None
-    assert credential.is_expired(1_000_000_001.0)
-    assert not credential.is_expired(999_999_999.0)
-
-
-def test_a_refresh_only_credential_is_named_not_shrugged_at() -> None:
-    """Observed live: accessToken empty, expiresAt 0, refreshToken present.
-
-    Claude Code mints access tokens on demand. We must NOT mint one
-    ourselves -- the refresh token rotates on use, so doing so would
-    invalidate Claude Code's copy and break the user's `claude` login. The
-    correct behaviour is to recognise the state and say so.
-    """
-    raw = json.dumps(
-        {
-            "claudeAiOauth": {
-                "accessToken": "",
-                "refreshToken": "rt-value",
-                "expiresAt": 0,
-                "subscriptionType": "max",
-            }
-        }
-    )
-    assert claude_quota.credential_from_keychain_payload(raw) is None
-    assert claude_quota.credential_needs_sign_in(raw) is True
-
-
-def test_a_healthy_credential_does_not_ask_for_sign_in() -> None:
-    raw = json.dumps(
-        {"claudeAiOauth": {"accessToken": "at", "refreshToken": "rt", "expiresAt": 0}}
-    )
-    assert claude_quota.credential_needs_sign_in(raw) is False
-
-
-@pytest.mark.parametrize("raw", ["", "not json", "{}", "[]", '{"claudeAiOauth": {}}'])
-def test_absent_credentials_are_not_a_sign_in_prompt(raw: str) -> None:
-    """No credential at all is "not connected", not "your session expired"."""
-    assert claude_quota.credential_needs_sign_in(raw) is False

@@ -243,6 +243,131 @@ def refresh_token_expired(raw: object, now: float) -> bool:
     return math.isfinite(seconds) and now >= seconds
 
 
+_REDIRECT_GUARD_CLASS = None
+
+
+def _redirect_guard_class():
+    """Build the redirect delegate on first use.
+
+    Defined lazily so this module stays importable without PyObjC --
+    the parsers and reason codes here run in headless tests.
+    """
+    global _REDIRECT_GUARD_CLASS
+    if _REDIRECT_GUARD_CLASS is not None:
+        return _REDIRECT_GUARD_CLASS
+
+    import objc
+    from Foundation import NSObject
+
+    class _SameOriginRedirectGuard(NSObject):
+        """Refuse cross-origin redirects on a request carrying a bearer
+        token. A 30x to another host would hand the Authorization header
+        to whoever answered it. CodexBar's ProviderHTTPClient blocks
+        exactly this; urllib follows such redirects silently, which is
+        one more reason token requests do not belong on it.
+        """
+
+        def initWithOrigin_(self, origin):
+            this = objc.super(_SameOriginRedirectGuard, self).init()
+            if this is None:
+                return None
+            this._origin = tuple(origin)
+            return this
+
+        def URLSession_task_willPerformHTTPRedirection_newRequest_completionHandler_(
+            self, _session, _task, _response, request, handler
+        ):
+            try:
+                url = request.URL()
+                origin = (
+                    str(url.scheme() or ""),
+                    str(url.host() or ""),
+                    int(url.port().intValue()) if url.port() is not None else None,
+                )
+            except Exception:
+                handler(None)
+                return
+            handler(request if origin == self._origin else None)
+
+    _REDIRECT_GUARD_CLASS = _SameOriginRedirectGuard
+    return _REDIRECT_GUARD_CLASS
+
+
+def _origin_of(url: str) -> tuple:
+    from Foundation import NSURL
+
+    parsed = NSURL.URLWithString_(url)
+    return (
+        str(parsed.scheme() or ""),
+        str(parsed.host() or ""),
+        int(parsed.port().intValue()) if parsed.port() is not None else None,
+    )
+
+
+def request_via_apple_stack(
+    url: str,
+    *,
+    method: str,
+    headers: dict[str, str],
+    body: bytes | None = None,
+    timeout: float,
+) -> tuple[int, bytes]:
+    """One HTTP round trip through NSURLSession, same-origin only.
+
+    Ephemeral configuration so a token response never reaches the
+    on-disk URL cache, and the timeout is set on the REQUEST as well as
+    the wait, so an expired wait does not leave a task running.
+    """
+    import threading
+
+    from Foundation import (
+        NSURL,
+        NSData,
+        NSMutableURLRequest,
+        NSURLSession,
+        NSURLSessionConfiguration,
+    )
+
+    request = NSMutableURLRequest.requestWithURL_(NSURL.URLWithString_(url))
+    request.setHTTPMethod_(method)
+    for key, value in headers.items():
+        request.setValue_forHTTPHeaderField_(value, key)
+    if body is not None:
+        request.setHTTPBody_(NSData.dataWithBytes_length_(body, len(body)))
+    request.setTimeoutInterval_(float(timeout))
+
+    guard = _redirect_guard_class().alloc().initWithOrigin_(_origin_of(url))
+    session = NSURLSession.sessionWithConfiguration_delegate_delegateQueue_(
+        NSURLSessionConfiguration.ephemeralSessionConfiguration(), guard, None
+    )
+    finished = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def handler(data, response, error) -> None:
+        outcome["status"] = int(response.statusCode()) if response is not None else 0
+        outcome["body"] = bytes(data) if data is not None else b""
+        outcome["error"] = error is not None
+        finished.set()
+
+    task = session.dataTaskWithRequest_completionHandler_(request, handler)
+    task.resume()
+    try:
+        if not finished.wait(max(1.0, float(timeout)) + 1.0):
+            try:
+                task.cancel()
+            except Exception:
+                pass
+            raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NETWORK)
+        if outcome.get("error") or not outcome.get("status"):
+            raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NETWORK)
+        return int(outcome["status"]), bytes(outcome["body"])
+    finally:
+        try:
+            session.finishTasksAndInvalidate()
+        except Exception:
+            pass
+
+
 def post_form_via_apple_stack(
     url: str,
     fields: dict[str, str],
@@ -258,44 +383,18 @@ def post_form_via_apple_stack(
     app -- never hit this wall). The app is already PyObjC, so the
     honest fix is to use the platform's own client.
     """
-    import threading
     from urllib.parse import urlencode
 
-    from Foundation import (
-        NSURL,
-        NSData,
-        NSMutableURLRequest,
-        NSURLSession,
+    return request_via_apple_stack(
+        url,
+        method="POST",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+            "Accept": "application/json",
+        },
+        body=urlencode(fields).encode("utf-8"),
+        timeout=timeout,
     )
-
-    body = urlencode(fields).encode("utf-8")
-    request = NSMutableURLRequest.requestWithURL_(NSURL.URLWithString_(url))
-    request.setHTTPMethod_("POST")
-    request.setValue_forHTTPHeaderField_(
-        "application/x-www-form-urlencoded; charset=utf-8", "Content-Type"
-    )
-    request.setValue_forHTTPHeaderField_("application/json", "Accept")
-    request.setHTTPBody_(NSData.dataWithBytes_length_(body, len(body)))
-
-    finished = threading.Event()
-    outcome: dict[str, object] = {}
-
-    def handler(data, response, error) -> None:
-        outcome["status"] = (
-            int(response.statusCode()) if response is not None else 0
-        )
-        outcome["body"] = bytes(data) if data is not None else b""
-        outcome["error"] = error is not None
-        finished.set()
-
-    NSURLSession.sharedSession().dataTaskWithRequest_completionHandler_(
-        request, handler
-    ).resume()
-    if not finished.wait(max(1.0, float(timeout))):
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NETWORK)
-    if outcome.get("error") or not outcome.get("status"):
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NETWORK)
-    return int(outcome["status"]), bytes(outcome["body"])
 
 
 def refresh_claude_payload(
@@ -422,7 +521,7 @@ def _default_opener(request, timeout: float):
 def fetch_windows(
     *,
     access_token: str | None = None,
-    opener=None,
+    requester=None,
     timeout: float = CLAUDE_USAGE_TIMEOUT_SECONDS,
 ) -> list[dict]:
     """Read the live per-window quota for a Claude subscription.
@@ -437,34 +536,33 @@ def fetch_windows(
     if not isinstance(access_token, str) or not access_token.strip():
         raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_UNSUPPORTED)
 
-    from urllib.error import HTTPError, URLError
-    from urllib.request import Request
-
-    request = Request(
-        CLAUDE_USAGE_URL,
-        method="GET",
-        headers={
-            "Authorization": f"Bearer {access_token.strip()}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "anthropic-beta": CLAUDE_OAUTH_BETA_HEADER,
-            "User-Agent": _claude_code_user_agent(),
-        },
-    )
+    # Same guarded transport as the token request: this call carries a
+    # bearer token, so it must not follow a redirect to another host,
+    # and it must not ride the client Cloudflare fingerprints.
+    transport = requester or request_via_apple_stack
     try:
-        with (opener or _default_opener)(request, timeout) as response:
-            status = getattr(response, "status", 200)
-            if status != 200:
-                raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR)
-            body = response.read(CLAUDE_USAGE_MAX_BYTES + 1)
-    except HTTPError as error:
-        if error.code == 401:
-            raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_UNAUTHORIZED) from None
-        if error.code == 429:
-            raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_RATE_LIMITED) from None
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR) from None
-    except (URLError, OSError, ValueError):
+        status, body = transport(
+            CLAUDE_USAGE_URL,
+            method="GET",
+            headers={
+                "Authorization": f"Bearer {access_token.strip()}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "anthropic-beta": CLAUDE_OAUTH_BETA_HEADER,
+                "User-Agent": _claude_code_user_agent(),
+            },
+            timeout=timeout,
+        )
+    except ClaudeQuotaUnavailableError:
+        raise
+    except Exception:
         raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NETWORK) from None
+    if status == 401:
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_UNAUTHORIZED)
+    if status == 429:
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_RATE_LIMITED)
+    if status != 200:
+        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR)
 
     if len(body) > CLAUDE_USAGE_MAX_BYTES:
         raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR)
