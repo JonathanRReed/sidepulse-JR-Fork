@@ -16682,6 +16682,16 @@ class AgentMailboxMenuTests(unittest.TestCase):
         self.assertEqual(signature, private_signature)
         self.assertNotEqual(signature, activity_signature)
 
+        # No time bucket: the 30s "safety valve" forced a 799ms-average
+        # AppKit rebuild every 30 seconds forever (deleted 2026-08-26).
+        # Identical content must hash identically no matter how much
+        # wall-clock passes between calls.
+        with patch("sidepulse.status_bar.time.monotonic", return_value=100_000.0):
+            much_later = self.status_bar.menu_content_signature(
+                activity_snapshot, self.status_bar.STATE_WORKING, self.controller
+            )
+        self.assertEqual(activity_signature, much_later)
+
 
 class MenuQualityOfLifeTests(unittest.TestCase):
     """Worker rollup, device-health rows, completion banners."""

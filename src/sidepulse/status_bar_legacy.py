@@ -3439,6 +3439,14 @@ class StatusBarController(NSObject):
         del provider_id
         return False
 
+    def jr_plane_owns_usage_menu_item(self) -> bool:
+        """Overridden by the JR provider-usage controller. When True, the
+        menu build skips constructing the legacy usage card entirely --
+        the facade used to build it, remove it, and build its own row,
+        paying full card construction (layout measure + a view of text
+        fields) as pure dead weight in every rebuild."""
+        return False
+
     def _capacity_row_enabled(self, provider_id: str) -> bool:
         """Whether this provider's capacity row is one the user asked to see.
 
@@ -16146,9 +16154,16 @@ def _mailbox_row_content_signature(row) -> tuple:
 
 
 def menu_content_signature(snapshot, state, target) -> tuple:
-    """Everything the dropdown renders, hashed coarsely. Ages bucket to
-    the minute (rows show "4m"), and a 30s monotonic bucket is a safety
-    valve: anything this signature misses self-heals within 30s."""
+    """Everything the dropdown renders, hashed coarsely.
+
+    There is deliberately NO time bucket in here (the 30s "safety valve"
+    was deleted 2026-08-26): it forced a measured 799ms-average AppKit
+    rebuild every 30 seconds forever, idle or not, which the owner felt
+    as menu lag. Every section that once leaned on the valve has since
+    had its content added explicitly -- the intake report, the remote
+    ledger, both activity-ledger halves -- and each addition is marked
+    below. The contract stands: if a section can change on screen, its
+    content belongs IN this signature, not on a timer."""
     mailbox = mailbox_projection_for_menu(snapshot, target)
     devices = tuple(
         (
@@ -16187,9 +16202,8 @@ def menu_content_signature(snapshot, state, target) -> tuple:
         # The other Mac's rows are drawn straight from the merged ledger,
         # not from the mailbox projection, so nothing above this line can
         # see them change. Without this the "Other Macs" section would
-        # only ever repaint on the 30s valve below.
+        # never repaint on its own.
         remote_ledger_content_signature(target),
-        int(time.monotonic() // 30),
     )
 
 
@@ -16950,7 +16964,9 @@ def build_menu(snapshot, state: StatusBarState, target: StatusBarController) -> 
 
     _mark("ledger")
     menu.addItem_(NSMenuItem.separatorItem())
-    menu.addItem_(build_usage_menu_item(target))
+    # getattr-tolerant: tests drive build_menu with bare probe targets.
+    if not getattr(target, "jr_plane_owns_usage_menu_item", lambda: False)():
+        menu.addItem_(build_usage_menu_item(target))
     from .today_menu import build_today_menu_item
 
     today_item = build_today_menu_item(target)

@@ -35,6 +35,11 @@ from .usage_event_hooks import (
     hook_path_message,
     run_usage_hooks,
 )
+from .usage_menu_injection import (
+    menu_index,
+    remove_legacy_usage_item,
+    remove_redundant_separators,
+)
 from .usage_percent_history import record_state_observations
 
 _legacy = getattr(_host, "_legacy", _host)
@@ -76,44 +81,6 @@ def _disabled_item(title: str, *, alert: bool = False):
         except Exception:
             pass
     return item
-
-
-def _menu_index(menu, title: str) -> int:
-    for index in range(menu.numberOfItems()):
-        item = menu.itemAtIndex_(index)
-        if str(item.title() or "") == title:
-            return index
-    return -1
-
-
-def _remove_legacy_usage_item(menu, target) -> None:
-    item = getattr(target, "_usage_menu_item", None)
-    if item is None:
-        return
-    try:
-        index = menu.indexOfItem_(item)
-    except Exception:
-        index = -1
-    if index >= 0:
-        menu.removeItemAtIndex_(index)
-    else:
-        # The compact facade may have grouped the legacy view under its own
-        # "Usage · …" parent row; removing only the nested item would leave
-        # a second, empty usage row behind. Remove the whole parent.
-        for parent_index in range(menu.numberOfItems()):
-            parent = menu.itemAtIndex_(parent_index)
-            submenu = parent.submenu()
-            if submenu is None:
-                continue
-            try:
-                nested = submenu.indexOfItem_(item)
-            except Exception:
-                nested = -1
-            if nested >= 0:
-                menu.removeItemAtIndex_(parent_index)
-                break
-    target._usage_menu_item = None
-    target._usage_menu_view = None
 
 
 def _native_usage_menu_item(target):
@@ -234,38 +201,13 @@ def _native_usage_menu_item(target):
     return item
 
 
-def _remove_redundant_separators(menu) -> None:
-    index = menu.numberOfItems() - 1
-    while index >= 0:
-        item = menu.itemAtIndex_(index)
-        previous = menu.itemAtIndex_(index - 1) if index > 0 else None
-        if item.isSeparatorItem() and (
-            index == 0
-            or index == menu.numberOfItems() - 1
-            or (previous is not None and previous.isSeparatorItem())
-        ):
-            menu.removeItemAtIndex_(index)
-        index -= 1
-
-
 def build_menu(snapshot, state, target):
     menu = _original_build_menu(snapshot, state, target)
-    _remove_legacy_usage_item(menu, target)
+    remove_legacy_usage_item(menu, target)
     native_item = _native_usage_menu_item(target)
-    index = _menu_index(menu, "Devices")
-    if index < 0:
-        # The compact facade retitles the devices row ("Devices · N
-        # connected"); anchor on the prefix before falling back.
-        index = next(
-            (
-                position
-                for position in range(menu.numberOfItems())
-                if str(menu.itemAtIndex_(position).title() or "").startswith(
-                    "Devices"
-                )
-            ),
-            -1,
-        )
+    # Prefix match covers both the plain "Devices" title and the compact
+    # facade's retitled "Devices · N connected" row.
+    index = menu_index(menu, "Devices")
     if index < 0:
         index = min(4, menu.numberOfItems())
     menu.insertItem_atIndex_(native_item, index)
@@ -273,7 +215,7 @@ def build_menu(snapshot, state, target):
         next_item = menu.itemAtIndex_(index + 1)
         if not next_item.isSeparatorItem():
             menu.insertItem_atIndex_(_legacy.NSMenuItem.separatorItem(), index + 1)
-    _remove_redundant_separators(menu)
+    remove_redundant_separators(menu)
     return menu
 
 
@@ -730,6 +672,12 @@ else:
                     _legacy.signals_module, "SIGNAL_QUOTA", None
                 ),
             )
+
+        def jr_plane_owns_usage_menu_item(self) -> bool:
+            # The legacy build constructs its usage card only to have the
+            # wrapper above remove it -- measured dead weight in every
+            # full rebuild. This facade owns the usage row.
+            return True
 
         def jr_plane_owns_capacity(self, provider_id: str) -> bool:
             """The JR usage plane polls the Claude usage ENDPOINT

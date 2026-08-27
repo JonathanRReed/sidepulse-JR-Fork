@@ -414,3 +414,23 @@ def test_a_broken_sign_in_says_reconnect_not_stale():
 def test_a_live_reading_carries_no_marker():
     fresh = snapshot("devin", "Weekly", 100)
     assert _titles(fresh) == ["Devin · 100% left"]
+
+
+def test_jr_plane_owns_the_usage_menu_row() -> None:
+    """The legacy build used to construct its usage card only for the JR
+    facade's build_menu wrapper to remove it and insert its own row --
+    full card construction as dead weight in every rebuild (fixed
+    2026-08-26). The base class keeps the card for non-JR builds."""
+    from types import SimpleNamespace
+
+    from sidepulse.provider_usage_status_bar import (
+        JRProviderUsageStatusBarController,
+    )
+    from sidepulse.status_bar import StatusBarController
+
+    probe = SimpleNamespace()
+    assert StatusBarController.jr_plane_owns_usage_menu_item(probe) is False
+    assert (
+        JRProviderUsageStatusBarController.jr_plane_owns_usage_menu_item(probe)
+        is True
+    )

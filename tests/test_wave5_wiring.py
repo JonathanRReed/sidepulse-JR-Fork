@@ -339,7 +339,7 @@ class RemotePeerWiringTests(unittest.TestCase):
         )
 
     def test_the_menu_signature_notices_a_peer_row_appearing(self) -> None:
-        """Without this the section repaints only on the 30s safety valve.
+        """Without this the section would never repaint on its own.
 
         Through `menu_content_signature`, the function the rebuild gate
         actually calls -- an earlier version of this test asked the helper
