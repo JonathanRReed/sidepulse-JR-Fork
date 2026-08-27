@@ -15,6 +15,7 @@ from typing import Any
 
 from .boot_identity import boot_identifier_basis
 from .capacity_types import SourceKey
+from .delegation import _reconcile_delegating_parents, status_counts_active
 from .freshness import bounded_age_seconds, is_recent
 from .latest_state_timing import (
     clock_continuity_from_payload,
@@ -332,66 +333,6 @@ def agent_status_from_canonical_work(
         ),
         work_key=work.key,
         request_key=work.request_keys[0] if work.request_keys else None,
-    )
-
-
-#: How long a child event keeps vouching for its parent's presence.
-#: Sub-agents emit tool events every few seconds while genuinely
-#: working; ten quiet minutes means the delegation is over or wedged,
-#: and the ordinary silence semantics take back over.
-DELEGATION_CHILD_FRESH_SECONDS = 600.0
-
-
-def _reconcile_delegating_parents(
-    statuses: tuple[AgentStatus, ...],
-    collected_at: datetime,
-) -> tuple[AgentStatus, ...]:
-    """A fresh child event is evidence of the parent's presence.
-
-    Claude fires Stop the moment the main turn ends, even mid-
-    delegation: a main's own thread can be silent for an hour while its
-    workers stream events under it. Refresh the parent's clock from its
-    freshest active child and call it WORKING -- BEFORE the presence
-    horizon and the staleness windows read that clock (2026-08-27 owner
-    report: two delegating mains aged out entirely; the count said one
-    and the strip painted orphan murk). Quiet modes only: an ask keeps
-    asking, a failure stays named.
-    """
-    freshest_child: dict[str, datetime] = {}
-    for status in statuses:
-        if not status.is_subagent or not status_counts_active(status):
-            continue
-        parent_id = status.parent_agent_id
-        if parent_id is None:
-            continue
-        if (
-            bounded_age_seconds(collected_at, status.updated_at)
-            > DELEGATION_CHILD_FRESH_SECONDS
-        ):
-            continue
-        current = freshest_child.get(parent_id)
-        if current is None or status.updated_at > current:
-            freshest_child[parent_id] = status.updated_at
-    if not freshest_child:
-        return statuses
-    quiet_modes = {
-        AgentMode.COMPLETED,
-        AgentMode.IDLE_READY,
-        AgentMode.UNKNOWN,
-    }
-    return tuple(
-        replace(
-            status,
-            mode=AgentMode.WORKING,
-            updated_at=max(status.updated_at, freshest_child[status.agent_id]),
-        )
-        if (
-            not status.is_subagent
-            and status.agent_id in freshest_child
-            and status.mode in quiet_modes
-        )
-        else status
-        for status in statuses
     )
 
 
@@ -2920,14 +2861,6 @@ def agent_status_from_dict(data: object) -> AgentStatus | None:
         )
     except Exception:
         return None
-
-
-def status_counts_active(status: AgentStatus) -> bool:
-    return status.mode not in {
-        AgentMode.COMPLETED,
-        AgentMode.IDLE_READY,
-        AgentMode.ENDED_UNCONFIRMED,
-    }
 
 
 def track_pending_permissions(

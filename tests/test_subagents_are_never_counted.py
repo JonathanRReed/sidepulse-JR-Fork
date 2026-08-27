@@ -415,7 +415,7 @@ def test_collector_refreshes_a_delegating_parents_presence() -> None:
     its workers streamed events aged out entirely -- the count said
     one, and the strip painted orphan murk (2026-08-27 owner report).
     """
-    from sidepulse.collector import _reconcile_delegating_parents
+    from sidepulse.delegation import _reconcile_delegating_parents
 
     hour_old = _NOW - timedelta(seconds=3700)
     stopped_main = replace(
@@ -437,7 +437,7 @@ def test_collector_refreshes_a_delegating_parents_presence() -> None:
 
 
 def test_collector_leaves_a_parent_with_finished_children_alone() -> None:
-    from sidepulse.collector import _reconcile_delegating_parents
+    from sidepulse.delegation import _reconcile_delegating_parents
 
     stopped_main = _main("main", AgentMode.COMPLETED)
     finished_child = _worker(1, AgentMode.COMPLETED)
@@ -450,7 +450,7 @@ def test_collector_leaves_a_parent_with_finished_children_alone() -> None:
 
 
 def test_collector_never_rewrites_an_asking_or_failed_parent() -> None:
-    from sidepulse.collector import _reconcile_delegating_parents
+    from sidepulse.delegation import _reconcile_delegating_parents
 
     asking = _main("asker", AgentMode.WAITING_FOR_INPUT)
     failed = replace(
@@ -470,7 +470,7 @@ def test_collector_never_rewrites_an_asking_or_failed_parent() -> None:
 
 
 def test_a_stale_child_stops_vouching_for_its_parent() -> None:
-    from sidepulse.collector import (
+    from sidepulse.delegation import (
         DELEGATION_CHILD_FRESH_SECONDS,
         _reconcile_delegating_parents,
     )
