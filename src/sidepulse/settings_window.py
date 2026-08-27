@@ -787,10 +787,14 @@ def _build_profile_pane(target: StatusBarController):
     )
     fields["usage_event_hook_field"] = hook_field
     fields["profile_usage_legend"] = legend
-    provider_row = native_ui.make_stack(
-        orientation="horizontal",
-        spacing=native_ui.SPACE_M,
+    # A grid, not one horizontal strip: ten switch rows in a single
+    # NSStackView crushed every cell to its chevron ("looks botched",
+    # reported live 2026-08-27). Three per row keeps labels readable.
+    provider_grid = native_ui.make_stack(
+        orientation="vertical",
+        spacing=native_ui.SPACE_XS,
     )
+    provider_row = None
     provider_switches = {}
     # EVERY registry provider gets a switch (the row was hard-coded to
     # two while the setter and loader already accepted the whole
@@ -809,7 +813,15 @@ def _build_profile_pane(target: StatusBarController):
     graph_provider_ids = tuple(
         dict.fromkeys(("claude", "codex", *HOOK_PROVIDERS))
     )
-    for provider_id in graph_provider_ids:
+    for index, provider_id in enumerate(graph_provider_ids):
+        if index % 3 == 0:
+            if provider_row is not None:
+                provider_row.addArrangedSubview_(native_ui.make_hspacer())
+            provider_row = native_ui.make_stack(
+                orientation="horizontal",
+                spacing=native_ui.SPACE_M,
+            )
+            provider_grid.addArrangedSubview_(provider_row)
         try:
             provider_label = provider_spec(provider_id).label
         except Exception:
@@ -828,8 +840,9 @@ def _build_profile_pane(target: StatusBarController):
         switch.setState_(1 if provider_id in selected_providers else 0)
         provider_row.addArrangedSubview_(row)
         provider_switches[provider_id] = switch
-    provider_row.addArrangedSubview_(native_ui.make_hspacer())
-    today_inner.addArrangedSubview_(provider_row)
+    if provider_row is not None:
+        provider_row.addArrangedSubview_(native_ui.make_hspacer())
+    today_inner.addArrangedSubview_(provider_grid)
     fields["usage_graph_provider_switches"] = provider_switches
     today_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
@@ -4366,10 +4379,15 @@ def _build_provider_animation_row(row, target, actions, hex_labels):
     actions.animation_hover_areas[row.provider] = hover_thumb
     controls.addArrangedSubview_(hover_thumb)
 
-    description = native_ui.make_label(
+    # Wrapping and bounded: this sentence used to be a non-wrapping
+    # label whose intrinsic width crushed the popup beside it down to a
+    # bare chevron -- "why can't I choose Claude's animations",
+    # reported live 2026-08-27. The picker keeps its natural size now.
+    description = native_ui.make_wrapping_label(
         row.animation_description,
         secondary=True,
         size=11.0,
+        max_width=320.0,
     )
     sync.add_description(description)
     controls.addArrangedSubview_(description)
