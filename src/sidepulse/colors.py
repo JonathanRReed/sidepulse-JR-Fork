@@ -1772,7 +1772,24 @@ def _active_agents(statuses: tuple[AgentStatus, ...], colors: ColorSettings) -> 
                 weight=urgency_weight(status.mode),
             )
         )
-    return agents
+    return _engaged_or_all(agents)
+
+
+def _engaged_or_all(agents: list[_ActiveAgent]) -> list[_ActiveAgent]:
+    """While anyone works, idle sessions do not claim strip slots.
+
+    A workspace retains sessions long after their work ends (a live
+    Devin plane listed 13 idle sessions from that morning), and every
+    idle row rendered its 8%-luminance identity whisper -- with a
+    dozen of them, the strip under real work read as unattributable
+    murk (2026-08-27 owner report). Idle presence is still the whole
+    story when NOTHING is engaged, so an idle-only fleet keeps its
+    ambient breathing.
+    """
+    engaged = [
+        agent for agent in agents if agent.state is not LedDisplayState.IDLE
+    ]
+    return engaged or agents
 
 
 def _representative_state(agents: list[_ActiveAgent]) -> LedDisplayState:
@@ -2828,6 +2845,7 @@ def program_for_projection(
         )
         for row in ordered
     ]
+    agents = _engaged_or_all(agents)
     if settings.blend_mode == BLEND_MODE_CLASSIC:
         program = program_for_display_state(
             state,

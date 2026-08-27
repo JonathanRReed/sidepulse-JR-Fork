@@ -486,3 +486,58 @@ def test_a_stale_child_stops_vouching_for_its_parent() -> None:
     )
 
     assert reconciled[0].mode is AgentMode.COMPLETED
+
+
+def test_idle_sessions_do_not_claim_strip_slots_while_anyone_works() -> None:
+    """A dozen retained-but-idle sessions must not bury the real work
+    in identity whispers (the live Devin plane listed 13 idle sessions;
+    the working strip read as unattributable murk)."""
+    from sidepulse.colors import program_for_snapshot
+
+    statuses = tuple(
+        [_main("busy", AgentMode.WORKING)]
+        + [
+            replace(
+                _main(f"retained-{index}", AgentMode.IDLE_READY),
+                agent_id=f"claude:session:retained-{index}",
+                session_id=f"retained-{index}",
+            )
+            for index in range(12)
+        ]
+    )
+
+    _, program = program_for_snapshot(
+        statuses, led_count=8, colors=ColorSettings.defaults(), brightness=255
+    )
+    working_line = next(
+        line for line in program.splitlines() if "pulse" in line
+    )
+    peaks = {
+        segment.split("#", 1)[1][:6]
+        for segment in working_line.split("; ")
+        if "#" in segment
+    }
+    assert len(peaks) == 1, (
+        "one engaged agent owns the strip; twelve idle sessions "
+        f"must not paint their whispers over it (saw peaks {peaks})"
+    )
+
+
+def test_an_idle_only_fleet_keeps_its_ambient_presence() -> None:
+    from sidepulse.colors import program_for_snapshot
+    from sidepulse.led_status import LedDisplayState
+
+    statuses = tuple(
+        replace(
+            _main(f"resting-{index}", AgentMode.IDLE_READY),
+            agent_id=f"claude:session:resting-{index}",
+            session_id=f"resting-{index}",
+        )
+        for index in range(3)
+    )
+
+    state, program = program_for_snapshot(
+        statuses, led_count=8, colors=ColorSettings.defaults(), brightness=255
+    )
+    assert state is LedDisplayState.IDLE
+    assert program.strip(), "idle presence still renders"
