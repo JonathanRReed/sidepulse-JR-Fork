@@ -158,11 +158,15 @@ def test_visible_rows_refuses_a_worker_however_it_is_constructed() -> None:
 
 
 def test_a_worker_never_drives_the_light() -> None:
-    """The peripheral surface answers "does anything want ME".
+    """The light only ever talks about a MAIN the user can see.
 
-    With the main agent idle, 40 busy workers must not make the strip
-    say "working" -- the user has nothing to do about a worker, and
-    cannot even see one.
+    The original sin this file guards against was the representative
+    being an anonymous worker row -- the strip announcing "working"
+    about something the user cannot see, click, or answer. That stays
+    forbidden. But a quiet main whose 40 workers are busy IS working
+    (2026-08-27 owner call: Claude pauses the main thread while
+    sub-agents carry the work, and "completed" was a lie) -- so the
+    light says working, and the row that says it is the MAIN.
     """
     statuses = [_main("main", AgentMode.IDLE_READY)] + [
         _worker(index, AgentMode.WORKING) for index in range(_OBSERVED_FANOUT)
@@ -170,7 +174,11 @@ def test_a_worker_never_drives_the_light() -> None:
 
     projection = _project(statuses)
 
-    assert projection.lifecycle_mode is LifecycleMode.IDLE
+    assert projection.lifecycle_mode is LifecycleMode.ACTIVE
+    (main_row,) = projection.visible_rows
+    assert not main_row.is_subagent
+    assert main_row.lifecycle_mode is LifecycleMode.ACTIVE
+    assert all(row.is_subagent for row in projection.worker_rows)
     assert projection.dominant_provider == "claude"
 
 
