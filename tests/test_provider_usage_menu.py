@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from sidepulse.provider_usage_menu import project_usage_menu
 from sidepulse.provider_usage_platform import (
     ProviderSourceState,
@@ -82,7 +84,11 @@ def test_actionable_missing_source_is_named_instead_of_no_reading():
     )
     projection = project_usage_menu(state, now=1000)
     assert projection.title == "Usage · setup needed"
-    assert projection.rows[0].title == "Claude · permission required"
+    # The row carries the FIX, not the diagnosis: "permission required"
+    # names a state the reader cannot act on, while "Connect Claude
+    # usage" is the thing to do (2026-08-27 owner report).
+    assert projection.rows[0].title == "Claude · Connect Claude usage"
+    assert "permission required" in (projection.rows[0].detail or "")
     assert projection.rows[0].action_label == "Connect Claude usage"
     assert "no reading" not in repr(projection).lower()
 
@@ -446,3 +452,33 @@ def test_jr_plane_owns_the_usage_menu_row() -> None:
     assert marker in facade
     body = facade.split(marker, 1)[1].split("def ", 1)[0]
     assert "return True" in body
+
+
+def test_a_provider_with_no_usable_number_says_what_would_fix_it():
+    """'Grok · stale' is true and useless; the row is the whole glance.
+
+    Shaped from the live Grok snapshot: a retained lane that carries a
+    reset time but no percentage, so there is nothing to report.
+    """
+    numberless = UsageLane(
+        provider_id="grok",
+        lane_id="credits",
+        label="Weekly",
+        remaining_percent=None,
+        reset_at=3000,
+        scope="all",
+        model=None,
+        feature=None,
+        bindable=True,
+        source_id="grok-billing",
+    )
+    base = snapshot("grok", "Weekly", 50.0, state=ProviderSourceState.STALE)
+    state = ProviderUsageState(
+        (replace(base, lanes=(numberless,), action_label="Run grok login"),),
+        1000,
+        1100,
+        False,
+    )
+    row = project_usage_menu(state, now=1000).rows[0]
+    assert row.title == "Grok · Run grok login"
+    assert "stale" in (row.detail or "")

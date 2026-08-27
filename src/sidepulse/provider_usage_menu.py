@@ -122,8 +122,16 @@ def _row(
     provider_label = provider_descriptor(snapshot.provider_id).label
     lane = most_constrained_lane(snapshot)
     if lane is None:
-        title = f"{provider_label} · {_state_label(snapshot)}"
-        detail = None
+        # No usable number. "Grok · stale" is true and useless -- the row
+        # is the whole glance, so it carries the thing that would FIX it
+        # when there is one (2026-08-27 owner report: "so much of it says
+        # Grok stale"). The state label stays the fallback.
+        title = f"{provider_label} · {snapshot.action_label or _state_label(snapshot)}"
+        detail = (
+            f"{_state_label(snapshot)} · last reading unavailable"
+            if snapshot.action_label
+            else None
+        )
     else:
         remaining = (
             "unknown"
