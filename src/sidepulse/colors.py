@@ -487,14 +487,16 @@ DEFAULT_URGENCY_ALERT_ENABLED = True
 # and an optional finite arrival that precedes it with at most two full-bar
 # taps. The pure renderer defaults to the base so refresh or reconnection
 # cannot invent an arrival episode; the later episode owner must request it.
-# The arrival is ONE overshoot-and-settle crest (2026-08-26, Dynamic
-# Island grammar: alerts expand past their final size and settle), not
-# repeated flashes: the strip swells to the attention color, breathes
-# down to a 55% hold, and the persistent anchor stands up from there.
-# Urgency arrives once; the anchor carries it after that.
+# The arrival is ONE overshoot-and-settle crest (Dynamic Island
+# grammar: alerts expand past their final size and settle), not
+# repeated flashes: the strip swells to the attention color and
+# breathes down INTO the anchor's own level. 0.85, not the first
+# cut's 0.55: the anchor holds urgent at >=0.75, so settling to 55%
+# left a 40ms hop back up -- a stutter where the settle should land
+# ("the magic isn't feeling right", tuned 2026-08-27).
 ATTENTION_CREST_MS = 300
 ATTENTION_CREST_SETTLE_MS = 450
-ATTENTION_CREST_HOLD_FRACTION = 0.55
+ATTENTION_CREST_HOLD_FRACTION = 0.85
 ATTENTION_REST_MS = 900
 
 # A quick twinkle-then-bloom when an agent finishes, rather than an

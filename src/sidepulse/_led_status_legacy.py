@@ -555,17 +555,24 @@ DONE_CELEBRATION_FADE_MS = 900
 # Expressive exactly once, then quiet.
 DONE_CELEBRATION_CREST_MS = 240
 DONE_CELEBRATION_CREST_SETTLE_MS = 200
-DONE_CELEBRATION_CREST_FACTOR = 1.12
+# Blend toward white, not multiply: the default done green already has
+# a saturated channel at 255, so a multiplicative overdrive changed
+# nothing and the crest was invisible exactly where it mattered most
+# (tuned 2026-08-27). An 18% white blend brightens every hue visibly
+# while keeping its identity.
+DONE_CELEBRATION_CREST_BLEND = 0.18
 
 
-def _crest_color(hex_color: str, factor: float = DONE_CELEBRATION_CREST_FACTOR) -> str:
-    """Overdrive a color's channels past 100%, clamped at full scale."""
+def _crest_color(hex_color: str, blend: float = DONE_CELEBRATION_CREST_BLEND) -> str:
+    """Lift a color toward white by ``blend`` for one luminous crest."""
     cleaned = hex_color.lstrip("#")
     try:
         channels = [int(cleaned[i : i + 2], 16) for i in (0, 2, 4)]
     except (ValueError, IndexError):
         return hex_color
-    return "#" + "".join(f"{min(255, round(value * factor)):02X}" for value in channels)
+    return "#" + "".join(
+        f"{min(255, round(value + (255 - value) * blend)):02X}" for value in channels
+    )
 
 
 def _done_celebration_program(done_color: str, led_count: int) -> str:
