@@ -445,3 +445,33 @@ def test_forced_request_during_callback_delivery_is_not_swallowed(tmp_path):
         assert service._rerun_requested is False
         assert not service._forced_providers
     service.close()
+
+
+def test_a_visible_quota_strip_counts_as_attention():
+    """Our one adaptation of CodexBar's ladder: they only have a menu,
+    we can be showing the number on the LED bar the whole time."""
+    from sidepulse.provider_usage_runtime import _interval_for
+
+    assert _interval_for((), 10_000.0, menu_last_opened_at=None) == 1800.0
+    assert (
+        _interval_for((), 10_000.0, menu_last_opened_at=None, ambient_usage_visible=True)
+        == 300.0
+    )
+    # It only ever tightens; a fresh visit still wins.
+    assert (
+        _interval_for(
+            (), 10_000.0, menu_last_opened_at=9_990.0, ambient_usage_visible=True
+        )
+        == 120.0
+    )
+    # Low Power Mode outranks the ambient surface.
+    assert (
+        _interval_for(
+            (),
+            10_000.0,
+            menu_last_opened_at=9_990.0,
+            constrained=True,
+            ambient_usage_visible=True,
+        )
+        == 1800.0
+    )

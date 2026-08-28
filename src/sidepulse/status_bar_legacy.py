@@ -2898,10 +2898,21 @@ class StatusBarController(NSObject):
         )
         self.sync_keep_awake(display_mode)
         _t_pipeline = time.monotonic()
+        led_display_kind = self.active_led_display_kind(battery_snapshot)
+        # A Quota Runway strip shows the number without anyone opening a
+        # menu, so it counts as attention for the refresh cadence.
+        usage_service = getattr(self, "_sidepulse_provider_usage_service", None)
+        if usage_service is not None:
+            try:
+                usage_service.note_ambient_usage_visible(
+                    led_display_kind == LED_DISPLAY_QUOTA_RUNWAY
+                )
+            except Exception:
+                pass
         self.sync_leds(
             display_mode,
             battery_snapshot,
-            self.active_led_display_kind(battery_snapshot),
+            led_display_kind,
             snapshot.statuses,
             projection=projection,
             operator_events=snapshot.operator_events,

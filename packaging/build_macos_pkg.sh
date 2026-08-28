@@ -221,3 +221,32 @@ else
         echo "Local verification build only: this package is not Developer ID signed or notarized."
     fi
 fi
+
+# --- Distributable app archive ------------------------------------------
+# A Developer ID INSTALLER certificate is a separate purchase-time
+# artifact, and a .pkg cannot be notarized without one. A notarized ZIP
+# of the .app needs only the Developer ID APPLICATION identity, which is
+# what most menu-bar apps actually ship (CodexBar distributes the app,
+# not an installer package). So when we can make a distributable
+# archive, make it -- and say plainly what is missing when we cannot.
+OUTPUT_ZIP="${OUTPUT_PKG%.pkg}.zip"
+if [ -n "$APP_SIGN_IDENTITY" ]; then
+    /usr/bin/ditto -c -k --keepParent "$APP_PATH" "$OUTPUT_ZIP"
+    if [ -n "$NOTARY_PROFILE" ]; then
+        /usr/bin/xcrun notarytool submit "$OUTPUT_ZIP"             --keychain-profile "$NOTARY_PROFILE" --wait
+        # Staple the .app, then re-zip: a zip itself holds no ticket.
+        /usr/bin/xcrun stapler staple "$APP_PATH"
+        /usr/bin/xcrun stapler validate "$APP_PATH"
+        rm -f "$OUTPUT_ZIP"
+        /usr/bin/ditto -c -k --keepParent "$APP_PATH" "$OUTPUT_ZIP"
+        echo "Notarized and stapled app archive: $OUTPUT_ZIP"
+        echo "This one is safe to hand to another Mac."
+    else
+        echo "Signed app archive (NOT notarized): $OUTPUT_ZIP"
+        echo "Gatekeeper will still warn on another Mac. To finish, run once:"
+        echo "  xcrun notarytool store-credentials sidepulse \\"
+        echo "    --apple-id <your-apple-id> --team-id AJ9VWBRNZN \\"
+        echo "    --password <app-specific-password>"
+        echo "then rebuild with NOTARY_PROFILE=sidepulse."
+    fi
+fi

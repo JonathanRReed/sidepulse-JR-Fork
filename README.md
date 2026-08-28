@@ -48,6 +48,13 @@ ported behavior by behavior instead.
   — agent blocked for minutes, task completed, quota crossed, severe
   weather — to ntfy, Home Assistant, or anything with a URL.
 
+## Install
+
+The signed app archive built by `packaging/build_macos_pkg.sh` is the
+distributable artifact. Until it is notarized, macOS will warn on a
+machine that did not build it -- see `docs/PRODUCTION-RELEASE.md` for
+the one-time credential step that closes that gap.
+
 ## Quick start
 
 ```sh

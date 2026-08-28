@@ -8,9 +8,35 @@ Set the signing identities and notarization profile used by `packaging/build_mac
 
 ```bash
 export APP_SIGN_IDENTITY='Developer ID Application: …'
-export INSTALLER_SIGN_IDENTITY='Developer ID Installer: …'
+export INSTALLER_SIGN_IDENTITY='Developer ID Installer: …'   # .pkg only
 export NOTARY_PROFILE='sidepulse-notary'
 ```
+
+### What is actually required to hand this to another Mac
+
+Two artifacts are possible, and they need different things:
+
+| Artifact | Needs | Status |
+| --- | --- | --- |
+| Notarized **app archive** (`.zip`) | Developer ID **Application** cert + notary profile | the cert is held; the profile is the only gap |
+| Notarized **installer** (`.pkg`) | additionally a Developer ID **Installer** cert | that certificate does not exist yet |
+
+The app archive is the route most menu-bar apps take, and it is what the
+build produces automatically once a notary profile exists. Create one
+**once**, with an app-specific password from appleid.apple.com:
+
+```bash
+xcrun notarytool store-credentials sidepulse \
+  --apple-id <your-apple-id> --team-id AJ9VWBRNZN \
+  --password <app-specific-password>
+```
+
+Then any build with `NOTARY_PROFILE=sidepulse` submits, staples and
+re-zips on its own, and prints the path to an archive that opens
+cleanly on someone else's machine.
+
+To also ship a `.pkg`, create a Developer ID Installer certificate in
+the Apple Developer portal and set `INSTALLER_SIGN_IDENTITY`.
 
 Create an Instruments-backed JSON evidence file with these fields:
 

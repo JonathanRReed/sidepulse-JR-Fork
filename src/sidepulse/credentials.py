@@ -279,6 +279,21 @@ def _run_security_write(item: KeychainItem, secret: str) -> subprocess.Completed
         # a silent no-op that looked like a permission failure
         # (2026-08-27: the write-back never ran at all).
         raise ValueError("keychain item has no account to update")
+    # The secret rides argv, and we know that is visible to `ps` for the
+    # lifetime of the call. Two alternatives were measured and rejected
+    # (2026-08-27):
+    #   * `-w` last, reading from stdin: `security`'s interactive reader
+    #     TRUNCATES AT 128 CHARACTERS. A real Claude payload is ~500+,
+    #     so this silently corrupts the credential -- catastrophically
+    #     worse than the exposure it closes.
+    #   * SecItemUpdate under our own code identity: moves the write off
+    #     Apple's signed binary and into the ACL partition that is
+    #     reported to produce recurring authorization prompts
+    #     (steipete/CodexBar#2115).
+    # So argv stands, and write_keychain_secret VERIFIES the round trip
+    # instead -- a truncated or refused write must never look like a
+    # success, because the caller uses that answer to decide whether
+    # Claude Code still has a usable sign-in.
     return subprocess.run(
         [
             "/usr/bin/security",
@@ -317,7 +332,32 @@ def write_keychain_secret(
         completed = (runner or _run_security_write)(item, secret)
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
-    return completed.returncode == 0
+    if completed.returncode != 0:
+        return False
+    if runner is not None:
+        return True
+    # Verify the round trip. A silently truncated or partially applied
+    # write would otherwise be reported as success, and the caller would
+    # believe Claude Code still holds a usable sign-in when it does not.
+    try:
+        account = keychain_account_for(item)
+        readback = subprocess.run(
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-s",
+                item.service,
+                *(("-a", account) if account else ()),
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_SECURITY_BACKGROUND_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return readback.returncode == 0 and (readback.stdout or "").strip() == secret
 
 
 @dataclass(frozen=True, slots=True)

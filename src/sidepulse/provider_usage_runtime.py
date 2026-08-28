@@ -153,15 +153,26 @@ _RESET_WATCH_WINDOW_SECONDS = 600.0
 _RESET_WATCH_INTERVAL_SECONDS = 120.0
 
 
+#: When the LED bar is showing Quota Runway, the number is on a surface
+#: the owner can read WITHOUT opening anything -- so "menu age" stops
+#: being a fair proxy for attention. This is our one adaptation of
+#: CodexBar's ladder, and it exists because we have surfaces they do
+#: not: the idle rung tightens from 30 minutes to 5.
+_AMBIENT_VISIBLE_CEILING_SECONDS = 300.0
+
+
 def _interval_for(
     snapshots: tuple[ProviderUsageSnapshot, ...],
     observed_at: float,
     *,
     menu_last_opened_at: float | None = None,
     constrained: bool = False,
+    ambient_usage_visible: bool = False,
 ) -> float:
     """Seconds until the next refresh. Pure, so it stays testable."""
     if constrained:
+        # Low Power Mode outranks everything, ambient surfaces included:
+        # the owner asked the machine to stop working so hard.
         return _CONSTRAINED_INTERVAL_SECONDS
     # None means "not opened since launch" -- an INFINITE age, not an
     # age measured from the epoch (which read as 'looked at it recently'
@@ -173,6 +184,8 @@ def _interval_for(
             if age <= ceiling:
                 interval = candidate
                 break
+    if ambient_usage_visible:
+        interval = min(interval, _AMBIENT_VISIBLE_CEILING_SECONDS)
     for snapshot in snapshots:
         if snapshot.state in {
             ProviderSourceState.NEEDS_CONSENT,
@@ -252,6 +265,12 @@ class ProviderUsageService:
         #: When the owner last opened the menu -- the cadence ladder's
         #: only attention signal. None means 'not since launch'.
         self._menu_last_opened_at: float | None = None
+        #: True while the LED bar renders Quota Runway.
+        self._ambient_usage_visible = False
+
+    def note_ambient_usage_visible(self, visible: bool) -> None:
+        """Tell the cadence whether a usage number is on screen already."""
+        self._ambient_usage_visible = bool(visible)
 
     def note_menu_opened(self, *, now: float | None = None) -> None:
         """Record a visit; the cadence ladder keys off how long ago."""
@@ -441,6 +460,9 @@ class ProviderUsageService:
                 observed_at,
                 menu_last_opened_at=getattr(self, "_menu_last_opened_at", None),
                 constrained=_machine_is_constrained(),
+                ambient_usage_visible=bool(
+                    getattr(self, "_ambient_usage_visible", False)
+                ),
             ),
             refreshing=False,
         )

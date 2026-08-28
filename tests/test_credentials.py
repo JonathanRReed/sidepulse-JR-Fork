@@ -318,3 +318,61 @@ def test_a_background_read_cannot_park_a_worker_thread_for_half_a_minute(tmp_pat
     assert foreground >= background, "a real prompt gets room to be answered"
     source = inspect.getsource(module)
     assert "_SECURITY_ATTRIBUTES_TIMEOUT_SECONDS" in source
+
+
+def test_a_truncated_keychain_write_is_never_reported_as_success():
+    """`security`'s stdin reader truncates at 128 chars, and a real
+    Claude payload is ~500+. A partial write must fail loudly: the
+    caller uses this answer to decide whether Claude Code still has a
+    usable sign-in (2026-08-27)."""
+    import subprocess
+
+    from sidepulse import credentials as module
+    from sidepulse.credentials import write_keychain_secret
+
+    payload = "x" * 400
+    calls = {}
+
+    def fake_run(args, **kwargs):
+        if args[1] == "add-generic-password":
+            calls["wrote"] = True
+            return subprocess.CompletedProcess(args, 0, stdout="")
+        if args[1] == "find-generic-password" and "-w" in args:
+            # the item came back short, as a truncating writer would
+            return subprocess.CompletedProcess(args, 0, stdout=payload[:128] + "\n")
+        return subprocess.CompletedProcess(
+            args, 0, stdout='    "acct"<blob>="someone"\n'
+        )
+
+    original = module.subprocess.run
+    module.subprocess.run = fake_run
+    try:
+        assert write_keychain_secret(CLAUDE_CODE_KEYCHAIN, payload) is False
+    finally:
+        module.subprocess.run = original
+    assert calls.get("wrote"), "the write was attempted before verifying"
+
+
+def test_a_faithful_keychain_write_verifies_and_succeeds():
+    import subprocess
+
+    from sidepulse import credentials as module
+    from sidepulse.credentials import write_keychain_secret
+
+    payload = "y" * 400
+
+    def fake_run(args, **kwargs):
+        if args[1] == "add-generic-password":
+            return subprocess.CompletedProcess(args, 0, stdout="")
+        if args[1] == "find-generic-password" and "-w" in args:
+            return subprocess.CompletedProcess(args, 0, stdout=payload + "\n")
+        return subprocess.CompletedProcess(
+            args, 0, stdout='    "acct"<blob>="someone"\n'
+        )
+
+    original = module.subprocess.run
+    module.subprocess.run = fake_run
+    try:
+        assert write_keychain_secret(CLAUDE_CODE_KEYCHAIN, payload) is True
+    finally:
+        module.subprocess.run = original
