@@ -362,9 +362,9 @@ def test_discovery_tolerates_unknown_tailscale_fields():
 
 
 def test_discovery_never_reads_tailscale_stderr(monkeypatch):
-    """tailscale writes `tskey-...` auth keys to stderr. Reading it is how
-    a secret ends up in a log."""
-    secret = "tskey-auth-kSECRETVALUE12345"
+    """Tailscale can write auth keys to stderr. Reading it is how a secret
+    ends up in a log."""
+    secret = "redacted-auth-key-from-stderr"
     seen: dict[str, object] = {}
 
     class Completed:

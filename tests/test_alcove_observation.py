@@ -11,14 +11,147 @@ import pytest
 from sidepulse.alcove_observation import (
     ALCOVE_HOLD_SECONDS,
     AlcoveCaptureRequest,
+    AlcoveCaptureStatus,
+    AlcoveConfidenceState,
+    AlcoveGeometryIntent,
+    AlcoveMotionIntent,
     AlcoveObservation,
     AlcoveObservationBuffer,
     AlcoveObservationReducer,
     AlcoveObservationWorker,
+    AlcoveSilhouette,
+    AlcoveStatusSnapshot,
     RawAlphaImage,
+    note_alcove_status,
+    project_alcove_confidence,
     scan_alpha_image,
     validate_observation,
 )
+
+
+def test_alcove_silhouette_is_frozen_and_rejects_unsafe_boundary_values() -> None:
+    contour = ((40.0, 0.0), (40.0, 20.0), (120.0, 20.0), (120.0, 0.0), (40.0, 0.0))
+    silhouette = AlcoveSilhouette(80.0, 80.0, 20.0, contour)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        silhouette.width = 81.0
+    for kwargs in (
+        {"center_x": math.nan},
+        {"width": 0.0},
+        {"height": math.inf},
+        {"contour": [(40.0, 0.0), (40.0, 20.0), (120.0, 20.0), (40.0, 0.0)]},
+        {"contour": ((40.0, 0.0), (40.0, 20.0), (120.0, 20.0), (120.0, 0.0))},
+    ):
+        values = {"center_x": 80.0, "width": 80.0, "height": 20.0, "contour": contour}
+        values.update(kwargs)
+        with pytest.raises(ValueError):
+            AlcoveSilhouette(**values)
+
+
+@pytest.mark.parametrize(
+    ("status", "age", "geometry_age", "expected"),
+    [
+        (AlcoveCaptureStatus.CAPTURED, 0.0, 0.0, AlcoveConfidenceState.FRESH),
+        (AlcoveCaptureStatus.CAPTURED, 0.0, 2.01, AlcoveConfidenceState.STALE),
+        (AlcoveCaptureStatus.IMAGE_UNUSABLE, 0.0, None, AlcoveConfidenceState.UNSUPPORTED),
+        (AlcoveCaptureStatus.CAPTURE_FAILED, 0.0, None, AlcoveConfidenceState.RECOVERING),
+    ],
+)
+def test_confidence_projection_resolves_raw_capture_facts(status, age, geometry_age, expected) -> None:
+    snapshot = AlcoveStatusSnapshot(status=status, updated_at=100.0, geometry_age_seconds=geometry_age, geometry_available=geometry_age is not None)
+    projection = project_alcove_confidence(following=True, snapshot=snapshot, blocker=None, now=100.0 + age)
+    assert projection.state is expected
+
+
+def test_confidence_projection_precedence_and_boundaries() -> None:
+    captured = AlcoveStatusSnapshot(AlcoveCaptureStatus.CAPTURED, 100.0, 0.0, True)
+    assert project_alcove_confidence(following=False, snapshot=captured, blocker=None, now=100.0).state is AlcoveConfidenceState.NOT_FOLLOWING
+    assert project_alcove_confidence(following=True, snapshot=captured, blocker=AlcoveCaptureStatus.SCREEN_RECORDING_DENIED, now=100.0).state is AlcoveConfidenceState.PERMISSION_DENIED
+    assert project_alcove_confidence(following=True, snapshot=captured, blocker=AlcoveCaptureStatus.WINDOW_UNAVAILABLE, now=100.0).state is AlcoveConfidenceState.DISCONNECTED
+    assert project_alcove_confidence(following=True, snapshot=None, blocker=None, now=100.0).state is AlcoveConfidenceState.RECOVERING
+    assert project_alcove_confidence(following=True, snapshot=captured, blocker=None, now=102.0).state is AlcoveConfidenceState.FRESH
+    assert project_alcove_confidence(following=True, snapshot=captured, blocker=None, now=108.0).state is AlcoveConfidenceState.STALE
+    assert project_alcove_confidence(following=True, snapshot=captured, blocker=None, now=130.0).state is AlcoveConfidenceState.STALE
+
+
+def test_confidence_projection_copy_intents_and_permission_action() -> None:
+    fresh = project_alcove_confidence(
+        following=True,
+        snapshot=AlcoveStatusSnapshot(AlcoveCaptureStatus.CAPTURED, 100.0, 0.0, True),
+        blocker=None,
+        now=100.0,
+    )
+    assert fresh.message == "Live. Matching Alcove's width."
+    assert fresh.accessibility_value == "Fresh"
+    assert fresh.accessibility_help == "The Screen Bar is following a current measurement."
+    assert fresh.geometry_intent is AlcoveGeometryIntent.FOLLOW_LIVE
+    assert fresh.motion_intent is AlcoveMotionIntent.TRACK
+    assert fresh.needs_permission_action is False
+    denied = project_alcove_confidence(following=True, snapshot=None, blocker=AlcoveCaptureStatus.SCREEN_RECORDING_DENIED, now=100.0)
+    assert denied.needs_permission_action is True
+    assert denied.geometry_intent is AlcoveGeometryIntent.USE_SCREEN_BAR_GEOMETRY
+    assert denied.motion_intent is AlcoveMotionIntent.STATIC
+    assert "Screen Recording" in denied.message
+
+
+def test_projection_rejects_invalid_clock_and_geometry_age() -> None:
+    invalid = AlcoveStatusSnapshot(AlcoveCaptureStatus.CAPTURED, 100.0, -1.0, True)
+    assert project_alcove_confidence(following=True, snapshot=invalid, blocker=None, now=100.0).state is AlcoveConfidenceState.RECOVERING
+    assert project_alcove_confidence(following=True, snapshot=None, blocker=None, now=math.nan).state is AlcoveConfidenceState.RECOVERING
+
+
+def test_recovering_holds_geometry_without_starting_settle() -> None:
+    projection = project_alcove_confidence(
+        following=True,
+        snapshot=AlcoveStatusSnapshot(AlcoveCaptureStatus.CAPTURE_FAILED, 100.0, 0.0, True),
+        blocker=None,
+        now=100.0,
+    )
+    assert projection.geometry_intent is AlcoveGeometryIntent.HOLD_LAST_GOOD
+    assert projection.motion_intent is AlcoveMotionIntent.HOLD
+
+
+def test_recorded_blocker_statuses_project_without_a_live_blocker() -> None:
+    denied = project_alcove_confidence(
+        following=True,
+        snapshot=AlcoveStatusSnapshot(AlcoveCaptureStatus.SCREEN_RECORDING_DENIED, 100.0),
+        blocker=None,
+        now=100.0,
+    )
+    disconnected = project_alcove_confidence(
+        following=True,
+        snapshot=AlcoveStatusSnapshot(AlcoveCaptureStatus.WINDOW_UNAVAILABLE, 100.0),
+        blocker=None,
+        now=100.0,
+    )
+    assert denied.state is AlcoveConfidenceState.PERMISSION_DENIED
+    assert disconnected.state is AlcoveConfidenceState.DISCONNECTED
+
+
+def test_recovery_hold_expires_after_eight_seconds() -> None:
+    snapshot = AlcoveStatusSnapshot(AlcoveCaptureStatus.CAPTURE_FAILED, 100.0, 0.0, True)
+    assert project_alcove_confidence(following=True, snapshot=snapshot, blocker=None, now=108.0).geometry_intent is AlcoveGeometryIntent.HOLD_LAST_GOOD
+    assert project_alcove_confidence(following=True, snapshot=snapshot, blocker=None, now=108.01).geometry_intent is AlcoveGeometryIntent.USE_SCREEN_BAR_GEOMETRY
+
+
+def test_note_captured_status_records_fresh_geometry_by_default() -> None:
+    import sidepulse.alcove_observation as observation_module
+
+    observation_module.reset_alcove_status()
+    note_alcove_status(AlcoveCaptureStatus.CAPTURED, now=100.0)
+    snapshot = observation_module.latest_alcove_status()
+    assert snapshot is not None
+    assert snapshot.geometry_age_seconds == 0.0
+    assert snapshot.geometry_available is True
+
+
+def test_reducer_reports_last_good_age_without_changing_current_hold() -> None:
+    reducer = AlcoveObservationReducer()
+    assert reducer.last_good_age(now=100.0) is None
+    request = _request()
+    assert reducer.apply(_observation(), request, now=100.0)
+    assert reducer.last_good_age(now=102.0) == pytest.approx(2.0)
+    assert reducer.last_good_age(now=99.0) is None
+    assert reducer.last_good_age(now=math.inf) is None
 
 
 def _request(**changes) -> AlcoveCaptureRequest:
@@ -265,9 +398,7 @@ def test_worker_has_one_capture_in_flight_and_only_the_latest_request_pending() 
 
     assert worker.pending_count == 1
     release.set()
-    deadline = time.monotonic() + 2.0
-    while captured != [0, 99] and time.monotonic() < deadline:
-        time.sleep(0.005)
+    assert worker.wait_idle(timeout_seconds=2.0)
     assert worker.close(timeout_seconds=1.0)
     assert captured == [0, 99]
     assert maximum_active == 1
@@ -284,11 +415,8 @@ def test_worker_publishes_only_frozen_plain_values() -> None:
     worker = AlcoveObservationWorker(buffer, capture=capture)
     worker.reconcile(_request(requested_at=time.monotonic()))
     assert completed.wait(2.0)
-    deadline = time.monotonic() + 2.0
-    result = None
-    while result is None and time.monotonic() < deadline:
-        result = buffer.take()
-        time.sleep(0.001)
+    assert worker.wait_idle(timeout_seconds=2.0)
+    result = buffer.take()
     assert worker.close(timeout_seconds=1.0)
     assert result is not None
 
@@ -326,8 +454,6 @@ def test_worker_drops_a_late_capture_result_after_close() -> None:
     assert entered.wait(2.0)
     assert not worker.close(timeout_seconds=0.01)
     release.set()
-    deadline = time.monotonic() + 2.0
-    while worker.in_flight and time.monotonic() < deadline:
-        time.sleep(0.005)
+    assert worker.wait_idle(timeout_seconds=2.0)
 
     assert buffer.take() is None

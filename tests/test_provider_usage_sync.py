@@ -16,7 +16,14 @@ from sidepulse.provider_usage_sync import (
 )
 
 
-def snapshot(provider, observed, remaining, *, account="account-fixture"):
+def snapshot(
+    provider,
+    observed,
+    remaining,
+    *,
+    account="account-fixture",
+    source_instance_id="default",
+):
     lane = UsageLane(
         provider_id=provider,
         lane_id="weekly",
@@ -45,10 +52,18 @@ def snapshot(provider, observed, remaining, *, account="account-fixture"):
         cache_savings_usd=None,
         credits_remaining=None,
         incident=None,
+        source_instance_id=source_instance_id,
     )
 
 
-def observation(device, provider, observed, input_tokens):
+def observation(
+    device,
+    provider,
+    observed,
+    input_tokens,
+    *,
+    source_instance_id="default",
+):
     return MachineUsageObservation(
         device_id=device,
         provider_id=provider,
@@ -59,6 +74,7 @@ def observation(device, provider, observed, input_tokens):
         model_count=1,
         estimated_cost_usd=1.0,
         cache_savings_usd=0.0,
+        source_instance_id=source_instance_id,
     )
 
 
@@ -185,3 +201,61 @@ def test_agent_activity_is_not_part_of_default_packet_categories():
         ("quota", "token_usage"),
     )
     assert "agent_activity" not in packet.categories
+
+
+def test_sync_merge_preserves_two_same_provider_instances():
+    local = ProviderSyncPacket(
+        1,
+        "mac-mini",
+        1000,
+        (
+            snapshot("claude", 1000, 25, source_instance_id="personal"),
+            snapshot("claude", 1000, 75, source_instance_id="work"),
+        ),
+        (),
+        ("quota",),
+    )
+    merged = merge_provider_sync(local, ())
+    assert {
+        (item.provider_id, item.source_instance_id)
+        for item in merged.quota_snapshots
+    } == {("claude", "personal"), ("claude", "work")}
+
+
+def test_machine_usage_keeps_two_same_provider_instances_distinct():
+    packet = ProviderSyncPacket(
+        1,
+        "mac-mini",
+        1000,
+        (),
+        (
+            observation(
+                "mac-mini",
+                "claude",
+                1000,
+                25,
+                source_instance_id="personal",
+            ),
+            observation(
+                "mac-mini",
+                "claude",
+                1000,
+                75,
+                source_instance_id="work",
+            ),
+        ),
+        ("token_usage",),
+    )
+
+    decoded = decode_signed_packet(
+        encode_signed_packet(packet, b"fixture-shared-secret-32-bytes!!"),
+        b"fixture-shared-secret-32-bytes!!",
+        now=1000,
+    )
+    merged = merge_provider_sync(decoded, ())
+
+    assert {item.source_instance_id for item in merged.machine_usage} == {
+        "personal",
+        "work",
+    }
+    assert merged.total_input_tokens == 100

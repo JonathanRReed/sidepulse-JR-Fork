@@ -1,12 +1,8 @@
-"""The settings_window namespace-injection ratchet.
+"""Fail-closed contract for the Settings window's dependency graph.
 
-`settings_window._install()` copies the monolith's global namespace into
-this module, so dozens of names resolve through a channel invisible to
-ruff, to the import graph, and to grep-by-import -- an extraction that
-removes a legacy global can NameError the Settings window at runtime
-with zero static warning. This ratchet freezes the injected-name set:
-it may only SHRINK (replace injections with explicit imports), and any
-NEW injected name fails here instead of at the user's Settings pane.
+The Settings window must declare every dependency through Python imports.
+Ambient ``globals()`` copying makes the import graph invisible to static
+analysis and lets Settings panes fail only when a user opens them.
 """
 
 from __future__ import annotations
@@ -17,48 +13,13 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "sidepulse"
 
-# Frozen 2026-08-19 (60 names); shrunk to 31 on 2026-08-26 by the
-# explicit-import tranche, then 30 when the calibration stepper moved
-# out (every name importable without a cycle moved
-# to a real import; what remains is defined in status_bar_legacy itself).
-INJECTED_NAMES = frozenset(
-    {
-        "ANIMATION_STYLE_DISPLAY_LABELS",
-        "DEFAULT_SETTINGS_PANE",
-        "SCREEN_BAR_PREVIEW_HEIGHT",
-        "StatusBarController",
-        "StatusBarDevice",
-        "TIMEBOX_PRESET_MINUTES",
-        "UsageGraphView",
-        "add_preview_dot",
-        "focus_sync",
-        "log_status_bar",
-        "make_blend_mode_popup",
-        "make_closed_lid_awake_policy_popup",
-        "make_color_preset_popup",
-        "make_preview_scenario_popup",
-        "make_provider_opener_popup",
-        "native_ui",
-        "nscolor_from_hex",
-        "open_url",
-        "os",
-        "provider_icon_for_provider",
-        "select_blend_mode",
-        "select_color_preset",
-        "select_popup_item",
-        "set_checkbox_state",
-        "set_field_value",
-        "set_preview_dot_color",
-        "set_preview_dot_rgb",
-        "signals_module",
-        "sys",
-        "usage_stats",
-    }
-)
+
+def _settings_window_tree() -> ast.Module:
+    return ast.parse((SRC / "settings_window.py").read_text())
 
 
-def _injected_names() -> set[str]:
-    tree = ast.parse((SRC / "settings_window.py").read_text())
+def _ambient_names() -> set[str]:
+    tree = _settings_window_tree()
     defined = set(dir(builtins)) | {"__name__", "__file__", "__doc__"}
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -77,7 +38,7 @@ def _injected_names() -> set[str]:
 
     loads: set[str] = set()
 
-    def visit_function(node) -> None:
+    def visit_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         local = {
             arg.arg
             for arg in (
@@ -112,20 +73,31 @@ def _injected_names() -> set[str]:
     return {name for name in loads if name not in defined}
 
 
-def test_namespace_injection_only_shrinks() -> None:
-    current = _injected_names()
-    new = current - INJECTED_NAMES
-    assert not new, (
-        "settings_window gained NEW names that resolve only through the "
-        "_install() namespace injection -- import them explicitly instead: "
-        f"{sorted(new)}"
-    )
-    retired = INJECTED_NAMES - current
-    # Shrinking is the goal; keep the frozen list honest when it does.
-    # (The original branch asserted `retired <= INJECTED_NAMES`, which is
-    # true by construction -- a tautology found in the 2026-08-26 audit.
-    # Now a retired name must actually leave the frozen list.)
-    assert not retired, (
-        "settings_window no longer relies on these injected names -- "
-        f"remove them from INJECTED_NAMES: {sorted(retired)}"
-    )
+def test_settings_window_has_no_namespace_injection() -> None:
+    tree = _settings_window_tree()
+    functions = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert "_install" not in functions
+    global_namespace_reads = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "globals"
+    ]
+    assert global_namespace_reads == []
+    assert _ambient_names() == set()
+
+
+def test_settings_window_declares_extracted_settings_pane_dependencies() -> None:
+    imports = {
+        node.module
+        for node in ast.walk(_settings_window_tree())
+        if isinstance(node, ast.ImportFrom)
+    }
+
+    assert "global_action_settings_pane" in imports
+    assert "dnd_settings_pane" in imports

@@ -714,6 +714,12 @@ def test_package_builder_strictly_verifies_ad_hoc_signatures() -> None:
     assert '"--deep"' in source
 
 
+def test_package_builder_collects_the_resource_package_for_installed_manifests() -> None:
+    source = (REPO_ROOT / "packaging" / "build_macos_pkg.sh").read_text()
+
+    assert "--collect-data sidepulse.resources" in source
+
+
 def _write_executable(path: Path, source: str) -> None:
     path.write_text(source)
     path.chmod(0o755)
@@ -730,7 +736,21 @@ def test_package_builder_uses_isolated_roots_identity_and_pre_pkg_verifier(tmp_p
     shutil.copy2(REPO_ROOT / "packaging" / "verify_macos_app.py", packaging_dir)
     shutil.copy2(REPO_ROOT / "packaging" / "scripts" / "postinstall", scripts_dir)
     shutil.copy2(REPO_ROOT / "packaging" / "sign_macos_app.py", packaging_dir)
+    shutil.copy2(
+        REPO_ROOT / "packaging" / "sparkle_public_ed_key.txt",
+        packaging_dir,
+    )
     shutil.copy2(REPO_ROOT / "pyproject.toml", project)
+    project_scripts = project / "scripts"
+    project_scripts.mkdir()
+    shutil.copy2(
+        REPO_ROOT / "scripts" / "release_artifact_contract.py",
+        project_scripts,
+    )
+    shutil.copy2(
+        REPO_ROOT / "scripts" / "package_macos_artifact.py",
+        project_scripts,
+    )
     requirements_dir = project / "requirements"
     requirements_dir.mkdir()
     shutil.copy2(
@@ -750,6 +770,34 @@ set -eu
 if [ "${1:-}" = "-m" ]; then
     exit 0
 fi
+case "${1:-}" in
+    */prepare_sparkle.py)
+        output=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --output) output="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        [ -n "$output" ]
+        /bin/mkdir -p "$output/Sparkle.framework"
+        printf 'fixture license\n' > "$output/LICENSE"
+        exit 0
+        ;;
+    */package_macos_artifact.py)
+        output=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --output-pkg) output="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        [ -n "$output" ]
+        : > "$output"
+        echo package >> "$PACKAGE_TEST_EVENT_LOG"
+        exit 0
+        ;;
+esac
 echo verify >> "$PACKAGE_TEST_EVENT_LOG"
 exit 0
 """,
@@ -790,8 +838,37 @@ EOF
         build_python,
         """#!/bin/sh
 set -eu
-# Answer the builder's interpreter version probe as a supported Python.
-if [ "$1" = "-c" ]; then exit 0; fi
+# Answer the builder's interpreter version probe as a supported Python. The
+# three-argument form is the public-key validation seam used by the builder.
+if [ "$1" = "-c" ]; then
+    if [ "$#" -eq 3 ]; then
+        /bin/cat "$3"
+    fi
+    exit 0
+fi
+case "$1" in
+    */validate_release_version.py)
+        printf '0.5.0\n'
+        exit 0
+        ;;
+    */release_artifact_contract.py)
+        version=""
+        architecture=""
+        dist_dir=""
+        shift
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --version) version="$2"; shift 2 ;;
+                --architecture) architecture="$2"; shift 2 ;;
+                --dist-dir) dist_dir="$2"; shift 2 ;;
+                --format) shift 2 ;;
+                *) exit 91 ;;
+            esac
+        done
+        printf '%s/SidePulse-%s-%s.pkg\n' "$dist_dir" "$version" "$architecture"
+        exit 0
+        ;;
+esac
 if [ "$1" != "-m" ] || [ "$2" != "venv" ]; then exit 90; fi
 /bin/mkdir -p "$3/bin"
 /bin/cp "$PACKAGE_TEST_PYTHON_TEMPLATE" "$3/bin/python"
@@ -827,13 +904,26 @@ if [ "$1" != "-m" ] || [ "$2" != "venv" ]; then exit 90; fi
     app = build_root / "pyinstaller" / "SidePulse.app"
     info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
     assert info["CFBundleIdentifier"] == "io.sidepulse.app"
+    assert info["CFBundleDisplayName"] == "JR Bar"
     assert info["NSAppleEventsUsageDescription"] == (
-        "SidePulse uses Automation only to open a reviewed resume command in "
+        "JR Bar uses Automation only to open a reviewed resume command in "
         "Terminal or iTerm2 when you choose Open."
+    )
+    assert info["NSFocusStatusUsageDescription"] == (
+        "JR Bar uses Focus Status only when you choose Allow Focus Status, "
+        "so Do Not Disturb can follow whether a macOS Focus is active."
     )
     entitlements = plistlib.loads((packaging_dir / "entitlements.plist").read_bytes())
     assert entitlements["com.apple.security.automation.apple-events"] is True
-    # Three script-file invocations run before pkgbuild now: the signer,
-    # the pre-pkg bundle verifier, and the entitlements verifier.
-    assert event_log.read_text().splitlines() == ["verify", "verify", "verify"]
+    # Three script-file invocations verify the app, then the isolated package
+    # assembly seam creates the exact PKG output.
+    assert event_log.read_text().splitlines() == [
+        "verify",
+        "verify",
+        "verify",
+        "verify",
+        "package",
+    ]
     assert list(output_root.glob("SidePulse-*.pkg"))
+    assert not list(output_root.glob("*.zip"))
+    assert not list(output_root.glob("*appcast*"))

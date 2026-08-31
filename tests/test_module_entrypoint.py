@@ -60,10 +60,9 @@ class ModuleEntrypointTests(unittest.TestCase):
             {"document", "findings", "last_failure_class", "version"},
         )
         self.assertEqual(payload["document"], "sidepulse-doctor")
-        # v2 added alcove_follow_state: Alcove following used to have no
-        # observable state at all, so a denied Screen Recording permission
-        # was indistinguishable from a working feature with nothing to do.
-        self.assertEqual(payload["version"], 3)
+        # v4 expands alcove_follow_state from capture outcomes into the
+        # seven semantic confidence states used by the product surfaces.
+        self.assertEqual(payload["version"], 4)
         self.assertEqual(
             tuple(finding["check"] for finding in payload["findings"]),
             (

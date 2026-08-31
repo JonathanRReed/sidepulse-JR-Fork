@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import time
 
+from .product_identity import PRODUCT_DISPLAY_NAME
+
 
 def build_setup_window(target):
-    """The welcome window: what SidePulse is (shown live, not described),
+    """The welcome window: what JR Bar is (shown live, not described),
     which agents to connect, and the Mac-level installs -- a first-run
     moment that should feel like the product, not a permissions form."""
     from AppKit import (
@@ -49,7 +51,7 @@ def build_setup_window(target):
         NSBackingStoreBuffered,
         False,
     )
-    window.setTitle_("Welcome to JR-BAR")
+    window.setTitle_(f"Welcome to {PRODUCT_DISPLAY_NAME}")
     window.setReleasedWhenClosed_(False)
     window.center()
 
@@ -65,7 +67,7 @@ def build_setup_window(target):
 
     # Hero: the product introduces itself by DOING the thing -- a live
     # LED strip playing the full-team demo, not a paragraph about LEDs.
-    title = native_ui.make_label("JR-BAR", size=27.0, bold=True)
+    title = native_ui.make_label(PRODUCT_DISPLAY_NAME, size=27.0, bold=True)
     hero_title_holder = native_ui.make_stack(orientation="vertical", spacing=0.0)
     hero_title_holder.addArrangedSubview_(title)
     stack.addArrangedSubview_(hero_title_holder)
@@ -128,7 +130,7 @@ def build_setup_window(target):
     fda_status = native_ui.make_label("", secondary=True, size=12.0)
     fda_button = native_ui.make_button("Grant…", target, "openFullDiskAccessSettings:")
     fda_reveal = native_ui.make_button(
-        "Reveal SidePulse" if running_inside_bundle() else "Reveal Program",
+        f"Reveal {PRODUCT_DISPLAY_NAME}" if running_inside_bundle() else "Reveal Program",
         target,
         "revealFocusBinaryInFinder:",
     )
@@ -141,7 +143,7 @@ def build_setup_window(target):
             "Focus Detection (Full Disk Access)",
             fda_cluster,
             help_text=(
-                "Lets SidePulse see which macOS Focus is active, so LEDs "
+                f"Lets {PRODUCT_DISPLAY_NAME} see which macOS Focus is active, so LEDs "
                 "can dim or turn off per Focus. Grant\u2026 opens the "
                 "Privacy pane; click +, then pick the app Reveal shows "
                 "you (macOS won't list it by itself). The full "

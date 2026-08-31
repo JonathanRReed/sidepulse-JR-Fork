@@ -4,7 +4,6 @@ import os
 import socket
 import tempfile
 import threading
-import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,15 +30,6 @@ def socket_root() -> Path:
         yield Path(directory)
 
 
-def _wait_until(predicate, *, timeout: float = 1.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.01)
-    return predicate()
-
-
 def _socket_identity(path: Path) -> tuple[int, int]:
     info = path.lstat()
     return info.st_dev, info.st_ino
@@ -48,8 +38,14 @@ def _socket_identity(path: Path) -> tuple[int, int]:
 def test_start_refuses_to_unlink_a_live_peer_socket(socket_root: Path) -> None:
     socket_path = socket_root / "state" / "events.sock"
     received: list[ProviderRefreshHint] = []
+    received_event = threading.Event()
+
+    def observe_hint(hint: ProviderRefreshHint) -> None:
+        received.append(hint)
+        received_event.set()
+
     first = HookEventServer(
-        received.append,
+        observe_hint,
         socket_path=socket_path,
     )
     second = HookEventServer(lambda _hint_value: None, socket_path=socket_path)
@@ -66,7 +62,7 @@ def test_start_refuses_to_unlink_a_live_peer_socket(socket_root: Path) -> None:
             socket_path=socket_path,
             timeout=0.5,
         )
-        assert _wait_until(lambda: len(received) == 1)
+        assert received_event.wait(1.0)
         assert received == [_hint("event:survivor")]
     finally:
         second.stop()
@@ -186,7 +182,8 @@ def test_start_bind_is_anchored_when_parent_swaps_inside_bind(
             bind_thread_cwds.append(os.getcwd())
             observer = threading.Thread(target=lambda: other_thread_cwds.append(os.getcwd()))
             observer.start()
-            observer.join()
+            observer.join(timeout=1.0)
+            assert not observer.is_alive()
             return self.inner.bind(address)
 
     server = HookEventServer(lambda _hint_value: None, socket_path=socket_path)
@@ -325,10 +322,18 @@ def test_silent_peer_does_not_block_a_later_valid_peer(socket_root: Path) -> Non
         socket_path=socket_path,
     )
     server.start()
+    original_handle = server._handle_connection
+    silent_started = threading.Event()
+
+    def observe_connection(connection: socket.socket) -> None:
+        silent_started.set()
+        original_handle(connection)
+
+    server._handle_connection = observe_connection
     silent = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     silent.settimeout(0.5)
     silent.connect(str(socket_path))
-    time.sleep(0.05)
+    assert silent_started.wait(1.0)
 
     try:
         assert send_refresh_hint(
@@ -346,19 +351,30 @@ def test_stop_closes_stalled_peers_and_joins_server_threads(socket_root: Path) -
     socket_path = socket_root / "state" / "events.sock"
     server = HookEventServer(lambda _hint_value: None, socket_path=socket_path)
     server.start()
+    original_handle = server._handle_connection
+    entered = 0
+    entered_lock = threading.Lock()
+    all_peers_started = threading.Event()
+
+    def observe_connection(connection: socket.socket) -> None:
+        nonlocal entered
+        with entered_lock:
+            entered += 1
+            if entered == 4:
+                all_peers_started.set()
+        original_handle(connection)
+
+    server._handle_connection = observe_connection
     silent_peers = []
     for _index in range(4):
         peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         peer.settimeout(0.5)
         peer.connect(str(socket_path))
         silent_peers.append(peer)
-    time.sleep(0.05)
+    assert all_peers_started.wait(1.0)
 
-    started = time.monotonic()
     server.stop()
-    elapsed = time.monotonic() - started
     try:
-        assert elapsed < 1.0
         assert server.thread is None or not server.thread.is_alive()
         assert not any(worker.is_alive() for worker in server._workers)
         assert server._connections == set()

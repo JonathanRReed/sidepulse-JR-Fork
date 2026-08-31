@@ -1,0 +1,38 @@
+name: Release issue
+description: Report a packaging, signing, notarization, install, upgrade, update, or release-evidence problem.
+title: "[Release]: "
+labels:
+  - release
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never attach signing credentials, notarization profiles, private certificates, tokens, or private machine paths. Redact diagnostics and use checksums or public release links.
+  - type: input
+    id: artifact
+    attributes:
+      label: Release and artifact
+      description: Give the public release tag, package name, and checksum if available.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Installation environment
+      placeholder: macOS version, Mac architecture, clean install or upgrade
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Describe the install, launch, update, rollback, or verification steps that fail.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Include redacted installer output, public receipts, Gatekeeper status, or release-verification fields.
+    validations:
+      required: true

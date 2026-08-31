@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -216,7 +215,12 @@ def test_t3_service_retains_last_known_good_on_failure(tmp_path: Path) -> None:
             return snapshot
         raise OSError("database disappeared")
 
-    service = T3SnapshotService(reader=reader, minimum_interval=0.01)
+    clock = {"now": 0.0}
+    service = T3SnapshotService(
+        reader=reader,
+        monotonic=lambda: clock["now"],
+        minimum_interval=0.25,
+    )
     first_ready = threading.Event()
     second_ready = threading.Event()
     first = []
@@ -227,10 +231,10 @@ def test_t3_service_retains_last_known_good_on_failure(tmp_path: Path) -> None:
         force=True,
     )
     assert first_ready.wait(1.0)
-    time.sleep(0.02)
+    clock["now"] = 1.0
     service.request(
         lambda observation: (second.append(observation), second_ready.set()),
-        force=True,
+        force=False,
     )
     assert second_ready.wait(1.0)
     service.close()

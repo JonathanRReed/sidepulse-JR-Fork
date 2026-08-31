@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
@@ -618,7 +619,16 @@ class CloudIngestWiringTests(unittest.TestCase):
         )
         self.controller.start_cloud_ingest_server()
         self.assertIsNotNone(self.controller.cloud_ingest)
-        return self.controller.cloud_ingest
+        server = self.controller.cloud_ingest
+        self._row_ready = threading.Event()
+        sink = server.sink
+
+        def observed_sink(record) -> None:
+            sink(record)
+            self._row_ready.set()
+
+        server.sink = observed_sink
+        return server
 
     def _post(self, server, body: dict) -> int:
         import http.client
@@ -708,15 +718,9 @@ class CloudIngestWiringTests(unittest.TestCase):
         )
         self.assertTrue(all(row.is_subagent for row in visible))
 
-    def _wait_for_rows(self, *, attempts: int = 50):
-        import time as time_module
-
-        for _ in range(attempts):
-            rows = self.controller.monitor.snapshot().statuses
-            if rows:
-                return rows
-            time_module.sleep(0.05)
-        return ()
+    def _wait_for_rows(self):
+        self.assertTrue(self._row_ready.wait(2.5), "cloud row did not publish")
+        return self.controller.monitor.snapshot().statuses
 
     def test_the_toggle_starts_and_stops_the_server(self) -> None:
         self.controller.toggleCloudIngest_(SimpleNamespace(state=lambda: 1))

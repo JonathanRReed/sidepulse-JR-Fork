@@ -48,11 +48,16 @@ class UsageHookEvent:
     provider_id: str
     lane_id: str
     detail: str
+    source_instance_id: str = "default"
 
 
-def _lane_percents(snapshots) -> dict[tuple[str, str], float]:
+def _lane_percents(snapshots) -> dict[tuple[str, str, str], float]:
     return {
-        (snapshot.provider_id, lane.lane_id): lane.remaining_percent
+        (
+            snapshot.provider_id,
+            snapshot.source_instance_id,
+            lane.lane_id,
+        ): lane.remaining_percent
         for snapshot in snapshots
         for lane in snapshot.lanes
         if lane.remaining_percent is not None
@@ -63,7 +68,7 @@ def detect_usage_hook_events(
     previous_snapshots,
     current_snapshots,
     *,
-    thresholds: dict[str, float],
+    thresholds: dict[object, float],
 ) -> tuple[UsageHookEvent, ...]:
     """Transitions between two usage states, in a stable order.
 
@@ -77,30 +82,51 @@ def detect_usage_hook_events(
         prior = previous_percents.get(key)
         if prior is None:
             continue
-        provider_id, lane_id = key
-        threshold = thresholds.get(provider_id)
+        provider_id, source_instance_id, lane_id = key
+        threshold = thresholds.get(
+            (provider_id, source_instance_id),
+            thresholds.get(provider_id),
+        )
         if (
             threshold is not None
             and prior > threshold >= current
         ):
             events.append(
-                UsageHookEvent("quota_low", provider_id, lane_id, f"{current:.0f}")
+                UsageHookEvent(
+                    "quota_low",
+                    provider_id,
+                    lane_id,
+                    f"{current:.0f}",
+                    source_instance_id,
+                )
             )
         if prior > 0.0 >= current:
             events.append(
-                UsageHookEvent("quota_reached", provider_id, lane_id, "0")
+                UsageHookEvent(
+                    "quota_reached",
+                    provider_id,
+                    lane_id,
+                    "0",
+                    source_instance_id,
+                )
             )
         if current - prior >= 50.0:
             # A large upward jump is a window reset seen through the
             # percent lens -- the same signal the reset celebrations use.
             events.append(
-                UsageHookEvent("quota_reset", provider_id, lane_id, f"{current:.0f}")
+                UsageHookEvent(
+                    "quota_reset",
+                    provider_id,
+                    lane_id,
+                    f"{current:.0f}",
+                    source_instance_id,
+                )
             )
     previous_states = {
-        snapshot.provider_id: snapshot.state for snapshot in previous_snapshots
+        snapshot.identity: snapshot.state for snapshot in previous_snapshots
     }
-    for snapshot in sorted(current_snapshots, key=lambda item: item.provider_id):
-        prior_state = previous_states.get(snapshot.provider_id)
+    for snapshot in sorted(current_snapshots, key=lambda item: item.identity):
+        prior_state = previous_states.get(snapshot.identity)
         if prior_state is None:
             continue
         if prior_state in _ANSWERING and snapshot.state in _SILENT:
@@ -110,6 +136,7 @@ def detect_usage_hook_events(
                     snapshot.provider_id,
                     "",
                     snapshot.state.name.lower(),
+                    snapshot.source_instance_id,
                 )
             )
         elif prior_state in _SILENT and snapshot.state in _ANSWERING:
@@ -119,6 +146,7 @@ def detect_usage_hook_events(
                     snapshot.provider_id,
                     "",
                     snapshot.state.name.lower(),
+                    snapshot.source_instance_id,
                 )
             )
     return tuple(events)
@@ -138,10 +166,13 @@ def hook_path_message(hook_path: str) -> str:
     return "Usage event hook saved."
 
 
-def run_usage_hooks(executable: str, events: tuple[UsageHookEvent, ...]) -> None:
+def run_usage_hooks(
+    executable: str,
+    events: tuple[UsageHookEvent, ...],
+) -> threading.Thread | None:
     """Fire-and-forget: one background thread runs the batch serially."""
     if not executable or not events:
-        return
+        return None
     import os
 
     executable = os.path.expanduser(executable)
@@ -175,9 +206,11 @@ def run_usage_hooks(executable: str, events: tuple[UsageHookEvent, ...]) -> None
                     print(message, flush=True)
                 continue
 
-    threading.Thread(
+    worker = threading.Thread(
         target=_run, name="SidePulseUsageHooks", daemon=True
-    ).start()
+    )
+    worker.start()
+    return worker
 
 
 __all__ = [

@@ -14,7 +14,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 from typing import Final, Protocol
 
 MAX_RUNTIME_PENDING_KEYS: Final = 32
@@ -63,6 +63,31 @@ class SubmissionDisposition(str, Enum):
     QUEUED = "queued"
     REPLACED_PENDING = "replaced_pending"
     REFUSED = "refused"
+
+
+class RuntimeWorkPriority(IntEnum):
+    """Selection priority within a bounded worker mailbox.
+
+    Coalescing remains scoped by ``RuntimeWorkCommand.coalesce_key``. Priority
+    only decides which distinct pending slot runs first, so an important cue
+    and the final ordinary state can both survive a burst.
+    """
+
+    COALESCIBLE = 0
+    IMPORTANT = 10
+    URGENT = 20
+    EXPLICIT = 30
+
+
+def _result_retention_priority(command: RuntimeWorkCommand) -> int:
+    priority = int(command.priority)
+    if (
+        command.domain is RuntimeWorkerDomain.HARDWARE_WRITE
+        and command.coalesce_key is not None
+        and command.coalesce_key.endswith(":latest")
+    ):
+        return int(RuntimeWorkPriority.EXPLICIT) + 1
+    return priority
 
 
 def _finite_number(value: object) -> bool:
@@ -397,11 +422,21 @@ class RuntimeWorkCommand:
     generation: int
     deadline: float
     payload: object
+    priority: RuntimeWorkPriority = RuntimeWorkPriority.COALESCIBLE
+    coalesce_key: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.domain) is not RuntimeWorkerDomain:
             raise ValueError("invalid runtime worker domain")
         object.__setattr__(self, "key", _normalize_work_key(self.key))
+        if type(self.priority) is not RuntimeWorkPriority:
+            raise ValueError("invalid runtime work priority")
+        coalesce_key = self.key if self.coalesce_key is None else self.coalesce_key
+        try:
+            normalized_coalesce_key = _normalize_work_key(coalesce_key)
+        except ValueError as exc:
+            raise ValueError("invalid runtime work coalescing key") from exc
+        object.__setattr__(self, "coalesce_key", normalized_coalesce_key)
         if type(self.generation) is not int or self.generation <= 0:
             raise ValueError("invalid runtime work generation")
         if not _finite_number(self.deadline) or float(self.deadline) <= 0.0:
@@ -522,17 +557,33 @@ class LatestWinsWorker:
             if not self._accepting or command.generation <= self._cancelled_through or command.deadline <= now:
                 self._increment("refused")
                 return SubmissionDisposition.REFUSED
-            existing = self._pending.get(command.key)
+            coalesce_key = command.coalesce_key
+            assert coalesce_key is not None
+            existing = self._pending.get(coalesce_key)
             if existing is not None:
-                self._pending[command.key] = command
+                if command.priority < existing.priority:
+                    self._increment("refused")
+                    return SubmissionDisposition.REFUSED
+                self._pending[coalesce_key] = command
                 self._increment("replaced_pending")
                 self._condition.notify_all()
                 return SubmissionDisposition.REPLACED_PENDING
             if len(self._pending) >= MAX_RUNTIME_PENDING_KEYS:
-                self._increment("refused")
-                return SubmissionDisposition.REFUSED
+                victim_key, victim = min(
+                    self._pending.items(),
+                    key=lambda item: (
+                        int(item[1].priority),
+                        -item[1].deadline,
+                        item[0],
+                    ),
+                )
+                if command.priority <= victim.priority:
+                    self._increment("refused")
+                    return SubmissionDisposition.REFUSED
+                del self._pending[victim_key]
+                self._increment("cancelled")
             first_start = self._thread is None
-            self._pending[command.key] = command
+            self._pending[coalesce_key] = command
             if first_start:
                 thread = threading.Thread(
                     target=self._run,
@@ -544,7 +595,7 @@ class LatestWinsWorker:
                     thread.start()
                 except Exception:
                     self._thread = None
-                    self._pending.pop(command.key, None)
+                    self._pending.pop(coalesce_key, None)
                     self._increment("refused")
                     raise
             else:
@@ -553,6 +604,46 @@ class LatestWinsWorker:
         if first_start:
             return SubmissionDisposition.STARTED
         return SubmissionDisposition.QUEUED
+
+    def discard_pending(self, coalesce_key: str) -> bool:
+        """Discard one exact semantic slot without cancelling the generation."""
+
+        normalized = _normalize_work_key(coalesce_key)
+        with self._condition:
+            removed = self._pending.pop(normalized, None) is not None
+            if removed:
+                self._increment("cancelled")
+                self._condition.notify_all()
+            return removed
+
+    def discard_pending_prefix(self, coalesce_prefix: str) -> int:
+        """Discard every bounded slot under one opaque resource prefix."""
+
+        normalized = _normalize_work_key(coalesce_prefix)
+        with self._condition:
+            keys = tuple(key for key in self._pending if key.startswith(normalized))
+            for key in keys:
+                del self._pending[key]
+            if keys:
+                self._metrics["cancelled"] = _bounded_increment(
+                    self._metrics["cancelled"], len(keys)
+                )
+                self._condition.notify_all()
+            return len(keys)
+
+    def wait_idle(self, *, timeout_seconds: float) -> bool:
+        """Wait until no command is running or pending without consuming results."""
+
+        if not _finite_number(timeout_seconds) or float(timeout_seconds) < 0.0:
+            raise ValueError("invalid runtime worker idle timeout")
+        deadline = self._now() + float(timeout_seconds)
+        with self._condition:
+            while self._running is not None or self._pending:
+                remaining = deadline - self._now()
+                if remaining <= 0.0:
+                    return False
+                self._condition.wait(remaining)
+            return True
 
     def cancel_generation(self, generation: int) -> None:
         if type(generation) is not int or generation <= 0:
@@ -637,15 +728,29 @@ class LatestWinsWorker:
                 elif stale:
                     self._increment("stale_results")
                 else:
-                    if command.key in self._results:
+                    result_key = command.coalesce_key
+                    assert result_key is not None
+                    admit_result = True
+                    if result_key in self._results:
                         self._increment("replaced_results")
-                        del self._results[command.key]
+                        del self._results[result_key]
                     elif len(self._results) >= MAX_RUNTIME_PENDING_KEYS:
-                        oldest_key = next(iter(self._results))
-                        del self._results[oldest_key]
+                        victim_key, victim = min(
+                            self._results.items(),
+                            key=lambda item: _result_retention_priority(
+                                item[1].command
+                            ),
+                        )
+                        if _result_retention_priority(
+                            command
+                        ) < _result_retention_priority(victim.command):
+                            admit_result = False
+                        else:
+                            del self._results[victim_key]
                         self._increment("stale_results")
-                    self._results[command.key] = _WorkResult(command, result)
-                    if not self._drain_scheduled:
+                    if admit_result:
+                        self._results[result_key] = _WorkResult(command, result)
+                    if admit_result and not self._drain_scheduled:
                         self._drain_scheduled = True
                         schedule_drain = True
                 self._condition.notify_all()
@@ -672,11 +777,16 @@ class LatestWinsWorker:
                 if expired:
                     self._metrics["refused"] = _bounded_increment(self._metrics["refused"], len(expired))
                 if self._pending:
-                    command = min(
-                        self._pending.values(),
-                        key=lambda candidate: (candidate.deadline, candidate.key),
+                    slot, command = min(
+                        self._pending.items(),
+                        key=lambda item: (
+                            -int(item[1].priority),
+                            item[1].deadline,
+                            item[1].key,
+                            item[0],
+                        ),
                     )
-                    del self._pending[command.key]
+                    del self._pending[slot]
                     self._running = command
                     self._increment("started")
                     return command
@@ -690,7 +800,15 @@ class LatestWinsWorker:
             if not self._accepting:
                 self._results.clear()
                 return
-            results = tuple(self._results[key] for key in sorted(self._results))
+            if self._domain is RuntimeWorkerDomain.HARDWARE_WRITE:
+                # Insertion order is completion order. Replacing one slot
+                # deletes and re-appends it above, preserving final device
+                # truth instead of reordering semantic callbacks by name.
+                results = tuple(self._results.values())
+            else:
+                # Existing shared workers have deterministic key-order
+                # dependencies between observations reconciled on main.
+                results = tuple(self._results[key] for key in sorted(self._results))
             self._results.clear()
         for item in results:
             with self._condition:

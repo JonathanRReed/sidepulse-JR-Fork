@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .provider_feature_settings import ProviderInstanceVisualProjection
 from .provider_usage_platform import ProviderSourceState, provider_descriptor
 from .provider_usage_qol import format_lane_meter, format_reset_countdown, usage_totals
 from .provider_usage_runtime import ProviderUsageState
@@ -24,6 +25,7 @@ class UsageCenterLane:
     #: The title without the text-glyph meter -- for renderers that draw
     #: a REAL bar and would otherwise show the meter twice.
     plain_title: str = ""
+    source_instance_id: str = "default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +38,8 @@ class UsageCenterSection:
     metrics: tuple[str, ...]
     action_label: str | None
     incident: str | None
+    source_instance_id: str = "default"
+    color_override: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +71,7 @@ def project_usage_center(
     *,
     now: float,
     merged_sync: MergedProviderSync | None = None,
+    visual: ProviderInstanceVisualProjection | None = None,
 ) -> UsageCenterProjection:
     state = apply_merged_sync_to_state(state, merged_sync)
     sections = []
@@ -112,6 +117,7 @@ def project_usage_center(
                         pace is not None
                         and pace.verdict in {PACE_CRITICAL, PACE_OUT}
                     ),
+                    source_instance_id=snapshot.source_instance_id,
                 )
             )
         token_total = (
@@ -133,16 +139,36 @@ def project_usage_center(
             metrics.append(f"Cache savings ${snapshot.cache_savings_usd:.2f}")
         if snapshot.credits_remaining is not None:
             metrics.append(f"{snapshot.credits_remaining:g} credits left")
+        try:
+            visual_policy = (
+                None
+                if visual is None
+                else visual.provider(
+                    snapshot.provider_id,
+                    snapshot.source_instance_id,
+                )
+            )
+        except StopIteration:
+            visual_policy = None
+        section_title = (
+            visual_policy.label
+            if visual_policy is not None
+            else provider_descriptor(snapshot.provider_id).label
+        )
+        if visual_policy is None and snapshot.source_instance_id != "default":
+            section_title += f" · {snapshot.source_instance_id}"
         sections.append(
             UsageCenterSection(
                 snapshot.provider_id,
-                provider_descriptor(snapshot.provider_id).label,
+                section_title,
                 snapshot.account_label,
                 _status_label(snapshot.state),
                 tuple(lanes),
                 tuple(metrics),
                 snapshot.action_label,
                 snapshot.incident,
+                snapshot.source_instance_id,
+                None if visual_policy is None else visual_policy.color_override,
             )
         )
     aggregate = []

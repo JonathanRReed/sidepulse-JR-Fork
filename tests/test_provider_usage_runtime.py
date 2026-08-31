@@ -2,13 +2,25 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace as dataclass_replace
 
+import pytest
+
+from sidepulse.provider_feature_settings import (
+    ProviderCollectionFeature,
+    project_presentation_settings,
+)
 from sidepulse.provider_usage_platform import (
     ProviderSourceState,
     ProviderUsageSnapshot,
     UsageLane,
 )
-from sidepulse.provider_usage_runtime import ProviderUsageService, ProviderUsageState
+from sidepulse.provider_usage_runtime import (
+    ProviderUsageApply,
+    ProviderUsageService,
+    ProviderUsageState,
+    RefreshPublicationOutcome,
+)
 from sidepulse.provider_usage_settings import default_provider_usage_settings
 
 
@@ -189,6 +201,7 @@ def test_request_runs_off_caller_thread_and_coalesces(tmp_path):
     settings = default_provider_usage_settings()
     gate = threading.Event()
     collector_threads = []
+    callback_threads = []
 
     def collect(_pref, _home, observed, _credentials):
         collector_threads.append(threading.current_thread().name)
@@ -203,26 +216,178 @@ def test_request_runs_off_caller_thread_and_coalesces(tmp_path):
         clock=time.time,
     )
     callbacks = []
-    first = service.request(callback=callbacks.append, providers=("codex",), force=True)
+    callbacks_ready = threading.Event()
+
+    def callback(state):
+        callback_threads.append(threading.current_thread().name)
+        callbacks.append(state)
+        callbacks_ready.set()
+
+    first = service.request(callback=callback, providers=("codex",), force=True)
     # A FORCED request during an in-flight run may not piggyback on it:
     # that run already read the old credential, which is how "Reconnect"
     # used to report pre-click results as fresh ones. It runs once more.
-    second = service.request(callback=callbacks.append, providers=("codex",), force=True)
+    second = service.request(callback=callback, providers=("codex",), force=True)
     # An UNFORCED request still coalesces onto whatever is in flight.
-    third = service.request(callback=callbacks.append, providers=("codex",))
+    third = service.request(callback=callback, providers=("codex",))
     assert first.refreshing is True
     assert second.refreshing is True
     assert third.refreshing is True
     gate.set()
-    deadline = time.time() + 3
-    while time.time() < deadline and not callbacks:
-        time.sleep(0.01)
+    assert callbacks_ready.wait(3)
     assert len(collector_threads) == 2
     assert all(
         name != threading.current_thread().name for name in collector_threads
     )
+    assert callback_threads
+    assert all(name != threading.current_thread().name for name in callback_threads)
     assert callbacks and callbacks[0].refreshing is False
     service.close()
+
+
+def test_request_uses_the_service_clock_for_refresh_gating(tmp_path):
+    settings = default_provider_usage_settings()
+    clock = {"now": 1000.0}
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={},
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: clock["now"],
+    )
+
+    service.refresh_now()
+    clock["now"] = 1001.0
+    result = service.request(
+        callback=lambda _state: None,
+        providers=("codex",),
+        force=False,
+    )
+
+    assert result.refreshing is False
+    assert service.snapshot().refreshing is False
+
+
+def test_service_exposes_the_exact_settings_snapshot_used_for_collection(tmp_path):
+    settings = default_provider_usage_settings().with_enabled("grok", False)
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={},
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: 1000.0,
+    )
+
+    assert service.settings_snapshot() is None
+    service.refresh_now(force=True)
+
+    assert service.settings_snapshot() is settings
+
+
+def test_collectors_receive_only_the_typed_collection_projection(tmp_path):
+    settings = default_provider_usage_settings()
+    observed_preferences = []
+
+    def collect(preference, _home, observed, _credentials):
+        observed_preferences.append(preference)
+        assert type(preference) is ProviderCollectionFeature
+        assert not hasattr(preference, "menu_visible")
+        assert not hasattr(preference, "reset_celebrations")
+        assert not hasattr(preference, "threshold_remaining")
+        return snapshot("devin", observed=observed)
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={"devin": collect},
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: 1000.0,
+    )
+
+    service.refresh_now(providers=("devin",), force=True)
+
+    assert len(observed_preferences) == 1
+
+
+def test_same_provider_instances_collect_and_remain_exactly_addressable(tmp_path):
+    settings = default_provider_usage_settings()
+    settings = settings.with_instance(
+        dataclass_replace(
+            settings.preference("claude"),
+            source_instance_id="work",
+            options=(("account", "work"),),
+        )
+    )
+
+    def collect(preference, _home, observed, _credentials):
+        return snapshot(
+            "claude",
+            remaining=20 if preference.source_instance_id == "work" else 80,
+            observed=observed,
+        )
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={"claude": collect},
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: 1000.0,
+    )
+
+    state = service.refresh_now(providers=("claude",), force=True)
+
+    assert state.by_instance("claude", "default").lanes[0].remaining_percent == 80
+    assert state.by_instance("claude", "work").lanes[0].remaining_percent == 20
+    with pytest.raises(ValueError, match="ambiguous"):
+        state.by_provider("claude")
+
+
+def test_explicit_settings_update_outlives_an_older_worker_load(tmp_path):
+    initial = default_provider_usage_settings()
+    updated = initial.with_enabled("grok", False)
+    load_started = threading.Event()
+    release_load = threading.Event()
+
+    def load_settings():
+        load_started.set()
+        release_load.wait(2.0)
+        return initial
+
+    service = ProviderUsageService(
+        settings_loader=load_settings,
+        collectors={},
+        credentials=object(),
+        home=tmp_path,
+        clock=time.time,
+    )
+    callbacks = []
+    callbacks_ready = threading.Event()
+
+    def callback(state):
+        callbacks.append(state)
+        callbacks_ready.set()
+
+    service.request(callback=callback, force=True)
+    assert load_started.wait(1.0)
+
+    service.note_settings_updated(updated)
+    release_load.set()
+    assert callbacks_ready.wait(3.0)
+
+    assert callbacks
+    assert service.settings_snapshot() is updated
+    service.close()
+
+
+def test_provider_usage_apply_rejects_mixed_or_untyped_payloads():
+    state = ProviderUsageState((), None, None, False)
+    settings = project_presentation_settings(default_provider_usage_settings())
+
+    assert ProviderUsageApply(state, settings).state is state
+    with pytest.raises(ValueError, match="invalid provider usage state"):
+        ProviderUsageApply(object(), settings)
+    with pytest.raises(ValueError, match="invalid provider usage settings"):
+        ProviderUsageApply(state, object())
 
 
 def test_service_restores_and_persists_last_known_good(tmp_path):
@@ -475,3 +640,104 @@ def test_a_visible_quota_strip_counts_as_attention():
         )
         == 1800.0
     )
+
+
+def test_stale_refresh_is_superseded_then_worker_reruns_latest_settings(tmp_path):
+    initial = default_provider_usage_settings().with_enabled("grok", True)
+    updated = initial.with_enabled("grok", False)
+    load_started = threading.Event()
+    release_load = threading.Event()
+    calls = []
+    receipts = []
+
+    def load_settings():
+        load_started.set()
+        release_load.wait(2.0)
+        return initial if len(calls) == 0 else updated
+
+    def collect(preference, _home, observed, _credentials):
+        calls.append(preference.provider_id)
+        return snapshot(preference.provider_id, observed=observed)
+
+    service = ProviderUsageService(
+        settings_loader=load_settings,
+        collectors={"grok": collect},
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: 1000.0,
+        receipt_handler=receipts.append,
+    )
+    callbacks = []
+    done = threading.Event()
+
+    service.request(
+        callback=lambda state: (callbacks.append(state), done.set()), force=True
+    )
+    assert load_started.wait(1.0)
+    service.note_settings_updated(updated)
+    release_load.set()
+
+    assert done.wait(3.0)
+    assert service.settings_snapshot() is updated
+    assert callbacks and callbacks[-1].by_provider("grok").state is ProviderSourceState.DISABLED
+    assert len(callbacks) == 1
+    assert any(item.outcome is RefreshPublicationOutcome.SUPERSEDED for item in receipts)
+    assert any(item.outcome is RefreshPublicationOutcome.ACCEPTED for item in receipts)
+    service.close()
+
+
+def test_settings_update_after_persistence_suppresses_old_callback(tmp_path):
+    initial = default_provider_usage_settings().with_enabled("grok", True)
+    updated = initial.with_enabled("grok", False)
+    current = {"settings": initial}
+    saved = []
+    callbacks = []
+    persisted = threading.Event()
+    allow_receipt = threading.Event()
+    update_done = threading.Event()
+
+    def receipt_handler(receipt):
+        if receipt.outcome is RefreshPublicationOutcome.ACCEPTED and not persisted.is_set():
+            # The receipt is emitted after state persistence. Hold the
+            # worker in the callback-delivery gap while another thread edits
+            # settings, after the durable save but before callback delivery.
+            persisted.set()
+            allow_receipt.wait(2.0)
+
+    def update_settings() -> None:
+        assert persisted.wait(2.0)
+        current["settings"] = updated
+        service.note_settings_updated(updated)
+        update_done.set()
+
+    service = ProviderUsageService(
+        settings_loader=lambda: current["settings"],
+        collectors={
+            "grok": lambda preference, _home, observed, _credentials: snapshot(
+                preference.provider_id, observed=observed
+            )
+        },
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: 1000.0,
+        state_saver=saved.append,
+        receipt_handler=receipt_handler,
+    )
+    done = threading.Event()
+    updater = threading.Thread(target=update_settings, daemon=True)
+    updater.start()
+
+    service.request(
+        callback=lambda state: (callbacks.append(state), done.set()),
+        providers=("grok",),
+        force=True,
+    )
+
+    assert persisted.wait(2.0)
+    assert update_done.wait(2.0)
+    allow_receipt.set()
+    assert done.wait(3.0)
+    assert len(saved) == 2
+    assert callbacks[-1].by_provider("grok").state is ProviderSourceState.DISABLED
+    assert len(callbacks) == 1
+    service.close()

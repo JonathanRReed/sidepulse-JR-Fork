@@ -1,4 +1,4 @@
-# SidePulse production release gate
+# JR Bar production release gate
 
 A release tag may be published only after the authoritative macOS gate passes from a clean `main` checkout that exactly matches `origin/main`.
 
@@ -8,35 +8,61 @@ Set the signing identities and notarization profile used by `packaging/build_mac
 
 ```bash
 export APP_SIGN_IDENTITY='Developer ID Application: …'
-export INSTALLER_SIGN_IDENTITY='Developer ID Installer: …'   # .pkg only
+export INSTALLER_SIGN_IDENTITY='Developer ID Installer: …'
 export NOTARY_PROFILE='sidepulse-notary'
+export SPARKLE_KEY_ACCOUNT='io.sidepulse.app'
+export SIDEPULSE_RELEASE_CHANNEL='stable'
 ```
 
-### What is actually required to hand this to another Mac
+## Authoritative artifact
 
-Two artifacts are possible, and they need different things:
+The signed and notarized PKG remains the authoritative installer and manual
+recovery artifact:
 
-| Artifact | Needs | Status |
-| --- | --- | --- |
-| Notarized **app archive** (`.zip`) | Developer ID **Application** cert + notary profile | the cert is held; the profile is the only gap |
-| Notarized **installer** (`.pkg`) | additionally a Developer ID **Installer** cert | that certificate does not exist yet |
+```text
+dist/SidePulse-<version>-<architecture>.pkg
+```
 
-The app archive is the route most menu-bar apps take, and it is what the
-build produces automatically once a notary profile exists. Create one
-**once**, with an app-specific password from appleid.apple.com:
+The filename keeps the SidePulse compatibility name because the package
+installs `SidePulse.app`, the `SidePulse` executable, and the `sidepulse` CLI.
+The application displays JR Bar to people.
+
+Production packaging also creates a required supplemental Sparkle ZIP from the
+same signed, notarized, and stapled `SidePulse.app`. The signed `appcast.xml`
+and `jr-bar-update-channel.json` bind that ZIP to the exact candidate. They do
+not become a second installer contract.
+
+Production packaging requires both Developer ID identities and a notarytool
+profile. Store the notarization credentials once. Omit `--password` so
+notarytool reads the app-specific password from its secure interactive prompt
+instead of placing it in process arguments:
 
 ```bash
-xcrun notarytool store-credentials sidepulse \
-  --apple-id <your-apple-id> --team-id AJ9VWBRNZN \
-  --password <app-specific-password>
+xcrun notarytool store-credentials sidepulse-notary \
+  --apple-id <your-apple-id> --team-id AJ9VWBRNZN
 ```
 
-Then any build with `NOTARY_PROFILE=sidepulse` submits, staples and
-re-zips on its own, and prints the path to an archive that opens
-cleanly on someone else's machine.
+JR Bar embeds pinned Sparkle 2.9.6 and exposes `Software Update` only from a
+complete packaged bundle. Sparkle owns its first automatic-check consent
+prompt because the app deliberately omits `SUEnableAutomaticChecks`. Stable is
+the default channel and uses a one-day phased rollout interval. Beta is an
+explicit opt-in channel. No JR Bar GitHub Release or update feed has been
+published by this source tranche.
 
-To also ship a `.pkg`, create a Developer ID Installer certificate in
-the Apple Developer portal and set `INSTALLER_SIGN_IDENTITY`.
+The prepared Sparkle framework, helpers, tools, and license must match exact
+distribution digest
+`a57379fc39978044fe38787bda8ca8613d48bc9da48296514622be83651d17ce`.
+The final signed-appcast receipt reruns pinned `sign_update --verify` against
+both the appcast and update archive. A matching version string alone is not a
+release provenance receipt.
+
+The dedicated Sparkle private key is stored in the owner's login Keychain under
+account `io.sidepulse.app`. Only its public key is committed. Before a real
+release, export one encrypted offline backup with pinned Sparkle's
+`generate_keys --account io.sidepulse.app -x <secure-path>` command. Never put
+that file in the checkout, shell arguments, logs, release evidence, or Git.
+The committed public-key fingerprint is
+`9c134249398dd15c364a29451de3d81436d8eda97a0c706fa59047e6607f59ac`.
 
 Create an Instruments-backed JSON evidence file with these fields:
 
@@ -61,20 +87,64 @@ The measurements must come from the signed candidate on the release Mac after a 
 
 The signed package installs the application payload and an owned `sidepulse` CLI link only. Package scripts do not install provider hooks, a user LaunchAgent, the privileged sleep helper, the eject guard, or T3 Code integration. Those are external mutable state and cannot be transactionally rolled back by Installer without risking pre-existing user setup.
 
-The ordinary user completes integrations from SidePulse’s first-run setup or explicit CLI commands. The release gate exercises the explicit installed `status-bar start` command after package installation before it checks the LaunchAgent. This keeps package installation reversible while still testing the installed integration path.
+The ordinary user completes integrations from JR Bar's first-run setup or explicit CLI commands. The release gate exercises the explicit installed `status-bar start` command after package installation before it checks the LaunchAgent. This keeps package installation reversible while still testing the installed integration path.
 
 ## Run the gate
 
-Connect the required physical hardware and preserve an existing settings file for the installed-upgrade check. The default gate requires both SidePulse Pro and SidePulse Dot. Override `SIDEPULSE_REQUIRED_HARDWARE` with `pro`, `dot`, or `any` only for a documented hardware-matrix exception.
+Use a dedicated release Mac or disposable QA account, connect the required
+physical hardware, and preserve an existing settings file for the
+installed-upgrade check. A differently versioned, Developer ID signed JR Bar
+PKG must already be installed, with its package receipt present. Settings by
+themselves never count as upgrade evidence. The gate deliberately exercises the supported
+uninstaller, then reinstalls the exact same PKG. It preserves user settings but
+removes explicitly installed integrations and helpers. Do not run that portion
+against an everyday account. The default gate requires both SidePulse Pro and
+SidePulse Dot. Override `SIDEPULSE_REQUIRED_HARDWARE` with `pro`, `dot`, or
+`any` only for a documented hardware-matrix exception.
 
 ```bash
-export SIDEPULSE_PERFORMANCE_EVIDENCE="$PWD/performance-evidence.json"
+export SIDEPULSE_PERFORMANCE_EVIDENCE='/absolute/path/outside-the-checkout/performance-evidence.json'
 export SIDEPULSE_HARDWARE_CONFIRM=1
 export SIDEPULSE_RUN_INSTALLED_UPGRADE=1
+export SIDEPULSE_RUN_UNINSTALL=1
+export SIDEPULSE_RELEASE_USER="$(id -un)"
 ./scripts/verify_macos_release.sh
 ```
 
-The gate runs the full test suite, package checks, clean-wheel install, performance-budget validation, Developer ID signing, notarization, stapling, Gatekeeper assessment, bundle closure inspection, reversible hardware writes, a real package installation, explicit installed LaunchAgent setup, settings preservation, signing-team continuity, and installed `sidepulse integrations status --json` smoke validation.
+Set `SIDEPULSE_RELEASE_CHANNEL=beta` only for a beta release. To retain prior
+stable and beta entries, set `SIDEPULSE_SPARKLE_HISTORY_DIR` to an absolute
+external directory containing the currently published signed `appcast.xml`
+and every retained `SidePulse-*.zip` it references. The gate verifies the prior
+feed and each retained archive with the pinned Keychain key before it signs a
+replacement feed. Omit this variable only for the first published feed.
+
+The gate builds first so one immutable candidate identity exists, then binds
+the full source suite, clean-wheel install, performance budget, Developer ID
+signatures, nested Sparkle signing, app and PKG notarization, app and PKG
+stapling, Gatekeeper, the exact updater ZIP and signed appcast, package
+contents, bundle closure, entitlements, reversible hardware writes, installed
+upgrade, settings preservation, supported uninstall, and clean PKG reinstall
+to that exact candidate. The clean reinstall verifies `doctor` and
+`sidepulse integrations status --json` without silently reinstalling external
+integrations.
+
+The developer-facing wheel and source distribution are rebuilt from the same
+clean release checkout in an empty candidate-owned staging directory. Their
+exact names come from the release-artifact contract, Twine validates them, and
+the evidence manifest records their bytes and SHA-256 values. Publication
+ignores unrelated files in `dist/` and refuses any asset whose bytes changed
+after the evidence manifest was assembled.
+
+Successful verification produces `dist/release-verification.json` using the
+`jr-bar-release-evidence` schema. It contains the commit, final stapled PKG
+hash, deterministic app-tree hash, signing identities, SBOM and performance
+hashes, and one bounded receipt for every required check. Assembly fails when
+a receipt is missing, duplicated, failed, malformed, secret-shaped, changed
+on disk, or bound to another candidate. The pre-staple digest is checked
+against the notarization log, the final PKG is independently validated by
+Stapler, and the stapling receipt links both digests without pretending they
+are byte-identical. `dist/performance-evidence.json` is the immutable copy included with
+the release assets.
 
 Before authorizing the release gate, enable T3 Code only when the release Mac has representative local data. Run a bounded probe and preserve the output with the release evidence:
 
@@ -87,7 +157,14 @@ An unavailable optional third-party installation is not a failure for the core p
 
 ## Publish
 
-`publish_release.sh` creates a draft release against the exact verified commit, uploads checksummed artifacts, and publishes only after every upload succeeds. A failed publication deletes the draft release and its server-side tag.
+`publish_release.sh` creates a draft release against the exact verified commit,
+uploads the exact checksummed PKG, supplemental updater ZIP, performance
+evidence, SBOM, candidate-bound manifest, and Python developer artifacts. It
+publishes the immutable version release before changing the durable `updates`
+release, then uploads channel metadata before the client-visible signed
+appcast. A failure before the version release is published deletes its draft
+and server-side tag. A feed-update failure leaves the prior signed appcast in
+place and must be repaired before another release.
 
 ```bash
 ./scripts/publish_release.sh

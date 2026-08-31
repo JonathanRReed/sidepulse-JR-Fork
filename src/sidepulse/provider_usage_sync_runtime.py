@@ -5,14 +5,15 @@ from __future__ import annotations
 import base64
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .provider_feature_settings import ProviderInstanceSharingProjection
+from .provider_instances import REMOTE_SHARING_STATUS_ONLY
 from .provider_usage_platform import ProviderSourceState
 from .provider_usage_runtime import ProviderUsageState
 from .provider_usage_sync import (
     MAX_SYNC_PACKET_BYTES,
-    MachineUsageObservation,
     MergedProviderSync,
     ProviderSyncPacket,
     StaleSyncPacketError,
@@ -46,45 +47,69 @@ class ProviderSyncRefresh:
     refreshed_at: float
 
 
+def _load_sharing_projection(
+    loader: Callable[[], ProviderInstanceSharingProjection | object] | None,
+) -> ProviderInstanceSharingProjection | None:
+    if loader is None:
+        return None
+    try:
+        loaded = loader()
+        sharing = getattr(loaded, "sharing", loaded)
+    except Exception:
+        return None
+    if type(sharing) is not ProviderInstanceSharingProjection:
+        return None
+    return sharing
+
+
 def build_local_sync_packet(
     state: ProviderUsageState,
     settings: ProviderSyncSettings,
     *,
     generated_at: float,
+    sharing: ProviderInstanceSharingProjection | object | None = None,
 ) -> ProviderSyncPacket:
     if type(state) is not ProviderUsageState or type(settings) is not ProviderSyncSettings:
         raise ValueError("invalid provider sync input")
     if settings.device_id is None:
         raise ValueError("provider sync has no device id")
+
+    def shares_status(snapshot) -> bool:
+        if type(sharing) is not ProviderInstanceSharingProjection:
+            return False
+        try:
+            policy = sharing.provider(
+                snapshot.provider_id,
+                snapshot.source_instance_id,
+            )
+        except (StopIteration, ValueError):
+            return False
+        return policy.remote_sharing_choice == REMOTE_SHARING_STATUS_ONLY
+
+    def status_only_snapshot(snapshot):
+        return replace(
+            snapshot,
+            account_label=None,
+            input_tokens=0,
+            cached_input_tokens=0,
+            output_tokens=0,
+            model_count=0,
+            estimated_cost_usd=None,
+            cache_savings_usd=None,
+        )
+
     quota_snapshots = ()
     if "quota" in settings.categories:
         quota_snapshots = tuple(
-            snapshot
+            status_only_snapshot(snapshot)
             for snapshot in state.snapshots
             if snapshot.state in {ProviderSourceState.READY, ProviderSourceState.STALE}
             and snapshot.lanes
+            and shares_status(snapshot)
         )
+    # The current bounded profile vocabulary is `never` or `status_only`.
+    # Neither permits token counts, cost estimates, or cache-savings totals.
     machine_usage = ()
-    if "token_usage" in settings.categories:
-        machine_usage = tuple(
-            MachineUsageObservation(
-                settings.device_id,
-                snapshot.provider_id,
-                snapshot.observed_at,
-                snapshot.input_tokens,
-                snapshot.cached_input_tokens,
-                snapshot.output_tokens,
-                snapshot.model_count,
-                snapshot.estimated_cost_usd,
-                snapshot.cache_savings_usd,
-            )
-            for snapshot in state.snapshots
-            if snapshot.input_tokens
-            or snapshot.cached_input_tokens
-            or snapshot.output_tokens
-            or snapshot.estimated_cost_usd is not None
-            or snapshot.cache_savings_usd is not None
-        )
     return ProviderSyncPacket(
         schema_version=1,
         device_id=settings.device_id,
@@ -115,6 +140,8 @@ class ProviderSyncRuntime:
         self,
         *,
         settings_loader: Callable[[], ProviderSyncSettings | object],
+        sharing_loader: Callable[[], ProviderInstanceSharingProjection | object]
+        | None = None,
         credentials,
         local_directory: Path,
         fetcher: Callable[[ProviderSyncPeer], SftpFetchResult] = fetch_peer_packet,
@@ -122,6 +149,7 @@ class ProviderSyncRuntime:
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._settings_loader = settings_loader
+        self._sharing_loader = sharing_loader
         self._credentials = credentials
         self._local_directory = Path(local_directory)
         self._fetcher = fetcher
@@ -135,6 +163,9 @@ class ProviderSyncRuntime:
             raise ValueError("invalid provider sync settings")
         return settings
 
+    def _sharing(self) -> ProviderInstanceSharingProjection | None:
+        return _load_sharing_projection(self._sharing_loader)
+
     def refresh(self, state: ProviderUsageState) -> ProviderSyncRefresh:
         refreshed_at = float(self._clock())
         settings = self._settings()
@@ -144,6 +175,7 @@ class ProviderSyncRuntime:
             state,
             settings,
             generated_at=refreshed_at,
+            sharing=self._sharing(),
         )
         remotes = []
         health = []
@@ -238,6 +270,8 @@ def load_cached_merged_sync(
     state: ProviderUsageState,
     *,
     settings_loader: Callable[[], ProviderSyncSettings | object],
+    sharing_loader: Callable[[], ProviderInstanceSharingProjection | object]
+    | None = None,
     credentials,
     local_directory: Path,
     now: float | None = None,
@@ -261,7 +295,12 @@ def load_cached_merged_sync(
             or not settings.peers
         ):
             return None
-        local_packet = build_local_sync_packet(state, settings, generated_at=current)
+        local_packet = build_local_sync_packet(
+            state,
+            settings,
+            generated_at=current,
+            sharing=_load_sharing_projection(sharing_loader),
+        )
     except Exception:
         return None
     remotes = []

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from sidepulse import provider_usage_cli
+from sidepulse.provider_browser_import import BrowserImportResult, BrowserImportState
 from sidepulse.provider_usage_platform import (
     ProviderSourceState,
     ProviderUsageSnapshot,
@@ -163,6 +164,114 @@ def test_browser_consent_grant_is_exact_and_provider_scoped(tmp_path: Path):
         domain="app.devin.ai",
         field="auth1_session",
     )
+
+
+def test_browser_consent_cli_scopes_grant_list_and_revoke_to_source_instance(
+    tmp_path: Path,
+):
+    consent_path = tmp_path / "browser-consent.json"
+    output = io.StringIO()
+    common = [
+        "browser-consent",
+        "grant",
+        "devin",
+        "--browser",
+        "chrome",
+        "--profile",
+        "Default",
+        "--source-instance-id",
+        "work",
+    ]
+    assert provider_usage_cli.main(common, stdout=output, home=tmp_path, consent_path=consent_path) == 0
+    assert provider_usage_cli.main(
+        [
+            "browser-consent",
+            "grant",
+            "devin",
+            "--browser",
+            "chrome",
+            "--profile",
+            "Default",
+        ],
+        stdout=output,
+        home=tmp_path,
+        consent_path=consent_path,
+    ) == 0
+
+    output = io.StringIO()
+    assert provider_usage_cli.main(
+        ["browser-consent", "list", "--source-instance-id", "work"],
+        stdout=output,
+        home=tmp_path,
+        consent_path=consent_path,
+    ) == 0
+    listed = json.loads(output.getvalue())["consents"]
+    assert len(listed) == 1
+    assert listed[0]["source_instance_id"] == "work"
+
+    assert provider_usage_cli.main(
+        [
+            "browser-consent",
+            "revoke",
+            "devin",
+            "--browser",
+            "chrome",
+            "--profile",
+            "Default",
+            "--source-instance-id",
+            "work",
+        ],
+        stdout=io.StringIO(),
+        home=tmp_path,
+        consent_path=consent_path,
+    ) == 0
+    loaded = provider_usage_cli.load_browser_consents(consent_path).store
+    assert [item.source_instance_id for item in loaded.consents] == ["default"]
+
+
+def test_browser_consent_import_updates_the_exact_new_source_instance(
+    monkeypatch,
+    tmp_path: Path,
+):
+    captured = {}
+
+    def fake_import(**kwargs):
+        captured.update(kwargs)
+        return BrowserImportResult(
+            provider_id="devin",
+            state=BrowserImportState.IMPORTED,
+            organization="org_work",
+            reason=None,
+            source_label="chrome Default",
+        )
+
+    monkeypatch.setattr(provider_usage_cli, "import_devin_browser_session", fake_import)
+    settings_path = tmp_path / "provider-usage.json"
+    code = provider_usage_cli.main(
+        [
+            "browser-consent",
+            "import",
+            "devin",
+            "--browser",
+            "chrome",
+            "--profile",
+            "Default",
+            "--profile-root",
+            str(tmp_path),
+            "--source-instance-id",
+            "work",
+        ],
+        stdout=io.StringIO(),
+        home=tmp_path,
+        settings_path=settings_path,
+    )
+    assert code == 0
+    assert captured["source_instance_id"] == "work"
+    assert captured["home"] == tmp_path
+    settings = provider_usage_cli.load_provider_usage_settings(settings_path).settings
+    assert settings.preference("devin").option("organization") is None
+    assert settings.preference("devin", "work").option("organization") == "org_work"
+    assert settings.preference("devin", "work").browser_sources is True
 
 
 def test_refresh_uses_native_service_and_persists_result(tmp_path: Path):

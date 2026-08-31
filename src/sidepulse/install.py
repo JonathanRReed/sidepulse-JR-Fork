@@ -32,6 +32,7 @@ from .private_io import (
     read_private_text_with_identity,
     unlink_private_file_if_unchanged,
 )
+from .product_identity import PRODUCT_DISPLAY_NAME
 from .providers import (
     ANTIGRAVITY_CANONICAL_EVENTS,
     ANTIGRAVITY_ENVELOPE_KEY,
@@ -59,6 +60,7 @@ from .providers import (
     detect_log_path,
     is_sidepulse_hook_command,
     managed_opencode_plugin_log_path,
+    openclaw_handler_source_for_arguments,
     openclaw_hook_dir,
     opencode_plugin_source_for_arguments,
 )
@@ -322,12 +324,12 @@ class CodexHookTrustStatus(str, Enum):
 #: paths, no binary locations, no stderr.
 CODEX_TRUST_WARNINGS: Final[dict[CodexHookTrustStatus, str]] = {
     CodexHookTrustStatus.CLI_NOT_FOUND: (
-        "The Codex CLI is not installed here, so SidePulse could not "
+        f"The Codex CLI is not installed here, so {PRODUCT_DISPLAY_NAME} could not "
         "pre-approve its hook. Codex will ask you to trust it the first "
         "time it runs."
     ),
     CodexHookTrustStatus.NOT_CONFIRMED: (
-        "Codex did not confirm the hook, so SidePulse could not "
+        f"Codex did not confirm the hook, so {PRODUCT_DISPLAY_NAME} could not "
         "pre-approve it. Codex will ask you to trust it the first time "
         "it runs."
     ),
@@ -911,49 +913,15 @@ def uninstall_hermes_hooks(
 
 
 def openclaw_handler_source(log_path: Path, python_executable: str | None = None) -> str:
-    """The in-gateway JS handler OpenClaw loads for SidePulse. It maps the
-    gateway's own events to SidePulse's canonical hook events and forwards
-    each as one short-lived detached process -- OpenClaw's hook contract
-    forbids handlers owning long-lived resources, so each event is
-    fire-and-forget."""
-    executable = python_executable or sys.executable or "python3"
-    entry_point = Path(__file__).with_name("hook_entry.py")
-    return f"""// Managed by SidePulse -- reinstalling overwrites this file.
-import {{ spawn }} from "node:child_process";
-
-const EVENT_MAP = {{
-  "command:new": "SessionStart",
-  "message:received": "UserPromptSubmit",
-  "message:sent": "Stop",
-  "command:stop": "SessionEnd",
-}};
-
-const handler = async (event) => {{
-  const mapped = EVENT_MAP[`${{event.type}}:${{event.action}}`];
-  if (!mapped) return;
-  const payload = JSON.stringify({{
-    hook_event_name: mapped,
-    session_id: event.sessionKey ?? null,
-    logged_at: new Date().toISOString(),
-  }});
-  try {{
-    const child = spawn(
-      {json.dumps(str(executable))},
-      [{json.dumps(str(entry_point))}, "--provider", "openclaw", "--log", {json.dumps(str(log_path.expanduser()))}],
-      {{ stdio: ["pipe", "ignore", "ignore"], detached: true }},
-    );
-    child.stdin.end(payload);
-    child.unref();
-  }} catch {{}}
-}};
-
-export default handler;
-"""
+    """Return the exact managed OpenClaw handler for the current client."""
+    return openclaw_handler_source_for_arguments(
+        hook_command_arguments("openclaw", log_path, python_executable)
+    )
 
 
-OPENCLAW_HOOK_MD = """---
-name: {name}
-description: "Forwards agent activity to SidePulse so the LEDs show live status."
+OPENCLAW_HOOK_MD = f"""---
+name: {{name}}
+description: "Forwards agent activity to {PRODUCT_DISPLAY_NAME} so the LEDs show live status."
 metadata:
   openclaw:
     emoji: "\U0001F4A1"
@@ -961,9 +929,9 @@ metadata:
     export: "default"
 ---
 
-# SidePulse Status
+# {PRODUCT_DISPLAY_NAME} Status
 
-Forwards OpenClaw gateway events to the SidePulse agent monitor. Managed
+Forwards OpenClaw gateway events to the {PRODUCT_DISPLAY_NAME} agent monitor. Managed
 by SidePulse -- `sidepulse agent-monitor uninstall openclaw` removes it.
 """
 
@@ -1092,14 +1060,14 @@ def hook_command_arguments(
     log_path: Path,
     python_executable: str | None = None,
 ) -> list[str]:
-    """Return the frozen hook entry as an argument array, never a shell string."""
+    """Return the thin hook client as an argument array, never a shell string."""
     executable = python_executable or sys.executable or "python3"
     target_log = str(log_path.expanduser())
     if getattr(sys, "frozen", False) and python_executable is None:
         return [
             executable,
             "agent-monitor",
-            "hook-log",
+            "hook-client",
             "--provider",
             provider,
             "--log",
@@ -1116,7 +1084,7 @@ def hook_command_arguments(
     return [
         executable,
         "-m",
-        "sidepulse.hook_entry",
+        "sidepulse.hook_client",
         "--provider",
         provider,
         "--log",
@@ -1269,7 +1237,7 @@ def antigravity_hook_command(
     3. It always exits 0. A hook error is reported to the agent, so a broken
        status bar must not become the agent's problem.
 
-    `-m sidepulse.hook_entry`, not a baked path into site-packages: the path
+    `-m sidepulse.hook_client`, not a baked path into site-packages: the path
     form stops existing the moment the package is moved, symlinked or installed
     editable, while `import sidepulse` keeps working -- which is how every
     registered hook once died at once.
@@ -1617,31 +1585,10 @@ def hook_command(
     log_path: Path,
     python_executable: str | None = None,
 ) -> str:
-    executable = python_executable or sys.executable or "python3"
-    if getattr(sys, "frozen", False) and python_executable is None:
-        return " ".join(
-            [
-                shlex.quote(executable),
-                "agent-monitor",
-                "hook-log",
-                "--provider",
-                shlex.quote(provider),
-                "--log",
-                shlex.quote(str(log_path.expanduser())),
-            ]
-        )
-    entry_point = Path(__file__).with_name("hook_entry.py")
-    command = " ".join(
-        [
-            shlex.quote(executable),
-            shlex.quote(str(entry_point)),
-            "--provider",
-            shlex.quote(provider),
-            "--log",
-            shlex.quote(str(log_path.expanduser())),
-        ]
+    return " ".join(
+        shlex.quote(argument)
+        for argument in hook_command_arguments(provider, log_path, python_executable)
     )
-    return command
 
 
 def read_json_config(config: Path, *, tighten: bool = True) -> dict[str, Any]:
@@ -1822,7 +1769,9 @@ def resolve_codex_hook_hashes(
         if hook.get("sourcePath") != source_path:
             continue
         if not isinstance(command, str) or not (
-            "hook_entry.py" in command or "sidepulse.hook_entry" in command
+            "hook_entry.py" in command
+            or "sidepulse.hook_entry" in command
+            or "sidepulse.hook_client" in command
         ):
             continue
         if not isinstance(current_hash, str) or not isinstance(key, str):
@@ -1923,8 +1872,11 @@ def remove_codex_hook_blocks_for_log(text: str, log_path: Path) -> str:
             if (
                 target in block
                 or "sidepulse hook-log" in block
+                or "sidepulse hook-client" in block
+                or "agent-monitor hook-client" in block
                 or "hook_entry.py" in block
                 or "sidepulse.hook_entry" in block
+                or "sidepulse.hook_client" in block
             ):
                 index = end
                 continue
@@ -1995,11 +1947,18 @@ def is_sidepulse_json_hook_command(
         return False
 
     source_entrypoint = any(
-        Path(argument).name == "hook_entry.py" for argument in arguments
-    ) or ("-m" in arguments and "sidepulse.hook_entry" in arguments)
+        Path(argument).name in {"hook_entry.py", "hook_client.py"}
+        for argument in arguments
+    ) or (
+        "-m" in arguments
+        and any(
+            module in arguments
+            for module in ("sidepulse.hook_entry", "sidepulse.hook_client")
+        )
+    )
     packaged_entrypoint = (
         any(Path(argument).name == "agent-monitor" for argument in arguments)
-        and "hook-log" in arguments
+        and any(command in arguments for command in ("hook-log", "hook-client"))
     )
     return source_entrypoint or packaged_entrypoint
 

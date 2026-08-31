@@ -4,20 +4,29 @@ The token/cost/sessions graph can only show claude and codex because only
 they leave local transcript records. Every other provider answers a single
 point-in-time question -- "what percent is left right now" -- so the only
 way to chart them is to remember those answers. This module is that memory:
-an append-only private JSONL of (provider, lane, remaining_percent,
-observed_at) samples, deduplicated at the source so an all-day session adds
-dozens of points, not thousands, plus the projection that turns the file
-into the same graph-model shape the settings chart already draws.
+a private JSONL of (provider, source instance, lane, remaining_percent,
+observed_at) samples, deduplicated at the exact account source so an all-day
+session adds dozens of points, not thousands, plus the projection that turns
+the file into the same graph-model shape the settings chart already draws.
 """
 
 from __future__ import annotations
 
 import json
+import threading
+import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import audit
-from .private_io import append_private_text
+from .persistence_writer import (
+    PersistenceDisposition,
+    PersistenceOutcome,
+    PersistenceReceipt,
+)
+from .private_io import append_private_text, atomic_private_write, read_private_text
+from .provider_feature_settings import ProviderInstanceRetentionProjection
 from .providers import default_state_dir
 
 PERCENT_HISTORY_FILE_NAME = "usage-percent-history.jsonl"
@@ -32,20 +41,21 @@ def default_percent_history_path(home: Path | None = None) -> Path:
 
 
 def filter_new_observations(
-    last_recorded: dict[tuple[str, str], tuple[float, float]],
-    observations: list[tuple[str, str, float]],
+    last_recorded: dict[tuple[str, str, str], tuple[float, float]],
+    observations: list[tuple[str, str, str, float]],
     *,
     now_epoch: float,
-) -> tuple[list[dict], dict[tuple[str, str], tuple[float, float]]]:
+) -> tuple[list[dict], dict[tuple[str, str, str], tuple[float, float]]]:
     """(records worth appending, updated last-recorded map).
 
-    ``last_recorded`` maps (provider_id, lane_id) -> (percent, epoch) and
-    lives on the controller so dedupe never rereads the file.
+    ``last_recorded`` maps (provider_id, source_instance_id, lane_id) to
+    (percent, epoch) and lives on the controller so dedupe never rereads
+    the file.
     """
     updated = dict(last_recorded)
     fresh: list[dict] = []
-    for provider_id, lane_id, remaining_percent in observations:
-        if not provider_id or not lane_id:
+    for provider_id, source_instance_id, lane_id, remaining_percent in observations:
+        if not provider_id or not source_instance_id or not lane_id:
             continue
         try:
             value = float(remaining_percent)
@@ -53,7 +63,7 @@ def filter_new_observations(
             continue
         if not (0.0 <= value <= 100.0):
             continue
-        key = (provider_id, lane_id)
+        key = (provider_id, source_instance_id, lane_id)
         previous = updated.get(key)
         if previous is not None:
             prior_value, prior_epoch = previous
@@ -66,6 +76,7 @@ def filter_new_observations(
         fresh.append(
             {
                 "provider_id": provider_id,
+                "source_instance_id": source_instance_id,
                 "lane_id": lane_id,
                 "remaining_percent": round(value, 2),
                 "observed_at_epoch": round(float(now_epoch), 3),
@@ -74,21 +85,127 @@ def filter_new_observations(
     return fresh, updated
 
 
-def append_percent_observations(path: Path, records: list[dict]) -> int:
-    """Append pre-filtered records; the audit trimmer bounds the file."""
-    if not records:
-        return 0
+def _retention_by_identity(
+    projection: ProviderInstanceRetentionProjection,
+) -> dict[tuple[str, str], int]:
+    if type(projection) is not ProviderInstanceRetentionProjection:
+        raise TypeError("expected ProviderInstanceRetentionProjection")
+    return {policy.identity: policy.retention_days for policy in projection.providers}
+
+
+def _retention_signature(
+    projection: ProviderInstanceRetentionProjection,
+) -> tuple[tuple[str, str, int], ...]:
+    return tuple(
+        sorted(
+            (policy.provider_id, policy.source_instance_id, policy.retention_days)
+            for policy in projection.providers
+        )
+    )
+
+
+def _history_record(
+    provider_id: str,
+    source_instance_id: str,
+    lane_id: str,
+    percent: float,
+    epoch: float,
+) -> dict:
+    return {
+        "provider_id": provider_id,
+        "source_instance_id": source_instance_id,
+        "lane_id": lane_id,
+        "remaining_percent": round(percent, 2),
+        "observed_at_epoch": round(epoch, 3),
+    }
+
+
+def _serialize_history(records: list[dict]) -> str:
+    return "".join(
+        json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n"
+        for record in records
+    )
+
+
+def _retained_history_records(
+    history_text: str,
+    projection: ProviderInstanceRetentionProjection,
+    *,
+    now_epoch: float,
+) -> list[dict]:
+    retention_by_identity = _retention_by_identity(projection)
+    retained: list[dict] = []
+    for provider_id, source_instance_id, lane_id, percent, epoch in _parse_history_lines(
+        history_text
+    ):
+        retention_days = retention_by_identity.get((provider_id, source_instance_id), 0)
+        if retention_days == 0:
+            continue
+        if epoch < now_epoch - retention_days * 86_400.0:
+            continue
+        retained.append(
+            _history_record(
+                provider_id,
+                source_instance_id,
+                lane_id,
+                percent,
+                epoch,
+            )
+        )
+    return retained
+
+
+def append_percent_observations(
+    path: Path,
+    records: list[dict],
+    *,
+    retention_projection: ProviderInstanceRetentionProjection | None = None,
+    now_epoch: float | None = None,
+) -> int:
+    """Persist pre-filtered records and enforce exact-instance retention."""
+    if retention_projection is None:
+        if not records:
+            return 0
+        text = _serialize_history(records)
+        append_private_text(path, text)
+        audit.compact_jsonl_file(path)
+        return len(records)
+
+    current_epoch = time.time() if now_epoch is None else float(now_epoch)
+    try:
+        existing = read_private_text(path, errors="replace")
+        existed = True
+    except FileNotFoundError:
+        existing = ""
+        existed = False
     text = "".join(
         json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n"
         for record in records
     )
-    append_private_text(path, text)
+    retained = _retained_history_records(
+        existing + text,
+        retention_projection,
+        now_epoch=current_epoch,
+    )
+    if not existed and not retained:
+        return 0
+    atomic_private_write(path, _serialize_history(retained))
     audit.compact_jsonl_file(path)
-    return len(records)
+    eligible_identities = {
+        policy.identity
+        for policy in retention_projection.providers
+        if policy.retention_days > 0
+    }
+    return sum(
+        1
+        for record in records
+        if (record.get("provider_id"), record.get("source_instance_id", "default"))
+        in eligible_identities
+    )
 
 
-def _parse_history_lines(text: str) -> list[tuple[str, str, float, float]]:
-    parsed: list[tuple[str, str, float, float]] = []
+def _parse_history_lines(text: str) -> list[tuple[str, str, str, float, float]]:
+    parsed: list[tuple[str, str, str, float, float]] = []
     for line in text.splitlines():
         try:
             payload = json.loads(line)
@@ -97,19 +214,30 @@ def _parse_history_lines(text: str) -> list[tuple[str, str, float, float]]:
         if type(payload) is not dict:
             continue
         provider_id = payload.get("provider_id")
+        source_instance_id = payload.get("source_instance_id", "default")
         lane_id = payload.get("lane_id")
         percent = payload.get("remaining_percent")
         epoch = payload.get("observed_at_epoch")
         if (
             type(provider_id) is not str
             or not provider_id
+            or type(source_instance_id) is not str
+            or not source_instance_id
             or type(lane_id) is not str
             or type(percent) not in (int, float)
             or type(epoch) not in (int, float)
             or not (0.0 <= float(percent) <= 100.0)
         ):
             continue
-        parsed.append((provider_id, lane_id, float(percent), float(epoch)))
+        parsed.append(
+            (
+                provider_id,
+                source_instance_id,
+                lane_id,
+                float(percent),
+                float(epoch),
+            )
+        )
     return parsed
 
 
@@ -123,11 +251,11 @@ def percent_graph_model(
 ) -> dict:
     """The settings chart's model shape, from percent history.
 
-    One value per provider per local calendar day: the day's WORST
-    (minimum) remaining percent across that provider's lanes -- the
-    number that answers "how squeezed did I get". Days with no sample
-    carry the previous known value forward so the line stays readable;
-    days before the first sample repeat the first known value.
+    One value per exact provider instance per local calendar day: the day's
+    WORST (minimum) remaining percent across that instance's lanes -- the
+    number that answers "how squeezed did I get". Days with no sample carry
+    the previous known value forward so the line stays readable; days before
+    the first sample remain gaps.
     """
     current = now or datetime.now()
     day_keys = [
@@ -139,35 +267,59 @@ def percent_graph_model(
         day[5:].replace("-", "/") if index % label_stride == 0 else ""
         for index, day in enumerate(day_keys)
     )
-    worst_by_provider_day: dict[str, dict[str, float]] = {}
-    for provider_id, _lane_id, percent, epoch in _parse_history_lines(history_text):
+    worst_by_identity_day: dict[tuple[str, str], dict[str, float]] = {}
+    for provider_id, source_instance_id, _lane_id, percent, epoch in _parse_history_lines(
+        history_text
+    ):
         if provider_id not in provider_ids:
             continue
         day = datetime.fromtimestamp(epoch).date().isoformat()
-        per_day = worst_by_provider_day.setdefault(provider_id, {})
+        identity = (provider_id, source_instance_id)
+        per_day = worst_by_identity_day.setdefault(identity, {})
         existing = per_day.get(day)
         if existing is None or percent < existing:
             per_day[day] = percent
     series = []
     for provider_id in provider_ids:
-        per_day = worst_by_provider_day.get(provider_id)
-        if not per_day:
-            continue
-        values: list[float] = []
-        carried: float | None = None
-        for day in day_keys:
-            observed = per_day.get(day)
-            if observed is not None:
-                carried = observed
-            values.append(carried if carried is not None else -1.0)
-        if all(value < 0.0 for value in values):
-            continue
-        # Days BEFORE the first sample stay negative: the chart renders
-        # them as a gap. They used to be backfilled with the first known
-        # reading, which drew a fabricated flat line across every day
-        # before history began (noticeable on 90/365 ranges -- history
-        # starts 2026-08-21).
-        series.append({"provider_id": provider_id, "values": tuple(values)})
+        identities = sorted(
+            (
+                identity
+                for identity in worst_by_identity_day
+                if identity[0] == provider_id
+            ),
+            key=lambda identity: (identity[1] != "default", identity[1]),
+        )
+        for identity in identities:
+            _provider_id, source_instance_id = identity
+            per_day = worst_by_identity_day[identity]
+            values: list[float] = []
+            carried: float | None = None
+            for day in day_keys:
+                observed = per_day.get(day)
+                if observed is not None:
+                    carried = observed
+                values.append(carried if carried is not None else -1.0)
+            if all(value < 0.0 for value in values):
+                continue
+            # Days BEFORE the first sample stay negative: the chart renders
+            # them as a gap. They used to be backfilled with the first known
+            # reading, which drew a fabricated flat line across every day
+            # before history began (noticeable on 90/365 ranges -- history
+            # starts 2026-08-21).
+            label = (
+                provider_id
+                if source_instance_id == "default"
+                else f"{provider_id} · {source_instance_id}"
+            )
+            series.append(
+                {
+                    "provider_id": provider_id,
+                    "source_instance_id": source_instance_id,
+                    "identity": identity,
+                    "label": label,
+                    "values": tuple(values),
+                }
+            )
     return {
         "days": days,
         "period_label": period_label or f"Last {days} days",
@@ -178,37 +330,199 @@ def percent_graph_model(
     }
 
 
-def record_state_observations(controller, snapshots) -> None:
-    """Record a fresh usage state's lane percents, dedup'd, off-main.
+@dataclass(frozen=True, slots=True)
+class _PendingPercentWrite:
+    records: tuple[dict, ...]
+    retention_signature: tuple[tuple[str, str, int], ...] | None
+
+
+def _controller_retention_projection(
+    controller,
+    explicit: ProviderInstanceRetentionProjection | None,
+) -> ProviderInstanceRetentionProjection | None:
+    if explicit is not None:
+        if type(explicit) is not ProviderInstanceRetentionProjection:
+            raise TypeError("expected ProviderInstanceRetentionProjection")
+        return explicit
+    direct = getattr(controller, "_sidepulse_provider_instance_retention", None)
+    if type(direct) is ProviderInstanceRetentionProjection:
+        return direct
+    policies = getattr(controller, "_sidepulse_provider_instance_policies", None)
+    projected = getattr(policies, "retention", None)
+    return (
+        projected
+        if type(projected) is ProviderInstanceRetentionProjection
+        else None
+    )
+
+
+def record_state_observations(
+    controller,
+    snapshots,
+    *,
+    writer,
+    retention_projection: ProviderInstanceRetentionProjection | None = None,
+) -> bool | None:
+    """Queue fresh usage percents on the shared serial persistence writer.
 
     The controller carries the last-recorded map so dedupe never rereads
-    the file; the append itself rides a daemon thread.
+    the file. A refused write does not advance that map, so the observation
+    remains eligible for a later retry.
     """
-    import threading
-    import time
-
+    retention = _controller_retention_projection(controller, retention_projection)
+    retention_by_identity = (
+        _retention_by_identity(retention) if retention is not None else None
+    )
     observations = [
-        (snapshot.provider_id, lane.lane_id, lane.remaining_percent)
+        (
+            snapshot.provider_id,
+            getattr(snapshot, "source_instance_id", "default"),
+            lane.lane_id,
+            lane.remaining_percent,
+        )
         for snapshot in snapshots
         for lane in snapshot.lanes
         if lane.remaining_percent is not None
+        and (
+            retention_by_identity is None
+            or retention_by_identity.get(
+                (
+                    snapshot.provider_id,
+                    getattr(snapshot, "source_instance_id", "default"),
+                ),
+                0,
+            )
+            > 0
+        )
     ]
-    if not observations:
-        return
-    fresh, updated = filter_new_observations(
-        getattr(controller, "_sidepulse_percent_history_last", {}),
-        observations,
-        now_epoch=time.time(),
-    )
-    controller._sidepulse_percent_history_last = updated
-    if fresh:
-        threading.Thread(
-            target=lambda: append_percent_observations(
-                default_percent_history_path(), fresh
-            ),
-            name="SidePulsePercentHistory",
-            daemon=True,
-        ).start()
+    signature = _retention_signature(retention) if retention is not None else None
+    if not observations and signature is None:
+        return None
+    lock = getattr(controller, "_sidepulse_percent_history_lock", None)
+    if lock is None:
+        lock = threading.Lock()
+        controller._sidepulse_percent_history_lock = lock
+    with lock:
+        committed = dict(
+            getattr(controller, "_sidepulse_percent_history_last", {})
+        )
+        pending = dict(
+            getattr(controller, "_sidepulse_percent_history_pending", {})
+        )
+        planned = dict(committed)
+        for pending_write in pending.values():
+            for record in pending_write.records:
+                planned[
+                    (
+                        record["provider_id"],
+                        record["source_instance_id"],
+                        record["lane_id"],
+                    )
+                ] = (
+                    record["remaining_percent"],
+                    record["observed_at_epoch"],
+                )
+        pending_signatures = {
+            pending_write.retention_signature for pending_write in pending.values()
+        }
+        committed_signature = getattr(
+            controller,
+            "_sidepulse_percent_history_retention_signature",
+            None,
+        )
+        needs_retention = (
+            signature is not None
+            and signature != committed_signature
+            and signature not in pending_signatures
+        )
+        observed_epoch = time.time()
+        fresh, _updated = filter_new_observations(
+            planned,
+            observations,
+            now_epoch=observed_epoch,
+        )
+        if not fresh and not needs_retention:
+            return None
+        records = tuple(fresh)
+        token = object()
+        pending[token] = _PendingPercentWrite(records, signature)
+        controller._sidepulse_percent_history_pending = pending
+
+    def _complete(receipt: PersistenceReceipt) -> None:
+        with lock:
+            current_pending = dict(
+                getattr(controller, "_sidepulse_percent_history_pending", {})
+            )
+            completed = current_pending.pop(token, None)
+            if completed is None:
+                return
+            controller._sidepulse_percent_history_pending = current_pending
+            if receipt.outcome is PersistenceOutcome.SUCCEEDED:
+                committed_now = dict(
+                    getattr(controller, "_sidepulse_percent_history_last", {})
+                )
+                if retention is not None:
+                    retention_now = _retention_by_identity(retention)
+                    committed_now = {
+                        key: value
+                        for key, value in committed_now.items()
+                        if retention_now.get(key[:2], 0) > 0
+                        and value[1]
+                        >= observed_epoch - retention_now[key[:2]] * 86_400.0
+                    }
+                    controller._sidepulse_percent_history_retention_signature = (
+                        completed.retention_signature
+                    )
+                for record in completed.records:
+                    committed_now[
+                        (
+                            record["provider_id"],
+                            record["source_instance_id"],
+                            record["lane_id"],
+                        )
+                    ] = (
+                        record["remaining_percent"],
+                        record["observed_at_epoch"],
+                    )
+                controller._sidepulse_percent_history_last = committed_now
+
+    def _persist() -> int:
+        path = default_percent_history_path()
+        if retention is None:
+            return append_percent_observations(path, list(records))
+        return append_percent_observations(
+            path,
+            list(records),
+            retention_projection=retention,
+            now_epoch=observed_epoch,
+        )
+
+    try:
+        disposition = writer.submit(
+            "usage-percent-history",
+            _persist,
+            receipt_handler=_complete,
+        )
+    except Exception:
+        with lock:
+            current_pending = dict(
+                getattr(controller, "_sidepulse_percent_history_pending", {})
+            )
+            current_pending.pop(token, None)
+            controller._sidepulse_percent_history_pending = current_pending
+        return False
+    if disposition in {
+        PersistenceDisposition.REFUSED_FULL,
+        PersistenceDisposition.REFUSED_CLOSED,
+    }:
+        with lock:
+            current_pending = dict(
+                getattr(controller, "_sidepulse_percent_history_pending", {})
+            )
+            current_pending.pop(token, None)
+            controller._sidepulse_percent_history_pending = current_pending
+        return False
+    return True
 
 
 def shared_percent_graph_model(

@@ -9,6 +9,7 @@ project_usage_center -- this module stays a thin projection host.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 import objc
 from AppKit import (
@@ -32,6 +33,11 @@ from AppKit import (
 )
 
 from .colors import default_agent_color
+from .product_identity import PRODUCT_DISPLAY_NAME
+from .provider_feature_settings import (
+    ProviderInstancePolicyProjection,
+    ProviderInstanceVisualProjection,
+)
 from .provider_usage_center import project_usage_center, usage_center_text
 from .provider_usage_runtime import ProviderUsageState
 from .provider_usage_sync_cache import cached_merged_sync
@@ -97,6 +103,13 @@ class UsageMeterBarView(NSView):
         fill.fill()
 
 
+class FlippedStackView(NSStackView):
+    """Keep scroll content anchored to the visual top on first display."""
+
+    def isFlipped(self):
+        return True
+
+
 def _label(text: str, *, secondary: bool = False, bold: bool = False, size: float = 13.0):
     field = NSTextField.labelWithString_(text)
     field.setTranslatesAutoresizingMaskIntoConstraints_(False)
@@ -138,10 +151,31 @@ def _account_display(account: str) -> str:
     return account
 
 
+def _visual_projection(action_target) -> ProviderInstanceVisualProjection | None:
+    policies = getattr(action_target, "_sidepulse_provider_instance_policies", None)
+    if type(policies) is ProviderInstancePolicyProjection:
+        return policies.visual
+    return None
+
+
+def _usage_meter_color(section, lane) -> str:
+    return section.color_override or default_agent_color(
+        lane.provider_id or section.provider_id
+    )
+
+
 class ProviderUsageWindowController:
     """Own one reusable window; all provider work happens before refresh."""
 
-    def __init__(self, action_target=None) -> None:
+    def __init__(
+        self,
+        action_target=None,
+        *,
+        wall_clock: Callable[[], float] = time.time,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._wall_clock = wall_clock
+        self._monotonic_clock = monotonic_clock
         style = (
             NSWindowStyleMaskTitled
             | NSWindowStyleMaskClosable
@@ -154,7 +188,7 @@ class ProviderUsageWindowController:
             NSBackingStoreBuffered,
             False,
         )
-        self.window.setTitle_("SidePulse Usage Center")
+        self.window.setTitle_(f"{PRODUCT_DISPLAY_NAME} Usage Center")
         # A code-created NSWindow is released-when-closed by default;
         # this controller is cached on the status-bar controller and
         # refresh() runs on every usage update, so the first close made
@@ -165,7 +199,7 @@ class ProviderUsageWindowController:
         self.window.center()
         self.action_target = action_target
 
-        self.stack = NSStackView.alloc().init()
+        self.stack = FlippedStackView.alloc().init()
         self.stack.setTranslatesAutoresizingMaskIntoConstraints_(False)
         self.stack.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
         self.stack.setAlignment_(1)  # leading
@@ -230,10 +264,11 @@ class ProviderUsageWindowController:
         self._last_state = state
         projection = project_usage_center(
             state,
-            now=time.time() if now is None else float(now),
-            # Cached local documents only -- the window never fetches
-            # (cached_merged_sync is TTL-memoized and best-effort).
+            now=self._wall_clock() if now is None else float(now),
+            # Worker-refreshed memory only. The window never reads sync
+            # settings, Keychain credentials, cached packets, or a network.
             merged_sync=cached_merged_sync(state),
+            visual=_visual_projection(self.action_target),
         )
         self._clear()
 
@@ -242,7 +277,7 @@ class ProviderUsageWindowController:
         # Action feedback lands HERE, in the window the user is looking
         # at -- set_settings_message's only sink used to be the Settings
         # window, so Connect/Import feedback vanished when it was closed.
-        if self._message and time.monotonic() < self._message_until:
+        if self._message and self._monotonic_clock() < self._message_until:
             banner = _label(self._message, secondary=False, size=12.0)
             self.stack.addArrangedSubview_(banner)
         for line in projection.aggregate_metrics:
@@ -262,7 +297,7 @@ class ProviderUsageWindowController:
             for lane in section.lanes:
                 bar = UsageMeterBarView.alloc().initWithFraction_color_alert_(
                     lane.fraction,
-                    default_agent_color(lane.provider_id or section.provider_id),
+                    _usage_meter_color(section, lane),
                     lane.alert,
                 )
                 body.append(
@@ -285,17 +320,23 @@ class ProviderUsageWindowController:
                 )
                 button.setTranslatesAutoresizingMaskIntoConstraints_(False)
                 button.setIdentifier_(section.provider_id)
+                button.setRepresentedObject_(
+                    {
+                        "provider_id": section.provider_id,
+                        "source_instance_id": section.source_instance_id,
+                    }
+                )
                 body.append(button)
             self._card(title_views, body)
 
-        title = "SidePulse Usage Center"
+        title = f"{PRODUCT_DISPLAY_NAME} Usage Center"
         if state.refreshing:
             title += " — Refreshing"
         self.window.setTitle_(title)
 
     def show_message(self, text: str) -> None:
         self._message = str(text or "")
-        self._message_until = time.monotonic() + 12.0
+        self._message_until = self._monotonic_clock() + 12.0
         try:
             self.refresh(self._last_state)
         except Exception:

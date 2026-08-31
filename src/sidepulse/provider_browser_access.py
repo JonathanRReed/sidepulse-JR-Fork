@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import time
 
+from .product_identity import PRODUCT_DISPLAY_NAME
 from .provider_usage_settings import (
     load_provider_usage_settings,
     save_provider_usage_settings,
@@ -75,7 +76,54 @@ def _open_url(url: str) -> None:
         pass
 
 
-def _import_browser_session(provider_id: str) -> str | None:
+def _consented_devin_session(
+    *,
+    home,
+    consents,
+    session_reader,
+    source_instance_id: str = "default",
+):
+    """Read only when one exact persisted Devin grant selects a profile."""
+    matches = []
+    for consent in consents.consents:
+        if consent.provider_id != "devin":
+            continue
+        if consent.source_instance_id != source_instance_id:
+            continue
+        if not (
+            consents.allows(
+                provider_id="devin",
+                browser=consent.browser,
+                profile=consent.profile,
+                domain="app.devin.ai",
+                field="auth1_session",
+                source_instance_id=source_instance_id,
+            )
+            and consents.allows(
+                provider_id="devin",
+                browser=consent.browser,
+                profile=consent.profile,
+                domain="app.devin.ai",
+                field="organization",
+                source_instance_id=source_instance_id,
+            )
+        ):
+            continue
+        matches.append(consent)
+    if len(matches) != 1:
+        return None
+    selected = matches[0]
+    return session_reader(
+        home=home,
+        browser=selected.browser,
+        profile=selected.profile,
+    )
+
+
+def _import_browser_session(
+    provider_id: str,
+    source_instance_id: str = "default",
+) -> str | None:
     """Lift the provider's own session out of the user's browser.
 
     This is what "browser access" was always supposed to mean. Returns
@@ -89,22 +137,47 @@ def _import_browser_session(provider_id: str) -> str | None:
     try:
         from pathlib import Path
 
-        from .browser_session_import import import_devin_session
+        from .browser_session_import import import_devin_session_from_profile
+        from .provider_browser_consent import load_browser_consents
         from .provider_credential_store import ProviderCredentialStore
 
-        session = import_devin_session(Path.home())
+        loaded_consents = load_browser_consents()
+        if loaded_consents.read_only:
+            return None
+        session = _consented_devin_session(
+            home=Path.home(),
+            consents=loaded_consents.store,
+            session_reader=import_devin_session_from_profile,
+            source_instance_id=source_instance_id,
+        )
         if session is None:
             return None
-        ProviderCredentialStore().set(provider_id, "token", session.token)
+        credential_store = ProviderCredentialStore()
+        if source_instance_id == "default":
+            credential_store.set(provider_id, "token", session.token)
+        else:
+            from .provider_instances import ProviderInstanceKey
+
+            credential_store.set_for_instance(
+                ProviderInstanceKey(provider_id, source_instance_id),
+                "token",
+                session.token,
+            )
         loaded = load_provider_usage_settings()
         settings = loaded.settings
         if session.organization:
             settings = settings.with_option(
-                provider_id, "organization", session.organization
+                provider_id,
+                "organization",
+                session.organization,
+                source_instance_id=source_instance_id,
             )
         if session.internal_organization_id:
             settings = settings.with_option(
-                provider_id, "organization_id", session.internal_organization_id
+                provider_id,
+                "organization_id",
+                session.internal_organization_id,
+                source_instance_id=source_instance_id,
             )
         save_provider_usage_settings(settings, loaded=loaded)
     except Exception:
@@ -135,6 +208,7 @@ def handle_provider_usage_action(
     url_opener=_open_url,
     session_importer=None,
     reason_code: str | None = None,
+    source_instance_id: str = "default",
 ) -> str | None:
     """Perform one staged action. Returns the user-facing message, or
     None when this action is not part of the browser-access flow (the
@@ -144,25 +218,43 @@ def handle_provider_usage_action(
     if label.startswith("Enable ") and label.endswith("browser access"):
         try:
             loaded = load_provider_usage_settings()
-            updated = loaded.settings.with_browser_sources(provider_id, True)
+            updated = loaded.settings.with_browser_sources(
+                provider_id,
+                True,
+                source_instance_id=source_instance_id,
+            )
             save_provider_usage_settings(updated, loaded=loaded)
         except Exception:
             return (
                 f"{title} does not support browser sources in this build."
             )
         return (
-            f"{title} browser access enabled — next, click "
+            f"{title} browser access enabled. Browser data is still off-limits "
+            f"until an exact browser/profile grant exists. Then click "
             f"'Import {title} browser session' on the same card."
         )
     if label.startswith("Import ") and "browser session" in label:
         importer = session_importer or _import_browser_session
-        imported = importer(provider_id)
+        imported = (
+            importer(provider_id)
+            if source_instance_id == "default"
+            else importer(provider_id, source_instance_id)
+        )
         if imported is not None:
             return imported
         clipboard = clipboard_reader()
         if plausible_token(clipboard):
             try:
-                credential_store.set(provider_id, "token", clipboard.strip())
+                if source_instance_id == "default":
+                    credential_store.set(provider_id, "token", clipboard.strip())
+                else:
+                    from .provider_instances import ProviderInstanceKey
+
+                    credential_store.set_for_instance(
+                        ProviderInstanceKey(provider_id, source_instance_id),
+                        "token",
+                        clipboard.strip(),
+                    )
             except Exception as exc:
                 return f"Could not store the {title} session: {exc}"
             return f"{title} session imported — refreshing usage now."
@@ -170,10 +262,13 @@ def handle_provider_usage_action(
         if url is not None:
             url_opener(url)
         return (
-            f"Copy your {title} API key"
+            f"Grant one exact browser/profile with `sidepulse providers "
+            f"browser-consent grant {provider_id} --browser <browser> "
+            "--profile <profile>` to use browser import. Or copy your "
+            f"{title} API key"
             + (" (page opened)" if url is not None else "")
             + f", then click 'Import {title} browser session' again — "
-            "SidePulse reads it from the clipboard only when you click."
+            f"{PRODUCT_DISPLAY_NAME} reads it from the clipboard only when you click."
             + (_signed_out_hint(title, url) if url is not None else "")
         )
     if label == f"Reconnect {title}" and provider_id in PROVIDER_TOKEN_PAGES:
@@ -182,14 +277,26 @@ def handle_provider_usage_action(
         # 401 came back -- the dead-button pattern all over again.
         # Clear the bad credential and re-enter the import stage.
         try:
-            credential_store.delete(provider_id, "token")
+            if source_instance_id == "default":
+                credential_store.delete(provider_id, "token")
+            else:
+                from .provider_instances import ProviderInstanceKey
+
+                credential_store.delete_for_instance(
+                    ProviderInstanceKey(provider_id, source_instance_id),
+                    "token",
+                )
         except Exception:
             pass
         # A rotated session is the COMMON case, not a wrong key: Devin
         # reissues its web token routinely. Re-read the browser before
         # sending the user off to hunt for a credential.
         importer = session_importer or _import_browser_session
-        reimported = importer(provider_id)
+        reimported = (
+            importer(provider_id)
+            if source_instance_id == "default"
+            else importer(provider_id, source_instance_id)
+        )
         if reimported is not None:
             return reimported
         url = PROVIDER_TOKEN_PAGES.get(provider_id)
@@ -225,7 +332,7 @@ def handle_provider_usage_action(
             return result.message
         except Exception:
             return (
-                "Run `grok login` in a terminal — SidePulse reads the "
+                f"Run `grok login` in a terminal — {PRODUCT_DISPLAY_NAME} reads the "
                 "CLI's sign-in automatically on the next refresh."
             )
     if provider_id == "codex" and (
@@ -256,7 +363,7 @@ def handle_provider_usage_action(
         return (
             "Antigravity's usage comes from its local service. Open the "
             "Antigravity app (or run `agy` in a terminal) so its "
-            "endpoint is running — SidePulse reads it on the next "
+            f"endpoint is running — {PRODUCT_DISPLAY_NAME} reads it on the next "
             "refresh."
         )
     if provider_id == "openai-api" and (
@@ -273,7 +380,7 @@ def handle_provider_usage_action(
             return "OpenAI Admin key stored — refreshing usage now."
         return (
             "Copy an OpenAI ADMIN key (platform.openai.com → Settings → "
-            "Admin keys), then click this again — SidePulse reads it "
+            f"Admin keys), then click this again — {PRODUCT_DISPLAY_NAME} reads it "
             "from the clipboard only when you click."
         )
     if label.startswith("Choose ") and "organization" in label:
@@ -282,7 +389,10 @@ def handle_provider_usage_action(
             try:
                 loaded = load_provider_usage_settings()
                 updated = loaded.settings.with_option(
-                    provider_id, "organization", clipboard
+                    provider_id,
+                    "organization",
+                    clipboard,
+                    source_instance_id=source_instance_id,
                 )
                 save_provider_usage_settings(updated, loaded=loaded)
             except Exception as exc:
@@ -295,7 +405,11 @@ def handle_provider_usage_action(
     return None
 
 
-def run_provider_usage_action(controller, provider_id: str) -> bool:
+def run_provider_usage_action(
+    controller,
+    provider_id: str,
+    source_instance_id: str = "default",
+) -> bool:
     """Controller-level wrapper: resolve the provider's CURRENT action
     label, run the staged flow, surface the message, force a refresh.
     False when the label is not part of this flow (caller falls back)."""
@@ -304,7 +418,7 @@ def run_provider_usage_action(controller, provider_id: str) -> bool:
         (
             item
             for item in getattr(state, "snapshots", ())
-            if item.provider_id == provider_id
+            if item.identity == (provider_id, source_instance_id)
         ),
         None,
     )
@@ -318,6 +432,7 @@ def run_provider_usage_action(controller, provider_id: str) -> bool:
         label,
         credential_store=ProviderCredentialStore(),
         reason_code=getattr(snapshot, "reason_code", None),
+        source_instance_id=source_instance_id,
     )
     if message is None:
         return False
@@ -335,17 +450,28 @@ def run_provider_usage_action(controller, provider_id: str) -> bool:
             controller.set_settings_message(message)
         except Exception:
             pass
+    # Arm the outcome watcher before starting the asynchronous refresh so a
+    # fast collector cannot publish before the click has an identity.
     try:
-        controller._request_provider_usage(force=True, providers=(provider_id,))
+        controller._sidepulse_reconnect_watch = (
+            provider_id,
+            source_instance_id,
+            time.time(),
+        )
+    except Exception:
+        pass
+    try:
+        scope = (
+            (provider_id,)
+            if source_instance_id == "default"
+            else ((provider_id, source_instance_id),)
+        )
+        controller._request_provider_usage(force=True, providers=scope)
     except Exception:
         pass
     # The click's REAL outcome arrives with the refresh it just forced;
     # arm the one-shot reporter so the banner tells the truth about what
     # actually happened instead of only what was attempted.
-    try:
-        controller._sidepulse_reconnect_watch = (provider_id, time.time())
-    except Exception:
-        pass
     return True
 
 

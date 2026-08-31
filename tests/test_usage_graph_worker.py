@@ -10,6 +10,7 @@ default-QoS scan thread made the whole app feel laggy.
 from __future__ import annotations
 
 import threading
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -107,6 +108,54 @@ def test_scan_lands_model_and_resolves_loading_label(
     assert getattr(target, "_usage_graph_worker_in_flight") is False
 
 
+def test_scan_uses_one_settings_snapshot_for_key_and_payload(
+    synchronous_worker, monkeypatch
+):
+    """A settings update cannot split the cache key from the chart payload."""
+
+    class FlippingSettings:
+        def __init__(self):
+            self._values = {
+                "usage_graph_days": (7, 365),
+                "usage_display_mode": ("tokens", "sessions"),
+                "usage_graph_providers": (("claude", "codex"), ("grok",)),
+            }
+
+        def _next(self, name):
+            current, next_value = self._values[name]
+            self._values[name] = (next_value, next_value)
+            return current
+
+        @property
+        def usage_graph_days(self):
+            return self._next("usage_graph_days")
+
+        @property
+        def usage_display_mode(self):
+            return self._next("usage_display_mode")
+
+        @property
+        def usage_graph_providers(self):
+            return self._next("usage_graph_providers")
+
+    target = make_target()
+    target.settings = FlippingSettings()
+
+    built_settings = []
+
+    def build(settings):
+        built_settings.append(settings)
+        return model_for(settings)
+
+    monkeypatch.setattr(usage_graph_worker, "_build_payload", build)
+
+    usage_graph_worker.refresh_usage_graph(target)
+
+    assert built_settings[0].usage_graph_providers == ("claude", "codex")
+    assert target.usage_graph_model["days"] == 7
+    assert target.usage_graph_model["metric"] == "tokens"
+
+
 def test_range_change_shows_scanning_not_the_old_chart(
     synchronous_worker, monkeypatch
 ):
@@ -166,12 +215,13 @@ def test_mid_scan_request_is_remembered_not_dropped(monkeypatch):
     assert len(started) == 1
     assert getattr(target, "_usage_graph_rescan_pending") is True
 
-    # Scan 1 runs LATE, reads the live settings, and therefore already
-    # builds 365. The pending re-fire then finds a fresh identical
-    # result and serves it from memory instead of scanning again.
+    # Scan 1 runs from the snapshot captured when it was requested. The
+    # pending re-fire then captures the updated settings and builds 365.
     started[0]()
-    assert builds == [365]
-    assert len(started) == 1
+    assert builds == [7]
+    assert len(started) == 2
+    started[1]()
+    assert builds == [7, 365]
     assert target.usage_graph_model["days"] == 365
     view = target.settings_fields["profile_usage_graph"]
     assert view.models[-1]["days"] == 365
@@ -196,6 +246,42 @@ def test_recent_identical_result_is_reused_without_a_second_scan(
     assert len(calls) == 1
     view = target.settings_fields["profile_usage_graph"]
     assert view.models[-1]["marker"] == "built"
+
+
+def test_recent_result_cache_uses_injected_monotonic_boundary(
+    synchronous_worker, monkeypatch
+):
+    target = make_target()
+    calls = []
+    now = [100.0]
+
+    def build(settings):
+        calls.append(now[0])
+        return model_for(settings, marker=f"built-{len(calls)}")
+
+    monkeypatch.setattr(usage_graph_worker, "_build_payload", build)
+    def monotonic():
+        return now[0]
+
+    usage_graph_worker.refresh_usage_graph(target, monotonic=monotonic)
+    now[0] = 159.999
+    usage_graph_worker.refresh_usage_graph(target, monotonic=monotonic)
+    assert calls == [100.0]
+
+    now[0] = 160.0
+    usage_graph_worker.refresh_usage_graph(target, monotonic=monotonic)
+    assert calls == [100.0, 160.0]
+    assert target.usage_graph_model["marker"] == "built-2"
+
+
+def test_scan_period_start_is_pinned_to_injected_calendar_day() -> None:
+    now = datetime(2026, 8, 29, 23, 59, 59)
+
+    assert usage_graph_worker._period_start(7, now=now) == datetime(
+        2026,
+        8,
+        23,
+    )
 
 
 def test_build_failure_clears_the_flag_and_keeps_the_view_scanning(

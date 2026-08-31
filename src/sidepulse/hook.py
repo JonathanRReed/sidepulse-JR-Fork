@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,12 @@ from .providers import (
     negotiated_provider_sources,
     parse_log_line,
 )
+
+
+class HookProcessingOutcome(str, Enum):
+    WRITTEN = "written"
+    DUPLICATE = "duplicate"
+    IGNORED = "ignored"
 
 
 def format_hook_payload(
@@ -166,31 +174,50 @@ def _hook_event_name_from_line(line: dict[str, Any]) -> str | None:
     return str(name) if name else None
 
 
+def process_hook_payload(
+    provider: str,
+    log_path: Path,
+    payload_text: str,
+    *,
+    refresh_hint_handler: Callable[[ProviderRefreshHint], object] | None = None,
+) -> HookProcessingOutcome:
+    """Normalize and persist one payload without owning process stdio."""
+    actual_provider, actual_log_path, line = routed_hook_payload(
+        provider,
+        log_path,
+        payload_text,
+    )
+    record = _normalized_hook_record(actual_provider, line)
+    if record is None:
+        return HookProcessingOutcome.IGNORED
+    hint = _refresh_hint_for_record(actual_provider, record)
+    if hint is None:
+        write_normalized_hook_record(actual_log_path, record)
+        return HookProcessingOutcome.WRITTEN
+    deduplicator = HookEventDeduplicator(hook_dedupe_path(actual_log_path))
+    written = deduplicator.run_once(
+        hint.event_token.value,
+        lambda: write_normalized_hook_record(actual_log_path, record),
+    )
+    if not written:
+        return HookProcessingOutcome.DUPLICATE
+    if refresh_hint_handler is None:
+        send_refresh_hint(
+            hint,
+            event_name=_hook_event_name_from_line(line),
+        )
+    else:
+        # The app-owned ingress already runs inside the process that owns the
+        # canonical monitor. Apply its refresh synchronously so a successful
+        # queue drain also means the accepted tail reached that monitor. The
+        # external hint socket remains the fallback for standalone hooks.
+        refresh_hint_handler(hint)
+    return HookProcessingOutcome.WRITTEN
+
+
 def hook_log_main(provider: str, log_path: Path) -> int:
     try:
-        actual_provider, actual_log_path, line = routed_hook_payload(
-            provider,
-            log_path,
-            sys.stdin.read(),
-        )
-        record = _normalized_hook_record(actual_provider, line)
-        if record is None:
-            return 0
-        hint = _refresh_hint_for_record(actual_provider, record)
-        if hint is None:
-            write_normalized_hook_record(actual_log_path, record)
-        else:
-            deduplicator = HookEventDeduplicator(hook_dedupe_path(actual_log_path))
-            written = deduplicator.run_once(
-                hint.event_token.value,
-                lambda: write_normalized_hook_record(actual_log_path, record),
-            )
-            if not written:
-                return 0
-            send_refresh_hint(
-                hint,
-                event_name=_hook_event_name_from_line(line),
-            )
+        process_hook_payload(provider, log_path, sys.stdin.read())
     except Exception:
         return 0
     finally:
@@ -201,3 +228,16 @@ def hook_log_main(provider: str, log_path: Path) -> int:
             except Exception:
                 pass
     return 0
+
+
+__all__ = [
+    "HookProcessingOutcome",
+    "annotate_hook_line",
+    "format_hook_payload",
+    "hook_dedupe_path",
+    "hook_log_main",
+    "infer_provider_from_hook_line",
+    "process_hook_payload",
+    "routed_hook_payload",
+    "write_normalized_hook_record",
+]

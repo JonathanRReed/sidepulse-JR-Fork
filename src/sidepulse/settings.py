@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from . import _settings_legacy as _legacy
+from .product_identity import PRODUCT_DISPLAY_NAME
 
 CURRENT_SETTINGS_SCHEMA_VERSION = 2
 MIN_READABLE_SETTINGS_SCHEMA_VERSION = 1
@@ -38,6 +39,19 @@ DEVICE_SETTING_PERSISTED_FIELDS = frozenset(
         "blend_mode",
         "provider_pin",
         "signal_policy",
+    }
+)
+DND_SETTING_PERSISTED_FIELDS = frozenset(
+    {
+        "dnd_schedule_enabled",
+        "dnd_schedule_start_minutes",
+        "dnd_schedule_end_minutes",
+        "dnd_schedule_mode",
+        "dnd_dim_fraction",
+        "dnd_override_mode",
+        "dnd_override_created_epoch",
+        "dnd_override_until_epoch",
+        "dnd_focus_mode",
     }
 )
 
@@ -231,6 +245,7 @@ _OWNED_COLLECTION_PATHS = frozenset(
         "focus_dim_rules",
         "session_open_preferences",
         "timebox_shortcuts",
+        "global_action_shortcuts",
     }
 )
 
@@ -383,14 +398,14 @@ def save_settings(
             current_version = _settings_schema_version(current_document)
             if current_version > CURRENT_SETTINGS_SCHEMA_VERSION:
                 raise SettingsWriteRefusedError(
-                    "settings were written by a newer SidePulse version"
+                    f"settings were written by a newer {PRODUCT_DISPLAY_NAME} version"
                 )
             source_document = current_document
 
         effective = compatibility or remembered_compatibility
         if effective is not None and effective.read_only:
             raise SettingsWriteRefusedError(
-                "settings were written by a newer SidePulse version"
+                f"settings were written by a newer {PRODUCT_DISPLAY_NAME} version"
             )
         if effective is not None and (
             effective.source_version < MIN_WRITABLE_SETTINGS_SCHEMA_VERSION
@@ -398,6 +413,11 @@ def save_settings(
             raise SettingsWriteRefusedError("settings schema is not writable")
 
         encoded = settings.to_dict()
+        if not DND_SETTING_PERSISTED_FIELDS.issubset(encoded):
+            missing = sorted(DND_SETTING_PERSISTED_FIELDS - set(encoded))
+            raise SettingsWriteRefusedError(
+                f"settings encoder omitted DND fields: {missing}"
+            )
         encoded["settings_schema_version"] = CURRENT_SETTINGS_SCHEMA_VERSION
         document = _merge_unknown_fields(source_document, encoded)
         if not isinstance(document, dict):

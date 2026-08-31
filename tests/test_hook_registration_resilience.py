@@ -22,7 +22,7 @@ from sidepulse.providers import _is_sidepulse_hook_invocation
 
 def test_hook_command_does_not_bake_a_package_file_path() -> None:
     arguments = hook_command_arguments("claude", Path("/tmp/claude.jsonl"))
-    assert arguments[1:3] == ["-m", "sidepulse.hook_entry"]
+    assert arguments[1:3] == ["-m", "sidepulse.hook_client"]
     # No argument may be a filesystem path INTO the package: that is the
     # assumption that broke when the install layout changed.
     assert not any(argument.endswith("hook_entry.py") for argument in arguments)
@@ -52,7 +52,11 @@ def test_every_shape_we_have_ever_registered_is_recognized_as_ours() -> None:
               "--provider", "claude", "--log", "/tmp/claude.jsonl"]
     frozen = ["/Applications/SidePulse.app/Contents/MacOS/SidePulse", "agent-monitor", "hook-log",
               "--provider", "claude", "--log", "/tmp/claude.jsonl"]
-    for shape in (legacy, module, frozen):
+    current_module = ["/venv/bin/python", "-m", "sidepulse.hook_client",
+                      "--provider", "claude", "--log", "/tmp/claude.jsonl"]
+    current_frozen = ["/Applications/SidePulse.app/Contents/MacOS/SidePulse", "agent-monitor", "hook-client",
+                      "--provider", "claude", "--log", "/tmp/claude.jsonl"]
+    for shape in (legacy, module, frozen, current_module, current_frozen):
         assert _is_sidepulse_hook_invocation(shape) is True, shape
     assert _is_sidepulse_hook_invocation(["/bin/echo", "hello"]) is False
 

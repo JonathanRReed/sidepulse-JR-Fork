@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .provider_feature_settings import ProviderInstanceVisualProjection
 from .provider_usage_platform import (
     ProviderSourceState,
     ProviderUsageSnapshot,
@@ -31,6 +32,37 @@ class ProviderUsageMenuRow:
     #: Indexes into lane_lines whose lane has crossed the provider's
     #: low-remaining threshold -- renderers paint these as a warning.
     alert_lane_indexes: tuple[int, ...] = ()
+    source_instance_id: str = "default"
+
+
+def _identity_label(snapshot: ProviderUsageSnapshot) -> str | None:
+    labels = []
+    if snapshot.account_label:
+        labels.append(snapshot.account_label)
+    if snapshot.source_instance_id != "default":
+        labels.append(snapshot.source_instance_id)
+    return " · ".join(labels) if labels else None
+
+
+def _display_identity(
+    snapshot: ProviderUsageSnapshot,
+    visual: ProviderInstanceVisualProjection | None,
+) -> tuple[str, str | None, bool]:
+    if visual is not None:
+        try:
+            policy = visual.provider(
+                snapshot.provider_id,
+                snapshot.source_instance_id,
+            )
+        except StopIteration:
+            pass
+        else:
+            return policy.label, snapshot.account_label, True
+    return (
+        provider_descriptor(snapshot.provider_id).label,
+        _identity_label(snapshot),
+        False,
+    )
 
 
 def _lane_lines(
@@ -118,15 +150,22 @@ def _row(
     now: float,
     display: MenuUsageDisplay,
     threshold: float | None = None,
+    visual: ProviderInstanceVisualProjection | None = None,
 ) -> ProviderUsageMenuRow:
-    provider_label = provider_descriptor(snapshot.provider_id).label
+    provider_label, identity_label, _custom_label = _display_identity(
+        snapshot,
+        visual,
+    )
     lane = most_constrained_lane(snapshot)
     if lane is None:
         # No usable number. "Grok · stale" is true and useless -- the row
         # is the whole glance, so it carries the thing that would FIX it
         # when there is one (2026-08-27 owner report: "so much of it says
         # Grok stale"). The state label stays the fallback.
-        title = f"{provider_label} · {snapshot.action_label or _state_label(snapshot)}"
+        title = f"{provider_label} · "
+        if identity_label:
+            title += f"{identity_label} · "
+        title += snapshot.action_label or _state_label(snapshot)
         detail = (
             f"{_state_label(snapshot)} · last reading unavailable"
             if snapshot.action_label
@@ -138,7 +177,10 @@ def _row(
             if lane.remaining_percent is None
             else f"{lane.remaining_percent:.0f}% left"
         )
-        title = f"{provider_label} · {remaining}"
+        title = f"{provider_label} · "
+        if identity_label:
+            title += f"{identity_label} · "
+        title += remaining
         detail = f"{lane.label} {remaining} · {format_reset_countdown(lane.reset_at, now=now)}"
         if snapshot.state is ProviderSourceState.STALE:
             # The TITLE is the line that gets read -- this row is the whole
@@ -181,6 +223,7 @@ def _row(
         snapshot.state is ProviderSourceState.STALE,
         lane_lines,
         alert_indexes,
+        snapshot.source_instance_id,
     )
 
 
@@ -190,7 +233,9 @@ def project_usage_menu(
     now: float,
     display: MenuUsageDisplay | None = None,
     hidden_providers: frozenset[str] = frozenset(),
-    thresholds: dict[str, float] | None = None,
+    hidden_instances: frozenset[tuple[str, str]] = frozenset(),
+    thresholds: dict[object, float] | None = None,
+    visual: ProviderInstanceVisualProjection | None = None,
 ) -> ProviderUsageMenuProjection:
     display = MenuUsageDisplay() if display is None else display
     thresholds = {} if thresholds is None else thresholds
@@ -198,13 +243,18 @@ def project_usage_menu(
         snapshot
         for snapshot in state.snapshots
         if snapshot.provider_id not in hidden_providers
+        and snapshot.identity not in hidden_instances
     )
     rows = tuple(
         _row(
             snapshot,
             now=now,
             display=display,
-            threshold=thresholds.get(snapshot.provider_id),
+            threshold=thresholds.get(
+                snapshot.identity,
+                thresholds.get(snapshot.provider_id),
+            ),
+            visual=visual,
         )
         for snapshot in snapshots
     )
@@ -220,8 +270,20 @@ def project_usage_menu(
             continue
         lane = most_constrained_lane(snapshot)
         if lane is not None and lane.remaining_percent is not None:
-            constrained.append((lane.remaining_percent, snapshot.provider_id))
-    constrained.sort(key=lambda item: (item[0], item[1]))
+            display_label, identity_label, custom_label = _display_identity(
+                snapshot,
+                visual,
+            )
+            constrained.append(
+                (
+                    lane.remaining_percent,
+                    snapshot.provider_id,
+                    display_label,
+                    identity_label,
+                    custom_label,
+                )
+            )
+    constrained.sort(key=lambda item: (item[0], item[1], item[3] or ""))
     if state.refreshing and not state.snapshots:
         title = "Usage · refreshing…"
     elif constrained:
@@ -232,11 +294,13 @@ def project_usage_menu(
         compact = len(shown) > 4
         labels = [
             (
-                f"{provider_descriptor(provider_id).label[:2]} {remaining:.0f}"
+                f"{display_label if custom_label else display_label[:2]}"
+                f"{f' {identity}' if identity else ''} {remaining:.0f}"
                 if compact
-                else f"{provider_descriptor(provider_id).label} {remaining:.0f}%"
+                else f"{display_label}"
+                f"{f' · {identity}' if identity else ''} {remaining:.0f}%"
             )
-            for remaining, provider_id in shown
+            for remaining, _provider_id, display_label, identity, custom_label in shown
         ]
         # The tightest lane's meter rides in the row itself: the
         # at-a-glance answer with zero hovering. Curated off with the
@@ -303,6 +367,7 @@ def menu_bar_quota_glance(
     state: ProviderUsageState,
     *,
     hidden_providers: frozenset[str] = frozenset(),
+    hidden_instances: frozenset[tuple[str, str]] = frozenset(),
     active_providers: frozenset[str] = frozenset(),
     now: float,
 ) -> QuotaGlance | None:
@@ -316,7 +381,10 @@ def menu_bar_quota_glance(
     speaks. None when nothing has a number -- never "unknown%"."""
     candidates = []
     for snapshot in state.snapshots:
-        if snapshot.provider_id in hidden_providers:
+        if (
+            snapshot.provider_id in hidden_providers
+            or snapshot.identity in hidden_instances
+        ):
             continue
         if snapshot.state not in {
             ProviderSourceState.READY,

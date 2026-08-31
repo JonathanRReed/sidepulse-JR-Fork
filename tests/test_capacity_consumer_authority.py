@@ -269,6 +269,7 @@ def test_raw_percentage_cannot_populate_screen_bar_capacity_gauge(controller) ->
         set_follow_alcove=MagicMock(),
         set_standing_gauges=MagicMock(),
         set_click_handler=MagicMock(),
+        set_announcer_stack=MagicMock(),
         set_pointer_interaction_relevant=MagicMock(),
         set_program=MagicMock(),
     )

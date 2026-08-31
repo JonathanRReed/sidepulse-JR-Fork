@@ -1,7 +1,13 @@
-.PHONY: bootstrap format lint test test-portable package clean-install verify verify-portable release install-user clean
+.PHONY: bootstrap fast fast-fix format lint test test-portable package clean-install verify verify-portable release install-user clean
 
 bootstrap:
 	./scripts/bootstrap-dev.sh
+
+fast:
+	.venv/bin/python scripts/verify_fast.py
+
+fast-fix:
+	.venv/bin/python scripts/verify_fast.py --fix
 
 format: bootstrap
 	.venv/bin/python -m ruff check --fix src tests packaging scripts

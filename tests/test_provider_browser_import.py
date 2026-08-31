@@ -9,6 +9,7 @@ from sidepulse.provider_browser_import import (
     import_devin_browser_session,
     read_chromium_local_storage,
 )
+from sidepulse.provider_instances import ProviderInstanceKey
 
 
 class Record:
@@ -47,9 +48,19 @@ class Credentials:
     def set(self, provider, account, secret):
         self.values[(provider, account)] = secret
 
+    def set_for_instance(self, key, account, secret):
+        self.values[(*key.value, account)] = secret
+
 
 def profile(tmp_path: Path) -> Path:
-    root = tmp_path / "Default"
+    root = (
+        tmp_path
+        / "Library"
+        / "Application Support"
+        / "Google"
+        / "Chrome"
+        / "Default"
+    )
     leveldb = root / "Local Storage" / "leveldb"
     leveldb.mkdir(parents=True)
     (leveldb / "000001.log").write_bytes(b"fixture")
@@ -57,7 +68,7 @@ def profile(tmp_path: Path) -> Path:
     return root
 
 
-def consent() -> BrowserConsentStore:
+def consent(source_instance_id: str = "default") -> BrowserConsentStore:
     return BrowserConsentStore.empty().grant(
         provider_id="devin",
         browser="chrome",
@@ -66,6 +77,7 @@ def consent() -> BrowserConsentStore:
         fields=("auth1_session", "organization"),
         background_repair=False,
         granted_at=1000,
+        source_instance_id=source_instance_id,
     )
 
 
@@ -109,9 +121,52 @@ def test_import_requires_exact_provider_browser_profile_consent(tmp_path: Path):
         browser="chrome",
         profile="Default",
         profile_root=profile(tmp_path),
+        home=tmp_path,
         consents=BrowserConsentStore.empty(),
         credentials=credentials,
     )
+    assert result.state is BrowserImportState.CONSENT_REQUIRED
+    assert credentials.values == {}
+
+
+def test_import_refuses_a_profile_root_that_does_not_match_the_granted_profile(
+    tmp_path: Path,
+):
+    credentials = Credentials()
+    wrong_root = tmp_path / "Work"
+    wrong_root.mkdir()
+    result = import_devin_browser_session(
+        browser="chrome",
+        profile="Default",
+        profile_root=wrong_root,
+        home=tmp_path,
+        consents=consent(),
+        credentials=credentials,
+    )
+    assert result.state is BrowserImportState.CONSENT_REQUIRED
+    assert credentials.values == {}
+
+
+def test_import_refuses_a_same_named_profile_outside_the_browser_root(
+    tmp_path: Path,
+):
+    profile(tmp_path)
+    rogue_root = tmp_path / "rogue" / "Default"
+    leveldb = rogue_root / "Local Storage" / "leveldb"
+    leveldb.mkdir(parents=True)
+    (leveldb / "000001.log").write_bytes(b"fixture")
+    (leveldb / "CURRENT").write_text("MANIFEST-000001\n")
+    credentials = Credentials()
+
+    result = import_devin_browser_session(
+        browser="chrome",
+        profile="Default",
+        profile_root=rogue_root,
+        home=tmp_path,
+        consents=consent(),
+        credentials=credentials,
+    )
+
     assert result.state is BrowserImportState.CONSENT_REQUIRED
     assert credentials.values == {}
 
@@ -138,6 +193,7 @@ def test_import_stores_only_validated_session_and_returns_org(tmp_path: Path):
         browser="chrome",
         profile="Default",
         profile_root=root,
+        home=tmp_path,
         consents=consent(),
         credentials=credentials,
         raw_db_factory=lambda path: RawDb(path, records, []),
@@ -151,9 +207,56 @@ def test_import_stores_only_validated_session_and_returns_org(tmp_path: Path):
     assert "auth1_fixture_value_long" not in repr(result)
 
 
+def test_import_stores_nondefault_session_for_the_exact_instance(tmp_path: Path):
+    root = profile(tmp_path)
+    records = [
+        Record(
+            1,
+            KeyState.Live,
+            b"_https://app.devin.ai\x00\x01auth1_session",
+            b"\x01" + json.dumps({"token": "auth1_fixture_value_long"}).encode("latin-1"),
+        ),
+        Record(
+            2,
+            KeyState.Live,
+            b"_https://app.devin.ai\x00\x01last-internal-org-for-external-org-v1-fixture",
+            b"\x01org_fixture",
+        ),
+    ]
+    credentials = Credentials()
+
+    result = import_devin_browser_session(
+        browser="chrome",
+        profile="Default",
+        profile_root=root,
+        home=tmp_path,
+        consents=consent("work"),
+        credentials=credentials,
+        source_instance_id="work",
+        raw_db_factory=lambda path: RawDb(path, records, []),
+        key_state_live=KeyState.Live,
+        key_state_deleted=KeyState.Deleted,
+    )
+
+    assert result.state is BrowserImportState.IMPORTED
+    assert credentials.values == {
+        (
+            *ProviderInstanceKey("devin", "work").value,
+            "token",
+        ): "auth1_fixture_value_long"
+    }
+
+
 def test_import_refuses_symlinked_profile_store(tmp_path: Path):
-    root = tmp_path / "Default"
-    root.mkdir()
+    root = (
+        tmp_path
+        / "Library"
+        / "Application Support"
+        / "Google"
+        / "Chrome"
+        / "Default"
+    )
+    root.mkdir(parents=True)
     target = tmp_path / "real-leveldb"
     target.mkdir()
     (root / "Local Storage").mkdir()
@@ -163,6 +266,7 @@ def test_import_refuses_symlinked_profile_store(tmp_path: Path):
         browser="chrome",
         profile="Default",
         profile_root=root,
+        home=tmp_path,
         consents=consent(),
         credentials=Credentials(),
     )

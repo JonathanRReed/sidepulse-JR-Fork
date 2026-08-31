@@ -16,6 +16,7 @@ from .private_io import (
     ensure_private_directory,
     read_private_bytes_with_identity,
 )
+from .product_identity import PRODUCT_DISPLAY_NAME
 from .providers import default_state_dir
 from .trusted_tools import trusted_system_tool
 
@@ -34,14 +35,14 @@ REVIEWED_TERMINAL_BUNDLE_IDENTIFIERS = (
 )
 GHOSTTY_APPLICATION_PATHS = (Path("/Applications/Ghostty.app"),)
 APPLE_EVENTS_USAGE_DESCRIPTION = (
-    "SidePulse uses Automation only to open a reviewed resume command in "
+    f"{PRODUCT_DISPLAY_NAME} uses Automation only to open a reviewed resume command in "
     "Terminal or iTerm2 when you choose Open."
 )
 UNSUPPORTED_TERMINAL_FALLBACK_COPY = (
-    "SidePulse does not support this terminal yet, so it opened Terminal."
+    f"{PRODUCT_DISPLAY_NAME} does not support this terminal yet, so it opened Terminal."
 )
 UNAVAILABLE_GHOSTTY_FALLBACK_COPY = (
-    "SidePulse could not verify Ghostty, so it opened Terminal."
+    f"{PRODUCT_DISPLAY_NAME} could not verify Ghostty, so it opened Terminal."
 )
 
 

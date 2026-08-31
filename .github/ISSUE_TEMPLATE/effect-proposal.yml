@@ -1,0 +1,38 @@
+name: Effect proposal
+description: Propose a new ambient effect, animation, or presentation behavior.
+title: "[Effect proposal]: "
+labels:
+  - effect-proposal
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Proposals must preserve the universal light-safety rules, bounded cadence, privacy defaults, and reduced-motion behavior.
+  - type: textarea
+    id: concept
+    attributes:
+      label: Effect concept
+      description: What should the effect communicate, and in which states should it appear?
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: State and transition behavior
+      description: Describe idle, active, stale, unavailable, error, recovery, and interruption behavior as applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and accessibility considerations
+      description: Address brightness, cadence, saturated red, reduced motion, color independence, and night use.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Reference or evidence
+      description: Link to a public reference or attach a sketch, mock, or redacted recording.
+    validations:
+      required: true

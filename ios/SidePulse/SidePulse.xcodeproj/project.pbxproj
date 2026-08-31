@@ -18,6 +18,8 @@
         9F0000010000000000000009 /* EventLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000010000000000000112 /* EventLog.swift */; };
         9F0000010000000000000010 /* PushPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000010000000000000113 /* PushPayload.swift */; };
         9F0000010000000000000011 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000010000000000000114 /* KeychainStore.swift */; };
+        9F0000010000000000000012 /* PhoneGlanceContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000010000000000000115 /* PhoneGlanceContract.swift */; };
+        9F0000010000000000000013 /* PhoneGlanceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0000010000000000000116 /* PhoneGlanceClient.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -35,6 +37,8 @@
         9F0000010000000000000112 /* EventLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventLog.swift; sourceTree = "<group>"; };
         9F0000010000000000000113 /* PushPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushPayload.swift; sourceTree = "<group>"; };
         9F0000010000000000000114 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+        9F0000010000000000000115 /* PhoneGlanceContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneGlanceContract.swift; sourceTree = "<group>"; };
+        9F0000010000000000000116 /* PhoneGlanceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneGlanceClient.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -63,6 +67,8 @@
                 9F0000010000000000000102 /* ContentView.swift */,
                 9F0000010000000000000103 /* AppModel.swift */,
                 9F0000010000000000000114 /* KeychainStore.swift */,
+                9F0000010000000000000115 /* PhoneGlanceContract.swift */,
+                9F0000010000000000000116 /* PhoneGlanceClient.swift */,
                 9F0000010000000000000104 /* DriveWriter.swift */,
                 9F0000010000000000000105 /* AppDelegate.swift */,
                 9F0000010000000000000112 /* EventLog.swift */,
@@ -161,6 +167,8 @@
                 9F0000010000000000000009 /* EventLog.swift in Sources */,
                 9F0000010000000000000010 /* PushPayload.swift in Sources */,
                 9F0000010000000000000011 /* KeychainStore.swift in Sources */,
+                9F0000010000000000000012 /* PhoneGlanceContract.swift in Sources */,
+                9F0000010000000000000013 /* PhoneGlanceClient.swift in Sources */,
                 9F0000010000000000000006 /* FolderPicker.swift in Sources */,
                 9F0000010000000000000007 /* WriteLEDsIntent.swift in Sources */,
             );

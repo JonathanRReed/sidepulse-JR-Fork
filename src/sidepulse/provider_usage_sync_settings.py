@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Callable
@@ -134,6 +135,13 @@ class LoadedProviderSyncSettings:
     settings: ProviderSyncSettings
     read_only: bool
     unknown_fields: tuple[tuple[str, object], ...]
+    source_revision: str | None = None
+    source_path: Path | None = None
+
+    @property
+    def source_digest(self) -> str | None:
+        """Compatibility name for the content-addressed source revision."""
+        return self.source_revision
 
 
 def default_provider_sync_settings() -> ProviderSyncSettings:
@@ -149,6 +157,26 @@ def default_provider_sync_settings() -> ProviderSyncSettings:
 def default_provider_sync_settings_path(home: Path | None = None) -> Path:
     base = Path.home() if home is None else Path(home)
     return base / ".config" / "sidepulse" / "provider-sync.json"
+
+
+def _document_digest(document: dict[str, object]) -> str:
+    encoded = json.dumps(
+        document,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _read_real_document(target: Path) -> dict[str, object]:
+    from .private_io import read_private_text
+
+    document = json.loads(read_private_text(target))
+    if not isinstance(document, dict):
+        raise ValueError("provider sync settings document must be an object")
+    return document
 
 
 def _peer_from_document(value: object) -> ProviderSyncPeer | None:
@@ -172,8 +200,9 @@ def load_provider_sync_settings(
     *,
     reader: Callable[[Path], str] | None = None,
 ) -> LoadedProviderSyncSettings:
-    target = default_provider_sync_settings_path() if path is None else Path(path)
+    target = (default_provider_sync_settings_path() if path is None else Path(path)).expanduser().absolute()
     read = reader
+    real_path = read is None
     if read is None:
         from .private_io import read_private_text
 
@@ -182,12 +211,31 @@ def load_provider_sync_settings(
     try:
         document = json.loads(read(target))
     except (FileNotFoundError, OSError, UnicodeError, ValueError):
-        return LoadedProviderSyncSettings(defaults, False, ())
+        return LoadedProviderSyncSettings(
+            defaults,
+            False,
+            (),
+            None,
+            target if real_path else None,
+        )
     if not isinstance(document, dict):
-        return LoadedProviderSyncSettings(defaults, True, ())
+        return LoadedProviderSyncSettings(
+            defaults,
+            True,
+            (),
+            None,
+            target if real_path else None,
+        )
+    source_revision = _document_digest(document)
     version = document.get("settings_schema_version")
     if type(version) is not int or version > PROVIDER_SYNC_SETTINGS_SCHEMA_VERSION:
-        return LoadedProviderSyncSettings(defaults, True, tuple(document.items()))
+        return LoadedProviderSyncSettings(
+            defaults,
+            True,
+            tuple(document.items()),
+            source_revision,
+            target if real_path else None,
+        )
     peers = []
     raw_peers = document.get("peers")
     if isinstance(raw_peers, list):
@@ -230,7 +278,13 @@ def load_provider_sync_settings(
             "peers",
         }
     )
-    return LoadedProviderSyncSettings(settings, False, unknown)
+    return LoadedProviderSyncSettings(
+        settings,
+        False,
+        unknown,
+        source_revision,
+        target if real_path else None,
+    )
 
 
 def save_provider_sync_settings(
@@ -264,7 +318,20 @@ def save_provider_sync_settings(
             ],
         }
     )
-    target = default_provider_sync_settings_path() if path is None else Path(path)
+    target = (default_provider_sync_settings_path() if path is None else Path(path)).expanduser().absolute()
+    if loaded is not None and loaded.source_path == target:
+        try:
+            current_revision = _document_digest(_read_real_document(target))
+        except FileNotFoundError:
+            current_revision = None
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ProviderSyncSettingsWriteRefusedError(
+                "provider sync settings could not be verified; reload before saving"
+            ) from exc
+        if current_revision != loaded.source_revision:
+            raise ProviderSyncSettingsWriteRefusedError(
+                "provider sync settings changed after they were loaded; reload before saving"
+            )
     text = json.dumps(document, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     write = writer
     if write is None:

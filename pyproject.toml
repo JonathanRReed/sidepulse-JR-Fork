@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sidepulse"
-version = "0.5.0"
-description = "Command-line and macOS tools for SidePulse Pro and SidePulse Dot."
+version = "0.6.0"
+description = "JR Bar tools for SidePulse Pro and SidePulse Dot."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -61,6 +61,7 @@ dev = [
     "build==1.5.0",
     "pytest==9.1.1",
     "ruff==0.16.3",
+    "setuptools==83.0.0",
     "tomli==2.4.1; python_version < '3.11'",
     "twine==6.2.0",
     "wheel==0.47.0",
@@ -71,6 +72,7 @@ sidepulse = "sidepulse.cli_entry:sidepulse_main"
 sidepulse-integrations = "sidepulse.integration_cli:main"
 agent-monitor = "sidepulse.cli:main"
 agent-status-bar = "sidepulse.provider_usage_status_bar:main"
+sidepulse-waybar = "sidepulse.waybar_client:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -79,6 +81,7 @@ include = ["sidepulse*", "agent_monitor*", "sidepulse_cli*"]
 [tool.setuptools.package-data]
 "sidepulse.resources" = [
     "integration_compatibility.json",
+    "provider_fixture_ownership.json",
     "sd_eject_guard.c",
     "sdled.wasm",
 ]

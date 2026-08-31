@@ -13,7 +13,6 @@ import os
 import socketserver
 import stat
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -721,14 +720,20 @@ def test_sub_agents_arrive_as_sub_agents():
 @pytest.fixture
 def running_server(tmp_path):
     monitor = LiveAgentMonitor()
+    delivered = threading.Event()
+
+    def sink(event):
+        monitor.ingest_record(event)
+        delivered.set()
+
     server = CloudIngestServer(
-        monitor.ingest_record,
+        sink,
         token=TOKEN,
         config=_config(port=0, limits=_limits(burst_events=200)),
     )
     host, port = server.start()
     try:
-        yield server, monitor, host, port
+        yield server, monitor, host, port, delivered
     finally:
         server.stop()
 
@@ -749,18 +754,16 @@ def _http_post(host: str, port: int, document: dict, *, token: str = TOKEN, **he
         connection.close()
 
 
-def _await(predicate, *, timeout: float = 3.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(0.02)
+def _await(predicate, wake: threading.Event, *, timeout: float = 3.0):
+    value = predicate()
+    if value:
+        return value
+    wake.wait(timeout)
     return predicate()
 
 
 def test_server_binds_loopback_on_an_ephemeral_port(running_server):
-    _server, _monitor, host, port = running_server
+    _server, _monitor, host, port, _delivered = running_server
     assert host == cloud_ingest.LOOPBACK_HOST
     assert port > 0
 
@@ -770,7 +773,7 @@ def test_cloud_agent_reaches_the_ledger_over_a_real_socket(running_server):
     row in the same `LiveAgentMonitor` the local hooks feed.
 
     Deletion: make `CloudIngestServer._dispatch` skip calling the sink."""
-    _server, monitor, host, port = running_server
+    _server, monitor, host, port, delivered = running_server
 
     status, payload = _http_post(
         host,
@@ -785,7 +788,7 @@ def test_cloud_agent_reaches_the_ledger_over_a_real_socket(running_server):
     assert payload == {"accepted": True, "reason": "accepted"}
 
     key = "claude:session:cloud-review-1"
-    row = _await(lambda: monitor.current_statuses_by_key().get(key))
+    row = _await(lambda: monitor.current_statuses_by_key().get(key), delivered)
     assert row is not None
     assert row.mode is AgentMode.WORKING
     assert row.provider == "claude"
@@ -793,6 +796,7 @@ def test_cloud_agent_reaches_the_ledger_over_a_real_socket(running_server):
     # ledger can tell a cloud reviewer apart from a session on this Mac.
     assert row.origin == "Claude Cloud"
 
+    delivered.clear()
     status, _payload = _http_post(
         host, port, _document(session_id="cloud-review-1", event="Stop")
     )
@@ -803,7 +807,8 @@ def test_cloud_agent_reaches_the_ledger_over_a_real_socket(running_server):
             if monitor.current_statuses_by_key().get(key) is not None
             and monitor.current_statuses_by_key()[key].mode is AgentMode.COMPLETED
             else None
-        )
+        ),
+        delivered,
     )
     assert completed is not None
     assert completed.origin == "Claude Cloud"
@@ -842,18 +847,17 @@ def test_display_name_reaches_the_collector_though_canonical_rows_self_label():
 
 
 def test_real_socket_rejects_a_wrong_token(running_server):
-    _server, monitor, host, port = running_server
+    _server, monitor, host, port, _delivered = running_server
     status, payload = _http_post(
         host, port, _document(session_id="intruder"), token="wrong-token-wrong-token"
     )
     assert status == 401
     assert payload["accepted"] is False
-    time.sleep(0.15)
     assert "claude:session:intruder" not in monitor.current_statuses_by_key()
 
 
 def test_real_socket_rejects_an_oversize_body(running_server):
-    _server, _monitor, host, port = running_server
+    _server, _monitor, host, port, _delivered = running_server
     document = _document(session_id="big", display_name="x" * 8192)
     status, payload = _http_post(host, port, document)
     assert status == 413
@@ -861,7 +865,7 @@ def test_real_socket_rejects_an_oversize_body(running_server):
 
 
 def test_real_socket_answers_no_cors_preflight(running_server):
-    _server, _monitor, host, port = running_server
+    _server, _monitor, host, port, _delivered = running_server
     connection = http.client.HTTPConnection(host, port, timeout=5)
     try:
         connection.request("OPTIONS", INGEST_PATH)

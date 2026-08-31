@@ -3,7 +3,7 @@ import Foundation
 
 @available(iOS 16.0, *)
 struct WriteLEDsIntent: AppIntent {
-    static var title: LocalizedStringResource = "Write SidePulse LEDS.LED"
+    static var title: LocalizedStringResource = "Write \(ProductIdentity.displayName) LEDS.LED"
     static var description = IntentDescription("Writes the supplied LED program to LEDS.LED on the selected USB drive.")
     static var openAppWhenRun = false
 

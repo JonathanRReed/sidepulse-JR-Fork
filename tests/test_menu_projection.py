@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+import pytest
+
+from sidepulse.dnd_policy import DndMode, DndSource
 from sidepulse.menu_projection import (
     MenuProjectionInputs,
     MenuRowKind,
+    project_dnd_submenu,
     project_root_menu,
 )
 
@@ -17,8 +23,14 @@ def inputs(**changes) -> MenuProjectionInputs:
         screen_bar_enabled=True,
         warning_rows=("Grok hooks need reload", "Claude usage needs permission"),
         setup_required=True,
-        quiet_active=False,
-        unseen_finished_count=1,
+        dnd_mode=None,
+        dnd_source=None,
+        dnd_active_sources=(),
+        dnd_summary="DND: Off",
+        dnd_return_time=None,
+        dnd_override_active=False,
+        dnd_resume_available=False,
+        clearable_presented_count=1,
     )
     values.update(changes)
     return MenuProjectionInputs(**values)
@@ -38,8 +50,8 @@ def test_root_menu_is_compact_and_semantic() -> None:
         "diagnostics",
         "setup",
         "settings",
-        "quiet",
-        "clear_finished",
+        "dnd",
+        "clear_agents",
         "quit",
     ]
     assert plan.rows[0].title == "2 active · 1 needs you"
@@ -48,20 +60,36 @@ def test_root_menu_is_compact_and_semantic() -> None:
     assert plan.rows[3].kind is MenuRowKind.SUBMENU
 
 
-def test_setup_and_clear_finished_hide_when_not_needed() -> None:
+def test_setup_and_clear_agents_hide_when_not_needed() -> None:
     plan = project_root_menu(
         inputs(
             setup_required=False,
             warning_rows=(),
-            unseen_finished_count=0,
+            clearable_presented_count=0,
             active_count=0,
             needs_you_count=0,
         )
     )
     keys = {row.key for row in plan.rows}
     assert "setup" not in keys
-    assert "clear_finished" not in keys
+    assert "clear_agents" not in keys
     assert plan.rows[0].title == "No agents active"
+
+
+def test_clear_agents_uses_preview_action_without_exposing_a_count() -> None:
+    plan = project_root_menu(inputs(clearable_presented_count=3))
+    row = next(row for row in plan.rows if row.key == "clear_agents")
+
+    assert row.title == "Clear Agents…"
+    assert row.action == "clearAgents:"
+    assert row.kind is MenuRowKind.ACTION
+    assert len(plan.rows) <= 15
+
+
+@pytest.mark.parametrize("value", (-1, 1.0, True))
+def test_clearable_presented_count_must_be_a_nonnegative_integer(value: object) -> None:
+    with pytest.raises(ValueError):
+        inputs(clearable_presented_count=value)
 
 
 def test_warning_rows_are_bounded_and_actionable() -> None:
@@ -72,7 +100,137 @@ def test_warning_rows_are_bounded_and_actionable() -> None:
     assert len(plan.rows) <= 15
 
 
-def test_quiet_row_reflects_current_state() -> None:
-    plan = project_root_menu(inputs(quiet_active=True))
-    row = next(row for row in plan.rows if row.key == "quiet")
-    assert row.title == "Resume Notifications"
+def test_dnd_row_shows_off_without_reviving_the_quiet_boolean() -> None:
+    plan = project_root_menu(inputs())
+    row = next(row for row in plan.rows if row.key == "dnd")
+
+    assert row.title == "DND: Off"
+    assert row.kind is MenuRowKind.SUBMENU
+    assert all(row.key != "quiet" for row in plan.rows)
+
+
+def test_dnd_row_shows_temporary_mode_with_exact_return_time() -> None:
+    return_time = datetime(2026, 8, 30, 22, 5, tzinfo=timezone.utc)
+    plan = project_root_menu(
+        inputs(
+            dnd_mode=DndMode.MUTE,
+            dnd_source=DndSource.MANUAL,
+            dnd_active_sources=(DndSource.MANUAL,),
+            dnd_summary="DND: Manual Mute",
+            dnd_return_time=return_time,
+            dnd_override_active=True,
+        )
+    )
+    row = next(row for row in plan.rows if row.key == "dnd")
+
+    assert row.title == "DND: Mute until 10:05 PM"
+    assert len(plan.rows) <= 15
+
+
+def test_dnd_row_shows_scheduled_mode_with_exact_return_time() -> None:
+    return_time = datetime(2026, 8, 31, 7, 0, tzinfo=timezone.utc)
+    plan = project_root_menu(
+        inputs(
+            dnd_mode=DndMode.DARK,
+            dnd_source=DndSource.SCHEDULE,
+            dnd_active_sources=(DndSource.SCHEDULE,),
+            dnd_summary="DND: Scheduled Fully Dark",
+            dnd_return_time=return_time,
+            dnd_resume_available=True,
+        )
+    )
+    row = next(row for row in plan.rows if row.key == "dnd")
+
+    assert row.title == "DND: Fully Dark, scheduled until 7:00 AM"
+    assert len(plan.rows) <= 15
+
+
+def test_dnd_submenu_exposes_all_modes_and_bounded_contextual_actions() -> None:
+    plan = project_dnd_submenu(
+        inputs(dnd_resume_available=True, dnd_override_active=True)
+    )
+
+    assert [(row.title, row.action) for row in plan] == [
+        ("Mute for One Hour", "setDndMuteForHour:"),
+        ("Dim for One Hour", "setDndDimForHour:"),
+        ("Pause for One Hour", "setDndPauseForHour:"),
+        ("Asks Only for One Hour", "setDndAsksOnlyForHour:"),
+        ("Fully Dark for One Hour", "setDndDarkForHour:"),
+        ("Resume Schedule Until Next Change", "resumeDndUntilNextChange:"),
+        ("End Temporary Override", "endDndOverride:"),
+        ("DND Settings…", "openDndSettings:"),
+    ]
+    assert len(plan) == 8
+
+
+def test_dnd_submenu_hides_inapplicable_resume_and_end_override() -> None:
+    plan = project_dnd_submenu(inputs())
+    keys = {row.key for row in plan}
+
+    assert "dnd:resume" not in keys
+    assert "dnd:end_override" not in keys
+    assert "dnd:settings" in keys
+
+
+def test_dnd_row_names_all_mixed_sources_and_next_exact_change() -> None:
+    return_time = datetime(2026, 8, 31, 7, 0, tzinfo=timezone.utc)
+    plan = project_root_menu(
+        inputs(
+            dnd_mode=DndMode.DIM,
+            dnd_source=DndSource.SCHEDULE,
+            dnd_active_sources=(DndSource.SCHEDULE, DndSource.MACOS_FOCUS),
+            dnd_summary="DND: Scheduled Dim + macOS Focus Mute",
+            dnd_return_time=return_time,
+            dnd_resume_available=True,
+        )
+    )
+    row = next(row for row in plan.rows if row.key == "dnd")
+
+    assert row.title == "DND: Scheduled Dim + macOS Focus Mute until 7:00 AM"
+    assert len(plan.rows) <= 15
+
+
+def test_dnd_row_names_manual_and_focus_instead_of_only_first_contribution() -> None:
+    return_time = datetime(2026, 8, 30, 22, 5, tzinfo=timezone.utc)
+    plan = project_root_menu(
+        inputs(
+            dnd_mode=DndMode.DIM,
+            dnd_source=DndSource.MANUAL,
+            dnd_active_sources=(DndSource.MANUAL, DndSource.MACOS_FOCUS),
+            dnd_summary="DND: Manual Dim + macOS Focus Pause",
+            dnd_return_time=return_time,
+            dnd_override_active=True,
+        )
+    )
+    row = next(row for row in plan.rows if row.key == "dnd")
+
+    assert row.title == "DND: Manual Dim + macOS Focus Pause until 10:05 PM"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("dnd_mode", "mute"),
+        ("dnd_source", "manual"),
+        ("dnd_active_sources", [DndSource.MANUAL]),
+        ("dnd_summary", ""),
+        ("dnd_return_time", datetime(2026, 8, 30, 22, 5)),
+        ("dnd_override_active", 1),
+        ("dnd_resume_available", 0),
+    ),
+)
+def test_dnd_menu_inputs_refuse_untyped_state(field: str, value: object) -> None:
+    with pytest.raises(ValueError):
+        inputs(**{field: value})
+
+
+def test_dnd_menu_inputs_require_mode_and_source_together() -> None:
+    with pytest.raises(ValueError):
+        inputs(dnd_mode=DndMode.MUTE)
+    with pytest.raises(ValueError):
+        inputs(dnd_source=DndSource.SCHEDULE)
+
+
+def test_dnd_menu_inputs_require_primary_source_in_active_sources() -> None:
+    with pytest.raises(ValueError):
+        inputs(dnd_mode=DndMode.MUTE, dnd_source=DndSource.MANUAL)

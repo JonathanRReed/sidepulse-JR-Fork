@@ -17,9 +17,13 @@ def _classes(source: str) -> set[str]:
 
 def test_native_provider_host_installs_settings_and_screen_bar_before_launch() -> None:
     source = (SRC / "provider_usage_status_bar.py").read_text(encoding="utf-8")
+    composition = (SRC / "application_composition.py").read_text(encoding="utf-8")
 
-    assert "install_settings_navigation(_legacy, _settings_window)" in source
-    assert "install_screen_bar_runtime()" in source
+    assert "install_settings_navigation(legacy, settings_window)" in composition
+    assert "install_screen_bar_runtime()" in composition
+    assert "install_provider_usage_status_bar()" in composition
+    assert "install_settings_navigation(_legacy, _settings_window)" not in source
+    assert "install_screen_bar_runtime()" not in source
     assert _classes(source) == {"JRProviderUsageStatusBarController"}
     assert "selectSettingsCategoryPage_" in source
     assert "openProviderUsageCenter_" in source

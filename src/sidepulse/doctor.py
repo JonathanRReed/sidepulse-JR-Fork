@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Final
 
 from .alcove_observation import (
-    ALCOVE_STATUS_MAX_AGE_SECONDS,
-    AlcoveCaptureStatus,
+    AlcoveConfidenceState,
     alcove_follow_blocker,
     latest_alcove_status,
+    project_alcove_confidence,
 )
 from .app_bundle import running_inside_bundle
 from .device_writer import discover_devices
@@ -27,6 +27,7 @@ from .private_export import (
     PrivateExportError,
     write_private_export,
 )
+from .product_identity import PRODUCT_DISPLAY_NAME
 from .providers import (
     HOOK_PROVIDERS,
     default_log_path,
@@ -39,11 +40,12 @@ from .status_bar_launch import launch_agent_path
 from .trusted_tools import trusted_system_tool
 
 DOCTOR_DOCUMENT: Final = "sidepulse-doctor"
-# 2: adds alcove_follow_state; 3: adds event_intake_freshness. The
+# 2: adds alcove_follow_state; 3: adds event_intake_freshness; 4: expands
+# Alcove following to its seven semantic confidence states. The
 # document gains rows, so anything holding an older export is reading a
 # different shape -- version it rather than let a consumer silently miss
 # a check that is now reported.
-DOCTOR_VERSION: Final = 3
+DOCTOR_VERSION: Final = 4
 MAX_DOCTOR_EXPORT_BYTES: Final = 64 * 1024
 PUBLIC_COLLECTION_ERROR_MESSAGE: Final = "Diagnostics could not be collected."
 
@@ -88,6 +90,11 @@ class DiagnosticCode(str, Enum):
     # vocabulary, never a message, a path, or a window title.
     NOT_PERMITTED = "not_permitted"
     NOT_RUNNING = "not_running"
+    STALE = "stale"
+    RECOVERING = "recovering"
+    UNSUPPORTED = "unsupported"
+    # Kept as a source-compatibility identifier for older callers. Doctor
+    # v4 emits UNSUPPORTED for the semantic state instead.
     UNUSABLE = "unusable"
 
 
@@ -227,20 +234,19 @@ DIAGNOSTIC_MANIFEST: Final = DiagnosticManifest(
             ),
             16,
         ),
-        # Alcove following had exactly one observable state -- nothing --
-        # for every one of these. Screen Recording denied, Alcove absent,
-        # an image that could not be measured and a clean success all
-        # returned the same None, so no surface could tell the user which
-        # one they were living in.
+        # Alcove following uses the seven semantic confidence states from
+        # alcove_observation. The fixed vocabulary keeps exported findings
+        # content-free while preserving the projection's distinctions.
         DiagnosticFieldManifest(
             DiagnosticCheck.ALCOVE_FOLLOW_STATE,
             (
                 DiagnosticCode.HEALTHY,
+                DiagnosticCode.STALE,
                 DiagnosticCode.NOT_PERMITTED,
                 DiagnosticCode.NOT_RUNNING,
-                DiagnosticCode.UNUSABLE,
+                DiagnosticCode.UNSUPPORTED,
                 DiagnosticCode.NOT_CONFIGURED,
-                DiagnosticCode.UNAVAILABLE,
+                DiagnosticCode.RECOVERING,
             ),
             1,
         ),
@@ -548,13 +554,14 @@ def _mounted_device_health_probe() -> DiagnosticFinding:
     )
 
 
-_ALCOVE_DIAGNOSTIC_CODES: Final[dict[AlcoveCaptureStatus, DiagnosticCode]] = {
-    AlcoveCaptureStatus.CAPTURED: DiagnosticCode.HEALTHY,
-    AlcoveCaptureStatus.SCREEN_RECORDING_DENIED: DiagnosticCode.NOT_PERMITTED,
-    AlcoveCaptureStatus.WINDOW_UNAVAILABLE: DiagnosticCode.NOT_RUNNING,
-    AlcoveCaptureStatus.IMAGE_UNUSABLE: DiagnosticCode.UNUSABLE,
-    AlcoveCaptureStatus.CAPTURE_FAILED: DiagnosticCode.UNAVAILABLE,
-    AlcoveCaptureStatus.NOT_FOLLOWING: DiagnosticCode.NOT_CONFIGURED,
+_ALCOVE_DIAGNOSTIC_CODES: Final[dict[AlcoveConfidenceState, DiagnosticCode]] = {
+    AlcoveConfidenceState.FRESH: DiagnosticCode.HEALTHY,
+    AlcoveConfidenceState.STALE: DiagnosticCode.STALE,
+    AlcoveConfidenceState.PERMISSION_DENIED: DiagnosticCode.NOT_PERMITTED,
+    AlcoveConfidenceState.DISCONNECTED: DiagnosticCode.NOT_RUNNING,
+    AlcoveConfidenceState.UNSUPPORTED: DiagnosticCode.UNSUPPORTED,
+    AlcoveConfidenceState.NOT_FOLLOWING: DiagnosticCode.NOT_CONFIGURED,
+    AlcoveConfidenceState.RECOVERING: DiagnosticCode.RECOVERING,
 }
 
 
@@ -569,22 +576,22 @@ def _alcove_following_enabled() -> bool:
 def _alcove_follow_state_probe() -> DiagnosticFinding:
     """What Alcove following is actually doing, or why it is not.
 
-    Prefers the render path's own live reading and falls back to a
-    promptless preflight plus a window probe. It never upgrades "nothing
-    is obviously in the way" into "it works": only a real capture may
-    report healthy, so a fresh process with no reading says unavailable
-    rather than inventing good news.
+    Gather the current promptless blocker and let the pure confidence
+    projection resolve status age, geometry age, and precedence in one
+    place. Diagnostic output contains only a fixed code and bounded count.
     """
-    if not _alcove_following_enabled():
-        status: AlcoveCaptureStatus | None = AlcoveCaptureStatus.NOT_FOLLOWING
-    else:
-        snapshot = latest_alcove_status()
-        age = None if snapshot is None else time.monotonic() - snapshot.updated_at
-        if snapshot is not None and age is not None and 0.0 <= age <= ALCOVE_STATUS_MAX_AGE_SECONDS:
-            status = snapshot.status
-        else:
-            status = alcove_follow_blocker(following=True)
-    code = _ALCOVE_DIAGNOSTIC_CODES.get(status, DiagnosticCode.UNAVAILABLE)
+    following = _alcove_following_enabled()
+    blocker = alcove_follow_blocker(following=following)
+    projection = project_alcove_confidence(
+        following=following,
+        snapshot=latest_alcove_status(),
+        blocker=blocker,
+        now=time.monotonic(),
+    )
+    code = _ALCOVE_DIAGNOSTIC_CODES.get(
+        projection.state,
+        DiagnosticCode.RECOVERING,
+    )
     return _finding(
         DiagnosticCheck.ALCOVE_FOLLOW_STATE,
         code,
@@ -704,16 +711,23 @@ def _sanitized_failure_class(error: Exception) -> SanitizedFailureClass:
     return SanitizedFailureClass.INTERNAL
 
 
-def _unavailable_finding(check: DiagnosticCheck) -> DiagnosticFinding:
+def _failed_probe_finding(check: DiagnosticCheck) -> DiagnosticFinding:
     """A probe that failed measured NOTHING, and says so in both numbers.
 
     This used to borrow the manifest's ceiling as the denominator, so a
     private-path probe that raised before reading a single path rendered
     ``private path modes: unavailable [0/32]`` -- a ratio out of a total
     the app had not counted and paths it had not looked at. 0/0 is the
-    honest pair: nothing examined, nothing healthy.
+    honest pair: nothing examined, nothing healthy. Doctor v4 represents
+    an Alcove probe failure as recovering because unavailable is not one
+    of that field's seven semantic confidence states.
     """
-    return _finding(check, DiagnosticCode.UNAVAILABLE, 0, 0)
+    code = (
+        DiagnosticCode.RECOVERING
+        if check is DiagnosticCheck.ALCOVE_FOLLOW_STATE
+        else DiagnosticCode.UNAVAILABLE
+    )
+    return _finding(check, code, 0, 0)
 
 
 def collect_diagnostics(
@@ -736,7 +750,7 @@ def collect_diagnostics(
             if type(finding) is not DiagnosticFinding or finding.check is not probe.check:
                 raise TypeError("diagnostic probe returned an invalid finding")
         except Exception as error:
-            finding = _unavailable_finding(probe.check)
+            finding = _failed_probe_finding(probe.check)
             last_failure = _sanitized_failure_class(error)
         findings.append(finding)
     return DiagnosticResult(
@@ -794,7 +808,7 @@ def write_diagnostic_export(path: Path, result: DiagnosticResult) -> Path:
 def render_diagnostic_result(result: DiagnosticResult) -> str:
     if type(result) is not DiagnosticResult:
         raise ValueError("invalid diagnostic result")
-    lines = [f"SidePulse diagnostics (v{result.manifest_version})"]
+    lines = [f"{PRODUCT_DISPLAY_NAME} diagnostics (v{result.manifest_version})"]
     lines.extend(
         f"{finding.check.value.replace('_', ' ')}: "
         f"{finding.code.value} [{finding.count}/{finding.limit}]"

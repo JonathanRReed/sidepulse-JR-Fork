@@ -6,7 +6,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import Final
+
+from .product_identity import PRODUCT_DISPLAY_NAME
 
 ALCOVE_ALPHA_THRESHOLD = 0.08
 ALCOVE_CONFIDENCE_MINIMUM = 0.75
@@ -44,13 +47,157 @@ class AlcoveCaptureStatus(str, Enum):
     NOT_FOLLOWING = "not_following"
 
 
+class AlcoveConfidenceState(str, Enum):
+    FRESH = "fresh"
+    STALE = "stale"
+    PERMISSION_DENIED = "permission_denied"
+    DISCONNECTED = "disconnected"
+    UNSUPPORTED = "unsupported"
+    NOT_FOLLOWING = "not_following"
+    RECOVERING = "recovering"
+
+
+class AlcoveGeometryIntent(str, Enum):
+    FOLLOW_LIVE = "follow_live"
+    HOLD_LAST_GOOD = "hold_last_good"
+    USE_SCREEN_BAR_GEOMETRY = "use_screen_bar_geometry"
+
+
+class AlcoveMotionIntent(str, Enum):
+    TRACK = "track"
+    HOLD = "hold"
+    SETTLE_ON_RECOVERY = "settle_on_recovery"
+    STATIC = "static"
+
+
+@dataclass(frozen=True, slots=True)
+class AlcoveSilhouette:
+    """Validated, immutable geometry crossing into the native view."""
+
+    center_x: float
+    width: float
+    height: float
+    contour: tuple[tuple[float, float], ...]
+
+    def __post_init__(self) -> None:
+        values = (self.center_x, self.width, self.height)
+        if any(type(value) not in (int, float) or not math.isfinite(float(value)) for value in values):
+            raise ValueError("silhouette dimensions must be finite numbers")
+        if not (40.0 <= float(self.width) <= ALCOVE_MAX_WIDTH):
+            raise ValueError("silhouette width is unsafe")
+        if not (1.0 <= float(self.height) <= ALCOVE_MAX_WIDTH * ALCOVE_MAX_BAND_FACTOR):
+            raise ValueError("silhouette height is unsafe")
+        if type(self.contour) is not tuple or not (4 <= len(self.contour) <= ALCOVE_MAX_CONTOUR_POINTS):
+            raise ValueError("silhouette contour must be a bounded tuple")
+        if self.contour[0] != self.contour[-1]:
+            raise ValueError("silhouette contour must be closed")
+        normalized = []
+        left = float(self.center_x) - float(self.width) / 2.0
+        right = float(self.center_x) + float(self.width) / 2.0
+        for point in self.contour:
+            if type(point) is not tuple or len(point) != 2:
+                raise ValueError("silhouette contour points must be tuples")
+            x, y = point
+            if any(type(value) not in (int, float) or not math.isfinite(float(value)) for value in point):
+                raise ValueError("silhouette contour points must be finite")
+            if not (left - 2.0 <= float(x) <= right + 2.0) or not (-2.0 <= float(y) <= float(self.height) + 2.0):
+                raise ValueError("silhouette contour point is unsafe")
+            normalized.append((float(x), float(y)))
+        object.__setattr__(self, "center_x", float(self.center_x))
+        object.__setattr__(self, "width", float(self.width))
+        object.__setattr__(self, "height", float(self.height))
+        object.__setattr__(self, "contour", tuple(normalized))
+
+    def __eq__(self, other):
+        if isinstance(other, tuple) and len(other) == 4:
+            return (self.center_x, self.width, self.height, self.contour) == other
+        if type(other) is not AlcoveSilhouette:
+            return NotImplemented
+        return (
+            self.center_x,
+            self.width,
+            self.height,
+            self.contour,
+        ) == (other.center_x, other.width, other.height, other.contour)
+
+
+@dataclass(frozen=True, slots=True)
+class AlcoveConfidenceProjection:
+    state: AlcoveConfidenceState
+    message: str
+    accessibility_value: str
+    accessibility_help: str
+    geometry_intent: AlcoveGeometryIntent
+    motion_intent: AlcoveMotionIntent
+    needs_permission_action: bool
+
+
+_CONFIDENCE_COPY = MappingProxyType({
+    AlcoveConfidenceState.FRESH: (
+        "Live. Matching Alcove's width.", "Fresh",
+        "The Screen Bar is following a current measurement.",
+    ),
+    AlcoveConfidenceState.STALE: (
+        "Stale. {geometry} while JR Bar checks again.", "Stale", "{help}",
+    ),
+    AlcoveConfidenceState.PERMISSION_DENIED: (
+        "Screen Recording is off, so JR Bar cannot see Alcove's capsule. The bar keeps its own size until you grant it.",
+        "Permission denied", "Grant Screen Recording access to let the Screen Bar follow Alcove.",
+    ),
+    AlcoveConfidenceState.DISCONNECTED: (
+        "Disconnected. Alcove is not showing a capsule, so the bar is using its own size.",
+        "Disconnected", "Following resumes when an Alcove capsule is available.",
+    ),
+    AlcoveConfidenceState.UNSUPPORTED: (
+        "Unsupported shape. The captured capsule could not be measured safely, so the bar is using its own size.",
+        "Unsupported", "No unsafe geometry is used.",
+    ),
+    AlcoveConfidenceState.NOT_FOLLOWING: (
+        "Not following Alcove. The bar uses its own size.",
+        "Not following", "The setting or manual geometry controls the shape.",
+    ),
+    AlcoveConfidenceState.RECOVERING: (
+        "Recovering. {geometry} until a fresh measurement arrives.", "Recovering", "{help}",
+    ),
+})
+
+
+def _confidence_projection(
+    state: AlcoveConfidenceState,
+    *,
+    held: bool = False,
+) -> AlcoveConfidenceProjection:
+    if state is AlcoveConfidenceState.STALE:
+        geometry = "Holding the last trusted width" if held else "Using the Screen Bar's own size"
+        help_text = "The held shape will expire and is not current." if held else "No current trusted shape is available."
+        message, value, help_template = _CONFIDENCE_COPY[state]
+        return AlcoveConfidenceProjection(state, message.format(geometry=geometry), value, help_template.format(help=help_text), AlcoveGeometryIntent.HOLD_LAST_GOOD if held else AlcoveGeometryIntent.USE_SCREEN_BAR_GEOMETRY, AlcoveMotionIntent.HOLD if held else AlcoveMotionIntent.STATIC, False)
+    if state is AlcoveConfidenceState.RECOVERING:
+        if held:
+            message = "Recovering. Holding the last trusted width while measurement resumes."
+            intent = AlcoveGeometryIntent.HOLD_LAST_GOOD
+            motion = AlcoveMotionIntent.HOLD
+            help_text = "The held shape is temporary."
+        else:
+            message = "Recovering. Using the Screen Bar's own size until a fresh measurement arrives."
+            intent = AlcoveGeometryIntent.USE_SCREEN_BAR_GEOMETRY
+            motion = AlcoveMotionIntent.STATIC
+            help_text = "The app is waiting for fresh evidence."
+        return AlcoveConfidenceProjection(state, message, "Recovering", help_text, intent, motion, False)
+    message, value, help_text = _CONFIDENCE_COPY[state]
+    if state is AlcoveConfidenceState.FRESH:
+        return AlcoveConfidenceProjection(state, message, value, help_text, AlcoveGeometryIntent.FOLLOW_LIVE, AlcoveMotionIntent.TRACK, False)
+    permission = state is AlcoveConfidenceState.PERMISSION_DENIED
+    return AlcoveConfidenceProjection(state, message, value, help_text, AlcoveGeometryIntent.USE_SCREEN_BAR_GEOMETRY, AlcoveMotionIntent.STATIC, permission)
+
+
 # What each outcome means to someone reading a settings pane. Content-free
 # by construction: fixed product sentences, no paths, no window titles, no
 # measurements.
 ALCOVE_STATUS_MESSAGES: Final[dict[AlcoveCaptureStatus, str]] = {
     AlcoveCaptureStatus.CAPTURED: "Matching Alcove's width.",
     AlcoveCaptureStatus.SCREEN_RECORDING_DENIED: (
-        "Screen Recording is off, so SidePulse cannot see Alcove's capsule. "
+        f"Screen Recording is off, so {PRODUCT_DISPLAY_NAME} cannot see Alcove's capsule. "
         "The bar keeps its classic size until you grant it."
     ),
     AlcoveCaptureStatus.WINDOW_UNAVAILABLE: (
@@ -146,6 +293,8 @@ class AlcoveStatusSnapshot:
 
     status: AlcoveCaptureStatus
     updated_at: float
+    geometry_age_seconds: float | None = None
+    geometry_available: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +473,8 @@ def note_alcove_status(
     status: AlcoveCaptureStatus,
     *,
     now: float | None = None,
+    geometry_age_seconds: float | None = None,
+    geometry_available: bool | None = None,
 ) -> bool:
     """Record the current outcome; True only when it CHANGED.
 
@@ -336,9 +487,27 @@ def note_alcove_status(
     moment = time.monotonic() if now is None else float(now)
     if not math.isfinite(moment):
         moment = time.monotonic()
+    if geometry_age_seconds is not None and (
+        not _finite(geometry_age_seconds) or float(geometry_age_seconds) < 0.0
+    ):
+        geometry_age_seconds = None
+        geometry_available = False
+    if geometry_available is None:
+        geometry_available = status is AlcoveCaptureStatus.CAPTURED
+    if geometry_available and geometry_age_seconds is None and status is AlcoveCaptureStatus.CAPTURED:
+        geometry_age_seconds = 0.0
+    if type(geometry_available) is not bool or geometry_age_seconds is None:
+        geometry_available = False
+    if not geometry_available:
+        geometry_age_seconds = None
     with _status_lock:
         previous = _status_snapshot
-        _status_snapshot = AlcoveStatusSnapshot(status=status, updated_at=moment)
+        _status_snapshot = AlcoveStatusSnapshot(
+            status=status,
+            updated_at=moment,
+            geometry_age_seconds=geometry_age_seconds,
+            geometry_available=geometry_available,
+        )
     return previous is None or previous.status is not status
 
 
@@ -358,6 +527,54 @@ def _finite(*values: object) -> bool:
         return all(math.isfinite(float(value)) for value in values)
     except (TypeError, ValueError, OverflowError):
         return False
+
+
+def project_alcove_confidence(
+    *,
+    following: bool,
+    snapshot: AlcoveStatusSnapshot | None,
+    blocker: AlcoveCaptureStatus | None,
+    now: float,
+) -> AlcoveConfidenceProjection:
+    """Resolve raw capture facts into the single seven-state product contract."""
+    if type(following) is not bool or not _finite(now):
+        return _confidence_projection(AlcoveConfidenceState.RECOVERING)
+    if not following:
+        return _confidence_projection(AlcoveConfidenceState.NOT_FOLLOWING)
+    if blocker is AlcoveCaptureStatus.SCREEN_RECORDING_DENIED:
+        return _confidence_projection(AlcoveConfidenceState.PERMISSION_DENIED)
+    if blocker is AlcoveCaptureStatus.WINDOW_UNAVAILABLE:
+        return _confidence_projection(AlcoveConfidenceState.DISCONNECTED)
+    if blocker is not None and type(blocker) is not AlcoveCaptureStatus:
+        return _confidence_projection(AlcoveConfidenceState.RECOVERING)
+    if snapshot is None or type(snapshot.status) is not AlcoveCaptureStatus or type(snapshot.geometry_available) is not bool:
+        return _confidence_projection(AlcoveConfidenceState.RECOVERING)
+    status_age = float(now) - float(snapshot.updated_at)
+    geometry_age = snapshot.geometry_age_seconds
+    if not _finite(snapshot.updated_at, status_age) or status_age < 0.0:
+        return _confidence_projection(AlcoveConfidenceState.RECOVERING)
+    if geometry_age is not None and (not _finite(geometry_age) or float(geometry_age) < 0.0):
+        return _confidence_projection(AlcoveConfidenceState.RECOVERING)
+    if status_age > ALCOVE_STATUS_MAX_AGE_SECONDS:
+        state = AlcoveConfidenceState.STALE
+    elif snapshot.status is AlcoveCaptureStatus.SCREEN_RECORDING_DENIED:
+        return _confidence_projection(AlcoveConfidenceState.PERMISSION_DENIED)
+    elif snapshot.status is AlcoveCaptureStatus.WINDOW_UNAVAILABLE:
+        return _confidence_projection(AlcoveConfidenceState.DISCONNECTED)
+    elif snapshot.status is AlcoveCaptureStatus.IMAGE_UNUSABLE:
+        state = AlcoveConfidenceState.UNSUPPORTED
+    elif snapshot.status is AlcoveCaptureStatus.CAPTURE_FAILED:
+        state = AlcoveConfidenceState.RECOVERING
+    elif snapshot.status is not AlcoveCaptureStatus.CAPTURED:
+        return _confidence_projection(AlcoveConfidenceState.RECOVERING)
+    elif not snapshot.geometry_available or geometry_age is None:
+        state = AlcoveConfidenceState.STALE
+    elif float(geometry_age) + status_age <= ALCOVE_MAX_AGE_SECONDS:
+        state = AlcoveConfidenceState.FRESH
+    else:
+        state = AlcoveConfidenceState.STALE
+    held = bool(snapshot.geometry_available and geometry_age is not None and float(geometry_age) + status_age <= ALCOVE_HOLD_SECONDS)
+    return _confidence_projection(state, held=held if state in (AlcoveConfidenceState.STALE, AlcoveConfidenceState.RECOVERING) else False)
 
 
 def validate_observation(
@@ -487,6 +704,12 @@ class AlcoveObservationReducer:
             self._adopted = None
             return None
         return self._adopted
+
+    def last_good_age(self, *, now: float) -> float | None:
+        if self._last_good_at is None or not _finite(now):
+            return None
+        age = float(now) - self._last_good_at
+        return age if age >= 0.0 else None
 
     def reset(self) -> None:
         self._adopted = None
@@ -750,6 +973,7 @@ class AlcoveObservationWorker:
         self._accepting = True
         self._in_flight = False
         self._last_status: AlcoveCaptureStatus | None = None
+        self._last_status_identity: tuple[str, int, int] | None = None
         self.dropped_requests = 0
         self._thread = threading.Thread(
             target=self._run,
@@ -778,6 +1002,22 @@ class AlcoveObservationWorker:
         """
         with self._condition:
             return self._last_status
+
+    @property
+    def last_status_identity(self) -> tuple[str, int, int] | None:
+        with self._condition:
+            return self._last_status_identity
+
+    def wait_idle(self, *, timeout_seconds: float) -> bool:
+        """Wait until no capture is running or queued, up to a bound."""
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        with self._condition:
+            while self._in_flight or self._pending is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                self._condition.wait(remaining)
+            return True
 
     def reconcile(self, request: AlcoveCaptureRequest) -> bool:
         if not isinstance(request, AlcoveCaptureRequest):
@@ -813,6 +1053,11 @@ class AlcoveObservationWorker:
                         # torn-down generation: it must not publish and
                         # must not overwrite the status either.
                         self._last_status = outcome.status
+                        self._last_status_identity = (
+                            request.screen_id,
+                            request.window_number,
+                            request.generation,
+                        )
                 if publish and outcome.observation is not None:
                     self._buffer.publish(outcome.observation)
             except Exception:

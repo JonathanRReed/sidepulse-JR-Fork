@@ -65,8 +65,8 @@ def test_the_reposition_path_reads_the_frame_back() -> None:
     from sidepulse import virtual_device
 
     source = Path(virtual_device.__file__).read_text(encoding="utf-8")
-    marker = source.index("setFrame_display_(window_frame, True)")
-    following = source[marker : marker + 900]
+    marker = source.rindex("_apply_alcove_frame(")
+    following = source[marker : marker + 1800]
     assert "self.window.frame()" in following, (
         "the granted frame is no longer read back after setFrame_display_; "
         "the view will be sized from a frame the window may not have"

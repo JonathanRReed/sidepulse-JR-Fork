@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shlex
 import stat
@@ -16,6 +15,7 @@ from .capacity_types import SourceKey
 from .models import HookEvent, parse_datetime
 from .origin import origin_label_from_payload
 from .private_io import read_private_text
+from .product_identity import PRODUCT_DISPLAY_NAME
 from .provider_contracts import (
     AdapterIdentifier,
     CapabilityAuthority,
@@ -30,6 +30,7 @@ from .provider_contracts import (
     provider_contract_document,
 )
 from .provider_facts import ObservationAuthority
+from .state_paths import candidate_state_dirs, default_state_dir  # noqa: F401
 
 try:
     import tomllib
@@ -218,7 +219,7 @@ KIRO_NATIVE_EVENT_NAMES = {
     "Stop": "stop",
 }
 KIRO_MANAGED_DESCRIPTION = (
-    "Kiro agent with SidePulse lifecycle monitoring enabled."
+    f"Kiro agent with {PRODUCT_DISPLAY_NAME} lifecycle monitoring enabled."
 )
 
 ANTIGRAVITY_HOOK_NAME = "sidepulse-status"
@@ -226,10 +227,12 @@ ANTIGRAVITY_ENVELOPE_KEY = "antigravity"
 
 OPENCODE_PLUGIN_MARKER = "sidepulse-opencode-plugin-v1"
 _OPENCODE_PLUGIN_MAX_SOURCE_BYTES = 32 * 1024
+OPENCLAW_HANDLER_MARKER = "sidepulse-openclaw-handler-v2"
+_OPENCLAW_HANDLER_MAX_SOURCE_BYTES = 32 * 1024
 
 
 def _is_sidepulse_hook_invocation(parts) -> bool:
-    """Ours, in any of the three shapes we have ever registered.
+    """Ours, in every legacy and current shape we register.
 
     Legacy installs name hook_entry.py directly; today's invoke the
     module so the entry resolves wherever the package lives; frozen
@@ -240,9 +243,13 @@ def _is_sidepulse_hook_invocation(parts) -> bool:
     parts = list(parts)
     if any(Path(part).name == "hook_entry.py" for part in parts):
         return True
-    if "sidepulse.hook_entry" in parts and "-m" in parts:
+    if "-m" in parts and any(
+        module in parts for module in ("sidepulse.hook_entry", "sidepulse.hook_client")
+    ):
         return True
-    return "agent-monitor" in parts and "hook-log" in parts
+    return "agent-monitor" in parts and any(
+        command in parts for command in ("hook-log", "hook-client")
+    )
 
 
 def _valid_opencode_hook_arguments(
@@ -258,7 +265,10 @@ def _valid_opencode_hook_arguments(
         for argument in arguments
     ):
         return None
-    package_hook_entry = str(Path(__file__).with_name("hook_entry.py").resolve())
+    package_hook_entries = {
+        str(Path(__file__).with_name(name).resolve())
+        for name in ("hook_entry.py", "hook_client.py")
+    }
     executable_trusted = False
     if Path(arguments[0]).is_absolute():
         try:
@@ -269,7 +279,7 @@ def _valid_opencode_hook_arguments(
         len(arguments) == 6
         and Path(arguments[0]).is_absolute()
         and executable_trusted
-        and arguments[1] == package_hook_entry
+        and arguments[1] in package_hook_entries
         and arguments[2:5] == ["--provider", "opencode", "--log"]
     )
     # Today's registrations invoke the module, so the entry resolves
@@ -279,14 +289,15 @@ def _valid_opencode_hook_arguments(
         and Path(arguments[0]).is_absolute()
         and executable_trusted
         and arguments[1] == "-m"
-        and arguments[2] == "sidepulse.hook_entry"
+        and arguments[2] in ("sidepulse.hook_entry", "sidepulse.hook_client")
         and arguments[3:6] == ["--provider", "opencode", "--log"]
     )
     frozen_shape = (
         len(arguments) == 7
         and Path(arguments[0]).is_absolute()
         and executable_trusted
-        and arguments[1:3] == ["agent-monitor", "hook-log"]
+        and arguments[1] == "agent-monitor"
+        and arguments[2] in ("hook-log", "hook-client")
         and arguments[3:6] == ["--provider", "opencode", "--log"]
     )
     if not (python_shape or module_shape or frozen_shape):
@@ -382,19 +393,30 @@ function payloadFor(event) {{
   return encoded.length <= SIDEPULSE_MAX_PAYLOAD_BYTES ? encoded : undefined;
 }}
 
-function forward(encodedPayload) {{
+let ingressTail = Promise.resolve();
+
+async function forwardOne(encodedPayload) {{
   try {{
     const child = Bun.spawn(SIDEPULSE_HOOK_ARGS, {{ stdin: "pipe", stdout: "ignore", stderr: "ignore" }});
     child.stdin.write(encodedPayload);
     child.stdin.end();
-    child.unref?.();
+    await child.exited;
   }} catch {{}}
+}}
+
+function forward(encodedPayload) {{
+  const admitted = ingressTail.then(
+    () => forwardOne(encodedPayload),
+    () => forwardOne(encodedPayload),
+  );
+  ingressTail = admitted;
+  return admitted;
 }}
 
 const SidePulsePlugin = {{
   event: async ({{ event }}) => {{
     const payload = payloadFor(event);
-    if (payload) forward(payload);
+    if (payload) await forward(payload);
   }},
 }};
 
@@ -417,6 +439,129 @@ def managed_opencode_plugin_log_path(text: str) -> Path | None:
     if valid_arguments is None:
         return None
     if text != opencode_plugin_source_for_arguments(valid_arguments):
+        return None
+    return Path(valid_arguments[-1])
+
+
+def _valid_openclaw_hook_arguments(arguments: object) -> tuple[str, ...] | None:
+    if not isinstance(arguments, list) or len(arguments) != 7:
+        return None
+    if not all(
+        isinstance(argument, str)
+        and argument
+        and argument.isascii()
+        and not any(ord(character) < 32 for character in argument)
+        for argument in arguments
+    ):
+        return None
+    module_shape = arguments[1:3] == ["-m", "sidepulse.hook_client"]
+    frozen_shape = arguments[1:3] == ["agent-monitor", "hook-client"]
+    if not (module_shape or frozen_shape):
+        return None
+    if arguments[3:6] != ["--provider", "openclaw", "--log"]:
+        return None
+    log_path = Path(arguments[-1]).expanduser()
+    if (
+        not log_path.is_absolute()
+        or len(arguments[0]) > 4096
+        or len(arguments[-1]) > 4096
+        or "\x00" in arguments[0]
+        or "\x00" in arguments[-1]
+    ):
+        return None
+    return tuple(arguments)
+
+
+def openclaw_handler_source_for_arguments(
+    hook_arguments: list[str] | tuple[str, ...],
+) -> str:
+    """Build the exact bounded, ordered OpenClaw event bridge."""
+    arguments = _valid_openclaw_hook_arguments(list(hook_arguments))
+    if arguments is None:
+        raise ValueError("invalid OpenClaw hook arguments")
+    encoded_arguments = json.dumps(arguments, separators=(",", ":"))
+    return f'''// Managed by SidePulse -- {OPENCLAW_HANDLER_MARKER}
+const SIDEPULSE_HOOK_ARGS = Object.freeze({encoded_arguments});
+import {{ spawn }} from "node:child_process";
+
+const SIDEPULSE_MAX_ID_LENGTH = 128;
+const SIDEPULSE_MAX_PAYLOAD_BYTES = 1024;
+
+const EVENT_MAP = {{
+  "command:new": "SessionStart",
+  "message:received": "UserPromptSubmit",
+  "message:sent": "Stop",
+  "command:stop": "SessionEnd",
+}};
+
+let ingressTail = Promise.resolve();
+
+function opaqueIdentifier(value) {{
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= SIDEPULSE_MAX_ID_LENGTH
+    && /^[A-Za-z0-9._:-]+$/.test(value)
+    && !/^(?:sk|token|secret|api[_-]?key)[._:-]/i.test(value)
+    ? value : undefined;
+}}
+
+async function forward(payload) {{
+  try {{
+    await new Promise((resolve) => {{
+      const child = spawn(
+        SIDEPULSE_HOOK_ARGS[0],
+        SIDEPULSE_HOOK_ARGS.slice(1),
+        {{ stdio: ["pipe", "ignore", "ignore"] }},
+      );
+      child.once("close", resolve);
+      child.once("error", resolve);
+      child.stdin.on("error", () => {{}});
+      child.stdin.end(payload);
+    }});
+  }} catch {{}}
+}}
+
+const handler = async (event) => {{
+  const mapped = EVENT_MAP[`${{event.type}}:${{event.action}}`];
+  if (!mapped) return;
+  const sessionId = opaqueIdentifier(event.sessionKey);
+  if (event.sessionKey !== undefined && !sessionId) return;
+  const payload = JSON.stringify({{
+    hook_event_name: mapped,
+    session_id: sessionId ?? null,
+    logged_at: new Date().toISOString(),
+  }});
+  if (payload.length > SIDEPULSE_MAX_PAYLOAD_BYTES) return;
+  const admitted = ingressTail.then(
+    () => forward(payload),
+    () => forward(payload),
+  );
+  ingressTail = admitted;
+  await admitted;
+}};
+
+export default handler;
+'''
+
+
+def managed_openclaw_handler_log_path(text: str) -> Path | None:
+    marker = (
+        f"// Managed by SidePulse -- {OPENCLAW_HANDLER_MARKER}\n"
+        "const SIDEPULSE_HOOK_ARGS = Object.freeze("
+    )
+    if not text.startswith(marker):
+        return None
+    end = text.find(");\n", len(marker))
+    if end < 0:
+        return None
+    try:
+        arguments = json.loads(text[len(marker):end])
+    except json.JSONDecodeError:
+        return None
+    valid_arguments = _valid_openclaw_hook_arguments(arguments)
+    if valid_arguments is None:
+        return None
+    if text != openclaw_handler_source_for_arguments(valid_arguments):
         return None
     return Path(valid_arguments[-1])
 
@@ -526,16 +671,6 @@ class NegotiatedProviderSource:
             in {CapabilityAuthority.DISCOVERY, CapabilityAuthority.OBSERVATION}
             and self.contract.observation_invocation_allowed
         )
-
-
-def default_state_dir(home: Path | None = None) -> Path:
-    if home is None:
-        xdg_state_home = os.environ.get("XDG_STATE_HOME")
-        if xdg_state_home:
-            return Path(xdg_state_home).expanduser() / "sidepulse" / "agent-monitor"
-
-    base = home or Path.home()
-    return base / ".local" / "state" / "sidepulse" / "agent-monitor"
 
 
 def default_log_path(provider: str, home: Path | None = None) -> Path:
@@ -842,24 +977,25 @@ def detect_openclaw_config(home: Path | None = None) -> ProviderConfig:
             entry_enabled = bool(isinstance(entry, dict) and entry.get("enabled"))
 
     handler = openclaw_hook_dir(home) / "handler.ts"
-    paths: list[Path] = []
-    if handler.exists():
-        try:
-            # The handler passes args as a JS array, so the log path sits
-            # in '"--log", "<path>"' form -- not shell syntax.
-            for match in re.finditer(r'"--log",\s*"([^"]+)"', handler.read_text()):
-                paths.append(Path(match.group(1)).expanduser())
-        except OSError:
-            paths = []
+    managed_log_path: Path | None = None
+    try:
+        handler_text = read_private_text(
+            handler,
+            tighten=False,
+            max_bytes=_OPENCLAW_HANDLER_MAX_SOURCE_BYTES,
+        )
+        managed_log_path = managed_openclaw_handler_log_path(handler_text)
+    except (OSError, UnicodeError):
+        pass
 
-    installed = entry_enabled and handler.exists()
+    installed = entry_enabled and managed_log_path is not None
     return ProviderConfig(
         "openclaw",
         config_path,
         True,
         installed,
         OPENCLAW_EVENTS if installed else (),
-        _dedupe_paths(paths),
+        () if managed_log_path is None else (managed_log_path,),
     )
 
 

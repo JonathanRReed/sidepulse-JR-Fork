@@ -1,0 +1,9 @@
+{
+  "provider": "cursor",
+  "fixtureType": "hook-event",
+  "fixtureVersion": 1,
+  "payload": {
+    "event": "sessionStart",
+    "session_id": "synthetic-cursor-session"
+  }
+}

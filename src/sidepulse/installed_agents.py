@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
+from .product_identity import PRODUCT_DISPLAY_NAME
+
 MAX_IDENTIFIER_LENGTH: Final = 64
 MAX_LABEL_LENGTH: Final = 128
 MAX_CAPABILITIES_PER_SURFACE: Final = 16
@@ -267,7 +269,7 @@ _INSTALLED_SURFACE_REGISTRATIONS: Final = validate_installed_surface_registratio
         _registration(
             "opencode",
             "sidepulse-plugin",
-            "OpenCode SidePulse integration",
+            f"OpenCode {PRODUCT_DISPLAY_NAME} integration",
             InstalledSurfaceKind.LOCAL_HARNESS,
             SurfaceSupportLevel.LIFECYCLE,
             ("live_agent_events", "actionable_requests"),
@@ -377,7 +379,7 @@ _INSTALLED_SURFACE_REGISTRATIONS: Final = validate_installed_surface_registratio
         _registration(
             "kiro",
             "sidepulse-agent",
-            "Kiro SidePulse agent",
+            f"Kiro {PRODUCT_DISPLAY_NAME} agent",
             InstalledSurfaceKind.LOCAL_HARNESS,
             SurfaceSupportLevel.LIFECYCLE,
             ("live_agent_events",),

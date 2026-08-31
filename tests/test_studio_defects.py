@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from sidepulse import colors as colors_module
 from sidepulse.colors import (
@@ -260,6 +261,35 @@ class ThrowawayLocalTests(unittest.TestCase):
             [label.stringValue() for label in sync.description_labels],
             [PROVIDER_ANIMATION_DESCRIPTIONS[MOTION_BLINK]],
         )
+
+    def test_custom_preset_is_a_controller_no_op_except_refreshing_sync_fields(self) -> None:
+        sender = SimpleNamespace(
+            selectedItem=lambda: SimpleNamespace(
+                representedObject=lambda: {"preset": "custom"}
+            )
+        )
+        before = self.controller.settings
+        with (
+            patch("sidepulse.status_bar_legacy.save_settings") as save_settings,
+            patch(
+                "sidepulse.status_bar_legacy.refresh_blend_and_speed_fields"
+            ) as refresh_fields,
+            patch.object(self.controller, "refresh_colors_window") as refresh_colors_window,
+            patch.object(self.controller, "refresh_colors_preview") as refresh_colors_preview,
+            patch.object(self.controller, "refresh_") as refresh_controller,
+            patch.object(
+                self.controller, "push_colors_preview_to_device"
+            ) as push_colors_preview_to_device,
+        ):
+            self.controller.setColorPreset_(sender)
+
+        self.assertIs(self.controller.settings, before)
+        save_settings.assert_not_called()
+        refresh_fields.assert_called_once_with(self.controller)
+        refresh_colors_window.assert_not_called()
+        refresh_colors_preview.assert_not_called()
+        refresh_controller.assert_not_called()
+        push_colors_preview_to_device.assert_not_called()
 
 
 # --- Defects 5 and 6: the two Codex colours ---------------------------------

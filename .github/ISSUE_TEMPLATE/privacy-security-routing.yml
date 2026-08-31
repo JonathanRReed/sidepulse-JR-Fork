@@ -1,0 +1,28 @@
+name: Privacy concern or security routing
+description: Ask about a non-sensitive privacy behavior, or get routed before reporting a vulnerability.
+title: "[Privacy/security]: "
+labels:
+  - privacy
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not describe a suspected vulnerability or privacy leak in this public issue. Do not include tokens, cookies, private prompts, transcripts, account identifiers, personal data, or exploitable details. If you need private reporting, stop here and [email Contact@JonathanRReed.com](mailto:Contact@JonathanRReed.com) instead. You may leave the public fields below empty.
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Non-sensitive privacy question
+        - Public documentation clarification
+        - I need private vulnerability reporting instructions
+  - type: textarea
+    id: safe_summary
+    attributes:
+      label: Safe summary
+      description: For non-sensitive questions only, describe the behavior without data or exploit details. If this is a vulnerability, stop and use SECURITY.md.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Redacted reproduction or evidence
+      description: Use synthetic fixtures, public documentation, or a high-level sequence only.

@@ -14,7 +14,10 @@ from .presentation_policy import MotionClass
 MAX_SAMPLE_RATE_HZ = 60.0
 MIN_SAMPLE_INTERVAL_SECONDS = 1.0 / MAX_SAMPLE_RATE_HZ
 METRIC_RESERVOIR_CAPACITY = 512
-MAX_METRIC_COUNTER = 10_000
+MAX_METRIC_COUNTER = 1_000_000
+MAX_METRIC_DURATION_NS = 60_000_000_000
+MAX_METRIC_TOTAL_NS = MAX_METRIC_COUNTER * MAX_METRIC_DURATION_NS
+MAX_BATCH_FRAMES = 24
 
 Color = tuple[float, float, float, float]
 Colors = tuple[Color, ...]
@@ -31,6 +34,16 @@ class PresentationMetricKind(str, Enum):
     STALE_SAMPLE = "stale_sample"
     DROPPED_COMMAND = "dropped_command"
     STALE_OBSERVATION = "stale_observation"
+    JSC_STEP_CALL = "jsc_step_call"
+    JSC_STEP_BATCH_CALL = "jsc_step_batch_call"
+    JSC_BATCH_SUCCESS = "jsc_batch_success"
+    BATCH_CACHE_HIT = "batch_cache_hit"
+    BATCH_FALLBACK = "batch_fallback"
+    BATCH_INVALIDATED = "batch_invalidated"
+    BATCH_TRUNCATED = "batch_truncated"
+    PRESENTED_FRAME = "presented_frame"
+    PROCESSED_CALLBACK = "processed_callback"
+    SUPPRESSED_CALLBACK = "suppressed_callback"
 
 
 _DURATION_METRICS = frozenset(
@@ -54,6 +67,8 @@ def _require_metric_kind(kind: PresentationMetricKind) -> None:
 class PresentationMetricsSnapshot:
     duration_values: tuple[tuple[PresentationMetricKind, tuple[int, ...]], ...]
     counter_values: tuple[tuple[PresentationMetricKind, int], ...]
+    duration_counts: tuple[tuple[PresentationMetricKind, int], ...]
+    duration_totals: tuple[tuple[PresentationMetricKind, int], ...]
 
     def durations(self, kind: PresentationMetricKind) -> tuple[int, ...]:
         _require_metric_kind(kind)
@@ -62,6 +77,14 @@ class PresentationMetricsSnapshot:
     def counter(self, kind: PresentationMetricKind) -> int:
         _require_metric_kind(kind)
         return next((value for candidate, value in self.counter_values if candidate is kind), 0)
+
+    def duration_count(self, kind: PresentationMetricKind) -> int:
+        _require_metric_kind(kind)
+        return next((value for candidate, value in self.duration_counts if candidate is kind), 0)
+
+    def duration_total(self, kind: PresentationMetricKind) -> int:
+        _require_metric_kind(kind)
+        return next((value for candidate, value in self.duration_totals if candidate is kind), 0)
 
 
 class PresentationMetrics:
@@ -74,9 +97,9 @@ class PresentationMetrics:
     """
 
     def __init__(self) -> None:
-        self._durations = {
-            kind: deque(maxlen=METRIC_RESERVOIR_CAPACITY) for kind in _DURATION_METRICS
-        }
+        self._durations = {kind: deque(maxlen=METRIC_RESERVOIR_CAPACITY) for kind in _DURATION_METRICS}
+        self._duration_counts = {kind: 0 for kind in _DURATION_METRICS}
+        self._duration_totals = {kind: 0 for kind in _DURATION_METRICS}
         self._counters = {kind: 0 for kind in PresentationMetricKind if kind not in _DURATION_METRICS}
 
     def record_duration(self, kind: PresentationMetricKind, nanoseconds: int) -> None:
@@ -87,7 +110,16 @@ class PresentationMetrics:
             value = int(nanoseconds)
         except (TypeError, ValueError, OverflowError) as exc:
             raise TypeError("duration must be an integer") from exc
-        self._durations[kind].append(max(0, value))
+        bounded = min(MAX_METRIC_DURATION_NS, max(0, value))
+        self._durations[kind].append(bounded)
+        self._duration_counts[kind] = min(
+            MAX_METRIC_COUNTER,
+            self._duration_counts[kind] + 1,
+        )
+        self._duration_totals[kind] = min(
+            MAX_METRIC_TOTAL_NS,
+            self._duration_totals[kind] + bounded,
+        )
 
     def increment(self, kind: PresentationMetricKind) -> None:
         _require_metric_kind(kind)
@@ -100,16 +132,31 @@ class PresentationMetrics:
     def snapshot(self) -> PresentationMetricsSnapshot:
         return PresentationMetricsSnapshot(
             duration_values=tuple(
-                (kind, tuple(self._durations[kind]))
+                (kind, tuple(self._durations[kind])) for kind in PresentationMetricKind if kind in _DURATION_METRICS
+            ),
+            counter_values=tuple(
+                (kind, self._counters[kind]) for kind in PresentationMetricKind if kind not in _DURATION_METRICS
+            ),
+            duration_counts=tuple(
+                (kind, self._duration_counts[kind])
                 for kind in PresentationMetricKind
                 if kind in _DURATION_METRICS
             ),
-            counter_values=tuple(
-                (kind, self._counters[kind])
+            duration_totals=tuple(
+                (kind, self._duration_totals[kind])
                 for kind in PresentationMetricKind
-                if kind not in _DURATION_METRICS
+                if kind in _DURATION_METRICS
             ),
         )
+
+    def reset(self) -> None:
+        for values in self._durations.values():
+            values.clear()
+        for kind in self._duration_counts:
+            self._duration_counts[kind] = 0
+            self._duration_totals[kind] = 0
+        for kind in self._counters:
+            self._counters[kind] = 0
 
 
 DEFAULT_PRESENTATION_METRICS = PresentationMetrics()
@@ -150,6 +197,13 @@ class SamplerCommand:
     sample_interval: float
     motion: MotionClass
     next_visual_change_at: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class _BatchScope:
+    generation: int | None
+    program: str | None
+    interval_ms: int
 
 
 def _valid_positive_finite(value: object) -> bool:
@@ -281,6 +335,7 @@ def display_colors_for_tick(
     DEFAULT_PRESENTATION_METRICS.record_duration(
         PresentationMetricKind.DISPLAY_CALLBACK_NS, time.perf_counter_ns() - started
     )
+    DEFAULT_PRESENTATION_METRICS.increment(PresentationMetricKind.PROCESSED_CALLBACK)
     return _safe_colors(result)
 
 
@@ -345,6 +400,8 @@ class ScreenBarSampler:
         self._busy = False
         self._published_generation: int | None = None
         self._batch_queue: list[tuple[int, Sequence[Sequence[int]]]] = []
+        self._batch_scope: _BatchScope | None = None
+        self._batch_epoch = 0
         self._worker_ident: int | None = None
         self._worker = threading.Thread(
             target=self._run,
@@ -363,6 +420,7 @@ class ScreenBarSampler:
                 return
             if self._pending is not _EMPTY:
                 self._metrics.increment(PresentationMetricKind.DROPPED_COMMAND)
+            self._invalidate_batch_queue_locked(record=True)
             self._pending = command
             self._condition.notify()
 
@@ -390,6 +448,7 @@ class ScreenBarSampler:
         with self._condition:
             self._closed = True
             self._pending = _EMPTY
+            self._invalidate_batch_queue_locked(record=False)
             self._condition.notify_all()
         if threading.get_ident() == self._worker_ident:
             return False
@@ -448,9 +507,7 @@ class ScreenBarSampler:
                 continue
             self._execute_command(controller, command)
 
-    def _execute_command(
-        self, controller: _SamplerController, command: SamplerCommand
-    ) -> None:
+    def _execute_command(self, controller: _SamplerController, command: SamplerCommand) -> None:
         started = time.perf_counter_ns()
         try:
             effective = self._prepare_program(controller, command)
@@ -478,14 +535,10 @@ class ScreenBarSampler:
         except Exception:
             return
         finally:
-            self._metrics.record_duration(
-                PresentationMetricKind.SAMPLE_WORK_NS, time.perf_counter_ns() - started
-            )
+            self._metrics.record_duration(PresentationMetricKind.SAMPLE_WORK_NS, time.perf_counter_ns() - started)
             self._mark_idle()
 
-    def _prepare_program(
-        self, controller: _SamplerController, command: SamplerCommand
-    ) -> SamplerCommand | None:
+    def _prepare_program(self, controller: _SamplerController, command: SamplerCommand) -> SamplerCommand | None:
         program = command.program
         if command.motion is MotionClass.FINITE and (
             not _valid_positive_finite(command.next_visual_change_at)
@@ -508,9 +561,7 @@ class ScreenBarSampler:
             return None
         if program == command.static_fallback_program:
             return None
-        if not self._parse(
-            controller, command.static_fallback_program, command.parse_anchor
-        ):
+        if not self._parse(controller, command.static_fallback_program, command.parse_anchor):
             return None
         return SamplerCommand(
             command.generation,
@@ -523,9 +574,7 @@ class ScreenBarSampler:
         )
 
     @staticmethod
-    def _parse(
-        controller: _SamplerController, program: str, parse_anchor: float
-    ) -> bool:
+    def _parse(controller: _SamplerController, program: str, parse_anchor: float) -> bool:
         if not isinstance(program, str) or not program:
             return False
         if not _valid_positive_finite(parse_anchor):
@@ -533,13 +582,44 @@ class ScreenBarSampler:
         result = controller.parse(program, int(parse_anchor * 1000.0))
         return bool(getattr(result, "ok", False))
 
-    _STEP_BATCH_FRAMES = 24
+    _STEP_BATCH_FRAMES = MAX_BATCH_FRAMES
+
+    def _invalidate_batch_queue_locked(self, *, record: bool) -> None:
+        had_prefetch = bool(self._batch_queue)
+        self._batch_queue = []
+        self._batch_scope = None
+        self._batch_epoch += 1
+        if record and had_prefetch:
+            self._metrics.increment(PresentationMetricKind.BATCH_INVALIDATED)
+
+    @classmethod
+    def _deliverable_batch_frames(
+        cls,
+        command: SamplerCommand | None,
+        sampled_at_ms: int,
+        interval_ms: int,
+    ) -> int:
+        if command is None or command.motion is not MotionClass.FINITE:
+            return cls._STEP_BATCH_FRAMES
+        deadline = command.next_visual_change_at
+        if not _valid_positive_finite(deadline):
+            return 0
+        deadline_ms = math.floor(float(deadline) * 1000.0)
+        if sampled_at_ms > deadline_ms:
+            return 0
+        # JavaScriptCore receives integer timestamps. Use that exact cadence
+        # here as well, or a 60 Hz float interval can admit a third frame at
+        # 33.33 ms even though the renderer steps it at 34 ms.
+        frame_count = (deadline_ms - sampled_at_ms) // interval_ms + 1
+        return min(cls._STEP_BATCH_FRAMES, frame_count)
 
     def _pixels_for(
         self,
         controller: _SamplerController,
         sampled_at: float,
         interval: float | None,
+        *,
+        command: SamplerCommand | None = None,
     ) -> Sequence[Sequence[int]] | None:
         """One frame, prefetching a batch when the engine supports it.
 
@@ -550,28 +630,54 @@ class ScreenBarSampler:
         now_ms = int(sampled_at * 1000.0)
         step_batch = getattr(controller, "step_batch", None)
         if interval is None or not callable(step_batch):
+            self._metrics.increment(PresentationMetricKind.JSC_STEP_CALL)
             return controller.step(now_ms)
         interval_ms = max(1, int(round(interval * 1000.0)))
-        queue = self._batch_queue
-        if queue:
-            expected_ms, frame = queue[0]
-            if abs(expected_ms - now_ms) <= 1:
-                queue.pop(0)
-                return frame
-            self._batch_queue = queue = []
+        scope = _BatchScope(
+            command.generation if command is not None else None,
+            command.program if command is not None else None,
+            interval_ms,
+        )
+        with self._condition:
+            if self._batch_queue:
+                expected_ms, frame = self._batch_queue[0]
+                if self._batch_scope == scope and abs(expected_ms - now_ms) <= 1:
+                    self._batch_queue.pop(0)
+                    self._metrics.increment(PresentationMetricKind.BATCH_CACHE_HIT)
+                    return frame
+                self._invalidate_batch_queue_locked(record=True)
+            attempt_epoch = self._batch_epoch
+        frame_count = self._deliverable_batch_frames(command, now_ms, interval_ms)
+        if frame_count <= 0:
+            return None
+        if frame_count < self._STEP_BATCH_FRAMES:
+            self._metrics.increment(PresentationMetricKind.BATCH_TRUNCATED)
         try:
-            frames = step_batch(now_ms, interval_ms, self._STEP_BATCH_FRAMES)
+            self._metrics.increment(PresentationMetricKind.JSC_STEP_BATCH_CALL)
+            frames = step_batch(now_ms, interval_ms, frame_count)
         except Exception:
+            self._metrics.increment(PresentationMetricKind.BATCH_FALLBACK)
+            self._metrics.increment(PresentationMetricKind.JSC_STEP_CALL)
             return controller.step(now_ms)
         if not frames:
+            self._metrics.increment(PresentationMetricKind.BATCH_FALLBACK)
+            self._metrics.increment(PresentationMetricKind.JSC_STEP_CALL)
             return controller.step(now_ms)
-        for offset, frame in enumerate(frames[1:], start=1):
+        self._metrics.increment(PresentationMetricKind.JSC_BATCH_SUCCESS)
+        queued: list[tuple[int, Sequence[Sequence[int]]]] = []
+        for offset, frame in enumerate(frames[1:frame_count], start=1):
             # Expected stamps must use the same float arithmetic the
             # motion loop uses (sampled_at + k*interval). Stepping by the
             # rounded interval_ms instead drifts ~1/3ms per frame at
             # 30/60fps, blowing the +/-1ms gate a few frames in and
             # discarding most of every batch the engine rendered.
-            queue.append((int((sampled_at + offset * interval) * 1000.0), frame))
+            queued.append((int((sampled_at + offset * interval) * 1000.0), frame))
+        with self._condition:
+            if self._batch_epoch != attempt_epoch or self._closed or self._pending is not _EMPTY:
+                self._metrics.increment(PresentationMetricKind.BATCH_INVALIDATED)
+                return None
+            self._batch_queue = queued
+            self._batch_scope = scope if queued else None
         return frames[0]
 
     def _step(
@@ -581,8 +687,9 @@ class ScreenBarSampler:
         sampled_at: float,
         *,
         interval: float | None = None,
+        command: SamplerCommand | None = None,
     ) -> ColorSample | None:
-        pixels = self._pixels_for(controller, sampled_at, interval)
+        pixels = self._pixels_for(controller, sampled_at, interval, command=command)
         if pixels is None:
             return None
         if len(pixels) != self._led_count:
@@ -630,18 +737,20 @@ class ScreenBarSampler:
         interval: float,
     ) -> None:
         current = pair
-        self._batch_queue = []
         while not self._is_superseded():
             next_at = current.following.sampled_at + interval
             if command.motion is MotionClass.FINITE and (
-                command.next_visual_change_at is None
-                or next_at > command.next_visual_change_at
+                command.next_visual_change_at is None or next_at > command.next_visual_change_at
             ):
                 return
             if not self._wait_sample_interval(next_at):
                 return
             following = self._step(
-                controller, command.generation, next_at, interval=interval
+                controller,
+                command.generation,
+                next_at,
+                interval=interval,
+                command=command,
             )
             if following is None or self._is_superseded():
                 return

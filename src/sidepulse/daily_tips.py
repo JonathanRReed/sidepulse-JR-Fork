@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from .product_identity import PRODUCT_DISPLAY_NAME
+
 # One per day, keyed to the calendar: each teaches a feature people
 # don't find on their own. (text, settings pane key or None, anchor).
 DAILY_TIPS: tuple[tuple[str, str | None, str | None], ...] = (
@@ -19,7 +21,11 @@ DAILY_TIPS: tuple[tuple[str, str | None, str | None], ...] = (
     ("Calendar events and Reminders can glow before they're due", "extras", None),
     ("Every signal card in Signals has a Test button -- try one", "led_behavior", None),
     ("Agents on your other Macs can show up in this menu", "agents", None),
-    ("A cloud code review can post its own status to SidePulse", "agents", None),
+    (
+        f"A cloud code review can post its own status to {PRODUCT_DISPLAY_NAME}",
+        "agents",
+        None,
+    ),
     ("Choose how each provider's light moves under Agents & Providers", "agents", None),
     ("A macOS Focus can dim or silence your lights automatically", "focus", None),
     ("A device can show Agent status, Battery, Timer, or your Studio program", "devices", None),

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import socket
 import tempfile
-import time
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -19,15 +19,6 @@ SOURCE = SourceKey("codex", "hooks", "global", "live_agent_events")
 
 def _hint(token: str = "event:hint") -> ProviderRefreshHint:
     return ProviderRefreshHint(SOURCE, EventToken(token))
-
-
-def _wait_until(predicate, *, timeout: float = 1.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.01)
-    return predicate()
 
 
 def _short_socket_root() -> tempfile.TemporaryDirectory[str]:
@@ -105,7 +96,13 @@ def test_invalid_hint_classes_recover_when_a_valid_hint_follows() -> None:
     with _short_socket_root() as directory:
         socket_path = Path(directory) / "state" / "events.sock"
         received: list[ProviderRefreshHint] = []
-        server = HookEventServer(received.append, socket_path=socket_path)
+        received_event = threading.Event()
+
+        def observe_hint(hint: ProviderRefreshHint) -> None:
+            received.append(hint)
+            received_event.set()
+
+        server = HookEventServer(observe_hint, socket_path=socket_path)
         server.start()
         invalid_documents = (
             b"not-json",
@@ -121,7 +118,7 @@ def test_invalid_hint_classes_recover_when_a_valid_hint_follows() -> None:
                 peer.sendall(document)
                 peer.close()
             assert send_refresh_hint(_hint("event:valid"), socket_path=socket_path)
-            assert _wait_until(lambda: len(received) == 1)
+            assert received_event.wait(1.0)
             assert received == [_hint("event:valid")]
         finally:
             server.stop()
@@ -231,10 +228,21 @@ def test_legacy_hook_is_reported_not_silently_dropped() -> None:
         socket_path = Path(directory) / "state" / "events.sock"
         hints: list[ProviderRefreshHint] = []
         legacy: list[str] = []
+        hint_received = threading.Event()
+        legacy_received = threading.Event()
+
+        def observe_hint(hint: ProviderRefreshHint) -> None:
+            hints.append(hint)
+            hint_received.set()
+
+        def observe_legacy(provider: str) -> None:
+            legacy.append(provider)
+            legacy_received.set()
+
         server = HookEventServer(
-            hints.append,
+            observe_hint,
             socket_path=socket_path,
-            on_legacy_hook=legacy.append,
+            on_legacy_hook=observe_legacy,
         )
         server.start()
         try:
@@ -249,11 +257,11 @@ def test_legacy_hook_is_reported_not_silently_dropped() -> None:
             peer.sendall(raw_event)
             peer.shutdown(socket.SHUT_WR)
             peer.close()
-            assert _wait_until(lambda: legacy == ["claude"])
+            assert legacy_received.wait(1.0)
             # The stale payload is still refused as an ingestion source.
             assert hints == []
             # A modern hook on the same socket keeps working.
             assert send_refresh_hint(_hint("event:valid"), socket_path=socket_path)
-            assert _wait_until(lambda: len(hints) == 1)
+            assert hint_received.wait(1.0)
         finally:
             server.stop()

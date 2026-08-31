@@ -1,0 +1,9 @@
+{
+  "provider": "openclaw",
+  "fixtureType": "hook-event",
+  "fixtureVersion": 1,
+  "payload": {
+    "event": "SessionStart",
+    "session_id": "synthetic-openclaw-session"
+  }
+}

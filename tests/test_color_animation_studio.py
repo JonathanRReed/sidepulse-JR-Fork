@@ -51,6 +51,11 @@ from sidepulse.colors import (
     studio_preview_program,
     swatch_name,
 )
+from sidepulse.effect_selection import (
+    BLEND_MODE_OPTIONS,
+    COLOR_PRESET_OPTIONS,
+    PREVIEW_SCENARIO_OPTIONS,
+)
 from sidepulse.led_status import LedDisplayState
 from sidepulse.models import AgentMode, AgentStatus
 from sidepulse.providers import PROVIDER_SPECS
@@ -62,6 +67,10 @@ def is_brand_color(hex_value):
     from sidepulse.colors import _BRAND_NAME_BY_HEX, normalize_hex
 
     return normalize_hex(hex_value, "#000000").upper() in _BRAND_NAME_BY_HEX
+
+
+class _DictSubclass(dict):
+    pass
 
 
 
@@ -288,6 +297,38 @@ def test_every_offered_animation_has_a_label_and_a_description() -> None:
         MOTION_BLINK,
     }
     assert MOTION_BEAT not in PROVIDER_ANIMATION_CHOICES
+
+
+@pytest.mark.parametrize(
+    "motion",
+    (
+        colors_module.MOTION_FLICKER,
+        colors_module.MOTION_TWINKLE,
+        colors_module.MOTION_DRIFT,
+        colors_module.MOTION_AURORA,
+    ),
+)
+def test_seeded_ambient_motion_compiles_to_repeatable_bytes(motion: str) -> None:
+    settings = ColorSettings.defaults().with_agent_animation("claude", motion)
+
+    first = colors_module._motion_turn_lines(
+        "#4F8CFF",
+        LedDisplayState.WORKING,
+        settings,
+        provider="claude",
+        led_count=8,
+        duration_ms=1600,
+    )
+    second = colors_module._motion_turn_lines(
+        "#4F8CFF",
+        LedDisplayState.WORKING,
+        settings,
+        provider="claude",
+        led_count=8,
+        duration_ms=1600,
+    )
+
+    assert first == second
 
 
 def test_a_providers_animation_replaces_the_states_rhythm() -> None:
@@ -684,6 +725,61 @@ class StudioPaneTests(unittest.TestCase):
                 popup.itemAtIndex_(index).representedObject()["provider"], "claude"
             )
 
+    def test_shared_effect_popups_render_catalog_order_and_current_selection(self) -> None:
+        preset_popup = self.controller.color_fields["preset_popup"]
+        self.assertEqual(
+            [preset_popup.itemAtIndex_(i).title() for i in range(preset_popup.numberOfItems())],
+            [option.label for option in COLOR_PRESET_OPTIONS],
+        )
+        self.assertEqual(
+            [
+                preset_popup.itemAtIndex_(i).representedObject()["preset"]
+                for i in range(preset_popup.numberOfItems())
+            ],
+            [option.value for option in COLOR_PRESET_OPTIONS],
+        )
+        self.assertEqual(
+            preset_popup.titleOfSelectedItem(),
+            colors_module.PRESET_LABELS[colors_module.matching_preset(self.controller.settings.colors)],
+        )
+
+        blend_popup = self.controller.color_fields["blend_mode_popup"]
+        self.assertEqual(
+            [blend_popup.itemAtIndex_(i).title() for i in range(blend_popup.numberOfItems())],
+            [option.label for option in BLEND_MODE_OPTIONS],
+        )
+        self.assertEqual(
+            [
+                blend_popup.itemAtIndex_(i).representedObject()["blend_mode"]
+                for i in range(blend_popup.numberOfItems())
+            ],
+            [option.value for option in BLEND_MODE_OPTIONS],
+        )
+        self.assertEqual(
+            blend_popup.titleOfSelectedItem(),
+            colors_module.BLEND_MODE_LABELS[self.controller.settings.colors.blend_mode],
+        )
+
+        preview_popup = self.controller.color_fields["preview_scenario_popup"]
+        self.assertEqual(
+            [
+                preview_popup.itemAtIndex_(i).title()
+                for i in range(preview_popup.numberOfItems())
+            ],
+            [option.label for option in PREVIEW_SCENARIO_OPTIONS],
+        )
+        self.assertEqual(
+            [
+                preview_popup.itemAtIndex_(i).representedObject()["scenario"]
+                for i in range(preview_popup.numberOfItems())
+            ],
+            [option.value for option in PREVIEW_SCENARIO_OPTIONS],
+        )
+        self.assertEqual(
+            preview_popup.titleOfSelectedItem(),
+            colors_module.PREVIEW_SCENARIO_LABELS[self.controller.color_preview_scenario],
+        )
+
     def test_choosing_an_animation_saves_it_and_resyncs_the_control(self) -> None:
         self.assertTrue(self.actions.apply_provider_animation("claude", MOTION_CHASE))
         self.assertEqual(
@@ -698,6 +794,14 @@ class StudioPaneTests(unittest.TestCase):
         self.assertEqual(
             load_settings(self._settings_path).colors.agent_animation("claude"),
             MOTION_CHASE,
+        )
+
+    def test_choosing_an_animation_accepts_a_bridged_mapping_payload(self) -> None:
+        payload = _DictSubclass(provider="claude", motion=MOTION_CHASE)
+
+        self.assertTrue(self.actions.apply_provider_animation(payload))
+        self.assertEqual(
+            self.controller.settings.colors.agent_animation("claude"), MOTION_CHASE
         )
 
     def test_choosing_a_colour_saves_it_and_renames_the_row(self) -> None:
@@ -726,6 +830,23 @@ class StudioPaneTests(unittest.TestCase):
         self.assertEqual(
             self.actions.animation_popups["claude"].titleOfSelectedItem(),
             PROVIDER_ANIMATION_LABELS[PROVIDER_ANIMATION_AUTO],
+        )
+
+    def test_agents_pane_animation_changes_resync_the_open_studio_popup(self) -> None:
+        self.controller.ensure_settings_pane("agents")
+        popup = self.controller.settings_fields["claude_agent_animation"]
+        chosen = next(
+            popup.itemAtIndex_(index)
+            for index in range(popup.numberOfItems())
+            if popup.itemAtIndex_(index).representedObject()["motion"] == MOTION_BLINK
+        )
+        popup.selectItem_(chosen)
+
+        self.controller.setAgentAnimation_(popup)
+
+        self.assertEqual(
+            self.actions.animation_popups["claude"].titleOfSelectedItem(),
+            PROVIDER_ANIMATION_LABELS[MOTION_BLINK],
         )
 
     def test_a_reset_underneath_an_open_hover_drops_the_stale_candidate(self) -> None:

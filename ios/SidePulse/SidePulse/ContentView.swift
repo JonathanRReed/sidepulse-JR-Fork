@@ -7,6 +7,7 @@ struct ContentView: View {
     @StateObject private var model: AppModel
     @State private var isShowingFolderPicker = false
     @State private var activeSheet: ActiveSheet?
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         _model = StateObject(wrappedValue: AppModel.shared)
@@ -25,6 +26,10 @@ struct ContentView: View {
                         requestPushToken()
                     }
 
+                    ComputerGlancePanel(model: model) {
+                        refreshComputerGlance()
+                    }
+
                     RecentPushesPanel(pushes: Array(model.receivedPushes.prefix(5)))
 
                     SidePulseDotSetupPanel(model: model) {
@@ -38,7 +43,7 @@ struct ContentView: View {
                 .padding(16)
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("SidePulse")
+            .navigationTitle(ProductIdentity.displayName)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink {
@@ -81,6 +86,10 @@ struct ContentView: View {
         .onAppear {
             model.refreshFolderStatus()
         }
+        .onChange(of: scenePhase) { newPhase in
+            guard newPhase == .active else { return }
+            refreshComputerGlance()
+        }
     }
 
     private func requestPushToken() {
@@ -101,6 +110,12 @@ struct ContentView: View {
         activeSheet = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             isShowingFolderPicker = true
+        }
+    }
+
+    private func refreshComputerGlance() {
+        Task {
+            await model.refreshPhoneGlance()
         }
     }
 
@@ -161,7 +176,7 @@ private struct HeaderPanel: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 5) {
-                        Label("SidePulse", systemImage: "dot.radiowaves.left.and.right")
+                        Label(ProductIdentity.displayName, systemImage: "dot.radiowaves.left.and.right")
                             .font(.title2.weight(.semibold))
                         Text("Push inbox and SidePulse Dot writer")
                             .font(.subheadline)
@@ -193,6 +208,143 @@ private struct StatusPill: View {
             .font(.caption.weight(.semibold))
             .foregroundStyle(isConnected ? Color.green : Color.orange)
             .lineLimit(1)
+    }
+}
+
+private struct ComputerGlancePanel: View {
+    @ObservedObject var model: AppModel
+    let refresh: () -> Void
+
+    var body: some View {
+        Panel {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: statusSymbolName)
+                        .font(.title2)
+                        .foregroundStyle(statusTint)
+                        .frame(width: 34, height: 34)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Computer Glance")
+                            .font(.headline)
+                        Text(statusTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(statusTint)
+                        statusDetail
+                    }
+
+                    Spacer(minLength: 0)
+                }
+
+                if case .loading = model.phoneGlanceLoadState {
+                    ProgressView("Checking Computer Glance")
+                        .font(.footnote)
+                } else {
+                    Button {
+                        refresh()
+                    } label: {
+                        Label("Refresh Computer Glance", systemImage: "arrow.clockwise")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityHint("Requests one current signed status from the configured Mac.")
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Computer Glance, \(statusTitle)")
+    }
+
+    @ViewBuilder
+    private var statusDetail: some View {
+        switch model.phoneGlanceLoadState {
+        case .unconfigured:
+            Text("Add your Mac private IP, port, and shared secret in Settings to view its signed, read-only local-network feed.")
+        case .idle:
+            Text("Saved settings are ready. Refresh to check the signed, read-only local-network feed.")
+        case .loading:
+            Text("Verifying the signed, read-only local-network feed.")
+        case .ready(let glance):
+            ComputerGlanceSnapshot(glance: glance)
+        case .stale(let glance):
+            VStack(alignment: .leading, spacing: 3) {
+                ComputerGlanceSnapshot(glance: glance)
+                Text("The last verified status may be out of date. Check that the Mac listener is running, then refresh.")
+            }
+        case .unavailable:
+            Text("Check that the Mac listener is running and both devices are on the same local network, then refresh.")
+        }
+    }
+
+    private var statusTitle: String {
+        switch model.phoneGlanceLoadState {
+        case .unconfigured:
+            return "Not configured"
+        case .idle:
+            return "Ready to check"
+        case .loading:
+            return "Checking"
+        case .ready:
+            return "Verified"
+        case .stale:
+            return "Last verified status is stale"
+        case .unavailable:
+            return "Unavailable"
+        }
+    }
+
+    private var statusSymbolName: String {
+        switch model.phoneGlanceLoadState {
+        case .unconfigured:
+            return "desktopcomputer.and.iphone"
+        case .idle:
+            return "desktopcomputer"
+        case .loading:
+            return "arrow.triangle.2.circlepath"
+        case .ready:
+            return "checkmark.shield"
+        case .stale:
+            return "exclamationmark.arrow.triangle.2.circlepath"
+        case .unavailable:
+            return "exclamationmark.triangle"
+        }
+    }
+
+    private var statusTint: Color {
+        switch model.phoneGlanceLoadState {
+        case .ready:
+            return .green
+        case .stale, .unconfigured:
+            return .orange
+        case .unavailable:
+            return .red
+        case .idle, .loading:
+            return .accentColor
+        }
+    }
+}
+
+private struct ComputerGlanceSnapshot: View {
+    let glance: VerifiedPhoneGlance
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(snapshotTitle)
+                .font(.footnote.weight(.semibold))
+            Text("\(glance.payload.outcome.capitalized) · Updated \(glance.observedAt, style: .relative)")
+                .font(.footnote)
+        }
+        .foregroundStyle(.secondary)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(snapshotTitle), \(glance.payload.outcome), updated \(glance.observedAt.formatted(date: .abbreviated, time: .shortened))")
+    }
+
+    private var snapshotTitle: String {
+        let label = glance.payload.label?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let label, !label.isEmpty {
+            return "\(label): \(glance.payload.status)"
+        }
+        return glance.payload.status
     }
 }
 
@@ -235,7 +387,7 @@ private struct EmptyInboxView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("No pushes received")
                         .font(.subheadline.weight(.semibold))
-                    Text("SidePulse will store general pushes here even without a SidePulse Dot device.")
+                    Text("\(ProductIdentity.displayName) will store general pushes here even without a SidePulse Dot device.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -429,7 +581,7 @@ private struct FolderSetupSheet: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("1. Attach the SidePulse Dot USB drive to this iPhone or iPad.")
                     Text("2. Open Files and select the SidePulse Dot USB drive folder containing LEDS.LED.")
-                    Text("3. SidePulse will remember that folder for later pushes and Shortcuts.")
+                    Text("3. \(ProductIdentity.displayName) will remember that folder for later pushes and Shortcuts.")
                 }
                 .font(.body)
                 .foregroundStyle(.secondary)
@@ -461,6 +613,10 @@ private struct FolderSetupSheet: View {
 private struct SettingsView: View {
     @ObservedObject var model: AppModel
     @State private var sharedSecretDraft = ""
+    @State private var phoneGlanceHostDraft = ""
+    @State private var phoneGlancePortDraft = ""
+    @State private var phoneGlanceSecretDraft = ""
+    @State private var phoneGlanceConfigurationMessage: String?
     let requestPushToken: () -> Void
     let showFolderPicker: () -> Void
 
@@ -490,6 +646,55 @@ private struct SettingsView: View {
                 } label: {
                     Label("Set Up LED Folder", systemImage: "folder.badge.plus")
                 }
+            }
+
+            Section("Computer Glance") {
+                Text("View a signed, minimized, read-only status feed from your Mac on the same local network. The local HTTP transport is not encrypted.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                TextField("Mac private IP address", text: $phoneGlanceHostDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.numbersAndPunctuation)
+
+                TextField("Computer Glance port", text: $phoneGlancePortDraft)
+                    .keyboardType(.numberPad)
+
+                SecureField("Computer Glance shared secret", text: $phoneGlanceSecretDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .textContentType(.password)
+                    .onSubmit {
+                        saveComputerGlanceConfiguration()
+                    }
+
+                Text("Enter the shared secret again when saving a changed Mac address or port. It is stored only in the iOS Keychain.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Button {
+                    saveComputerGlanceConfiguration()
+                } label: {
+                    Label("Save Computer Glance Settings", systemImage: "square.and.arrow.down")
+                }
+                .disabled(model.phoneGlanceLoadState == .loading)
+
+                Button {
+                    testComputerGlance()
+                } label: {
+                    Label("Test Computer Glance", systemImage: "checkmark.arrow.trianglehead.2.clockwise")
+                }
+                .disabled(model.phoneGlanceLoadState == .loading)
+                .accessibilityHint("Saves newly entered settings first, then requests one signed status from the Mac.")
+
+                if let phoneGlanceConfigurationMessage {
+                    Text(phoneGlanceConfigurationMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+
+                PhoneGlanceSettingsStatus(loadState: model.phoneGlanceLoadState)
             }
 
             Section("Advanced Server") {
@@ -591,6 +796,8 @@ private struct SettingsView: View {
         .navigationTitle("Settings")
         .onAppear {
             sharedSecretDraft = model.sharedSecret
+            phoneGlanceHostDraft = model.phoneGlanceHost
+            phoneGlancePortDraft = model.phoneGlancePort
         }
     }
 
@@ -605,6 +812,80 @@ private struct SettingsView: View {
             model.recordWriteSuccess("Wrote \(targetURL.lastPathComponent)")
         } catch {
             model.recordError(error)
+        }
+    }
+
+    @discardableResult
+    private func saveComputerGlanceConfiguration() -> Bool {
+        guard model.phoneGlanceLoadState != .loading else {
+            return false
+        }
+
+        guard !phoneGlanceSecretDraft.isEmpty else {
+            phoneGlanceConfigurationMessage = "Enter the Computer Glance shared secret before saving these settings."
+            return false
+        }
+
+        switch model.savePhoneGlanceConfiguration(
+            host: phoneGlanceHostDraft,
+            port: phoneGlancePortDraft,
+            secret: phoneGlanceSecretDraft
+        ) {
+        case .validationFailure:
+            phoneGlanceConfigurationMessage = "Use a private IP address, a port from 1 to 65535, and a nonempty shared secret, then save again."
+            return false
+        case .keychainStorageFailure:
+            phoneGlanceConfigurationMessage = "The protected Computer Glance secret could not be saved. Unlock the device if needed, then save again."
+            return false
+        case .saved:
+            break
+        }
+
+        phoneGlanceHostDraft = model.phoneGlanceHost
+        phoneGlancePortDraft = model.phoneGlancePort
+        phoneGlanceSecretDraft = ""
+        phoneGlanceConfigurationMessage = nil
+        return true
+    }
+
+    private func testComputerGlance() {
+        if !phoneGlanceSecretDraft.isEmpty {
+            guard saveComputerGlanceConfiguration() else { return }
+        } else if phoneGlanceHostDraft != model.phoneGlanceHost || phoneGlancePortDraft != model.phoneGlancePort {
+            phoneGlanceConfigurationMessage = "Enter the shared secret before testing changed Mac address or port settings."
+            return
+        }
+
+        phoneGlanceConfigurationMessage = nil
+        Task {
+            await model.refreshPhoneGlance()
+        }
+    }
+}
+
+private struct PhoneGlanceSettingsStatus: View {
+    let loadState: PhoneGlanceLoadState
+
+    var body: some View {
+        switch loadState {
+        case .unconfigured:
+            Label("Computer Glance is not configured", systemImage: "exclamationmark.circle")
+                .foregroundStyle(.orange)
+        case .idle:
+            Label("Computer Glance settings are saved", systemImage: "checkmark.circle")
+                .foregroundStyle(.secondary)
+        case .loading:
+            Label("Checking Computer Glance", systemImage: "arrow.triangle.2.circlepath")
+                .foregroundStyle(.secondary)
+        case .ready(let glance):
+            Label("Verified \(glance.observedAt, style: .relative)", systemImage: "checkmark.shield")
+                .foregroundStyle(.green)
+        case .stale(let glance):
+            Label("Last verified \(glance.observedAt, style: .relative), refresh after checking the Mac listener", systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                .foregroundStyle(.orange)
+        case .unavailable:
+            Label("Unavailable, check the Mac listener and same local network, then test again", systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.red)
         }
     }
 }

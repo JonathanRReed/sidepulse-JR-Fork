@@ -1,9 +1,9 @@
-# JR-BAR (formerly SidePulse)
+# JR Bar (formerly SidePulse)
 
 A macOS menu-bar app that turns AI-agent activity into ambient light —
 on SidePulse LED hardware (the Pro in a MacBook's SD slot, the Dot on
 USB-C) and on an on-screen light bar that hugs the notch. The rename to
-JR-BAR is display-name-first: bundle identifiers, file paths, and the
+JR Bar is display-name-first: bundle identifiers, file paths, and the
 `sidepulse` CLI keep the old name for now.
 
 When Claude Code or Codex is working, the lights breathe in that
@@ -50,10 +50,18 @@ ported behavior by behavior instead.
 
 ## Install
 
-The signed app archive built by `packaging/build_macos_pkg.sh` is the
-distributable artifact. Until it is notarized, macOS will warn on a
-machine that did not build it -- see `docs/PRODUCTION-RELEASE.md` for
-the one-time credential step that closes that gap.
+The signed and notarized PKG built by `packaging/build_macos_pkg.sh` is the
+authoritative installer and manual recovery artifact. It installs the compatibility-named
+`SidePulse.app`, whose visible display name is JR Bar. See
+`docs/PRODUCTION-RELEASE.md` for the required Developer ID identities,
+notarization profile, and candidate gate.
+
+Production bundles embed pinned Sparkle 2.9.6 and show a `Software Update`
+submenu with manual checks plus stable and beta channel selection. Automatic
+checks remain consent-driven. The supplemental updater ZIP and signed appcast
+are required release assets bound to the same verified app as the PKG. No
+public JR Bar release or feed has been published by the current source work.
+The current arm64 application bundle requires macOS 11.0 or newer.
 
 ## Quick start
 
@@ -67,6 +75,20 @@ The install script builds an isolated Python environment under
 `~/.local/bin` — it works on a stock Mac, where the system `python3`
 is too old for a bare `pip install -e .` and Homebrew Python refuses
 system-wide installs (PEP 668).
+
+For source work, bootstrap once and use the fast ordinary-change gate:
+
+```sh
+./scripts/bootstrap-dev.sh
+make fast
+```
+
+`make fast` runs lint, real imports, lightweight contracts, tracked-file secret
+scanning, literal fixture validation, a bounded selected set of contract,
+fixture, and semantic tests, compilation,
+dependency and version policy, and diff hygiene. It does not replace the full
+macOS, packaging, installed-app, hardware, signing, notarization, or Instruments
+gates.
 
 `sidepulse setup` walks through hook installation per provider, writes
 the status-bar LaunchAgent so the menu-bar app starts now and at
@@ -122,12 +144,24 @@ wearing your colors.
 - **Quiet hour, per-Focus signal policies** (all / asks only /
   silent), and a **quota sunrise** sweep the moment a limit window
   resets.
-- Engineering: no SD-card I/O, subprocess forks, or sqlite on the main
-  thread; a change-gated Screen Bar (60fps active, 30fps resting breathe) with 60Hz-capped WASM sampling;
-  6,000+ checks in the verification gate; corrupt settings are preserved for recovery,
+- Engineering: LED writes are atomic; the Screen Bar is change-gated (60fps active,
+  30fps resting breathe) with 60Hz-capped WASM sampling. Source-level verification
+  is bounded and evidence-labeled; it does not by itself establish main-thread,
+  subprocess, SQLite, installed-app, or hardware behavior. Corrupt settings are preserved for recovery,
   never silently reset. Architecture notes live in
-  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), the historical build
-  ledger in [`docs/archive/FORK-ROADMAP.md`](docs/archive/FORK-ROADMAP.md).
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), the living work ledger in
+  [`docs/ROADMAP.md`](docs/ROADMAP.md), and the historical build ledger in
+  [`docs/archive/FORK-ROADMAP.md`](docs/archive/FORK-ROADMAP.md).
+
+## Project guides and policies
+
+- [Living roadmap and adaptation ledger](docs/ROADMAP.md)
+- [Dated upstream and fork research](docs/UPSTREAM-REFRESH-2026-08-30.md)
+- [Provider adapter authoring guide](docs/PROVIDER-ADAPTER-GUIDE.md)
+- [Effect and data-only pack authoring guide](docs/EFFECT-AUTHORING-GUIDE.md)
+- [Compatibility policy](docs/COMPATIBILITY.md)
+- [Contributing](CONTRIBUTING.md), [support](SUPPORT.md),
+  [security](SECURITY.md), and [code of conduct](CODE_OF_CONDUCT.md)
 
 ## Credits
 
@@ -228,7 +262,7 @@ SidePulse Pro and SidePulse Dot.
 
 #### AI Agent Monitoring
 
-SidePulse can monitor AI agents such as Claude, Devin, Codex, and Grok through hooks, then
+JR Bar can monitor AI agents such as Claude, Devin, Codex, and Grok through hooks, then
 translate the current agent state into a small, glanceable LED status.
 
 Agent status modes:
@@ -243,12 +277,12 @@ Agent status modes:
 | Blocked / Error | The agent cannot continue, a tool failed, or a recoverable error needs attention. | Slow amber pulse. |
 | Completed | The agent finished successfully. | Solid green. |
 
-When multiple states are active, SidePulse should show the most actionable
+When multiple states are active, JR Bar should show the most actionable
 mode first: Blocked / Error, Waiting for Input, Tool Running, Long Task
 Progress, Working, then Idle / Ready.
 
-For multiple agents, SidePulse aggregates their statuses into one global
-display state. Each agent reports its own mode, and SidePulse renders the
+For multiple agents, JR Bar aggregates their statuses into one global
+display state. Each agent reports its own mode, and JR Bar renders the
 highest-priority active mode across all non-stale agents. This keeps the device
 useful at a glance: if any agent is blocked or waiting, the LEDs show that
 actionable state instead of trying to show every agent separately.
@@ -265,7 +299,7 @@ Aggregation priority:
 | 6 | Completed | Show briefly when the latest active agent completes successfully. |
 | 7 | Idle / Ready | Show only when all known agents are idle or no fresh agent status exists. |
 
-Agent statuses should include a timestamp. SidePulse should ignore stale
+Agent statuses should include a timestamp. JR Bar should ignore stale
 statuses after a short timeout so disconnected or finished agents do not hold
 the display indefinitely.
 
@@ -292,10 +326,10 @@ config and log paths). The founding four:
 | Devin | `~/.config/devin/config.json` | `${XDG_STATE_HOME:-~/.local/state}/sidepulse/agent-monitor/devin.jsonl` |
 | Grok | `~/.grok/hooks/sidepulse.json` | `${XDG_STATE_HOME:-~/.local/state}/sidepulse/agent-monitor/grok.jsonl` |
 
-Each provider adapter only adds SidePulse's own hook commands. Existing hook
+Each provider adapter only adds JR Bar's own hook commands. Existing hook
 entries, including Agent Deck entries, stay in place. Before a changed existing
-configuration is written, SidePulse creates a timestamped backup beside it.
-Use `sidepulse agent-monitor uninstall <provider>` to remove only SidePulse
+configuration is written, JR Bar creates a timestamped backup beside it.
+Use `sidepulse agent-monitor uninstall <provider>` to remove only JR Bar
 hooks, or restore that backup if you need to roll back the complete file.
 
 To add a future provider, add a `ProviderSpec` for its identity, supported
@@ -303,7 +337,7 @@ event set, and configuration detector; add its adapter functions to both
 `INSTALLERS` and `UNINSTALLERS`; and add preservation, detection, and CLI
 coverage. The detector reports the config and log paths to `doctor`; the
 adapter must preserve unrelated configuration while adding and removing only
-SidePulse hooks.
+JR Bar hooks.
 
 For CLI snapshots, debugging, or recovery after missed hook events, the
 file-based monitor can optionally read recent local transcripts as a fallback:
@@ -385,10 +419,17 @@ ln -sf "$(python3 -m site --user-base)/bin/sidepulse" ~/.local/bin/sidepulse
 
 ### macOS installer
 
-A signed and notarized PKG release can be built with
+A signed and notarized PKG release, the authoritative installer and recovery artifact,
+can be built with
 [`packaging/build_macos_pkg.sh`](packaging/build_macos_pkg.sh). See
 [`packaging/README.md`](packaging/README.md) for the required Developer ID
 certificates and notarization profile.
+
+The owner-Mac gate also binds the exact PKG, updater ZIP, signed appcast, and
+app hashes to signing, notarization, Gatekeeper, package contents, performance, hardware, upgrade,
+supported uninstall, clean reinstall, and SBOM receipts. See
+[`docs/PRODUCTION-RELEASE.md`](docs/PRODUCTION-RELEASE.md). Running the uninstall
+check requires a dedicated release account and separate explicit authorization.
 
 Check the current hook configuration:
 
@@ -409,9 +450,15 @@ sidepulse agent-monitor install grok
 Any registered provider name works the same way (`cursor`, `hermes`,
 `openclaw`, `opencode`, `antigravity`, `kiro`).
 
-Each hook invokes a small, standard-library-only Python entry point. It writes
-the event to the monitor log and then makes a short best-effort local socket
-delivery to the status-bar app.
+Each hook invokes a small, standard-library-only Python entry point. While the
+app is running, it admits the event to one private bounded FIFO and returns
+before normalization, minimization, dedupe, and the monitor-log write finish.
+If the listener is unavailable, the same canonical processing runs
+synchronously so closing JR Bar does not disable provider logs. Queue refusals
+and bounded shutdown failures create content-free local receipts instead of
+reordering newer events ahead of accepted work. Inside the app, accepted work
+also applies its monitor refresh before the queue reports it drained, so the
+shutdown snapshot includes the accepted tail.
 
 Show current aggregated status:
 
@@ -526,7 +573,7 @@ state to the LEDs. For debugging, run it in the foreground:
 sidepulse status-bar start --foreground
 ```
 
-On first launch, the status-bar app shows a SidePulse Setup window. It can:
+On first launch, the status-bar app shows a JR Bar Setup window. It can:
 
 - enable Run at Login;
 - install or uninstall SidePulse Pro Eject Prevention, which keeps SidePulse Pro/SidePulse Dot available after sleep;
@@ -581,6 +628,35 @@ live updates from the local hook event socket. Settings are stored at
 Safe diagnostic export lives in the History pane; the old hook decision
 log and its CSV/HTML exporters were deleted 2026-08-26.
 
+The local explanation panel also reports nine content-free health aggregates
+for the current run: Screen Bar render duty cycle, dropped batches, delivered
+FPS, runtime queue depth, physical write latency, source freshness, registered
+and live workers, shutdown latency, and refresh duration. Missing evidence is
+shown as `Unavailable`. These values stay in memory and are never sent to a
+cloud service or added to the safe diagnostic export.
+
+Its fixed **Current light context** section explains the selected semantic and
+P1-P7 priority, oldest visible source age, bounded suppressions in the current
+finite-cue plan, Scene availability, global surface role, Focus/DND
+observation-policy-decision, Reduce Motion substitution, and the timing source
+for the active output. Screen Bar callback timing and physical hardware-write
+latency are labeled separately; controller refresh duration is never presented
+as either one. The panel refreshes from cached, content-free state without
+probing a provider or device, and preserves the reader's selection and scroll
+position while it is open.
+
+The Power pane keeps four decisions separate:
+
+- **Keep Mac awake while agents work** prevents automatic system sleep during
+  active work and the configured release delay.
+- **Keep displays awake during holds** adds a display assertion to either
+  ordinary or closed-lid holds. It is off by default, so agents can keep
+  working while displays sleep and the screen locks normally.
+- **Continue agent holds on battery** permits an ordinary agent hold while
+  unplugged. The low-battery threshold can still release that hold.
+- **Closed-lid policy** controls the separately opted-in, stronger path below.
+  Enabling ordinary agent keep-awake never enables the privileged helper.
+
 The `Keep Awake With Lid Closed` menu section controls the stronger sleep
 prevention policy:
 
@@ -592,7 +668,7 @@ prevention policy:
 
 The status-bar app still keeps the SidePulse Pro/SidePulse Dot volume active by touching
 a `keepalive` file on each connected device at least once per minute. The
-closed-lid policy uses the SidePulse sleep helper when it is installed. The PKG
+closed-lid policy uses the JR Bar sleep helper when it is installed. The PKG
 installer sets this up automatically; source/dev installs can run the one-time
 setup command:
 
@@ -602,8 +678,8 @@ sudo "$(command -v sidepulse)" status-bar install-sleep-helper
 
 The helper is a narrow sudoers rule for exactly
 `/usr/bin/pmset -a disablesleep 0|1`, so the status-bar app can toggle it
-silently with non-interactive `sudo`. SidePulse uses this automatically for
-`Keep Awake With Lid Closed` and only restores the setting if SidePulse changed
+silently with non-interactive `sudo`. JR Bar uses this automatically for
+`Keep Awake With Lid Closed` and only restores the setting if JR Bar changed
 it. Remove the helper with:
 
 ```sh

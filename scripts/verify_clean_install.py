@@ -57,6 +57,7 @@ resources = importlib.resources.files("sidepulse.resources")
 assert (resources / "sdled.wasm").is_file()
 assert (resources / "sd_eject_guard.c").is_file()
 assert (resources / "integration_compatibility.json").is_file()
+assert (resources / "provider_fixture_ownership.json").is_file()
 for module in (
     "sidepulse.cli",
     "sidepulse.cli_entry",

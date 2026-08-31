@@ -26,6 +26,12 @@ _LEVELDB_FILE = re.compile(
     r"(?:[0-9A-Fa-f]{6}\.(?:ldb|sst|log)|CURRENT|LOCK|LOG(?:\.old)?|MANIFEST-[0-9A-Fa-f]{6})\Z"
 )
 _DEVIN_ORG_PREFIX = "last-internal-org-for-external-org-v1-"
+_CHROMIUM_PROFILE_ROOT_BY_BROWSER = {
+    "brave": "BraveSoftware/Brave-Browser",
+    "chrome": "Google/Chrome",
+    "chromium": "Chromium",
+    "edge": "Microsoft Edge",
+}
 
 
 class BrowserImportState(str, Enum):
@@ -70,6 +76,45 @@ def _profile_leveldb(profile_root: Path) -> Path:
     ):
         raise OSError("unsafe_profile_store")
     return source
+
+
+def chromium_profile_directory(
+    home: Path,
+    *,
+    browser: str,
+    profile: str,
+) -> Path | None:
+    """Resolve one canonical Chromium-family profile without path input."""
+    relative = _CHROMIUM_PROFILE_ROOT_BY_BROWSER.get(str(browser).lower())
+    if (
+        relative is None
+        or not isinstance(profile, str)
+        or not profile
+        or profile in {".", ".."}
+        or Path(profile).name != profile
+        or "\x00" in profile
+    ):
+        return None
+    support = Path(home) / "Library" / "Application Support"
+    root = support / relative
+    candidate = root / profile
+    current = support
+    paths = [current]
+    for part in (*Path(relative).parts, profile):
+        current = current / part
+        paths.append(current)
+    try:
+        for path in paths:
+            info = path.lstat()
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.getuid()
+            ):
+                return None
+    except OSError:
+        return None
+    return candidate
 
 
 def _copy_leveldb_snapshot(source: Path, destination: Path) -> None:
@@ -185,19 +230,33 @@ def import_devin_browser_session(
     browser: str,
     profile: str,
     profile_root: Path,
+    home: Path | None = None,
     consents: BrowserConsentStore,
     credentials,
     raw_db_factory: Callable[[str], object] | None = None,
     key_state_live: object | None = None,
     key_state_deleted: object | None = None,
+    source_instance_id: str = "default",
 ) -> BrowserImportResult:
-    if not (
+    expected_root = chromium_profile_directory(
+        Path.home() if home is None else Path(home),
+        browser=browser,
+        profile=profile,
+    )
+    try:
+        exact_profile = expected_root is not None and Path(profile_root).samefile(
+            expected_root
+        )
+    except OSError:
+        exact_profile = False
+    if not exact_profile or not (
         consents.allows(
             provider_id="devin",
             browser=browser,
             profile=profile,
             domain="app.devin.ai",
             field="auth1_session",
+            source_instance_id=source_instance_id,
         )
         and consents.allows(
             provider_id="devin",
@@ -205,6 +264,7 @@ def import_devin_browser_session(
             profile=profile,
             domain="app.devin.ai",
             field="organization",
+            source_instance_id=source_instance_id,
         )
     ):
         return BrowserImportResult(
@@ -250,7 +310,16 @@ def import_devin_browser_session(
             f"{browser} {profile}",
         )
     try:
-        credentials.set("devin", "token", token)
+        if source_instance_id == "default":
+            credentials.set("devin", "token", token)
+        else:
+            from .provider_instances import ProviderInstanceKey
+
+            credentials.set_for_instance(
+                ProviderInstanceKey("devin", source_instance_id),
+                "token",
+                token,
+            )
     except Exception:
         return BrowserImportResult(
             "devin",

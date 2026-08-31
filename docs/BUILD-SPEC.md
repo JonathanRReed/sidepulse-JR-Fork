@@ -366,7 +366,7 @@ PR #9's **isolated user installer** — a dedicated venv under `~/.local/bin` �
 
 ## Deletions
 
-## What to DELETE from today's menu
+## What to DELETE or REPLACE from today's menu
 
 Ranked by rows reclaimed. Current `build_menu` (status_bar.py:13360-13596) emits ~20-28 rows.
 
@@ -376,7 +376,19 @@ Ranked by rows reclaimed. Current `build_menu` (status_bar.py:13360-13596) emits
 
 3. **The daily `Tip` system entirely** — the `Tip:` item, its 3-item submenu (Show Me / Dismiss This Tip / Turn Off Tips), the separator above it, `daily_tip()`, and the dismissed-tips settings state. Tips are onboarding leaking into steady-state UI. Replace with the contextual-onboarding model (see the onboarding field). **–2 rows plus a settings key.**
 
-4. **`Clear Finished (N)`** — obsoleted by the derived unread model. Opening the menu *is* the visit that clears "done since you last looked"; an explicit clear button plus a `cleared_session_ids` set is redundant state that can drift from the timestamp comparison. Delete the row and the set. **–1 row.**
+4. **`Clear Agents…`** is a bounded presentation cleanup, not a history
+   deletion. It previews the exact local completion receipts that will leave
+   the mailbox, separates protected asks, failures, active agents, remote
+   agents, and unkeyed completions, then requires confirmation before saving.
+   The receipt identity includes the validated source key, agent ID, terminal
+   event, and completion time, so a reused agent ID cannot hide a later run.
+   The action never changes canonical event history, credentials, hooks,
+   remote configuration, mailbox ordering, or menu-visit acknowledgement
+   state. A persisted latest-batch receipt provides bounded Undo. Commit and
+   Undo reproject current truth behind a semantic fence, save through the
+   serial persistence writer, reject late callbacks with an operation
+   generation, and update the menu only after durable success. Opening the
+   menu still owns the independent "done since you last looked" watermark.
 
 5. **`Keep Awake With Lid Closed` submenu** — move to Settings. **Keep only the inline `Sleep warning:` error row**, which stays at top level (that instinct in the existing comment is right: errors never hide inside the submenu they came from). **–1 row.**
 

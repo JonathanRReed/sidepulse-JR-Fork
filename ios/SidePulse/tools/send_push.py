@@ -9,9 +9,13 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from product_identity import PRODUCT_DISPLAY_NAME
+
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Send a SidePulse push through the local push server.")
+    parser = argparse.ArgumentParser(
+        description=f"Send a {PRODUCT_DISPLAY_NAME} push through the local push server."
+    )
     parser.add_argument("--server", default=os.environ.get("SIDEPULSE_SERVER_URL", "http://127.0.0.1:8787"))
     parser.add_argument("--secret", default=os.environ.get("SIDEPULSE_SHARED_SECRET"))
     parser.add_argument("--device-token", default=os.environ.get("SIDEPULSE_DEVICE_TOKEN"))

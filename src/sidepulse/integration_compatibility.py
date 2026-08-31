@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import date
 from importlib.resources import files
 
 INTEGRATION_COMPATIBILITY_SCHEMA_VERSION = 1
@@ -19,6 +20,7 @@ class IntegrationCompatibilityEntry:
     source_commit: str
     fixture_version: int
     connection_mode: str
+    reviewed_on: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +62,12 @@ def load_integration_compatibility_manifest() -> IntegrationCompatibilityManifes
             source_commit=str(row.get("sourceCommit") or ""),
             fixture_version=row.get("fixtureVersion"),
             connection_mode=str(row.get("connectionMode") or ""),
+            reviewed_on=str(row.get("reviewedOn") or ""),
         )
+        try:
+            date.fromisoformat(entry.reviewed_on)
+        except (TypeError, ValueError) as error:
+            raise ValueError("invalid integration compatibility entry") from error
         if not (
             entry.integration == "t3code"
             and entry.minimum_version
@@ -71,6 +78,7 @@ def load_integration_compatibility_manifest() -> IntegrationCompatibilityManifes
             and type(entry.fixture_version) is int
             and entry.fixture_version >= 1
             and entry.connection_mode
+            and len(entry.reviewed_on) == 10
         ):
             raise ValueError("invalid integration compatibility entry")
         entries.append(entry)

@@ -1,8 +1,8 @@
-# SidePulse security policy
+# JR Bar (formerly SidePulse) security policy
 
 ## Supported versions
 
-Only the newest signed and notarized GitHub Release is supported. Source checkouts, editable installs, unsigned packages, development app wrappers, and commits on `main` are development artifacts unless the release page contains all of the following:
+Only the newest signed and notarized JR Bar (formerly SidePulse) GitHub Release is supported. Source checkouts, editable installs, unsigned packages, development app wrappers, and commits on `main` are development artifacts unless the release page contains all of the following:
 
 - a Developer ID signed and notarized `.pkg`;
 - `SHA256SUMS`;
@@ -14,9 +14,9 @@ A version is not considered production-supported until `scripts/verify_macos_rel
 
 ## Reporting a vulnerability
 
-Do not open a public issue for a suspected vulnerability or privacy leak. Send a private report to `Contact@JonathanRReed.com` with:
+Do not open a public issue for a suspected vulnerability or privacy leak. Send a private report to [Contact@JonathanRReed.com](mailto:Contact@JonathanRReed.com) with:
 
-- the affected SidePulse version or commit;
+- the affected JR Bar version or commit;
 - the macOS and hardware versions;
 - a concise reproduction;
 - expected and observed behavior;
@@ -28,7 +28,7 @@ Reports are acknowledged as soon as they can be reviewed. A fix is published onl
 
 ## Security properties that must hold
 
-SidePulse is a local ambient-attention utility. The following properties are release requirements:
+JR Bar (formerly SidePulse) is a local ambient-attention utility. The following properties are release requirements:
 
 1. **No unapproved secret access.** Keychain reads require an explicit user action. Secrets never enter logs, diagnostics, notifications, webhooks, history, or exception strings.
 2. **No unauthorised remote control.** Remote-peer support is read-only. It must not execute remote commands or grant navigation, mutation, or capacity authority.
@@ -57,7 +57,7 @@ SidePulse is a local ambient-attention utility. The following properties are rel
 
 ## Out of scope
 
-- vulnerabilities in upstream AI providers, macOS, Tailscale, terminal applications, or SidePulse firmware that SidePulse neither introduces nor can mitigate;
+- vulnerabilities in upstream AI providers, macOS, Tailscale, terminal applications, or SidePulse firmware that JR Bar neither introduces nor can mitigate;
 - denial of service requiring the user to deliberately replace reviewed binaries or disable macOS protections;
 - reports based only on an unsigned development wrapper behaving differently from the signed release identity;
 - social-engineering claims without a product vulnerability.

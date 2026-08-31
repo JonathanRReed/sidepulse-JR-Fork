@@ -79,6 +79,120 @@ def test_revoke_removes_only_one_provider_profile_scope():
     assert updated.consents[0].provider_id == "cursor"
 
 
+def test_same_provider_consents_are_scoped_to_the_exact_source_instance():
+    store = BrowserConsentStore.empty().grant(
+        provider_id="devin",
+        source_instance_id="work",
+        browser="chrome",
+        profile="Default",
+        domains=("app.devin.ai",),
+        fields=("auth1_session",),
+        background_repair=False,
+        granted_at=1000,
+    )
+
+    assert store.allows(
+        provider_id="devin",
+        source_instance_id="work",
+        browser="chrome",
+        profile="Default",
+        domain="app.devin.ai",
+        field="auth1_session",
+    )
+    assert not store.allows(
+        provider_id="devin",
+        source_instance_id="personal",
+        browser="chrome",
+        profile="Default",
+        domain="app.devin.ai",
+        field="auth1_session",
+    )
+
+
+def test_same_provider_consents_round_trip_without_collapsing(tmp_path):
+    path = tmp_path / "browser-consent.json"
+    store = BrowserConsentStore.empty()
+    store = store.grant(
+        provider_id="devin",
+        source_instance_id="personal",
+        browser="chrome",
+        profile="Default",
+        domains=("app.devin.ai",),
+        fields=("auth1_session",),
+        background_repair=False,
+        granted_at=1000,
+    )
+    store = store.grant(
+        provider_id="devin",
+        source_instance_id="work",
+        browser="chrome",
+        profile="Default",
+        domains=("app.devin.ai",),
+        fields=("auth1_session",),
+        background_repair=True,
+        granted_at=1001,
+    )
+
+    save_browser_consents(store, path)
+    loaded = load_browser_consents(path).store
+
+    assert {
+        consent.source_instance_id for consent in loaded.consents
+    } == {"personal", "work"}
+    assert loaded.allows(
+        provider_id="devin",
+        source_instance_id="personal",
+        browser="chrome",
+        profile="Default",
+        domain="app.devin.ai",
+        field="auth1_session",
+    )
+    assert loaded.allows(
+        provider_id="devin",
+        source_instance_id="work",
+        browser="chrome",
+        profile="Default",
+        domain="app.devin.ai",
+        field="auth1_session",
+    )
+
+    updated = loaded.revoke("devin", "chrome", "Default", source_instance_id="work")
+    assert {
+        consent.source_instance_id for consent in updated.consents
+    } == {"personal"}
+
+
+def test_legacy_consent_documents_migrate_to_default_source_instance():
+    loaded = load_browser_consents(
+        reader=lambda _path: json.dumps(
+            {
+                "settings_schema_version": 1,
+                "consents": [
+                    {
+                        "provider_id": "devin",
+                        "browser": "chrome",
+                        "profile": "Default",
+                        "domains": ["app.devin.ai"],
+                        "fields": ["auth1_session"],
+                        "background_repair": False,
+                        "granted_at": 1000,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert loaded.store.consents[0].source_instance_id == "default"
+    writes = []
+    save_browser_consents(
+        loaded.store,
+        loaded=loaded,
+        writer=lambda _path, text: writes.append(json.loads(text)),
+    )
+    assert writes[0]["settings_schema_version"] == BROWSER_CONSENT_SCHEMA_VERSION
+    assert writes[0]["consents"][0]["source_instance_id"] == "default"
+
+
 def test_settings_round_trip_preserves_unknown_fields():
     loaded = load_browser_consents(
         reader=lambda _path: json.dumps(

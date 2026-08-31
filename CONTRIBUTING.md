@@ -1,10 +1,10 @@
-# Contributing to SidePulse
+# Contributing to JR Bar (formerly SidePulse)
 
-SidePulse controls visible light, edits other tools’ hook configuration, reads private local state, can request macOS permissions, and ships a privileged installer path. Contributions are reviewed as desktop-systems changes, not as isolated Python utilities.
+JR Bar (formerly SidePulse) controls visible light, edits other tools’ hook configuration, reads private local state, can request macOS permissions, and ships a privileged installer path. Contributions are reviewed as desktop-systems changes, not as isolated Python utilities.
 
 ## Development baseline
 
-SidePulse supports Python 3.10 through 3.13. macOS behavior requires PyObjC and must be tested on macOS. Use the reviewed dependency constraints:
+JR Bar (formerly SidePulse) supports Python 3.10 through 3.13. macOS behavior requires PyObjC and must be tested on macOS. Use the reviewed dependency constraints:
 
 ```bash
 ./scripts/bootstrap-dev.sh

@@ -4,9 +4,90 @@ All notable changes to the JR fork are documented here.
 
 ## Unreleased
 
+## 0.6.0
+
+- macOS packaging now delegates PKG assembly to an executable, testable
+  standard-library seam with fixed production tool paths, explicit missing-tool
+  failures, signed and unsigned command coverage, and clear certificate-error
+  reporting. The builder validates the full source/package/changelog version
+  contract before work starts. The release gate rebuilds the exact wheel and
+  source distribution in an empty staging directory, validates both with
+  Twine, and binds them to the release evidence. Release checksums are generated
+  atomically in deterministic root-relative order and publication refuses any
+  asset changed after that evidence was written.
+- Production bundles now embed digest-pinned Sparkle 2.9.6 with exact nested
+  signing checks, a visible Software Update submenu, stable and beta channel
+  selection, and consent-owned automatic checks. The release gate creates a
+  supplemental ZIP from the notarized and stapled app, signs and verifies the
+  appcast with the dedicated Keychain key, binds channel metadata and receipts
+  to the exact candidate, rejects non-monotonic upgrades, and publishes the
+  immutable version archive before changing the durable feed. No release or
+  feed was published by this source work.
+- `make fast` now provides a fail-fast ordinary-change gate over Ruff, real
+  imports, lightweight contracts, tracked-file secret scanning, literal
+  fixtures, 430 selected contract, fixture, and semantic tests, compilation,
+  dependency and version
+  policy, and diff hygiene. Full-suite, build, installed-app, hardware, signing,
+  notarization, Instruments, and release evidence remain separate. The signed
+  release source receipt now disables build and clean-install work so it cannot
+  delete the exact candidate or evidence directory it is validating.
+- Why Is It Doing That now includes a fixed Current light context section with
+  the selected semantic and P1-P7 priority, oldest visible source age, bounded
+  current finite-cue suppressions, Scene availability, global surface role,
+  Focus/DND observation-policy-decision, Reduce Motion substitution, and
+  source-labeled active-output timing. Screen Bar renderer callbacks and
+  physical hardware-write latency remain distinct, unavailable values stay
+  explicit, and live refresh preserves selection and scroll position without
+  retaining prompts, transcripts, identifiers, or a second telemetry store.
+- Native notification access now fails closed outside the sealed application
+  bundle. Authorization refresh constructs its bridge on the main thread, so
+  source tests and unbundled Python processes cannot invoke Notification Center
+  through an invalid application identity.
+- The explanation panel now shows nine fixed, content-free health aggregates
+  for the current run: render duty cycle, dropped batches, delivered FPS,
+  runtime queue depth, physical write latency, source freshness, worker count,
+  shutdown latency, and refresh duration. The projection reuses existing
+  bounded in-memory owners, renders missing observations as unavailable, and
+  is never persisted, exported, or sent to a cloud service.
+- Power settings now separate the ordinary agent system hold, optional display
+  assertion, battery continuation, and stronger closed-lid policy. Displays may
+  sleep by default while agent work continues. Changing the display choice
+  replaces only the stale `caffeinate` child and preserves battery, grace,
+  helper, watchdog, and renewal state.
+- Provider hooks now submit to one private, bounded, ordered app-owned ingress
+  queue. Accepted work retains FIFO order through the canonical minimizer,
+  dedupe, private write, and refresh path; overload and shutdown timeout produce
+  content-free receipts; unavailable ingress falls back to the same synchronous
+  processor. OpenCode and OpenClaw now await tracked client admission instead
+  of detaching unobserved children. A reproducible source benchmark reports
+  listener and fallback latency without retaining event content. App-owned
+  refresh reconciliation completes inside the ordered worker, so normal shutdown
+  does not persist latest state ahead of the accepted tail.
+- Screen Bar prefetch now stays inside one generation, parsed program, and
+  cadence. New commands and timing stalls discard stale frames immediately,
+  finite cues stop requesting frames beyond their visual deadline, and local
+  profile counters separate shortened or invalidated work from renderer
+  fallback.
+- Usage Center, usage-menu, and settings-summary repaints now consume one
+  immutable worker-produced state and settings payload. Cross-Mac merge evidence
+  is refreshed before AppKit dispatch and reused by logical snapshot value, so
+  steady-state UI refresh no longer reads provider settings, Keychain
+  credentials, or cached packet files.
+- Usage-percent, provider-reset, operator-history, and capacity-history writes
+  now share one bounded serial persistence owner. Ordered appends advance their
+  watermarks only after a successful receipt, replaceable snapshots keep FIFO
+  position honest, capacity consent deletion fences stale queued flushes, and
+  normal shutdown reserves one final tail slot before draining accepted work.
+- Physical LED writes now coalesce by opaque semantic slot instead of replacing
+  every pending command for a device. Asks, failures, finite cues, and explicit
+  calibration previews outrank obsolete ambient frames while the latest normal
+  state remains queued as the trailing edge. Saturation evicts lower-priority
+  work, selected display kinds are snapshotted before worker dispatch, and lid
+  flourishes refuse to race a writer that cannot become idle.
+
 ## 0.5.0 — Coalescence
 
-The name is **JR-BAR** now (display-name-first; bundle ids stay `io.sidepulse`). Fully divergent from upstream by decision, not drift.
+The name is **JR Bar** now (display-name-first; bundle ids stay `io.sidepulse`). Fully divergent from upstream by decision, not drift.
 
 ### One system, ~12,000 fewer lines
 

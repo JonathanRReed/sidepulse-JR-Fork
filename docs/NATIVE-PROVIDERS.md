@@ -1,6 +1,6 @@
 # Native provider usage
 
-SidePulse owns provider accounting directly. CodexBar is an engineering reference only; it is never launched, queried, imported, or required at runtime. The only external application integrations are T3 Code and Alcove.
+JR Bar owns provider accounting directly. CodexBar is an engineering reference only; it is never launched, queried, imported, or required at runtime. The only external application integrations are T3 Code and Alcove.
 
 ## Supported providers
 
@@ -9,10 +9,10 @@ SidePulse owns provider accounting directly. CodexBar is an engineering referenc
 | ChatGPT / Codex | Codex OAuth usage API, `codex app-server`, local Codex records | five-hour and weekly limits, dynamic additional lanes such as Spark, credits, resets, tokens, models, and estimates |
 | Claude | Claude OAuth usage API, consented Claude browser session, local Claude records | five-hour, weekly, arbitrary model- or feature-scoped limits such as Fable, credits, extra usage, tokens, cache savings, and estimates |
 | Cursor | Cursor.app read-only SQLite auth, consented browser session | included plan, Auto/Composer, API/model usage, extra usage, resets, account identity |
-| Devin | encrypted SidePulse manual bearer or consented Chromium localStorage | daily and weekly quota, reset times, organization identity |
+| Devin | encrypted JR Bar manual bearer or consented Chromium localStorage | daily and weekly quota, reset times, organization identity |
 | Grok | `~/.grok/auth.json`, Grok billing API, local signals | subscription credit usage, cycle reset, account/plan, local token activity |
 | Antigravity | running Antigravity or `agy` loopback quota server | Gemini session/weekly and Claude+GPT session/weekly pools, dynamic detail lanes |
-| OpenAI API | encrypted SidePulse Admin API key | organization/project spend, tokens, requests, models, daily history |
+| OpenAI API | encrypted JR Bar Admin API key | organization/project spend, tokens, requests, models, daily history |
 
 Unknown provider-owned quota lanes remain visible in detail views but cannot trigger hardware or interruption alerts until their effect is declared. Missing data, measured zero, stale data, last-known-good data, permission failures, and unsupported sources are separate states.
 
@@ -49,7 +49,7 @@ sidepulse providers refresh --json
 
 ## Manual credentials
 
-Secrets are read from standard input and stored in SidePulse's encrypted owner-private credential store. They never appear in configuration files, process arguments, diagnostics, exports, or command output.
+Secrets are read from standard input and stored in JR Bar's encrypted owner-private credential store. They never appear in configuration files, process arguments, diagnostics, exports, or command output.
 
 ```bash
 printf '%s' "$DEVIN_BEARER_TOKEN" | \
@@ -93,7 +93,7 @@ Pricing is an explicitly versioned local estimate. Unknown models remain visible
 
 ## Cross-Mac sync
 
-SidePulse sync is local-first and peer-to-peer over SSH/SFTP, normally addressed through Tailscale. Envelopes are JSON signed with HMAC-SHA256 using the per-peer pairing secret — they are authenticated, not encrypted; confidentiality in transit comes from the SSH/SFTP channel. Packets stamped older than a bounded freshness window (7 days) are rejected on decode to blunt replays. Account-wide quota snapshots use the freshest valid observation and are never summed. Machine-local token events are deduplicated by device and provider, latest observation wins.
+JR Bar sync is local-first and peer-to-peer over SSH/SFTP, normally addressed through Tailscale. Envelopes are JSON signed with HMAC-SHA256 using the per-peer pairing secret — they are authenticated, not encrypted; confidentiality in transit comes from the SSH/SFTP channel. Packets stamped older than a bounded freshness window (7 days) are rejected on decode to blunt replays. Account-wide quota snapshots use the freshest valid observation and are never summed. Machine-local token events are deduplicated by device and provider, latest observation wins.
 
 On the first Mac:
 

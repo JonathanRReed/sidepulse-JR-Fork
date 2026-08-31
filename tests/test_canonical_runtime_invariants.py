@@ -5,8 +5,8 @@ import os
 import socket
 import stat
 import tempfile
+import threading
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -798,15 +798,6 @@ def _authority_privacy_evidence(root: Path, source: object) -> tuple[dict[str, i
     )
 
 
-def _wait_for(predicate: Callable[[], bool], *, timeout: float = 0.75) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.01)
-    return bool(predicate())
-
-
 def _send_wire_payload(socket_path: Path, payload: bytes) -> None:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(0.5)
@@ -856,7 +847,13 @@ def _wire_privacy_evidence() -> dict[str, int]:
     with tempfile.TemporaryDirectory(prefix="sp-can-", dir="/tmp") as directory:
         socket_path = Path(directory) / "state" / "events.sock"
         received: list[ProviderRefreshHint] = []
-        server = HookEventServer(received.append, socket_path=socket_path)
+        received_event = threading.Event()
+
+        def observe_hint(received_hint: ProviderRefreshHint) -> None:
+            received.append(received_hint)
+            received_event.set()
+
+        server = HookEventServer(observe_hint, socket_path=socket_path)
         server.start()
         try:
             refusal_counts: dict[str, int] = {}
@@ -870,7 +867,7 @@ def _wire_privacy_evidence() -> dict[str, int]:
                 assert received == []
                 refusal_counts[name] = 1
             assert send_refresh_hint(hint, socket_path=socket_path, timeout=0.5)
-            assert _wait_for(lambda: received == [hint])
+            assert received_event.wait(1.0)
             assert received == [hint]
         finally:
             server.stop()

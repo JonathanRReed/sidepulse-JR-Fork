@@ -1,10 +1,13 @@
 # Prior art and attribution
 
-JR-BAR is MIT licensed and stands on work by others. This file records
+JR Bar is MIT licensed and stands on work by others. This file records
 what we studied, what we adopted, and under which terms — so a reader
 can trace any design decision back to its source.
 
-## CodexBar — MIT, © 2026 Peter Steinberger
+## CodexBar
+
+Snapshot studied for P3.35: MIT, © 2026 Peter Steinberger, commit
+`e8e275511105e6e76409f2ef308c9bbc8c2fbcdc`.
 
 <https://github.com/steipete/CodexBar>
 
@@ -36,22 +39,57 @@ code copied):
   resets and have to observe the crossing.
 - **Same-origin redirect refusal** on requests that carry a bearer
   token, in the spirit of their `ProviderHTTPClient`.
+- **Pure layout planning and generation fences.** For P3.35 specifically,
+  we borrowed the discipline of immutable layout plans, stale-callback
+  refusal, passive overlay behavior, Reduce Motion parity, and grouped
+  accessibility metadata, then reimplemented it in Python and PyObjC.
 
 **Where we deliberately diverge:** for Claude-CLI-owned credentials
 CodexBar *delegates* refresh back to the CLI (driving `claude /status`
-in a PTY) and never writes that Keychain item. JR-BAR refreshes
+in a PTY) and never writes that Keychain item. JR Bar refreshes
 directly and writes the rotated tokens back, so it needs no PTY
 subprocess and no dependency on `claude` being installed — at the cost
 of owning that write-back. Their delegated path is reported unreliable
 in steipete/CodexBar#1287.
 
-## T3 Code — MIT, © 2026 T3 Tools Inc.
+## T3 Code
+
+Snapshot studied for P3.35: MIT, © 2026 T3 Tools Inc., commit
+`2daff8c25adf701fddd062ae93b94cc57d420ec2`.
 
 <https://github.com/pingdotgg/t3code>
 
-Studied for agent/session lifecycle reporting and desktop practices.
+Studied for agent and session lifecycle reporting, stable creation-order
+presentation, local read and visit receipts, and keyboard traversal
+semantics. The P3.35 stack follows the same high-level rule that activity
+may change selection priority without reordering the underlying identity map.
+
+## SidePulse upstream
+
+Snapshot studied for P3.35: MIT, © 2026 Peter Kuhar, commit
+`044508556934f913ac555d555e35e19b23294773`.
+
+<https://github.com/inteliwear/sidepulse>
+
+This is the original product lineage. It provided negative evidence for the
+old recency-style announcer behavior and positive evidence for keeping the
+product fork attribution explicit even as JR Bar diverges further.
+
+## SidePulse fleet fork
+
+Snapshot studied for P3.35: MIT, © 2026 Peter Kuhar, fork commit
+`e5161c47885e1246216a5dd98fa4317ad434ef7e`.
+
+<https://github.com/adamstambouli/sidepulse>
+
+Studied for sticky identity slots and coalescing behavior. We did not copy
+code. We reused the idea that stable visual positions are easier to trust
+than recency-driven reshuffles when several asks coexist.
 
 ## T3Notch
+
+Snapshot studied conceptually for P3.35: commit
+`f334abd225cd872b87b72a351800bc06ba064a7d`.
 
 <https://github.com/zortos293/T3Notch>
 
@@ -62,7 +100,8 @@ notched display, observing
 `NSApplicationDidChangeScreenParametersNotification`) is written from
 Apple's public AppKit contracts.
 
-## SidePulse
+## Product lineage
 
-JR-BAR began as a fork of SidePulse (MIT, © 2026 Peter Kuhar) and has
-since diverged substantially. See `LICENSE`.
+JR Bar began as a fork of SidePulse and has since diverged substantially.
+P3.35 continues that pattern: original implementation, explicit attribution,
+and ideas adapted from upstream and peers without code copying. See `LICENSE`.

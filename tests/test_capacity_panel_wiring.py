@@ -28,6 +28,7 @@ The load-bearing claims:
 from __future__ import annotations
 
 import json
+import threading
 import time
 from unittest.mock import patch
 
@@ -51,6 +52,7 @@ from sidepulse.capacity_types import (
 )
 from sidepulse.capacity_view import CapacityDetailModel
 from sidepulse.decision_trace import CAPACITY_SECTION_TITLE, capacity_detail_text
+from sidepulse.persistence_writer import SerialPersistenceWriter
 from tests.test_activity_ledger import _limits, _run_codex_refresh
 from tests.test_sidepulse import isolate_controller
 
@@ -77,7 +79,7 @@ def controller(request, tmp_path):
     isolate_controller(case)
     history_path = tmp_path / "capacity-history.json"
     patcher = patch(
-        "sidepulse.status_bar.default_capacity_history_path",
+        "sidepulse.capacity_history_runtime.default_capacity_history_path",
         return_value=history_path,
     )
     patcher.start()
@@ -94,6 +96,17 @@ def _enable_history(target, *, days: int = 7) -> None:
 def _capacity_section(body: str) -> str:
     assert CAPACITY_SECTION_TITLE in body, body
     return body.split(CAPACITY_SECTION_TITLE, 1)[1]
+
+
+def _terminate(target) -> None:
+    target.monitor = None
+    with (
+        patch.object(target.virtual_status_device, "terminate"),
+        patch.object(target, "stop_event_server"),
+        patch.object(target.closed_lid_awake, "release"),
+        patch.object(target.keep_awake, "release"),
+    ):
+        target.applicationWillTerminate_(None)
 
 
 # --------------------------------------------------------------------------
@@ -139,8 +152,8 @@ def test_the_open_panel_refresh_renders_the_same_body_as_opening_it(
         {"isVisible": lambda self: True},
     )()
     with patch.object(
-        status_bar,
-        "set_text_control_value",
+        status_bar.why_panel_module,
+        "set_text_preserving_position",
         side_effect=lambda _view, text: rendered.append(text),
     ):
         target.why_panel_window = window
@@ -312,6 +325,7 @@ def test_a_consented_refresh_writes_one_bounded_sample_per_lane(
     _enable_history(target)
 
     _run_codex_refresh(target, status_bar, _limits(85.0))
+    assert target._persistence_writer.wait_idle(timeout_seconds=1.0)
 
     store = target.capacity_history_store()
     assert store is not None
@@ -345,12 +359,103 @@ def test_turning_history_off_deletes_what_was_already_kept(controller) -> None:
     target, status_bar, history_path = controller
     _enable_history(target)
     _run_codex_refresh(target, status_bar, _limits(85.0))
+    assert target._persistence_writer.wait_idle(timeout_seconds=1.0)
     assert history_path.exists()
 
     target.settings = target.settings.with_capacity_history_enabled(False)
     assert target.capacity_history_store() is None
 
     assert not history_path.exists()
+
+
+def test_turning_history_off_invalidates_a_pending_flush(controller) -> None:
+    """A queued pre-consent-revocation write must not recreate the file."""
+    target, status_bar, history_path = controller
+    _enable_history(target)
+    _run_codex_refresh(target, status_bar, _limits(85.0))
+    assert target._persistence_writer.wait_idle(timeout_seconds=1.0)
+    assert history_path.exists()
+
+    running = threading.Event()
+    release = threading.Event()
+
+    def block_writer() -> None:
+        running.set()
+        release.wait(2.0)
+
+    target._persistence_writer.submit("test-block", block_writer)
+    assert running.wait(1.0)
+    _run_codex_refresh(target, status_bar, _limits(86.0))
+
+    target.settings = target.settings.with_capacity_history_enabled(False)
+    assert target.capacity_history_store() is None
+    release.set()
+    assert target._persistence_writer.wait_idle(timeout_seconds=1.0)
+
+    assert not history_path.exists()
+
+
+def test_termination_drains_a_dirty_capacity_history_tail(controller) -> None:
+    target, status_bar, history_path = controller
+    _enable_history(target)
+    running = threading.Event()
+    release = threading.Event()
+
+    def block_writer() -> None:
+        running.set()
+        release.wait(2.0)
+
+    target._persistence_writer.submit("test-block", block_writer)
+    assert running.wait(1.0)
+    _run_codex_refresh(target, status_bar, _limits(85.0))
+    assert not history_path.exists()
+
+    timer = threading.Timer(0.05, release.set)
+    timer.start()
+    try:
+        _terminate(target)
+    finally:
+        release.set()
+        timer.join(1.0)
+
+    assert history_path.exists()
+
+
+def test_termination_reserves_one_tail_slot_when_normal_queue_is_full(
+    controller,
+) -> None:
+    target, status_bar, history_path = controller
+    _enable_history(target)
+    assert target._persistence_writer.close(timeout_seconds=0.0)
+    target._persistence_writer = SerialPersistenceWriter(
+        max_pending=1,
+        receipt_handler=target._record_persistence_receipt,
+    )
+    running = threading.Event()
+    release = threading.Event()
+
+    def block_writer() -> None:
+        running.set()
+        release.wait(2.0)
+
+    target._persistence_writer.submit("test-block", block_writer)
+    assert running.wait(1.0)
+    target._persistence_writer.submit("test-filler", lambda: None)
+    _run_codex_refresh(target, status_bar, _limits(85.0))
+    assert target._persistence_writer.snapshot().refused_full >= 1
+    assert not history_path.exists()
+
+    timer = threading.Timer(0.05, release.set)
+    timer.start()
+    try:
+        _terminate(target)
+    finally:
+        release.set()
+        timer.join(1.0)
+
+    snapshot = target._persistence_writer.snapshot()
+    assert snapshot.reserved_drain_tail == 1
+    assert history_path.exists()
 
 
 def test_shortening_retention_prunes_now_not_at_some_later_flush(

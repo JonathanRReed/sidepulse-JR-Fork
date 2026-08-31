@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
+
+from .dnd_policy import DndMode, DndSource
+from .product_identity import PRODUCT_DISPLAY_NAME
 
 MAX_ROOT_MENU_ROWS = 15
 MAX_WARNING_ROWS = 3
+
+_DND_MODE_LABELS = {
+    DndMode.MUTE: "Mute",
+    DndMode.DIM: "Dim",
+    DndMode.PAUSE: "Pause",
+    DndMode.ASKS_ONLY: "Asks Only",
+    DndMode.DARK: "Fully Dark",
+}
 
 
 class MenuRowKind(str, Enum):
@@ -27,8 +39,14 @@ class MenuProjectionInputs:
     screen_bar_enabled: bool
     warning_rows: tuple[str, ...]
     setup_required: bool
-    quiet_active: bool
-    unseen_finished_count: int
+    dnd_mode: DndMode | None
+    dnd_source: DndSource | None
+    dnd_active_sources: tuple[DndSource, ...]
+    dnd_summary: str
+    dnd_return_time: datetime | None
+    dnd_override_active: bool
+    dnd_resume_available: bool
+    clearable_presented_count: int
 
     def __post_init__(self) -> None:
         for name in (
@@ -36,7 +54,7 @@ class MenuProjectionInputs:
             "needs_you_count",
             "ready_count",
             "connected_device_count",
-            "unseen_finished_count",
+            "clearable_presented_count",
         ):
             value = getattr(self, name)
             if type(value) is not int or value < 0:
@@ -54,9 +72,45 @@ class MenuProjectionInputs:
             raise ValueError("invalid warning rows")
         if not all(
             type(value) is bool
-            for value in (self.screen_bar_enabled, self.setup_required, self.quiet_active)
+            for value in (
+                self.screen_bar_enabled,
+                self.setup_required,
+                self.dnd_override_active,
+                self.dnd_resume_available,
+            )
         ):
             raise ValueError("menu flags must be booleans")
+        if self.dnd_mode is not None and type(self.dnd_mode) is not DndMode:
+            raise ValueError("DND menu mode must be typed")
+        if self.dnd_source is not None and type(self.dnd_source) is not DndSource:
+            raise ValueError("DND menu source must be typed")
+        if (self.dnd_mode is None) != (self.dnd_source is None):
+            raise ValueError("DND menu mode and source must be present together")
+        if (
+            type(self.dnd_active_sources) is not tuple
+            or len(self.dnd_active_sources) > 4
+            or not all(type(source) is DndSource for source in self.dnd_active_sources)
+            or len(set(self.dnd_active_sources)) != len(self.dnd_active_sources)
+        ):
+            raise ValueError("DND menu active sources must be bounded and typed")
+        if self.dnd_source is not None and self.dnd_source not in self.dnd_active_sources:
+            raise ValueError("DND menu primary source must be active")
+        if (
+            type(self.dnd_summary) is not str
+            or not 1 <= len(self.dnd_summary) <= 256
+            or "\x00" in self.dnd_summary
+            or not self.dnd_summary.startswith("DND: ")
+        ):
+            raise ValueError("DND menu summary must be bounded policy text")
+        if self.dnd_return_time is not None:
+            if type(self.dnd_return_time) is not datetime:
+                raise ValueError("DND return time must be a datetime")
+            try:
+                offset = self.dnd_return_time.utcoffset()
+            except (OverflowError, ValueError):
+                offset = None
+            if offset is None:
+                raise ValueError("DND return time must include a time zone")
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +194,99 @@ def _warning_rows(rows: tuple[str, ...]) -> tuple[MenuRow, ...]:
     return tuple(result)
 
 
+def _exact_time(value: datetime) -> str:
+    hour = value.hour % 12 or 12
+    suffix = "AM" if value.hour < 12 else "PM"
+    return f"{hour}:{value.minute:02d} {suffix}"
+
+
+def _dnd_title(inputs: MenuProjectionInputs) -> str:
+    mode = inputs.dnd_mode
+    if mode is None:
+        return "DND: Off"
+    if len(inputs.dnd_active_sources) > 1:
+        title = inputs.dnd_summary
+        if inputs.dnd_return_time is not None:
+            title += f" until {_exact_time(inputs.dnd_return_time)}"
+        return title
+    title = f"DND: {_DND_MODE_LABELS[mode]}"
+    return_time = inputs.dnd_return_time
+    if inputs.dnd_source is DndSource.SCHEDULE:
+        title += ", scheduled"
+    elif inputs.dnd_source is DndSource.MACOS_FOCUS:
+        title += ", macOS Focus"
+    elif inputs.dnd_source is DndSource.NAMED_FOCUS:
+        title += ", Focus detail"
+    if return_time is not None:
+        title += f" until {_exact_time(return_time)}"
+    return title
+
+
+def project_dnd_submenu(inputs: MenuProjectionInputs) -> tuple[MenuRow, ...]:
+    """Project the bounded DND actions without any AppKit dependency."""
+    if type(inputs) is not MenuProjectionInputs:
+        raise TypeError("inputs must be MenuProjectionInputs")
+    rows = [
+        MenuRow(
+            "dnd:mute",
+            "Mute for One Hour",
+            MenuRowKind.ACTION,
+            action="setDndMuteForHour:",
+        ),
+        MenuRow(
+            "dnd:dim",
+            "Dim for One Hour",
+            MenuRowKind.ACTION,
+            action="setDndDimForHour:",
+        ),
+        MenuRow(
+            "dnd:pause",
+            "Pause for One Hour",
+            MenuRowKind.ACTION,
+            action="setDndPauseForHour:",
+        ),
+        MenuRow(
+            "dnd:asks_only",
+            "Asks Only for One Hour",
+            MenuRowKind.ACTION,
+            action="setDndAsksOnlyForHour:",
+        ),
+        MenuRow(
+            "dnd:dark",
+            "Fully Dark for One Hour",
+            MenuRowKind.ACTION,
+            action="setDndDarkForHour:",
+        ),
+    ]
+    if inputs.dnd_resume_available:
+        rows.append(
+            MenuRow(
+                "dnd:resume",
+                "Resume Schedule Until Next Change",
+                MenuRowKind.ACTION,
+                action="resumeDndUntilNextChange:",
+            )
+        )
+    if inputs.dnd_override_active:
+        rows.append(
+            MenuRow(
+                "dnd:end_override",
+                "End Temporary Override",
+                MenuRowKind.ACTION,
+                action="endDndOverride:",
+            )
+        )
+    rows.append(
+        MenuRow(
+            "dnd:settings",
+            "DND Settings…",
+            MenuRowKind.ACTION,
+            action="openDndSettings:",
+        )
+    )
+    return tuple(rows)
+
+
 def project_root_menu(inputs: MenuProjectionInputs) -> RootMenuProjection:
     if type(inputs) is not MenuProjectionInputs:
         raise TypeError("inputs must be MenuProjectionInputs")
@@ -192,23 +339,29 @@ def project_root_menu(inputs: MenuProjectionInputs) -> RootMenuProjection:
         (
             MenuRow("settings", "Settings…", MenuRowKind.ACTION, action="openSettings:"),
             MenuRow(
-                "quiet",
-                "Resume Notifications" if inputs.quiet_active else "Quiet for an Hour",
-                MenuRowKind.ACTION,
-                action="toggleQuiet:",
+                "dnd",
+                _dnd_title(inputs),
+                MenuRowKind.SUBMENU,
             ),
         )
     )
-    if inputs.unseen_finished_count:
+    if inputs.clearable_presented_count:
         rows.append(
             MenuRow(
-                "clear_finished",
-                f"Clear Finished ({inputs.unseen_finished_count})",
+                "clear_agents",
+                "Clear Agents…",
                 MenuRowKind.ACTION,
-                action="clearCompleted:",
+                action="clearAgents:",
             )
         )
-    rows.append(MenuRow("quit", "Quit JR-BAR", MenuRowKind.ACTION, action="quit:"))
+    rows.append(
+        MenuRow(
+            "quit",
+            f"Quit {PRODUCT_DISPLAY_NAME}",
+            MenuRowKind.ACTION,
+            action="quit:",
+        )
+    )
     return RootMenuProjection(tuple(rows))
 
 
@@ -219,5 +372,6 @@ __all__ = [
     "MenuRow",
     "MenuRowKind",
     "RootMenuProjection",
+    "project_dnd_submenu",
     "project_root_menu",
 ]

@@ -38,7 +38,7 @@ select_python() {
 
 PYTHON_BIN="$(select_python || true)"
 if [ -z "$PYTHON_BIN" ]; then
-    echo "SidePulse requires Python 3.10+. Install Homebrew Python 3.13 or set PYTHON." >&2
+    echo "JR Bar requires Python 3.10+. Install Homebrew Python 3.13 or set PYTHON." >&2
     exit 2
 fi
 if [ ! -f "$CONSTRAINTS" ]; then

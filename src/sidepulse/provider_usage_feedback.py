@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import time
 
+from .product_identity import PRODUCT_DISPLAY_NAME
+
 
 def show_provider_usage_feedback(controller, message: str) -> None:
     text = str(message or "")
@@ -167,7 +169,7 @@ def alert_new_critical_pace(
             article = "An" if safe[:1].upper() in "AEIOU" else "A"
             client.deliver(
                 "quota.pace." + key.replace(":", "-"),
-                "SidePulse",
+                PRODUCT_DISPLAY_NAME,
                 f"{article} {safe} limit is running low",
                 {},
             )
@@ -218,7 +220,7 @@ def celebrate_quota_resets(controller, events, *, log, signal_kind) -> None:
                 label = provider_descriptor(event.provider_id).label
                 client.deliver(
                     "quota.reset." + event.event_id.replace(":", "-"),
-                    "SidePulse",
+                    PRODUCT_DISPLAY_NAME,
                     f"🎉 {label} {event.label} — fresh window",
                     {},
                 )
@@ -243,12 +245,20 @@ def report_reconnect_outcome(controller, state, *, log) -> None:
         watch = getattr(controller, "_sidepulse_reconnect_watch", None)
         if not watch:
             return
-        provider_id, clicked_at = watch
+        if len(watch) == 2:
+            provider_id, clicked_at = watch
+            source_instance_id = "default"
+        else:
+            provider_id, source_instance_id, clicked_at = watch
         snapshot = next(
             (
                 item
                 for item in getattr(state, "snapshots", ())
-                if item.provider_id == provider_id
+                if (
+                    getattr(item, "provider_id", None),
+                    getattr(item, "source_instance_id", "default"),
+                )
+                == (provider_id, source_instance_id)
             ),
             None,
         )
@@ -260,6 +270,8 @@ def report_reconnect_outcome(controller, state, *, log) -> None:
         from .provider_usage_platform import provider_descriptor
 
         label = provider_descriptor(provider_id).label
+        if source_instance_id != "default":
+            label += f" · {source_instance_id}"
         value = getattr(snapshot.state, "value", str(snapshot.state))
         if value == "ready":
             message = f"{label} reconnected — live numbers are in."
@@ -267,14 +279,17 @@ def report_reconnect_outcome(controller, state, *, log) -> None:
             message = (
                 f"{label} is still being rejected by the server — its own "
                 f"CLI has to mint a fresh sign-in (for Grok: `grok login`). "
-                "SidePulse retries the moment that happens."
+                f"{PRODUCT_DISPLAY_NAME} retries the moment that happens."
             )
         else:
             action = getattr(snapshot, "action_label", None)
             message = f"{label} is still {value.replace('_', ' ')}" + (
                 f" — {action}." if action else "."
             )
-        log(f"reconnect outcome: {provider_id} -> {value}")
+        log(
+            "reconnect outcome: "
+            f"{provider_id}/{source_instance_id} -> {value}"
+        )
         window = getattr(controller, "_sidepulse_provider_usage_window", None)
         if window is not None:
             try:
@@ -293,7 +308,12 @@ def report_reconnect_outcome(controller, state, *, log) -> None:
             pass
 
 
-def connect_claude_usage(controller, *, log) -> None:
+def connect_claude_usage(
+    controller,
+    *,
+    log,
+    source_instance_id: str = "default",
+) -> None:
     """The Claude connect flow behind the Connect/Reconnect click.
 
     The original sin here was optimism: whatever token the Keychain
@@ -338,11 +358,17 @@ def connect_claude_usage(controller, *, log) -> None:
                 ProviderCredentialStore(),
                 now=time.time(),
                 keychain_payload_reader=lambda: result.secret,
+                source_instance_id=source_instance_id,
             )
             message = repair.message
             if repair.changed or repair.outcome.value == "already_healthy":
+                scope = (
+                    ("claude",)
+                    if source_instance_id == "default"
+                    else (("claude", source_instance_id),)
+                )
                 controller._request_provider_usage(
-                    force=True, providers=("claude",)
+                    force=True, providers=scope
                 )
     except Exception as exc:
         message = f"Could not read the Claude Code sign-in: {exc}"

@@ -1,0 +1,9 @@
+{
+  "provider": "hermes",
+  "fixtureType": "hook-event",
+  "fixtureVersion": 1,
+  "payload": {
+    "event": "on_session_start",
+    "session_id": "synthetic-hermes-session"
+  }
+}

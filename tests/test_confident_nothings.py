@@ -377,7 +377,7 @@ def test_no_round_trip_yet_is_not_an_empty_answer() -> None:
         )
 
     assert unchecked == "No peers checked yet."
-    assert checked == "No other Macs are running SidePulse right now."
+    assert checked == "No other Macs are running JR Bar right now."
     assert unchecked != checked
 
 
@@ -501,7 +501,18 @@ def test_a_failed_probe_does_not_render_a_total_it_never_counted() -> None:
             check,
             exploding
             if check is DiagnosticCheck.PRIVATE_PATH_MODES
-            else (lambda c=check: doctor_module._finding(c, DiagnosticCode.UNAVAILABLE, 0, 0)),
+            else (
+                lambda c=check: doctor_module._finding(
+                    c,
+                    (
+                        DiagnosticCode.RECOVERING
+                        if c is DiagnosticCheck.ALCOVE_FOLLOW_STATE
+                        else DiagnosticCode.UNAVAILABLE
+                    ),
+                    0,
+                    0,
+                )
+            ),
         )
         for check in DiagnosticCheck
     )
@@ -580,7 +591,7 @@ class SweepSettingsSurfaceTests(unittest.TestCase):
         and the position the slider claimed WAS automatic were 12pt
         apart, on a control whose whole job is to show a measurement.
         """
-        from sidepulse.virtual_device import WINDOW_WIDTH
+        from sidepulse.screen_bar_design import WINDOW_WIDTH
 
         with patch.object(
             settings_window,
@@ -591,6 +602,26 @@ class SweepSettingsSurfaceTests(unittest.TestCase):
             self.controller.ensure_settings_pane("colors_screen_bar")
 
         slider = self.controller.settings_fields["screen_bar_gap_slider"]
+        self.assertIsNone(self.controller.settings.screen_bar_gap_width)
+        self.assertEqual(slider.doubleValue(), WINDOW_WIDTH)
+
+    def test_use_automatic_size_keeps_the_design_width_when_screen_is_unreadable(
+        self,
+    ) -> None:
+        from sidepulse.screen_bar_design import WINDOW_WIDTH
+
+        self.controller.show_settings_window()
+        self.controller.ensure_settings_pane("colors_screen_bar")
+        slider = self.controller.settings_fields["screen_bar_gap_slider"]
+        slider.setDoubleValue_(400.0)
+
+        with patch.object(
+            self.status_bar,
+            "slot_width_for_screen",
+            side_effect=RuntimeError("no screen"),
+        ):
+            self.controller.resetScreenBarGeometry_(None)
+
         self.assertIsNone(self.controller.settings.screen_bar_gap_width)
         self.assertEqual(slider.doubleValue(), WINDOW_WIDTH)
 

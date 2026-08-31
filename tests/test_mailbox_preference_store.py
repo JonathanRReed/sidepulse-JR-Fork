@@ -4,7 +4,7 @@ import json
 import os
 import stat
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from sidepulse.capacity_types import SourceKey
+from sidepulse.local_time_boundary import resolve_local_epoch
 from sidepulse.mailbox_preference_store import (
     LegacyMailboxPreference,
     MailboxPreferenceDocument,
@@ -481,6 +482,29 @@ def test_ambiguous_calendar_target_chooses_earlier_occurrence() -> None:
 
     assert result == expected
     assert result < later
+
+
+def test_mailbox_and_shared_local_boundary_keep_identical_gap_and_fold_rules() -> None:
+    gap_zone = ZoneInfo("Pacific/Apia")
+    fold_zone = ZoneInfo("Pacific/Kwajalein")
+
+    assert resolve_local_epoch(date(2011, 12, 30), time(9, 0), gap_zone) == datetime(
+        2011,
+        12,
+        31,
+        0,
+        0,
+        tzinfo=gap_zone,
+    ).timestamp()
+    assert resolve_local_epoch(date(1969, 9, 30), time(9, 0), fold_zone) == datetime(
+        1969,
+        9,
+        30,
+        9,
+        0,
+        tzinfo=fold_zone,
+        fold=0,
+    ).timestamp()
 
 
 def test_timezone_change_recomputes_calendar_preset_without_changing_now() -> None:

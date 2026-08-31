@@ -12,6 +12,8 @@ from sidepulse.presentation_policy import MotionClass
 from sidepulse.screen_bar_pipeline import (
     DEFAULT_PRESENTATION_METRICS,
     MAX_METRIC_COUNTER,
+    MAX_METRIC_DURATION_NS,
+    MAX_METRIC_TOTAL_NS,
     ColorSample,
     PresentationMetricKind,
     PresentationMetrics,
@@ -68,45 +70,31 @@ class _DisplayLink:
 def test_presentation_time_falls_back_once_for_invalid_targets(target: object) -> None:
     """Catches an invalid target escaping validation or a retry on the frame path."""
     link = _DisplayLink(target)
-    before = DEFAULT_PRESENTATION_METRICS.snapshot().counter(
-        PresentationMetricKind.TARGET_FALLBACK
-    )
+    before = DEFAULT_PRESENTATION_METRICS.snapshot().counter(PresentationMetricKind.TARGET_FALLBACK)
 
-    assert presentation_time(
-        link, callback_timestamp=9.5, previous_target=9.0
-    ) == pytest.approx(9.5)
+    assert presentation_time(link, callback_timestamp=9.5, previous_target=9.0) == pytest.approx(9.5)
     assert link.calls == 1
-    after = DEFAULT_PRESENTATION_METRICS.snapshot().counter(
-        PresentationMetricKind.TARGET_FALLBACK
-    )
+    after = DEFAULT_PRESENTATION_METRICS.snapshot().counter(PresentationMetricKind.TARGET_FALLBACK)
     assert after == min(before + 1, MAX_METRIC_COUNTER)
 
 
 def test_presentation_time_falls_back_for_missing_or_regressing_target() -> None:
     """Catches feature probing or monotonic validation being removed."""
-    assert presentation_time(
-        object(), callback_timestamp=20.0, previous_target=19.0
-    ) == pytest.approx(20.0)
-    assert presentation_time(
-        _DisplayLink(18.0), callback_timestamp=20.0, previous_target=19.0
-    ) == pytest.approx(20.0)
+    assert presentation_time(object(), callback_timestamp=20.0, previous_target=19.0) == pytest.approx(20.0)
+    assert presentation_time(_DisplayLink(18.0), callback_timestamp=20.0, previous_target=19.0) == pytest.approx(20.0)
 
 
 def test_presentation_time_prefers_finite_positive_monotonic_target() -> None:
     """Catches callback arrival time replacing the display's presentation clock."""
     link = _DisplayLink(20.25)
 
-    assert presentation_time(
-        link, callback_timestamp=19.75, previous_target=20.0
-    ) == pytest.approx(20.25)
+    assert presentation_time(link, callback_timestamp=19.75, previous_target=20.0) == pytest.approx(20.25)
     assert link.calls == 1
 
 
 def test_presentation_time_keeps_fallback_monotonic_when_callback_regresses() -> None:
     """Catches an invalid display target moving presentation time backwards."""
-    assert presentation_time(
-        _DisplayLink(0.0), callback_timestamp=9.0, previous_target=10.0
-    ) == pytest.approx(10.0)
+    assert presentation_time(_DisplayLink(0.0), callback_timestamp=9.0, previous_target=10.0) == pytest.approx(10.0)
 
 
 def test_color_samples_and_ticks_are_immutable() -> None:
@@ -126,9 +114,7 @@ def test_color_samples_and_ticks_are_immutable() -> None:
     ("target", "expected"),
     [(9.0, 0.0), (10.0, 0.0), (10.5, 0.25), (11.0, 0.5), (12.0, 1.0), (13.0, 1.0)],
 )
-def test_interpolation_uses_exact_endpoints_and_clamps_time(
-    target: float, expected: float
-) -> None:
+def test_interpolation_uses_exact_endpoints_and_clamps_time(target: float, expected: float) -> None:
     """Catches extrapolation or callback-count interpolation."""
     assert interpolate_sample(_pair(), target) == _colors(expected)
 
@@ -204,12 +190,10 @@ def test_display_path_is_target_driven_and_uses_only_published_samples(
     early = PresentationTick(99.90, 100.25, 1)
     late = PresentationTick(100.20, 100.25, 1)
     expected = _colors(0.25)
-    assert display_colors_for_tick(
-        buffer, early, last_safe_colors=None, static_fallback_colors=_colors(0.1)
-    ) == expected
-    assert display_colors_for_tick(
-        buffer, late, last_safe_colors=None, static_fallback_colors=_colors(0.1)
-    ) == expected
+    assert (
+        display_colors_for_tick(buffer, early, last_safe_colors=None, static_fallback_colors=_colors(0.1)) == expected
+    )
+    assert display_colors_for_tick(buffer, late, last_safe_colors=None, static_fallback_colors=_colors(0.1)) == expected
 
 
 def test_display_path_reuses_last_safe_then_static_fallback_without_worker_work() -> None:
@@ -247,6 +231,102 @@ def test_metrics_reservoirs_counters_and_labels_are_bounded() -> None:
         metrics.increment("session-123")  # type: ignore[arg-type]
 
 
+def test_metrics_snapshot_exposes_bounded_cumulative_duration_totals() -> None:
+    metrics = PresentationMetrics()
+
+    metrics.record_duration(PresentationMetricKind.DISPLAY_CALLBACK_NS, 10)
+    metrics.record_duration(PresentationMetricKind.DISPLAY_CALLBACK_NS, 20)
+    metrics.record_duration(
+        PresentationMetricKind.SAMPLE_WORK_NS,
+        MAX_METRIC_DURATION_NS * 2,
+    )
+    metrics._duration_totals[PresentationMetricKind.PAINT_BUILD_NS] = (
+        MAX_METRIC_TOTAL_NS - 5
+    )
+    metrics.record_duration(PresentationMetricKind.PAINT_BUILD_NS, 10)
+
+    snapshot = metrics.snapshot()
+    assert snapshot.duration_count(PresentationMetricKind.DISPLAY_CALLBACK_NS) == 2
+    assert snapshot.duration_total(PresentationMetricKind.DISPLAY_CALLBACK_NS) == 30
+    assert snapshot.duration_total(PresentationMetricKind.SAMPLE_WORK_NS) == (
+        MAX_METRIC_DURATION_NS
+    )
+    assert snapshot.duration_total(PresentationMetricKind.PAINT_BUILD_NS) == (
+        MAX_METRIC_TOTAL_NS
+    )
+
+    metrics.reset()
+    reset = metrics.snapshot()
+    assert reset.duration_count(PresentationMetricKind.DISPLAY_CALLBACK_NS) == 0
+    assert reset.duration_total(PresentationMetricKind.DISPLAY_CALLBACK_NS) == 0
+
+
+class _BatchController:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.step_calls = 0
+        self.batch_calls = 0
+        self.batch_frame_counts: list[int] = []
+
+    def parse(self, _program: str, _anchor_ms: int) -> object:
+        return SimpleNamespace(ok=True)
+
+    def step(self, _now_ms: int) -> list[tuple[int, int, int]]:
+        self.step_calls += 1
+        return [(255, 0, 0)] * 2
+
+    def step_batch(
+        self,
+        _now_ms: int,
+        _interval_ms: int,
+        frame_count: int,
+    ) -> list[list[tuple[int, int, int]]]:
+        self.batch_calls += 1
+        self.batch_frame_counts.append(frame_count)
+        if self.fail:
+            raise RuntimeError("batch failed")
+        return [[(index, 0, 0)] * 2 for index in range(frame_count)]
+
+
+def test_sampler_profiles_one_jsc_batch_and_its_cached_frames() -> None:
+    metrics = PresentationMetrics()
+    sampler = ScreenBarSampler(TwoSampleBuffer(), metrics=metrics, led_count=2)
+    controller = _BatchController()
+    interval = 1.0 / 60.0
+    try:
+        first = sampler._pixels_for(controller, 100.0, interval)
+        second = sampler._pixels_for(controller, 100.0 + interval, interval)
+    finally:
+        assert sampler.close(timeout_seconds=2.0)
+
+    snapshot = metrics.snapshot()
+    assert first == [(0, 0, 0)] * 2
+    assert second == [(1, 0, 0)] * 2
+    assert snapshot.counter(PresentationMetricKind.JSC_STEP_BATCH_CALL) == 1
+    assert snapshot.counter(PresentationMetricKind.JSC_BATCH_SUCCESS) == 1
+    assert snapshot.counter(PresentationMetricKind.BATCH_CACHE_HIT) == 1
+    assert snapshot.counter(PresentationMetricKind.BATCH_FALLBACK) == 0
+    assert snapshot.counter(PresentationMetricKind.JSC_STEP_CALL) == 0
+    assert controller.batch_frame_counts == [24]
+
+
+def test_sampler_profiles_a_failed_batch_and_single_step_fallback() -> None:
+    metrics = PresentationMetrics()
+    sampler = ScreenBarSampler(TwoSampleBuffer(), metrics=metrics, led_count=2)
+    controller = _BatchController(fail=True)
+    try:
+        pixels = sampler._pixels_for(controller, 100.0, 1.0 / 60.0)
+    finally:
+        assert sampler.close(timeout_seconds=2.0)
+
+    snapshot = metrics.snapshot()
+    assert pixels == [(255, 0, 0)] * 2
+    assert snapshot.counter(PresentationMetricKind.JSC_STEP_BATCH_CALL) == 1
+    assert snapshot.counter(PresentationMetricKind.JSC_BATCH_SUCCESS) == 0
+    assert snapshot.counter(PresentationMetricKind.BATCH_FALLBACK) == 1
+    assert snapshot.counter(PresentationMetricKind.JSC_STEP_CALL) == 1
+
+
 class _BlockingController:
     def __init__(self, started: threading.Event, release: threading.Event) -> None:
         self.started = started
@@ -275,6 +355,7 @@ def _command(
     *,
     motion: MotionClass = MotionClass.STATIC,
     sample_interval: float = 1.0 / 120.0,
+    next_visual_change_at: float | None = None,
 ) -> SamplerCommand:
     return SamplerCommand(
         generation=generation,
@@ -283,8 +364,184 @@ def _command(
         static_fallback_program="fallback",
         sample_interval=sample_interval,
         motion=motion,
-        next_visual_change_at=None,
+        next_visual_change_at=next_visual_change_at,
     )
+
+
+def test_sampler_clears_prefetched_batch_when_a_new_command_supersedes_it() -> None:
+    metrics = PresentationMetrics()
+    controller = _BatchController()
+    sampler = ScreenBarSampler(
+        TwoSampleBuffer(),
+        controller_factory=lambda: controller,
+        metrics=metrics,
+        led_count=2,
+    )
+    interval = 1.0 / 60.0
+    try:
+        assert (
+            sampler._pixels_for(
+                controller,
+                100.0,
+                interval,
+                command=_command(1, "first", motion=MotionClass.CONTINUOUS, sample_interval=interval),
+            )
+            is not None
+        )
+        assert len(sampler._batch_queue) == 23
+
+        sampler.reconcile(_command(2, "replacement"))
+        assert sampler.wait_until_published(2, timeout_seconds=2.0)
+        assert sampler._batch_queue == []
+    finally:
+        assert sampler.close(timeout_seconds=2.0)
+
+    snapshot = metrics.snapshot()
+    assert snapshot.counter(PresentationMetricKind.BATCH_INVALIDATED) == 1
+    assert snapshot.counter(PresentationMetricKind.BATCH_FALLBACK) == 0
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "second_interval"),
+    (
+        (_command(1, "pulse"), _command(2, "pulse"), 1.0 / 60.0),
+        (_command(1, "pulse"), _command(1, "ripple"), 1.0 / 60.0),
+        (_command(1, "pulse"), _command(1, "pulse"), 1.0 / 30.0),
+    ),
+)
+def test_sampler_reuses_prefetch_only_for_the_same_generation_program_and_cadence(
+    first: SamplerCommand,
+    second: SamplerCommand,
+    second_interval: float,
+) -> None:
+    metrics = PresentationMetrics()
+    sampler = ScreenBarSampler(TwoSampleBuffer(), metrics=metrics, led_count=2)
+    controller = _BatchController()
+    first_interval = 1.0 / 60.0
+    try:
+        sampler._pixels_for(controller, 100.0, first_interval, command=first)
+        sampler._pixels_for(
+            controller,
+            100.0 + first_interval,
+            second_interval,
+            command=second,
+        )
+    finally:
+        assert sampler.close(timeout_seconds=2.0)
+
+    snapshot = metrics.snapshot()
+    assert controller.batch_calls == 2
+    assert snapshot.counter(PresentationMetricKind.BATCH_CACHE_HIT) == 0
+    assert snapshot.counter(PresentationMetricKind.BATCH_INVALIDATED) == 1
+    assert snapshot.counter(PresentationMetricKind.BATCH_FALLBACK) == 0
+
+
+def test_sampler_clamps_batch_request_to_the_remaining_finite_visual_horizon() -> None:
+    metrics = PresentationMetrics()
+    sampler = ScreenBarSampler(TwoSampleBuffer(), metrics=metrics, led_count=2)
+    controller = _BatchController()
+    interval = 1.0 / 60.0
+    sampled_at = 100.0
+    command = _command(
+        1,
+        "finite",
+        motion=MotionClass.FINITE,
+        sample_interval=interval,
+        next_visual_change_at=sampled_at + 2.0 * interval,
+    )
+    try:
+        pixels = sampler._pixels_for(
+            controller,
+            sampled_at,
+            interval,
+            command=command,
+        )
+    finally:
+        assert sampler.close(timeout_seconds=2.0)
+
+    assert pixels == [(0, 0, 0)] * 2
+    assert controller.batch_frame_counts == [2]
+    start_ms = int(sampled_at * 1000.0)
+    cadence_ms = round(interval * 1000.0)
+    deadline_ms = math.floor(float(command.next_visual_change_at) * 1000.0)
+    assert start_ms + (controller.batch_frame_counts[0] - 1) * cadence_ms <= deadline_ms
+    assert start_ms + controller.batch_frame_counts[0] * cadence_ms > deadline_ms
+    snapshot = metrics.snapshot()
+    assert snapshot.counter(PresentationMetricKind.BATCH_TRUNCATED) == 1
+    assert snapshot.counter(PresentationMetricKind.BATCH_FALLBACK) == 0
+
+
+def test_sampler_counts_a_stalled_prefetch_as_invalidation_not_fallback() -> None:
+    metrics = PresentationMetrics()
+    sampler = ScreenBarSampler(TwoSampleBuffer(), metrics=metrics, led_count=2)
+    controller = _BatchController()
+    interval = 1.0 / 60.0
+    command = _command(1, "pulse", motion=MotionClass.CONTINUOUS, sample_interval=interval)
+    try:
+        sampler._pixels_for(controller, 100.0, interval, command=command)
+        sampler._pixels_for(controller, 100.0 + 10.0 * interval, interval, command=command)
+    finally:
+        assert sampler.close(timeout_seconds=2.0)
+
+    snapshot = metrics.snapshot()
+    assert controller.batch_calls == 2
+    assert snapshot.counter(PresentationMetricKind.BATCH_INVALIDATED) == 1
+    assert snapshot.counter(PresentationMetricKind.BATCH_FALLBACK) == 0
+
+
+class _BlockingBatchController(_BatchController):
+    def __init__(self, started: threading.Event, release: threading.Event) -> None:
+        super().__init__()
+        self.started = started
+        self.release = release
+
+    def step_batch(
+        self,
+        now_ms: int,
+        interval_ms: int,
+        frame_count: int,
+    ) -> list[list[tuple[int, int, int]]]:
+        self.started.set()
+        assert self.release.wait(2.0)
+        return super().step_batch(now_ms, interval_ms, frame_count)
+
+
+def test_latest_wins_does_not_publish_or_cache_an_in_flight_stale_batch() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    metrics = PresentationMetrics()
+    controller = _BlockingBatchController(started, release)
+    buffer = TwoSampleBuffer()
+    sampler = ScreenBarSampler(
+        buffer,
+        controller_factory=lambda: controller,
+        metrics=metrics,
+        led_count=2,
+    )
+    try:
+        sampler.reconcile(
+            _command(
+                1,
+                "continuous",
+                motion=MotionClass.CONTINUOUS,
+                sample_interval=1.0 / 60.0,
+            )
+        )
+        assert started.wait(2.0)
+        sampler.reconcile(_command(2, "replacement"))
+        release.set()
+        assert sampler.wait_until_published(2, timeout_seconds=2.0)
+
+        assert sampler._batch_queue == []
+        assert buffer.read(1) is None
+        assert buffer.read(2) is not None
+    finally:
+        release.set()
+        assert sampler.close(timeout_seconds=2.0)
+
+    snapshot = metrics.snapshot()
+    assert snapshot.counter(PresentationMetricKind.BATCH_INVALIDATED) == 1
+    assert snapshot.counter(PresentationMetricKind.BATCH_FALLBACK) == 0
 
 
 def test_sampler_mailbox_is_latest_wins_and_uses_one_worker() -> None:
@@ -330,9 +587,7 @@ def test_sampler_constructs_default_controller_only_on_worker(
         construction_threads.append(threading.get_ident())
         return controller
 
-    monkeypatch.setattr(
-        "sidepulse.screen_bar_pipeline._default_controller_factory", factory
-    )
+    monkeypatch.setattr("sidepulse.screen_bar_pipeline._default_controller_factory", factory)
     sampler = ScreenBarSampler(TwoSampleBuffer(), led_count=2)
     try:
         sampler.reconcile(_command(1, "first"))
@@ -350,16 +605,14 @@ def test_sampler_lifecycle_none_replaces_pending_program() -> None:
     release = threading.Event()
     controller = _BlockingController(started, release)
     metrics = PresentationMetrics()
-    sampler = ScreenBarSampler(
-        TwoSampleBuffer(), controller_factory=lambda: controller, metrics=metrics
-    )
+    sampler = ScreenBarSampler(TwoSampleBuffer(), controller_factory=lambda: controller, metrics=metrics)
     try:
         sampler.reconcile(_command(1, "first"))
         assert started.wait(2.0)
         sampler.reconcile(_command(2, "must-not-run"))
         sampler.reconcile(None)
         release.set()
-        time.sleep(0.03)
+        assert sampler.wait_until_idle(timeout_seconds=2.0)
 
         assert controller.programs == ["first"]
         assert metrics.snapshot().counter(PresentationMetricKind.DROPPED_COMMAND) == 1
@@ -372,25 +625,19 @@ def test_sampler_caps_logical_samples_at_60_hz_and_publishes_rgba_pair() -> None
     """Catches 120 Hz callbacks doubling WASM source sampling."""
     controller = _BlockingController(threading.Event(), threading.Event())
     buffer = TwoSampleBuffer()
-    sampler = ScreenBarSampler(
-        buffer, controller_factory=lambda: controller, led_count=2
-    )
+    sampler = ScreenBarSampler(buffer, controller_factory=lambda: controller, led_count=2)
     try:
         sampler.reconcile(_command(4, "static", sample_interval=1.0 / 120.0))
         assert sampler.wait_until_published(4, timeout_seconds=2.0)
         pair = buffer.read(4)
         assert pair is not None
-        assert pair.following.sampled_at - pair.previous.sampled_at == pytest.approx(
-            1.0 / 60.0
-        )
+        assert pair.following.sampled_at - pair.previous.sampled_at == pytest.approx(1.0 / 60.0)
         assert len(controller.step_times) == 2
         # Alpha carries "how lit is this LED" (max of the channels) --
         # the convention every downstream consumer expects. The old
         # hard-coded 1.0 made dark LEDs opaque black (audit fix,
         # 2026-08-26).
-        assert pair.previous.colors[0][3] == pytest.approx(
-            max(pair.previous.colors[0][:3])
-        )
+        assert pair.previous.colors[0][3] == pytest.approx(max(pair.previous.colors[0][:3]))
         assert pair.following.colors[1][1] == 1.0
         assert pair.following.colors[1][3] == 1.0
     finally:
@@ -416,9 +663,7 @@ def test_sampler_failure_publishes_static_fallback_on_worker() -> None:
     """Catches a parse failure publishing malformed output or parsing fallback on the caller."""
     controller = _FallbackController()
     buffer = TwoSampleBuffer()
-    sampler = ScreenBarSampler(
-        buffer, controller_factory=lambda: controller, led_count=2
-    )
+    sampler = ScreenBarSampler(buffer, controller_factory=lambda: controller, led_count=2)
     command = SamplerCommand(
         generation=9,
         program="bad-program",

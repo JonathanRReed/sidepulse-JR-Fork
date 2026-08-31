@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "reviewedOn": "2026-08-29",
+  "crossProviderIdentifiers": [],
+  "fixtures": [
+    {
+      "provider": "codex",
+      "fixtureId": "codex-session-start",
+      "fixtureType": "hook-event",
+      "sourceReference": "codex-hooks-v1",
+      "reviewedOn": "2026-08-29",
+      "fixtureVersion": 1,
+      "sha256": "sha256:14e3efac854d435a667843eede3c6211435b1372e294f951a24bf547f9126e23",
+      "synthetic": true
+    },
+    {
+      "provider": "claude",
+      "fixtureId": "claude-session-start",
+      "fixtureType": "hook-event",
+      "sourceReference": "claude-hooks-v1",
+      "reviewedOn": "2026-08-29",
+      "fixtureVersion": 1,
+      "sha256": "sha256:d28187e66666b471dfd5c0e0f3630914e86ca9235650f755aeaba5a06e3dd628",
+      "synthetic": true
+    },
+    {
+      "provider": "devin",
+      "fixtureId": "devin-session-start",
+      "fixtureType": "hook-event",
+      "sourceReference": "devin-hooks-v1",
+      "reviewedOn": "2026-08-29",
+      "fixtureVersion": 1,
+      "sha256": "sha256:cc95d0cb83e51eb90b61b8172aee10dc6bcf7c03b2f457c5132e5308fb2e122d",
+      "synthetic": true
+    },
+    {
+      "provider": "grok",
+      "fixtureId": "grok-session-start",
+      "fixtureType": "hook-event",
+      "sourceReference": "grok-hooks-v1",
+      "reviewedOn": "2026-08-29",
+      "fixtureVersion": 1,
+      "sha256": "sha256:d4411483da27162971c8beb356670d34e31e45cc86b725c91e925ded9d1b7755",
+      "synthetic": true
+    },
+    {
+      "provider": "cursor",
+      "fixtureId": "cursor-session-start",
+      "fixtureType": "hook-event",
+      "sourceReference": "cursor-hooks-v1",
+      "reviewedOn": "2026-08-29",
+      "fixtureVersion": 1,
+      "sha256": "sha256:32f95487f669f04e468aa26f197d858014bad56d61485f62a3b55966ebc8f8eb",
+      "synthetic": true
+    },
+    {
+      "provider": "hermes",
+      "fixtureId": "hermes-session-start",
+      "fixtureType": "hook-event",
+      "sourceReference": "hermes-hooks-v1",
+      "reviewedOn": "2026-08-29",
+      "fixtureVersion": 1,
+      "sha256": "sha256:f0209f1aac2946652b782c1cbf4381c6dc262687449f554bd76baae2b2d97aee",
+      "synthetic": true
+    },
+    {
+      "provider": "openclaw",
+      "fixtureId": "openclaw-session-start",
+      "fixtureType": "hook-event",
+      "sourceReference": "openclaw-hooks-v1",
+      "reviewedOn": "2026-08-29",
+      "fixtureVersion": 1,
+      "sha256": "sha256:ee840508c42df39d8b4a2e61e98e0ee3a434ae2595faed1ed67b6e34152e2159",
+      "synthetic": true
+    },
+    {
+      "provider": "opencode",
+      "fixtureId": "opencode-session-start",
+      "fixtureType": "hook-event",
+      "sourceReference": "opencode-hooks-v1",
+      "reviewedOn": "2026-08-29",
+      "fixtureVersion": 1,
+      "sha256": "sha256:a4dc86099d6000f21c85f121a4d03a0b0fc9d5508e095ad02619257a042e2be2",
+      "synthetic": true
+    },
+    {
+      "provider": "antigravity",
+      "fixtureId": "antigravity-invocation",
+      "fixtureType": "hook-event",
+      "sourceReference": "antigravity-hooks-v1",
+      "reviewedOn": "2026-08-29",
+      "fixtureVersion": 1,
+      "sha256": "sha256:1ddf0bd234d82cf749675fa037c3453ebde3743893a69a226c4fa3c5ec820013",
+      "synthetic": true
+    },
+    {
+      "provider": "kiro",
+      "fixtureId": "kiro-session-start",
+      "fixtureType": "hook-event",
+      "sourceReference": "kiro-hooks-v1",
+      "reviewedOn": "2026-08-29",
+      "fixtureVersion": 1,
+      "sha256": "sha256:38636f4e14e5dc5fa0a741c452b5641087b3b2a7f799a50eeeaaf17ed85cd70d",
+      "synthetic": true
+    }
+  ]
+}

@@ -1,21 +1,24 @@
-"""The one place this app reads a credential.
+"""The one place this app reads another application's credential.
 
 Every provider that needs a token comes through here, for three reasons.
 
 **Prompting is a user-visible event.** Reading another application's Keychain
 item raises a system dialog naming this app. A background refresh loop that
 does that is indistinguishable from malware, and after the first "Deny" it
-would ask again on the next tick, forever. So Keychain reads are *never*
-attempted in the background: they require an explicit user action, and a
-denial earns an escalating cooldown that survives restarts.
+would ask again on the next tick, forever. A background read is allowed only
+after an explicit user action recorded a standing grant, and it uses a short
+non-prompting timeout. A denial earns an escalating cooldown that survives
+restarts.
 
 **Secrets must not leak into diagnostics.** This module returns a secret to
 its caller and does nothing else with it -- no logging, no error text, no
 caching to disk, no inclusion in doctor output. Failures are reported as
 codes, never as content.
 
-**One audited surface.** A single hardened entry point can be reviewed once.
-Six ad-hoc `subprocess.run(["security", ...])` calls cannot.
+**External credentials are read-only.** JR Bar may copy a current access token
+into its own Keychain-backed store, but it never refreshes or mutates the
+credential owned by Claude Code. A single hardened read entry point can be
+reviewed once. Ad-hoc reads and third-party Keychain writes cannot.
 """
 
 from __future__ import annotations
@@ -33,15 +36,11 @@ from .private_io import atomic_private_write, read_private_text
 # `security` exits 128 when the user dismisses or denies the access dialog.
 _SECURITY_USER_CANCELED = 128
 #: One budget per kind of call, because they block on different things.
-#: A dialog the user must answer legitimately takes seconds; an
-#: attributes probe never prompts at all, and a BACKGROUND read must not
-#: park a worker thread for half a minute if the ACL has drifted and
-#: `security` decides to prompt anyway (2026-08-27 mining).
-_SECURITY_TIMEOUT_SECONDS = 30.0
+#: A dialog the user must answer legitimately takes seconds. A background
+#: read must not park a worker thread for half a minute if the ACL has
+#: drifted and `security` decides to prompt anyway (2026-08-27 mining).
 _SECURITY_PROMPT_TIMEOUT_SECONDS = 30.0
 _SECURITY_BACKGROUND_TIMEOUT_SECONDS = 2.0
-_SECURITY_ATTRIBUTES_TIMEOUT_SECONDS = 2.0
-_SECURITY_WRITE_TIMEOUT_SECONDS = 10.0
 # Codex writes plain JSON; a real one is a few KB. Anything larger is not it.
 CODEX_AUTH_MAX_BYTES = 256 * 1024
 
@@ -239,125 +238,6 @@ def read_keychain_secret(
         )
         return CredentialResult(CredentialOutcome.DENIED, retry_at=deadline)
     return CredentialResult(CredentialOutcome.NOT_FOUND)
-
-
-def keychain_account_for(item: KeychainItem) -> str | None:
-    """The account the existing item is filed under.
-
-    `add-generic-password` REQUIRES -a; Claude Code files its item under
-    the macOS short user name, which this app has no business assuming.
-    Read it off the item itself (attributes only -- no password, so no
-    consent prompt).
-    """
-    if item.account:
-        return item.account
-    try:
-        completed = subprocess.run(
-            ["/usr/bin/security", "find-generic-password", "-s", item.service],
-            capture_output=True,
-            text=True,
-            timeout=_SECURITY_ATTRIBUTES_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0:
-        return None
-    for line in (completed.stdout or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith('"acct"'):
-            _, _, value = stripped.partition("=")
-            account = value.strip().strip('"')
-            return account or None
-    return None
-
-
-def _run_security_write(item: KeychainItem, secret: str) -> subprocess.CompletedProcess:
-    account = keychain_account_for(item)
-    if not account:
-        # Without an account the tool prints usage and exits nonzero --
-        # a silent no-op that looked like a permission failure
-        # (2026-08-27: the write-back never ran at all).
-        raise ValueError("keychain item has no account to update")
-    # The secret rides argv, and we know that is visible to `ps` for the
-    # lifetime of the call. Two alternatives were measured and rejected
-    # (2026-08-27):
-    #   * `-w` last, reading from stdin: `security`'s interactive reader
-    #     TRUNCATES AT 128 CHARACTERS. A real Claude payload is ~500+,
-    #     so this silently corrupts the credential -- catastrophically
-    #     worse than the exposure it closes.
-    #   * SecItemUpdate under our own code identity: moves the write off
-    #     Apple's signed binary and into the ACL partition that is
-    #     reported to produce recurring authorization prompts
-    #     (steipete/CodexBar#2115).
-    # So argv stands, and write_keychain_secret VERIFIES the round trip
-    # instead -- a truncated or refused write must never look like a
-    # success, because the caller uses that answer to decide whether
-    # Claude Code still has a usable sign-in.
-    return subprocess.run(
-        [
-            "/usr/bin/security",
-            "add-generic-password",
-            "-U",
-            "-s",
-            item.service,
-            "-a",
-            account,
-            "-w",
-            secret,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=_SECURITY_WRITE_TIMEOUT_SECONDS,
-        check=False,
-    )
-
-
-def write_keychain_secret(
-    item: KeychainItem,
-    secret: str,
-    *,
-    runner=None,
-) -> bool:
-    """Update one Keychain item in place (`add-generic-password -U`).
-
-    Exists for exactly one caller today: writing Claude Code's ROTATED
-    OAuth tokens back after a refresh, so `claude` itself keeps working
-    -- the CodexBar contract. The secret rides argv to the system
-    `security` tool, the same channel the read path already uses.
-    """
-    if not isinstance(secret, str) or not secret:
-        return False
-    try:
-        completed = (runner or _run_security_write)(item, secret)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return False
-    if completed.returncode != 0:
-        return False
-    if runner is not None:
-        return True
-    # Verify the round trip. A silently truncated or partially applied
-    # write would otherwise be reported as success, and the caller would
-    # believe Claude Code still holds a usable sign-in when it does not.
-    try:
-        account = keychain_account_for(item)
-        readback = subprocess.run(
-            [
-                "/usr/bin/security",
-                "find-generic-password",
-                "-s",
-                item.service,
-                *(("-a", account) if account else ()),
-                "-w",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=_SECURITY_BACKGROUND_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return readback.returncode == 0 and (readback.stdout or "").strip() == secret
 
 
 @dataclass(frozen=True, slots=True)

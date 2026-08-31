@@ -17,6 +17,7 @@ from .provider_browser_consent import (
 )
 from .provider_browser_import import import_devin_browser_session
 from .provider_credential_store import ProviderCredentialStore
+from .provider_instances import ProviderInstanceKey, ProviderInstanceProfile
 from .provider_usage_platform import (
     ProviderSourceState,
     ProviderUsageSnapshot,
@@ -113,17 +114,21 @@ def build_parser() -> argparse.ArgumentParser:
     grant.add_argument("provider", choices=sorted(_BROWSER_SCOPES))
     grant.add_argument("--browser", required=True)
     grant.add_argument("--profile", required=True)
+    grant.add_argument("--source-instance-id", default="default")
     grant.add_argument("--background-repair", action="store_true")
     revoke = browser_commands.add_parser("revoke")
     revoke.add_argument("provider", choices=sorted(_BROWSER_SCOPES))
     revoke.add_argument("--browser", required=True)
     revoke.add_argument("--profile", required=True)
-    browser_commands.add_parser("list")
+    revoke.add_argument("--source-instance-id", default="default")
+    list_consents = browser_commands.add_parser("list")
+    list_consents.add_argument("--source-instance-id", default=None)
     import_session = browser_commands.add_parser("import")
     import_session.add_argument("provider", choices=("devin",))
     import_session.add_argument("--browser", required=True)
     import_session.add_argument("--profile", required=True)
     import_session.add_argument("--profile-root", type=Path, required=True)
+    import_session.add_argument("--source-instance-id", default="default")
 
     return parser
 
@@ -380,12 +385,18 @@ def main(
                 fields=scope["fields"],
                 background_repair=args.background_repair,
                 granted_at=float(clock()),
+                source_instance_id=args.source_instance_id,
             )
             save_browser_consents(updated, consent_target, loaded=loaded_consents)
             output.write("Browser consent granted. Import remains a separate action.\n")
             return 0
         if args.browser_command == "revoke":
-            updated = store.revoke(args.provider, args.browser, args.profile)
+            updated = store.revoke(
+                args.provider,
+                args.browser,
+                args.profile,
+                source_instance_id=args.source_instance_id,
+            )
             save_browser_consents(updated, consent_target, loaded=loaded_consents)
             output.write("Browser consent revoked.\n")
             return 0
@@ -395,6 +406,7 @@ def main(
                     "consents": [
                         {
                             "provider_id": item.provider_id,
+                            "source_instance_id": item.source_instance_id,
                             "browser": item.browser,
                             "profile": item.profile,
                             "domains": list(item.domains),
@@ -403,6 +415,8 @@ def main(
                             "granted_at": item.granted_at,
                         }
                         for item in store.consents
+                        if args.source_instance_id is None
+                        or item.source_instance_id == args.source_instance_id
                     ]
                 },
                 output,
@@ -414,15 +428,34 @@ def main(
             browser=args.browser,
             profile=args.profile,
             profile_root=args.profile_root,
+            home=root,
             consents=store,
             credentials=credential_store,
+            source_instance_id=args.source_instance_id,
         )
         if result.organization:
+            try:
+                settings.preference("devin", args.source_instance_id)
+            except StopIteration:
+                settings = settings.with_profile(
+                    ProviderInstanceProfile(
+                        ProviderInstanceKey("devin", args.source_instance_id),
+                        label=(
+                            f"{provider_descriptor('devin').label}"
+                            f" · {args.source_instance_id}"
+                        ),
+                    )
+                )
             updated_settings = settings.with_option(
                 "devin",
                 "organization",
                 result.organization,
-            ).with_browser_sources("devin", True)
+                source_instance_id=args.source_instance_id,
+            ).with_browser_sources(
+                "devin",
+                True,
+                source_instance_id=args.source_instance_id,
+            )
             save_provider_usage_settings(
                 updated_settings,
                 settings_target,

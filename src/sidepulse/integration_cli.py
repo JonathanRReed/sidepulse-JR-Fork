@@ -15,6 +15,7 @@ from .integration_settings import (
     load_integration_settings,
     save_integration_settings,
 )
+from .product_identity import PRODUCT_DISPLAY_NAME
 from .t3_compat import read_t3_snapshot
 
 INTEGRATION_NAMES = frozenset({"t3code"})
@@ -23,7 +24,7 @@ INTEGRATION_NAMES = frozenset({"t3code"})
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sidepulse-integrations",
-        description="Configure and inspect the SidePulse T3 Code integration.",
+        description=f"Configure and inspect the {PRODUCT_DISPLAY_NAME} T3 Code integration.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -120,7 +121,7 @@ def _save_updated(loaded, settings) -> int:
         print(f"sidepulse-integrations: {exc}", file=sys.stderr)
         return 1
     print(f"settings: {path}")
-    print("apply: restart the SidePulse status-bar app")
+    print(f"apply: restart the {PRODUCT_DISPLAY_NAME} status-bar app")
     return 0
 
 

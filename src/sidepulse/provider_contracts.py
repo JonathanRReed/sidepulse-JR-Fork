@@ -98,6 +98,168 @@ class CapabilityAuthority(str, Enum):
     MUTATION = "mutation"
 
 
+class ProductCapability(str, Enum):
+    """Product-facing capabilities declared independently of adapters."""
+
+    LIFECYCLE = "lifecycle"
+    QUESTIONS = "questions"
+    ANSWERING = "answering"
+    USAGE = "usage"
+    COSTS = "costs"
+    RESET_FORECASTS = "reset_forecasts"
+    RESET_FORECAST = "reset_forecasts"
+    REMOTE_OBSERVATION = "remote_observation"
+    TRANSCRIPT_FALLBACK = "transcript_fallback"
+    INVOCATION_SCOPED_MONITORING = "invocation_scoped_monitoring"
+    INVOCATION_MONITORING = "invocation_scoped_monitoring"
+
+
+_PRODUCT_CAPABILITY_ORDER = tuple(ProductCapability)
+
+
+class LocalRuntimeSurfaceIdentifier(_BoundedIdentifier):
+    """Bounded name for a product-owned local runtime surface."""
+
+
+@dataclass(frozen=True, slots=True)
+class ProductCapabilityBinding:
+    """One exact low-level capability or one named local runtime surface."""
+
+    low_level_capability_id: CapabilityIdentifier | None = None
+    capability_version: SchemaVersion | None = None
+    local_runtime_surface: LocalRuntimeSurfaceIdentifier | None = None
+
+    def __post_init__(self) -> None:
+        has_low_level = self.low_level_capability_id is not None
+        has_local = self.local_runtime_surface is not None
+        if has_low_level == has_local:
+            raise ContractValidationError("binding must name exactly one surface")
+        if has_low_level and not isinstance(
+            self.low_level_capability_id, CapabilityIdentifier
+        ):
+            raise ContractValidationError("invalid low-level capability binding")
+        if has_local and not isinstance(
+            self.local_runtime_surface, LocalRuntimeSurfaceIdentifier
+        ):
+            raise ContractValidationError("invalid local runtime surface binding")
+        if has_local and self.capability_version is not None:
+            raise ContractValidationError("local surface cannot have a capability version")
+        if self.capability_version is not None and not isinstance(
+            self.capability_version, SchemaVersion
+        ):
+            raise ContractValidationError("invalid capability binding version")
+
+    @classmethod
+    def low_level(
+        cls,
+        capability_id: str | CapabilityIdentifier,
+        version: SchemaVersion | None = None,
+    ) -> ProductCapabilityBinding:
+        if isinstance(capability_id, CapabilityIdentifier):
+            identifier = capability_id
+        else:
+            identifier = CapabilityIdentifier(capability_id)
+        return cls(
+            low_level_capability_id=identifier,
+            capability_version=version,
+        )
+
+    @classmethod
+    def local(
+        cls,
+        runtime_surface: str | LocalRuntimeSurfaceIdentifier,
+    ) -> ProductCapabilityBinding:
+        if isinstance(runtime_surface, LocalRuntimeSurfaceIdentifier):
+            identifier = runtime_surface
+        else:
+            identifier = LocalRuntimeSurfaceIdentifier(runtime_surface)
+        return cls(local_runtime_surface=identifier)
+
+    @property
+    def capability_id(self) -> CapabilityIdentifier | None:
+        """Compatibility alias for the exact low-level identifier."""
+        return self.low_level_capability_id
+
+    @property
+    def runtime_surface(self) -> LocalRuntimeSurfaceIdentifier | None:
+        """Compatibility alias for the named local surface."""
+        return self.local_runtime_surface
+
+
+@dataclass(frozen=True, slots=True)
+class ProductCapabilityDeclaration:
+    """Explicit yes/no support for one product capability."""
+
+    capability: ProductCapability
+    supported: bool
+    binding: ProductCapabilityBinding | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.capability, ProductCapability):
+            raise ContractValidationError("invalid product capability")
+        if type(self.supported) is not bool:
+            raise ContractValidationError("product support must be a boolean")
+        if self.supported and not isinstance(self.binding, ProductCapabilityBinding):
+            raise ContractValidationError("supported capability requires a binding")
+        if not self.supported and self.binding is not None:
+            raise ContractValidationError("unsupported capability cannot have a binding")
+
+    @property
+    def support(self) -> bool:
+        """Readable alias for the explicit support decision."""
+        return self.supported
+
+    @property
+    def is_supported(self) -> bool:
+        """Boolean spelling useful to callers rendering capability state."""
+        return self.supported
+
+    @property
+    def capability_id(self) -> ProductCapability:
+        """Stable product capability identifier."""
+        return self.capability
+
+
+@dataclass(frozen=True, slots=True)
+class ProductCapabilityInvocation:
+    """Exact identity used when invoking a supported product capability."""
+
+    product_capability: ProductCapability
+    provider_id: ProviderIdentifier
+    adapter_id: AdapterIdentifier
+    source_instance_id: SourceInstanceIdentifier
+    capability_id: CapabilityIdentifier | None = None
+    capability_version: SchemaVersion | None = None
+    local_runtime_surface: LocalRuntimeSurfaceIdentifier | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.product_capability, ProductCapability):
+            raise ContractValidationError("invalid product capability invocation")
+        if not (
+            isinstance(self.provider_id, ProviderIdentifier)
+            and isinstance(self.adapter_id, AdapterIdentifier)
+            and isinstance(self.source_instance_id, SourceInstanceIdentifier)
+        ):
+            raise ContractValidationError("invalid product capability invocation")
+        ProductCapabilityBinding(
+            low_level_capability_id=self.capability_id,
+            capability_version=self.capability_version,
+            local_runtime_surface=self.local_runtime_surface,
+        )
+        if self.capability_id is not None:
+            allowed_bindings = _PRODUCT_LOW_LEVEL_BINDINGS.get(
+                self.product_capability, frozenset()
+            )
+            definition = _CAPABILITY_DEFINITIONS.get(self.capability_id)
+            if self.capability_id not in allowed_bindings or definition is None:
+                raise ContractValidationError("product capability binding is not allowed")
+            if (
+                definition.authority is CapabilityAuthority.MUTATION
+                or self.capability_version not in definition.versions
+            ):
+                raise ContractValidationError("product capability binding is not allowed")
+
+
 class ContractStatus(str, Enum):
     SUPPORTED = "supported"
     PARTIAL = "partial"
@@ -164,6 +326,7 @@ class NegotiatedProviderContract:
     observation_capabilities: tuple[NegotiatedCapability, ...] = ()
     compatible_mutation_capabilities: tuple[NegotiatedCapability, ...] = ()
     diagnostics: tuple[ContractDiagnostic, ...] = ()
+    product_capabilities: tuple[ProductCapabilityDeclaration, ...] = ()
 
     @property
     def observation_invocation_allowed(self) -> bool:
@@ -187,6 +350,48 @@ class NegotiatedProviderContract:
             adapter_id=self.adapter_id,
             source_instance_id=self.source_instance_id,
             capability_id=identifier,
+        )
+
+    def product_capability(
+        self, capability: ProductCapability | str
+    ) -> ProductCapabilityDeclaration:
+        """Return the explicit product declaration, including absent support."""
+        try:
+            product_capability = (
+                capability
+                if isinstance(capability, ProductCapability)
+                else ProductCapability(capability)
+            )
+        except (TypeError, ValueError) as error:
+            raise ContractValidationError("invalid product capability") from error
+        for declaration in self.product_capabilities:
+            if declaration.capability is product_capability:
+                return declaration
+        return ProductCapabilityDeclaration(product_capability, supported=False)
+
+    def product_invocation_for(
+        self, capability: ProductCapability | str
+    ) -> ProductCapabilityInvocation:
+        """Resolve one supported product capability to its exact source identity."""
+        declaration = self.product_capability(capability)
+        if not declaration.supported or declaration.binding is None:
+            raise ContractValidationError("product capability is not supported")
+        binding = declaration.binding
+        if binding.low_level_capability_id is not None:
+            return ProductCapabilityInvocation(
+                product_capability=declaration.capability,
+                provider_id=self.provider_id,
+                adapter_id=self.adapter_id,
+                source_instance_id=self.source_instance_id,
+                capability_id=binding.low_level_capability_id,
+                capability_version=binding.capability_version,
+            )
+        return ProductCapabilityInvocation(
+            product_capability=declaration.capability,
+            provider_id=self.provider_id,
+            adapter_id=self.adapter_id,
+            source_instance_id=self.source_instance_id,
+            local_runtime_surface=binding.local_runtime_surface,
         )
 
 
@@ -218,6 +423,43 @@ _CAPABILITY_DEFINITIONS = {
         _definition("account_switching", CapabilityAuthority.MUTATION, (1, 0)),
     )
 }
+
+# Product semantics are an allowlist, not a projection of low-level authority.
+# In particular, the mutation-only account_switching capability is intentionally
+# absent from every product mapping. A future product action must receive its
+# own reviewed declaration or a product-owned local surface.
+_PRODUCT_LOW_LEVEL_BINDINGS: dict[
+    ProductCapability, frozenset[CapabilityIdentifier]
+] = {
+    ProductCapability.LIFECYCLE: frozenset(
+        {CapabilityIdentifier("live_agent_events")}
+    ),
+    ProductCapability.QUESTIONS: frozenset(
+        {CapabilityIdentifier("actionable_requests")}
+    ),
+    ProductCapability.ANSWERING: frozenset(),
+    ProductCapability.USAGE: frozenset(
+        {
+            CapabilityIdentifier("transcript_usage"),
+            CapabilityIdentifier("remote_quota_windows"),
+        }
+    ),
+    ProductCapability.COSTS: frozenset(),
+    ProductCapability.RESET_FORECASTS: frozenset(
+        {CapabilityIdentifier("reset_metadata")}
+    ),
+    ProductCapability.REMOTE_OBSERVATION: frozenset(),
+    ProductCapability.TRANSCRIPT_FALLBACK: frozenset(
+        {CapabilityIdentifier("transcript_usage")}
+    ),
+    ProductCapability.INVOCATION_SCOPED_MONITORING: frozenset(),
+}
+
+_TRANSCRIPT_ADAPTER = AdapterIdentifier("transcripts")
+_ANSWER_IN_PLACE_SURFACE = LocalRuntimeSurfaceIdentifier("local.answer_in_place")
+_INVOCATION_MONITORING_SURFACE = LocalRuntimeSurfaceIdentifier(
+    "local.invocation_scoped_monitoring"
+)
 
 # These pairs describe known in-tree source kinds only. They do not load or
 # identify an implementation. Adapter integration is a later reviewed tranche.
@@ -373,10 +615,13 @@ _DOCUMENT_FIELDS = frozenset(
         "adapter_id",
         "source_instance_id",
         "capabilities",
+        "product_capabilities",
     }
 )
 _VERSION_FIELDS = frozenset({"major", "minor"})
 _CAPABILITY_FIELDS = frozenset({"id", "versions"})
+_PRODUCT_CAPABILITY_FIELDS = frozenset({"id", "supported", "binding"})
+_BINDING_FIELDS = frozenset({"kind", "id", "version"})
 
 
 @dataclass(slots=True)
@@ -425,6 +670,13 @@ def _diagnostic(identifier: str, count: int = 1) -> ContractDiagnostic:
     return ContractDiagnostic(DiagnosticIdentifier(identifier), count)
 
 
+def _unsupported_product_capabilities() -> tuple[ProductCapabilityDeclaration, ...]:
+    return tuple(
+        ProductCapabilityDeclaration(capability, supported=False)
+        for capability in _PRODUCT_CAPABILITY_ORDER
+    )
+
+
 def _unsupported_result(
     *,
     schema_version: SchemaVersion,
@@ -440,16 +692,67 @@ def _unsupported_result(
         source_instance_id=source_instance_id,
         status=status,
         diagnostics=(_diagnostic(status.value),),
+        product_capabilities=_unsupported_product_capabilities(),
     )
 
 
-def provider_contract_document(registration: object) -> dict[str, object]:
+def product_capability_document(
+    declarations: tuple[ProductCapabilityDeclaration, ...],
+) -> list[dict[str, object]]:
+    """Serialize explicit product declarations without loading a provider."""
+    if type(declarations) is not tuple:
+        raise ContractValidationError("product declarations must be a tuple")
+    if len(declarations) > len(_PRODUCT_CAPABILITY_ORDER):
+        raise ContractValidationError("too many product capabilities")
+    seen: set[ProductCapability] = set()
+    rows: list[dict[str, object]] = []
+    for declaration in declarations:
+        if type(declaration) is not ProductCapabilityDeclaration:
+            raise ContractValidationError("invalid product capability declaration")
+        if declaration.capability in seen:
+            raise ContractValidationError("duplicate product capability")
+        seen.add(declaration.capability)
+        binding: dict[str, object] | None
+        if declaration.binding is None:
+            binding = None
+        elif declaration.binding.low_level_capability_id is not None:
+            binding = {
+                "kind": "low_level",
+                "id": declaration.binding.low_level_capability_id.value,
+                "version": (
+                    None
+                    if declaration.binding.capability_version is None
+                    else {
+                        "major": declaration.binding.capability_version.major,
+                        "minor": declaration.binding.capability_version.minor,
+                    }
+                ),
+            }
+        else:
+            binding = {
+                "kind": "local",
+                "id": declaration.binding.local_runtime_surface.value,
+            }
+        rows.append(
+            {
+                "id": declaration.capability.value,
+                "supported": declaration.supported,
+                "binding": binding,
+            }
+        )
+    return rows
+
+
+def provider_contract_document(
+    registration: object,
+    product_capabilities: tuple[ProductCapabilityDeclaration, ...] = (),
+) -> dict[str, object]:
     """Build the exact built-in-dict v1 declaration for one static source."""
     from .providers import ProviderSourceRegistration
 
     if type(registration) is not ProviderSourceRegistration:
         raise ContractValidationError("invalid provider source registration")
-    return {
+    document: dict[str, object] = {
         "schema_version": {"major": CONTRACT_SCHEMA_MAJOR, "minor": 0},
         "provider_id": registration.provider_id.value,
         "adapter_id": registration.adapter_id.value,
@@ -465,6 +768,158 @@ def provider_contract_document(registration: object) -> dict[str, object]:
             for capability_id, versions in registration.capability_versions
         ],
     }
+    declared_rows = product_capability_document(product_capabilities)
+    declared_by_id = {row["id"]: row for row in declared_rows}
+    document["product_capabilities"] = [
+        declared_by_id.get(
+            capability.value,
+            {"id": capability.value, "supported": False, "binding": None},
+        )
+        for capability in _PRODUCT_CAPABILITY_ORDER
+    ]
+    return document
+
+
+def _parse_product_binding(
+    value: object,
+    unknown_fields: _UnknownFieldBudget,
+) -> ProductCapabilityBinding:
+    if type(value) is not dict:
+        raise ContractValidationError("invalid product capability binding")
+    unknown_fields.add_mapping(value, _BINDING_FIELDS)
+    try:
+        kind = value["kind"]
+        identifier = value["id"]
+    except KeyError as error:
+        raise ContractValidationError("invalid product capability binding") from error
+    if kind == "low_level":
+        version_value = value.get("version")
+        version = (
+            None if version_value is None else _parse_version(version_value, unknown_fields)
+        )
+        return ProductCapabilityBinding.low_level(identifier, version)
+    if kind == "local":
+        if "version" in value and value["version"] is not None:
+            raise ContractValidationError("local surface cannot have a capability version")
+        return ProductCapabilityBinding.local(identifier)
+    raise ContractValidationError("invalid product capability binding")
+
+
+def _product_binding_allowed(
+    capability: ProductCapability,
+    binding: ProductCapabilityBinding,
+    adapter_id: AdapterIdentifier,
+    negotiated_by_id: dict[CapabilityIdentifier, NegotiatedCapability],
+) -> bool:
+    """Apply the product-to-source allowlist after structural validation."""
+    if binding.local_runtime_surface is not None:
+        # A local surface is product-owned and therefore does not grant
+        # provider mutation authority. Some product capabilities require one
+        # exact reviewed local route.
+        if capability is ProductCapability.ANSWERING:
+            return binding.local_runtime_surface == _ANSWER_IN_PLACE_SURFACE
+        if capability is ProductCapability.INVOCATION_SCOPED_MONITORING:
+            return binding.local_runtime_surface == _INVOCATION_MONITORING_SURFACE
+        return capability is not ProductCapability.TRANSCRIPT_FALLBACK
+
+    capability_id = binding.low_level_capability_id
+    if capability_id is None or capability_id not in _PRODUCT_LOW_LEVEL_BINDINGS.get(
+        capability, frozenset()
+    ):
+        return False
+    negotiated_capability = negotiated_by_id.get(capability_id)
+    if negotiated_capability is None or negotiated_capability.authority is CapabilityAuthority.MUTATION:
+        return False
+    if (
+        capability is ProductCapability.TRANSCRIPT_FALLBACK
+        and adapter_id != _TRANSCRIPT_ADAPTER
+    ):
+        return False
+    return True
+
+
+def _parse_product_capabilities(
+    raw: dict[object, object],
+    unknown_fields: _UnknownFieldBudget,
+    negotiated: tuple[NegotiatedCapability, ...],
+    adapter_id: AdapterIdentifier,
+) -> tuple[tuple[ProductCapabilityDeclaration, ...], int, int]:
+    try:
+        rows = raw["product_capabilities"]
+    except KeyError:
+        return tuple(
+            ProductCapabilityDeclaration(capability, supported=False)
+            for capability in _PRODUCT_CAPABILITY_ORDER
+        ), 0, 0
+    if type(rows) is not list:
+        raise ContractValidationError("product capabilities must be a list")
+    if len(rows) > len(_PRODUCT_CAPABILITY_ORDER):
+        raise ContractValidationError("too many product capabilities")
+
+    negotiated_by_id = {capability.identifier: capability for capability in negotiated}
+    declarations: dict[ProductCapability, ProductCapabilityDeclaration] = {}
+    unknown_count = 0
+    unsupported_count = 0
+    for row in rows:
+        if type(row) is not dict:
+            raise ContractValidationError("product capability must be an object")
+        unknown_fields.add_mapping(row, _PRODUCT_CAPABILITY_FIELDS)
+        try:
+            capability = ProductCapability(row["id"])
+            supported = row["supported"]
+            binding_value = row["binding"]
+        except (KeyError, TypeError, ValueError) as error:
+            if isinstance(error, ValueError):
+                unknown_count += 1
+                continue
+            raise ContractValidationError("invalid product capability") from error
+        if capability in declarations:
+            raise ContractValidationError("duplicate product capability")
+        if type(supported) is not bool:
+            raise ContractValidationError("product support must be a boolean")
+        if not supported:
+            if binding_value is not None:
+                raise ContractValidationError("unsupported capability cannot have a binding")
+            declarations[capability] = ProductCapabilityDeclaration(capability, False)
+            continue
+        if binding_value is None:
+            raise ContractValidationError("supported capability requires a binding")
+        binding = _parse_product_binding(binding_value, unknown_fields)
+        if binding.low_level_capability_id is not None:
+            negotiated_capability = negotiated_by_id.get(binding.low_level_capability_id)
+            if negotiated_capability is None:
+                unsupported_count += 1
+                declarations[capability] = ProductCapabilityDeclaration(capability, False)
+                continue
+            if binding.capability_version is None:
+                binding = ProductCapabilityBinding.low_level(
+                    binding.low_level_capability_id,
+                    negotiated_capability.version,
+                )
+            elif binding.capability_version != negotiated_capability.version:
+                unsupported_count += 1
+                declarations[capability] = ProductCapabilityDeclaration(capability, False)
+                continue
+        if not _product_binding_allowed(
+            capability,
+            binding,
+            adapter_id=adapter_id,
+            negotiated_by_id=negotiated_by_id,
+        ):
+            unsupported_count += 1
+            declarations[capability] = ProductCapabilityDeclaration(capability, False)
+            continue
+        declarations[capability] = ProductCapabilityDeclaration(
+            capability,
+            supported=True,
+            binding=binding,
+        )
+
+    ordered = tuple(
+        declarations.get(capability, ProductCapabilityDeclaration(capability, False))
+        for capability in _PRODUCT_CAPABILITY_ORDER
+    )
+    return ordered, unknown_count, unsupported_count
 
 
 def negotiate_provider_contract(document: object) -> NegotiatedProviderContract:
@@ -582,6 +1037,18 @@ def negotiate_provider_contract(document: object) -> NegotiatedProviderContract:
         diagnostics.append(
             _diagnostic("incompatible_capability_versions", incompatible_capability_count)
         )
+    negotiated = (*discovery, *observation, *mutation)
+    product_capabilities, unknown_product_count, unsupported_product_count = (
+        _parse_product_capabilities(raw, unknown_fields, negotiated, adapter_id)
+    )
+    if unknown_product_count:
+        diagnostics.append(
+            _diagnostic("unknown_product_capabilities_ignored", unknown_product_count)
+        )
+    if unsupported_product_count:
+        diagnostics.append(
+            _diagnostic("unsupported_product_capabilities", unsupported_product_count)
+        )
     if len(diagnostics) > MAX_DIAGNOSTICS:
         raise ContractValidationError("too many diagnostics")
 
@@ -595,6 +1062,7 @@ def negotiate_provider_contract(document: object) -> NegotiatedProviderContract:
         observation_capabilities=tuple(observation),
         compatible_mutation_capabilities=tuple(mutation),
         diagnostics=tuple(diagnostics),
+        product_capabilities=product_capabilities,
     )
 
 

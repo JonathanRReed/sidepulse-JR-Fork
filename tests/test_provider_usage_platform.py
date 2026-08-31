@@ -43,6 +43,7 @@ def _snapshot(
     reason: str | None = None,
     action: str | None = None,
     observed: float = 1000.0,
+    source_instance_id: str = "default",
 ) -> ProviderUsageSnapshot:
     return ProviderUsageSnapshot(
         provider_id=provider,
@@ -60,7 +61,13 @@ def _snapshot(
         cache_savings_usd=None,
         credits_remaining=None,
         incident=None,
+        source_instance_id=source_instance_id,
     )
+
+
+def test_snapshot_preserves_source_instance_identity() -> None:
+    result = _snapshot(source_instance_id="personal")
+    assert result.source_instance_id == "personal"
 
 
 def test_registry_has_all_native_providers_and_no_codexbar() -> None:

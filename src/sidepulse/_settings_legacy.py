@@ -9,6 +9,15 @@ from typing import Any
 
 from .battery import DEFAULT_POWER_CHANGE_PREVIEW_SECONDS
 from .colors import ColorSettings
+from .dnd_policy import (
+    DndMode,
+    DndOverride,
+    DndPersistedRefusal,
+    DndSchedule,
+    ParsedDndSettings,
+    parse_dnd_settings,
+    serialize_dnd_settings,
+)
 from .led_status import DEFAULT_CHANNEL_GAIN, normalize_channel_gain
 from .providers import PROVIDER_REGISTRY
 from .signals import (
@@ -24,6 +33,12 @@ from .private_io import (
     read_private_text,
 )
 from .remote_peers import RemotePeerSettings
+from .scenes import (
+    DEFAULT_SCENE,
+    ScenePolicy,
+    effective_policy_for_scene,
+    scene_from_value,
+)
 from .session_actions import SESSION_OPEN_CHOICES
 
 LED_DISPLAY_AGENT = "agent"
@@ -203,6 +218,11 @@ class AgentMonitorSettings:
     led_display: str = LED_DISPLAY_AGENT
     devices: tuple[DeviceDisplaySetting, ...] = ()
     virtual_status_device_enabled: bool = False
+    # Ordinary agent work may prevent automatic system sleep without
+    # asserting display wake. These are separate owner choices so a long
+    # background task does not need to pin the screen on.
+    agent_keep_awake_enabled: bool = True
+    keep_display_awake: bool = False
     closed_lid_awake_policy: str = CLOSED_LID_AWAKE_NEVER
     # How long (minutes) to keep holding the lid-closed awake state after
     # agent activity *looks* like it stopped, before actually letting the
@@ -326,6 +346,24 @@ class AgentMonitorSettings:
     # Access to (see focus_sync.py); silently defaulting this on would
     # look "broken" (no visible effect) for anyone who hasn't done that.
     focus_sync_enabled: bool = False
+    # Scenes are presentation policy only. Calm is the compatibility default:
+    # until a runtime owner consumes this policy, existing display behavior is
+    # unchanged, while every settings document has one valid active scene.
+    active_scene: str = DEFAULT_SCENE.value
+    # Presentation-only DND policy. New installations are inactive. These
+    # remain bounded scalar fields so Settings can preserve unknown peers while
+    # compare-and-set protects one coherent transaction.
+    dnd_schedule_enabled: bool = False
+    dnd_schedule_start_minutes: int = 1320
+    dnd_schedule_end_minutes: int = 420
+    dnd_schedule_mode: str = "dark"
+    dnd_dim_fraction: float = 0.15
+    dnd_override_mode: str | None = None
+    dnd_override_created_epoch: float | None = None
+    dnd_override_until_epoch: float | None = None
+    dnd_focus_mode: str = "pause"
+    # Load-only diagnostics. Refused persisted values are not re-serialized.
+    dnd_persisted_refusals: tuple[DndPersistedRefusal, ...] = ()
     tips_enabled: bool = True
     menu_bar_label_enabled: bool = False
     # The Screen Bar's dim floor as a USER dial. 0 = pitch black: only
@@ -409,6 +447,9 @@ class AgentMonitorSettings:
     # Story #10: timebox preset -> (start Shortcut, end Shortcut). Keys
     # are the preset minutes as strings ("25"); either name may be "".
     timebox_shortcuts: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # Global action identifier -> strict ShortcutChord persistence fields.
+    # Empty is intentional: a new installation does not claim a system chord.
+    global_action_shortcuts: dict[str, dict] = field(default_factory=dict)
     # Sub-agent asks can't be answered (their parent handles them), so
     # by default only MAIN sessions may ring the Ask signal.
     subagent_asks_alert: bool = False
@@ -760,6 +801,12 @@ class AgentMonitorSettings:
     def with_closed_lid_grace_minutes(self, minutes: float) -> AgentMonitorSettings:
         return replace(self, closed_lid_grace_minutes=normalize_closed_lid_grace_minutes(minutes))
 
+    def with_agent_keep_awake_enabled(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, agent_keep_awake_enabled=bool(enabled))
+
+    def with_keep_display_awake(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, keep_display_awake=bool(enabled))
+
     def with_keep_awake_on_battery(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, keep_awake_on_battery=bool(enabled))
 
@@ -1025,6 +1072,96 @@ class AgentMonitorSettings:
 
     def with_focus_sync_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, focus_sync_enabled=bool(enabled))
+
+    def with_active_scene(self, scene: object) -> AgentMonitorSettings:
+        selected = scene_from_value(scene)
+        if selected is None:
+            raise ValueError("invalid scene")
+        return replace(self, active_scene=selected.value)
+
+    def effective_scene_policy(
+        self,
+        accessibility_preferences: object | None = None,
+    ) -> ScenePolicy | None:
+        """Return the active pure policy using a cached accessibility value."""
+        return effective_policy_for_scene(
+            self.active_scene,
+            accessibility_preferences=accessibility_preferences,
+        )
+
+    def dnd_settings(self) -> ParsedDndSettings:
+        parsed = parse_dnd_settings(
+            {
+                "dnd_schedule_enabled": self.dnd_schedule_enabled,
+                "dnd_schedule_start_minutes": self.dnd_schedule_start_minutes,
+                "dnd_schedule_end_minutes": self.dnd_schedule_end_minutes,
+                "dnd_schedule_mode": self.dnd_schedule_mode,
+                "dnd_dim_fraction": self.dnd_dim_fraction,
+                "dnd_override_mode": self.dnd_override_mode,
+                "dnd_override_created_epoch": self.dnd_override_created_epoch,
+                "dnd_override_until_epoch": self.dnd_override_until_epoch,
+                "dnd_focus_mode": self.dnd_focus_mode,
+            }
+        )
+        if parsed.refusals:
+            raise ValueError("invalid DND settings")
+        return replace(parsed, refusals=self.dnd_persisted_refusals)
+
+    def with_dnd_schedule(
+        self,
+        *,
+        enabled: bool,
+        start_minutes: int,
+        end_minutes: int,
+        mode: DndMode,
+    ) -> AgentMonitorSettings:
+        schedule = DndSchedule(enabled, start_minutes, end_minutes, mode)
+        return replace(
+            self,
+            dnd_schedule_enabled=schedule.enabled,
+            dnd_schedule_start_minutes=schedule.start_minutes,
+            dnd_schedule_end_minutes=schedule.end_minutes,
+            dnd_schedule_mode=schedule.mode.value,
+            dnd_persisted_refusals=(),
+        )
+
+    def with_dnd_dim_fraction(self, fraction: float) -> AgentMonitorSettings:
+        parsed = parse_dnd_settings({"dnd_dim_fraction": fraction})
+        if parsed.refusals:
+            raise ValueError("invalid DND dim fraction")
+        return replace(
+            self,
+            dnd_dim_fraction=parsed.dim_fraction,
+            dnd_persisted_refusals=(),
+        )
+
+    def with_dnd_override(self, override: DndOverride | None) -> AgentMonitorSettings:
+        if override is not None and type(override) is not DndOverride:
+            raise ValueError("invalid DND override")
+        return replace(
+            self,
+            dnd_override_mode=(
+                None
+                if override is None
+                else "resume"
+                if override.resume
+                else override.mode.value  # type: ignore[union-attr]
+            ),
+            dnd_override_created_epoch=(
+                None if override is None else override.created_epoch
+            ),
+            dnd_override_until_epoch=(None if override is None else override.until_epoch),
+            dnd_persisted_refusals=(),
+        )
+
+    def with_dnd_focus_mode(self, mode: DndMode) -> AgentMonitorSettings:
+        if type(mode) is not DndMode:
+            raise ValueError("invalid DND Focus mode")
+        return replace(
+            self,
+            dnd_focus_mode=mode.value,
+            dnd_persisted_refusals=(),
+        )
 
     def with_screen_bar_gap_width(self, width: float | None) -> AgentMonitorSettings:
         if width is not None:
@@ -1309,6 +1446,7 @@ class AgentMonitorSettings:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        dnd_payload = serialize_dnd_settings(self.dnd_settings())
         return {
             "settings_schema_version": SETTINGS_SCHEMA_VERSION,
             # quota_runway persists since 2026-08-26 (see the device
@@ -1320,6 +1458,8 @@ class AgentMonitorSettings:
             "screen_bar_gap_width": self.screen_bar_gap_width,
             "screen_bar_wing_length": self.screen_bar_wing_length,
             "screen_bar_bracket_style": self.screen_bar_bracket_style,
+            "agent_keep_awake_enabled": self.agent_keep_awake_enabled,
+            "keep_display_awake": self.keep_display_awake,
             "closed_lid_awake_policy": self.closed_lid_awake_policy,
             "closed_lid_grace_minutes": self.closed_lid_grace_minutes,
             "keep_awake_on_battery": self.keep_awake_on_battery,
@@ -1368,6 +1508,8 @@ class AgentMonitorSettings:
             "idle_dim_after_minutes": self.idle_dim_after_minutes,
             "idle_dim_fraction": self.idle_dim_fraction,
             "focus_sync_enabled": self.focus_sync_enabled,
+            "active_scene": _scene_setting(self.active_scene),
+            **dnd_payload,
             "tips_enabled": self.tips_enabled,
             "menu_bar_label_enabled": self.menu_bar_label_enabled,
             "screen_bar_min_glow": self.screen_bar_min_glow,
@@ -1416,6 +1558,11 @@ class AgentMonitorSettings:
             ],
             "timebox_shortcuts": {
                 key: list(pair) for key, pair in self.timebox_shortcuts.items()
+            },
+            "global_action_shortcuts": {
+                str(key): dict(value)
+                for key, value in sorted(self.global_action_shortcuts.items())
+                if isinstance(key, str) and isinstance(value, dict)
             },
             "subagent_asks_alert": self.subagent_asks_alert,
             "alert_burst": normalize_alert_burst(self.alert_burst),
@@ -1498,6 +1645,11 @@ def _focus_dim_rules(raw: object) -> dict[str, float]:
     return rules
 
 
+def _scene_setting(raw: object) -> str:
+    selected = scene_from_value(raw)
+    return DEFAULT_SCENE.value if selected is None else selected.value
+
+
 def _preserve_corrupt_settings(target: Path) -> None:
     """A parse failure must never silently cost the user their
     calibration profiles, studio library, and colors: returning
@@ -1549,6 +1701,7 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         battery = {}
 
     led_display = _led_display_setting(data.get("led_display"), LED_DISPLAY_AGENT)
+    parsed_dnd = parse_dnd_settings(data)
     return AgentMonitorSettings(
         codex_transcripts_enabled=_bool_setting(transcript.get("codex"), False),
         claude_transcripts_enabled=_bool_setting(transcript.get("claude"), False),
@@ -1567,6 +1720,10 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             if data.get("screen_bar_bracket_style") in BRACKET_STYLE_CHOICES
             else "auto"
         ),
+        agent_keep_awake_enabled=_bool_setting(
+            data.get("agent_keep_awake_enabled"), True
+        ),
+        keep_display_awake=_bool_setting(data.get("keep_display_awake"), False),
         closed_lid_awake_policy=_closed_lid_awake_policy(
             data.get("closed_lid_awake_policy"),
         ),
@@ -1662,6 +1819,29 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
             data.get("idle_dim_fraction"), default=DEFAULT_IDLE_DIM_FRACTION
         ),
         focus_sync_enabled=_bool_setting(data.get("focus_sync_enabled"), False),
+        active_scene=_scene_setting(data.get("active_scene")),
+        dnd_schedule_enabled=parsed_dnd.schedule.enabled,
+        dnd_schedule_start_minutes=parsed_dnd.schedule.start_minutes,
+        dnd_schedule_end_minutes=parsed_dnd.schedule.end_minutes,
+        dnd_schedule_mode=parsed_dnd.schedule.mode.value,
+        dnd_dim_fraction=parsed_dnd.dim_fraction,
+        dnd_override_mode=(
+            None
+            if parsed_dnd.override is None
+            else "resume"
+            if parsed_dnd.override.resume
+            else parsed_dnd.override.mode.value  # type: ignore[union-attr]
+        ),
+        dnd_override_created_epoch=(
+            None
+            if parsed_dnd.override is None
+            else parsed_dnd.override.created_epoch
+        ),
+        dnd_override_until_epoch=(
+            None if parsed_dnd.override is None else parsed_dnd.override.until_epoch
+        ),
+        dnd_focus_mode=parsed_dnd.focus_mode.value,
+        dnd_persisted_refusals=parsed_dnd.refusals,
         tips_enabled=_bool_setting(data.get("tips_enabled"), True),
         menu_bar_label_enabled=_bool_setting(data.get("menu_bar_label_enabled"), False),
         screen_bar_min_glow=_fraction_setting(data.get("screen_bar_min_glow"), 0.25),
@@ -1760,6 +1940,15 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
                 if isinstance(pair, (list, tuple)) and len(pair) == 2
             }
             if isinstance(data.get("timebox_shortcuts"), dict)
+            else {}
+        ),
+        global_action_shortcuts=(
+            {
+                str(key): dict(value)
+                for key, value in data.get("global_action_shortcuts").items()
+                if isinstance(key, str) and isinstance(value, dict)
+            }
+            if isinstance(data.get("global_action_shortcuts"), dict)
             else {}
         ),
         studio_library=tuple(

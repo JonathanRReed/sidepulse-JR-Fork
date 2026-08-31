@@ -30,6 +30,7 @@ from sidepulse.alcove_observation import (
     AlcoveCaptureOutcome,
     AlcoveCaptureRequest,
     AlcoveCaptureStatus,
+    AlcoveConfidenceState,
     AlcoveObservation,
     AlcoveObservationBuffer,
     AlcoveObservationWorker,
@@ -258,9 +259,7 @@ def test_the_worker_reports_the_reason_the_buffer_never_could() -> None:
     try:
         worker.reconcile(_request(requested_at=time.monotonic()))
         assert done.wait(2.0)
-        deadline = time.monotonic() + 2.0
-        while worker.last_status is None and time.monotonic() < deadline:
-            time.sleep(0.005)
+        assert worker.wait_idle(timeout_seconds=2.0)
         assert worker.last_status is AlcoveCaptureStatus.SCREEN_RECORDING_DENIED
         assert buffer.take() is None
     finally:
@@ -279,9 +278,7 @@ def test_a_capture_that_declines_to_say_why_is_a_failure_not_a_silence() -> None
     try:
         worker.reconcile(_request(requested_at=time.monotonic()))
         assert done.wait(2.0)
-        deadline = time.monotonic() + 2.0
-        while worker.last_status is None and time.monotonic() < deadline:
-            time.sleep(0.005)
+        assert worker.wait_idle(timeout_seconds=2.0)
         assert worker.last_status is AlcoveCaptureStatus.CAPTURE_FAILED
     finally:
         worker.close(timeout_seconds=1.0)
@@ -572,9 +569,10 @@ def test_the_worker_reason_reaches_the_log_once_per_transition(monkeypatch) -> N
     class Observer:
         def __init__(self) -> None:
             self.last_status = AlcoveCaptureStatus.IMAGE_UNUSABLE
+            self.last_status_identity = None
 
-        def reconcile(self, _request) -> None:
-            pass
+        def reconcile(self, request) -> None:
+            self.last_status_identity = (request.screen_id, request.window_number, request.generation)
 
         def close(self, *, timeout_seconds: float) -> bool:
             return True
@@ -745,8 +743,8 @@ def test_doctor_reports_the_permission_as_its_own_code(monkeypatch) -> None:
         (AlcoveCaptureStatus.CAPTURED, "HEALTHY"),
         (AlcoveCaptureStatus.SCREEN_RECORDING_DENIED, "NOT_PERMITTED"),
         (AlcoveCaptureStatus.WINDOW_UNAVAILABLE, "NOT_RUNNING"),
-        (AlcoveCaptureStatus.IMAGE_UNUSABLE, "UNUSABLE"),
-        (AlcoveCaptureStatus.CAPTURE_FAILED, "UNAVAILABLE"),
+        (AlcoveCaptureStatus.IMAGE_UNUSABLE, "UNSUPPORTED"),
+        (AlcoveCaptureStatus.CAPTURE_FAILED, "RECOVERING"),
     ],
 )
 def test_every_outcome_has_a_distinct_doctor_code(
@@ -756,6 +754,7 @@ def test_every_outcome_has_a_distinct_doctor_code(
 
     note_alcove_status(status)
     monkeypatch.setattr(doctor, "_alcove_following_enabled", lambda: True)
+    monkeypatch.setattr(doctor, "alcove_follow_blocker", lambda **_kwargs: None)
 
     finding = doctor._alcove_follow_state_probe()
 
@@ -773,7 +772,7 @@ def test_doctor_never_upgrades_no_obvious_blocker_into_success(monkeypatch) -> N
 
     finding = doctor._alcove_follow_state_probe()
 
-    assert finding.code is doctor.DiagnosticCode.UNAVAILABLE
+    assert finding.code is doctor.DiagnosticCode.RECOVERING
 
 
 def test_a_stale_reading_is_not_presented_as_current(monkeypatch) -> None:
@@ -790,7 +789,7 @@ def test_a_stale_reading_is_not_presented_as_current(monkeypatch) -> None:
 
     finding = doctor._alcove_follow_state_probe()
 
-    assert finding.code is not doctor.DiagnosticCode.HEALTHY
+    assert finding.code is doctor.DiagnosticCode.STALE
 
 
 def test_the_alcove_finding_is_in_the_manifest_and_encodes(monkeypatch) -> None:
@@ -811,6 +810,71 @@ def test_the_alcove_finding_is_in_the_manifest_and_encodes(monkeypatch) -> None:
         result.finding(doctor.DiagnosticCheck.ALCOVE_FOLLOW_STATE).code
         is doctor.DiagnosticCode.NOT_PERMITTED
     )
+
+
+@pytest.mark.parametrize(
+    ("state", "code"),
+    [
+        (AlcoveConfidenceState.FRESH, "HEALTHY"),
+        (AlcoveConfidenceState.STALE, "STALE"),
+        (AlcoveConfidenceState.PERMISSION_DENIED, "NOT_PERMITTED"),
+        (AlcoveConfidenceState.DISCONNECTED, "NOT_RUNNING"),
+        (AlcoveConfidenceState.UNSUPPORTED, "UNSUPPORTED"),
+        (AlcoveConfidenceState.NOT_FOLLOWING, "NOT_CONFIGURED"),
+        (AlcoveConfidenceState.RECOVERING, "RECOVERING"),
+    ],
+)
+def test_doctor_maps_every_confidence_state(monkeypatch, state, code) -> None:
+    from sidepulse import doctor
+
+    projection = SimpleNamespace(state=state)
+    monkeypatch.setattr(doctor, "_alcove_following_enabled", lambda: True)
+    monkeypatch.setattr(doctor, "alcove_follow_blocker", lambda **_kwargs: None)
+    monkeypatch.setattr(doctor, "latest_alcove_status", lambda: None)
+    monkeypatch.setattr(doctor, "project_alcove_confidence", lambda **_kwargs: projection)
+
+    finding = doctor._alcove_follow_state_probe()
+
+    assert finding.code is getattr(doctor.DiagnosticCode, code)
+    assert finding.count == int(state is AlcoveConfidenceState.FRESH)
+
+
+def test_doctor_manifest_is_version_four_and_allows_seven_codes() -> None:
+    from sidepulse import doctor
+
+    assert doctor.DOCTOR_VERSION == 4
+    field = next(
+        field
+        for field in doctor.DIAGNOSTIC_MANIFEST.fields
+        if field.check is doctor.DiagnosticCheck.ALCOVE_FOLLOW_STATE
+    )
+    assert set(field.allowed_codes) >= {
+        doctor.DiagnosticCode.HEALTHY,
+        doctor.DiagnosticCode.STALE,
+        doctor.DiagnosticCode.NOT_PERMITTED,
+        doctor.DiagnosticCode.NOT_RUNNING,
+        doctor.DiagnosticCode.UNSUPPORTED,
+        doctor.DiagnosticCode.NOT_CONFIGURED,
+        doctor.DiagnosticCode.RECOVERING,
+    }
+
+
+def test_expired_captured_snapshot_maps_to_stale(monkeypatch) -> None:
+    import sidepulse.alcove_observation as module
+    from sidepulse import doctor
+
+    now = 100.0
+    note_alcove_status(
+        AlcoveCaptureStatus.CAPTURED,
+        now=now - module.ALCOVE_STATUS_MAX_AGE_SECONDS - 1.0,
+    )
+    monkeypatch.setattr(doctor, "_alcove_following_enabled", lambda: True)
+    monkeypatch.setattr(doctor, "alcove_follow_blocker", lambda **_kwargs: None)
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: now)
+
+    finding = doctor._alcove_follow_state_probe()
+
+    assert finding.code is doctor.DiagnosticCode.STALE
 
 
 # --- 7. the Screen Bar pane: the switch may not lie --------------------
@@ -859,11 +923,108 @@ class AlcoveSettingsSurfaceTests(unittest.TestCase):
 
         label, button = self._pane()
 
-        self.assertEqual(label.stringValue(), "Matching Alcove's width.")
+        self.assertEqual(label.stringValue(), "Live. Matching Alcove's width.")
         self.assertTrue(
             button.isHidden(),
             "sending someone to fix a permission that is fine is its own lie",
         )
+
+    def test_every_confidence_state_has_stable_copy_and_accessibility_metadata(self) -> None:
+        cases = (
+            (AlcoveCaptureStatus.CAPTURED, "Live. Matching Alcove's width.", "Fresh", False),
+            (AlcoveCaptureStatus.SCREEN_RECORDING_DENIED, "Screen Recording is off, so JR Bar cannot see Alcove's capsule. The bar keeps its own size until you grant it.", "Permission denied", True),
+            (AlcoveCaptureStatus.WINDOW_UNAVAILABLE, "Disconnected. Alcove is not showing a capsule, so the bar is using its own size.", "Disconnected", False),
+            (AlcoveCaptureStatus.IMAGE_UNUSABLE, "Unsupported shape. The captured capsule could not be measured safely, so the bar is using its own size.", "Unsupported", False),
+            (AlcoveCaptureStatus.CAPTURE_FAILED, "Recovering. Using the Screen Bar's own size until a fresh measurement arrives.", "Recovering", False),
+        )
+        with patch.object(self.settings_window, "alcove_follow_blocker", lambda **_kwargs: None):
+            for status, expected, value, needs_permission in cases:
+                reset_alcove_status()
+                note_alcove_status(status)
+                label, button = self._pane()
+                self.settings_window.refresh_alcove_follow_controls(self.controller)
+                self.assertEqual(label.stringValue(), expected, status.value)
+                self.assertEqual(label.accessibilityLabel(), value, status.value)
+                self.assertTrue(str(label.accessibilityHelp() or "").strip())
+                self.assertEqual(button.isHidden(), not needs_permission, status.value)
+
+            reset_alcove_status()
+            note_alcove_status(
+                AlcoveCaptureStatus.CAPTURED,
+                now=0.0,
+                geometry_age_seconds=3.0,
+                geometry_available=True,
+            )
+            with patch.object(self.settings_window.time, "monotonic", return_value=100.0):
+                label, button = self._pane()
+                self.settings_window.refresh_alcove_follow_controls(self.controller)
+            self.assertEqual(
+                label.stringValue(),
+                "Stale. Using the Screen Bar's own size while JR Bar checks again.",
+            )
+            self.assertEqual(label.accessibilityLabel(), "Stale")
+            self.assertTrue(button.isHidden())
+
+            self.controller.settings = self.controller.settings.with_screen_bar_follow_alcove(False)
+            label, button = self._pane()
+            self.settings_window.refresh_alcove_follow_controls(self.controller)
+            self.assertEqual(label.stringValue(), "Not following Alcove. The bar uses its own size.")
+            self.assertEqual(label.accessibilityLabel(), "Not following")
+            self.assertTrue(button.isHidden())
+
+    def test_held_stale_and_recovering_wing_copy_names_the_held_geometry(self) -> None:
+        from sidepulse import settings_window
+
+        self.controller.settings = self.controller.settings.with_virtual_status_device_wraps_menu_bar(True)
+        with (
+            patch.object(settings_window, "alcove_follow_blocker", lambda **_kwargs: None),
+            patch.object(settings_window.time, "monotonic", return_value=1.0),
+        ):
+            note_alcove_status(
+                AlcoveCaptureStatus.CAPTURED,
+                now=0.0,
+                geometry_age_seconds=3.0,
+                geometry_available=True,
+            )
+            stale = settings_window.alcove_follow_projection(self.controller)
+            self.assertEqual(stale.state.value, "stale")
+            self.assertEqual(
+                settings_window.screen_bar_wing_status_text(
+                    self.controller, projection=stale
+                ),
+                "Holding Alcove's last trusted width. See below.",
+            )
+
+            note_alcove_status(
+                AlcoveCaptureStatus.CAPTURE_FAILED,
+                now=0.0,
+                geometry_age_seconds=0.0,
+                geometry_available=True,
+            )
+            recovering = settings_window.alcove_follow_projection(self.controller)
+            self.assertEqual(recovering.state.value, "recovering")
+            self.assertEqual(
+                settings_window.screen_bar_wing_status_text(
+                    self.controller, projection=recovering
+                ),
+                "Holding Alcove's last trusted width. See below.",
+            )
+
+    def test_wrapped_pane_build_resolves_alcove_once(self) -> None:
+        from sidepulse import settings_window
+
+        self.controller.settings = self.controller.settings.with_virtual_status_device_wraps_menu_bar(True)
+        calls = 0
+        original = settings_window.alcove_follow_projection
+
+        def counted(target):
+            nonlocal calls
+            calls += 1
+            return original(target)
+
+        with patch.object(settings_window, "alcove_follow_projection", counted):
+            settings_window._build_colors_screen_bar_pane(self.controller)
+        self.assertEqual(calls, 1)
 
     def test_alcove_absent_is_distinguished_from_a_denied_permission(self) -> None:
         note_alcove_status(AlcoveCaptureStatus.WINDOW_UNAVAILABLE)
@@ -920,7 +1081,10 @@ class AlcoveSettingsSurfaceTests(unittest.TestCase):
         self.assertEqual(opened, [], "already granted needs no settings pane")
         self.assertIsNone(latest_alcove_status())
         self.assertNotIn("Screen Recording is off", label.stringValue())
-        self.assertEqual(label.stringValue(), "No measurement yet.")
+        self.assertEqual(
+            label.stringValue(),
+            "Recovering. Using the Screen Bar's own size until a fresh measurement arrives.",
+        )
         self.assertTrue(button.isHidden())
 
     def test_a_grant_never_claims_following_works_before_it_has(self) -> None:
@@ -977,7 +1141,7 @@ class AlcoveSettingsSurfaceTests(unittest.TestCase):
         note_alcove_status(AlcoveCaptureStatus.CAPTURED)
         self.settings_window.refresh_alcove_follow_controls(self.controller)
 
-        self.assertEqual(label.stringValue(), "Matching Alcove's width.")
+        self.assertEqual(label.stringValue(), "Live. Matching Alcove's width.")
         self.assertTrue(button.isHidden())
 
     def test_the_dropdown_names_only_the_failure_the_user_can_fix(self) -> None:

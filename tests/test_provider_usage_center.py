@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from sidepulse.provider_feature_settings import (
+    ProviderInstanceVisualPolicy,
+    ProviderInstanceVisualProjection,
+)
 from sidepulse.provider_usage_center import project_usage_center, usage_center_text
 from sidepulse.provider_usage_platform import (
     ProviderSourceState,
@@ -83,3 +87,137 @@ def test_usage_center_names_source_action_and_never_says_no_reading():
     assert center.sections[0].status == "Permission required"
     assert center.sections[0].action_label == "Enable Cursor browser access"
     assert "no reading" not in usage_center_text(center).lower()
+
+
+def test_usage_center_renders_distinct_same_provider_instance_labels():
+    def make(account, instance, remaining):
+        return ProviderUsageSnapshot(
+            provider_id="claude",
+            account_label=account,
+            observed_at=1000,
+            state=ProviderSourceState.READY,
+            reason_code=None,
+            action_label=None,
+            lanes=(UsageLane("claude", "weekly", "Weekly", remaining, 3000, "all", None, None, True, "official"),),
+            input_tokens=0,
+            cached_input_tokens=0,
+            output_tokens=0,
+            model_count=0,
+            estimated_cost_usd=None,
+            cache_savings_usd=None,
+            credits_remaining=None,
+            incident=None,
+            source_instance_id=instance,
+        )
+
+    center = project_usage_center(
+        ProviderUsageState(
+            (make("personal@example.invalid", "personal", 36), make("work@example.invalid", "work", 72)),
+            1000,
+            1100,
+            False,
+        ),
+        now=1000,
+    )
+    assert len(center.sections) == 2
+    assert {section.source_instance_id for section in center.sections} == {"personal", "work"}
+    assert {section.account for section in center.sections} == {
+        "personal@example.invalid",
+        "work@example.invalid",
+    }
+    assert {
+        section.lanes[0].source_instance_id for section in center.sections
+    } == {"personal", "work"}
+
+
+def test_usage_center_uses_exact_profile_label_and_color_override():
+    snapshot = ProviderUsageSnapshot(
+        provider_id="claude",
+        account_label="work@example.invalid",
+        observed_at=1000,
+        state=ProviderSourceState.READY,
+        reason_code=None,
+        action_label=None,
+        lanes=(
+            UsageLane(
+                "claude",
+                "weekly",
+                "Weekly",
+                72,
+                3000,
+                "all",
+                None,
+                None,
+                True,
+                "official",
+            ),
+        ),
+        input_tokens=0,
+        cached_input_tokens=0,
+        output_tokens=0,
+        model_count=0,
+        estimated_cost_usd=None,
+        cache_savings_usd=None,
+        credits_remaining=None,
+        incident=None,
+        source_instance_id="work",
+    )
+    visual = ProviderInstanceVisualProjection(
+        (
+            ProviderInstanceVisualPolicy(
+                provider_id="claude",
+                source_instance_id="work",
+                label="Client Claude",
+                color_override="#112233",
+            ),
+        )
+    )
+
+    section = project_usage_center(
+        ProviderUsageState((snapshot,), 1000, 1100, False),
+        now=1000,
+        visual=visual,
+    ).sections[0]
+
+    assert section.title == "Client Claude"
+    assert section.color_override == "#112233"
+
+
+def test_usage_center_falls_back_when_exact_profile_is_missing():
+    snapshot = ProviderUsageSnapshot(
+        provider_id="claude",
+        account_label=None,
+        observed_at=1000,
+        state=ProviderSourceState.READY,
+        reason_code=None,
+        action_label=None,
+        lanes=(),
+        input_tokens=0,
+        cached_input_tokens=0,
+        output_tokens=0,
+        model_count=0,
+        estimated_cost_usd=None,
+        cache_savings_usd=None,
+        credits_remaining=None,
+        incident=None,
+        source_instance_id="personal",
+    )
+    visual = ProviderInstanceVisualProjection(
+        (
+            ProviderInstanceVisualPolicy(
+                provider_id="claude",
+                source_instance_id="work",
+                label="Client Claude",
+                color_override="#112233",
+            ),
+        )
+    )
+
+    section = project_usage_center(
+        ProviderUsageState((snapshot,), 1000, 1100, False),
+        now=1000,
+        visual=visual,
+    ).sections[0]
+
+    assert section.title == "Claude · personal"
+    assert section.color_override is None

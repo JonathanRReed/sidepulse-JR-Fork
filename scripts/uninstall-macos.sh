@@ -5,6 +5,7 @@ APP_PATH="${SIDEPULSE_APP_PATH:-/Applications/SidePulse.app}"
 APP_BINARY="$APP_PATH/Contents/MacOS/SidePulse"
 CLI_LINK="${SIDEPULSE_CLI_LINK:-/usr/local/bin/sidepulse}"
 RECEIPT_DIR="${SIDEPULSE_RECEIPT_DIR:-/var/db/sidepulse}"
+PACKAGE_ID="io.sidepulse.app"
 PURGE_STATE=0
 REMOVE_APP=1
 TARGET_USER="${SIDEPULSE_USER:-}"
@@ -13,9 +14,9 @@ usage() {
     cat <<'EOF'
 Usage: sudo ./scripts/uninstall-macos.sh [options]
 
-  --user NAME    Remove user-owned SidePulse integrations for NAME.
+  --user NAME    Remove user-owned JR Bar integrations for NAME.
   --keep-app     Keep /Applications/SidePulse.app.
-  --purge-state  Also remove SidePulse settings, logs, and local history.
+  --purge-state  Also remove JR Bar settings, logs, and local history.
 EOF
 }
 
@@ -43,7 +44,7 @@ if [ -z "$TARGET_USER" ]; then
     TARGET_USER="$(/usr/bin/stat -f '%Su' /dev/console)"
 fi
 if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ] || [ "$TARGET_USER" = "loginwindow" ]; then
-    echo "Specify the SidePulse user with --user NAME." >&2
+    echo "Specify the JR Bar user with --user NAME." >&2
     exit 2
 fi
 
@@ -55,7 +56,7 @@ if [ -z "$TARGET_HOME" ] || [ ! -d "$TARGET_HOME" ]; then
 fi
 
 if [ ! -x "$APP_BINARY" ]; then
-    echo "SidePulse application executable is missing: $APP_BINARY" >&2
+    echo "JR Bar application executable is missing: $APP_BINARY" >&2
     exit 2
 fi
 
@@ -88,7 +89,7 @@ run_as_user "$APP_BINARY" sdejectguard uninstall --scope user
 if [ -L "$CLI_LINK" ] && [ "$(/usr/bin/readlink "$CLI_LINK")" = "$APP_BINARY" ]; then
     /bin/rm -f "$CLI_LINK"
 elif [ -e "$CLI_LINK" ] || [ -L "$CLI_LINK" ]; then
-    echo "Left existing $CLI_LINK unchanged because SidePulse does not own it."
+    echo "Left existing $CLI_LINK unchanged because JR Bar does not own it."
 fi
 
 /bin/rm -rf "$RECEIPT_DIR"
@@ -104,4 +105,11 @@ if [ "$REMOVE_APP" -eq 1 ]; then
     /bin/rm -rf "$APP_PATH"
 fi
 
-printf '%s\n' "SidePulse integrations removed for $TARGET_USER."
+# Forget only the exact installer receipt owned by the supported JR Bar PKG.
+# Leaving it behind would make a verified clean reinstall indistinguishable
+# from an upgrade at the package database boundary.
+if /usr/sbin/pkgutil --pkg-info "$PACKAGE_ID" >/dev/null 2>&1; then
+    /usr/sbin/pkgutil --forget "$PACKAGE_ID" >/dev/null
+fi
+
+printf '%s\n' "JR Bar integrations removed for $TARGET_USER."

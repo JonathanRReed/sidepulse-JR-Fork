@@ -31,6 +31,9 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from .product_identity import PRODUCT_DISPLAY_NAME
+from .provider_instances import ProviderInstanceKey
+
 #: Where each provider's OWN tooling keeps its sign-in. These are the
 #: files whose change means "the user just logged in somewhere" -- the
 #: one event that should bypass every backoff gate.
@@ -57,6 +60,7 @@ class RepairOutcome(Enum):
 
     REPAIRED = "repaired"  # a credential changed; a refresh will differ
     ALREADY_HEALTHY = "already_healthy"  # nothing to fix; refresh anyway
+    NEEDS_PROVIDER_REFRESH = "needs_provider_refresh"  # provider owns renewal
     NEEDS_SIGN_IN = "needs_sign_in"  # only the user's own tool can fix it
     BLOCKED = "blocked"  # consent/cooldown stands in the way
     UNAVAILABLE = "unavailable"  # the probe itself failed
@@ -210,7 +214,7 @@ def repair_grok_credential(
                 RepairOutcome.NEEDS_SIGN_IN,
                 f"The grok CLI holds a sign-in{who}, but the server is "
                 "rejecting it (revoked or rotated). Run `grok login` in a "
-                "terminal — SidePulse retries automatically the moment the "
+                f"terminal — {PRODUCT_DISPLAY_NAME} retries automatically the moment the "
                 "CLI saves a fresh sign-in.",
                 changed=cleared,
             )
@@ -225,18 +229,18 @@ def repair_grok_credential(
             "grok",
             RepairOutcome.NEEDS_SIGN_IN,
             "The grok CLI's sign-in has expired. Run `grok login` in a "
-            "terminal — SidePulse picks it up automatically within a minute.",
+            f"terminal — {PRODUCT_DISPLAY_NAME} picks it up automatically within a minute.",
         )
     return RepairResult(
         "grok",
         RepairOutcome.NEEDS_SIGN_IN,
         "No grok CLI sign-in was found. Install the grok CLI and run "
-        "`grok login` — SidePulse reads its sign-in automatically.",
+        f"`grok login` — {PRODUCT_DISPLAY_NAME} reads its sign-in automatically.",
     )
 
 
 # ---------------------------------------------------------------------------
-# Claude: the Keychain read may prompt, so repair is user-initiated only.
+# Claude: Claude Code owns renewal; JR Bar only copies a current access token.
 
 
 def repair_claude_credential(
@@ -244,8 +248,7 @@ def repair_claude_credential(
     *,
     now: float,
     keychain_payload_reader: Callable[[], object],
-    keychain_writer: Callable[[str], bool] | None = None,
-    refresher=None,
+    source_instance_id: str = "default",
 ) -> RepairResult:
     """User-initiated Claude reconnect that cannot claim a false success.
 
@@ -259,7 +262,6 @@ def repair_claude_credential(
     from .claude_quota import (
         credential_from_keychain_payload,
         credential_needs_sign_in,
-        refreshable_credential,
     )
 
     raw = keychain_payload_reader()
@@ -270,52 +272,32 @@ def repair_claude_credential(
             "Claude Code's sign-in was not found in the Keychain.",
         )
     credential = credential_from_keychain_payload(raw)
-    needs_renewal = (
-        credential_needs_sign_in(raw)
-        or credential is None
-        or credential.is_expired(now)
-    )
-    if needs_renewal:
-        # Renew with Claude Code's own public client and write the
-        # ROTATED tokens back so `claude` keeps working, instead of
-        # sending the human to a terminal for something a POST can do.
-        # (CodexBar takes the opposite route -- it delegates CLI-owned
-        # refreshes to `claude` itself and never writes that Keychain
-        # item. See the note in claude_quota.refresh_claude_payload.)
-        if not refreshable_credential(raw):
-            return RepairResult(
-                "claude",
-                RepairOutcome.NEEDS_SIGN_IN,
-                "Claude Code's stored sign-in is empty — run `claude` in a "
-                "terminal and sign in, then click Reconnect Claude.",
-            )
-        renewed = _renew_claude_from_payload(
-            raw,
-            credential_store,
-            now=now,
-            keychain_writer=keychain_writer,
-            refresher=refresher,
-        )
-        if renewed is not None:
-            return renewed
-        from .claude_quota import refresh_token_expired
-
-        if refresh_token_expired(raw, now):
-            return RepairResult(
-                "claude",
-                RepairOutcome.NEEDS_SIGN_IN,
-                "Claude Code's sign-in has fully expired — run `claude` in "
-                "a terminal and sign in, then click Reconnect Claude.",
-            )
+    if credential_needs_sign_in(raw) or (
+        credential is not None and credential.is_expired(now)
+    ):
         return RepairResult(
             "claude",
-            RepairOutcome.UNAVAILABLE,
-            "Claude's sign-in could not be renewed just now — the last "
-            "known numbers stand and it retries on its own.",
+            RepairOutcome.NEEDS_PROVIDER_REFRESH,
+            "Claude Code owns this sign-in. Run `claude` once so Claude Code "
+            "can mint a current access token, then click Reconnect Claude. "
+            "JR Bar never consumes the refresh token or changes Claude "
+            "Code's Keychain item.",
+        )
+    if credential is None:
+        return RepairResult(
+            "claude",
+            RepairOutcome.NEEDS_SIGN_IN,
+            "Claude Code's stored sign-in is empty or unreadable. Run "
+            "`claude` and sign in there, then click Reconnect Claude.",
         )
     stored = None
+    instance_key = None
     try:
-        read = credential_store.get("claude", "oauth-token")
+        if source_instance_id == "default":
+            read = credential_store.get("claude", "oauth-token")
+        else:
+            instance_key = ProviderInstanceKey("claude", source_instance_id)
+            read = credential_store.get_for_instance(instance_key, "oauth-token")
         stored = read.secret if getattr(read, "available", False) else None
     except Exception:
         stored = None
@@ -326,8 +308,19 @@ def repair_claude_credential(
             "Claude usage was already connected with a current sign-in — "
             "refreshing now.",
         )
-    credential_store.set("claude", "oauth-token", credential.access_token)
-    _remember_claude_expiry(credential_store, credential.expires_at)
+    if instance_key is None:
+        credential_store.set("claude", "oauth-token", credential.access_token)
+    else:
+        credential_store.set_for_instance(
+            instance_key,
+            "oauth-token",
+            credential.access_token,
+        )
+    _remember_claude_expiry(
+        credential_store,
+        credential.expires_at,
+        source_instance_id=source_instance_id,
+    )
     return RepairResult(
         "claude",
         RepairOutcome.REPAIRED,
@@ -336,75 +329,12 @@ def repair_claude_credential(
     )
 
 
-#: Renewal attempt spacing. The token endpoint rate-limits hard, and a
-#: renewal that retries every collect cycle turns one expired token into
-#: a 429 wall (observed 2026-08-27). Doubling from 1 minute to an hour.
-CLAUDE_RENEWAL_BACKOFF_SECONDS: tuple[float, ...] = (60.0, 300.0, 900.0, 3600.0)
-
-#: {"attempts": int, "next_at": float}. PERSISTED: a relaunch that
-#: forgot the ladder walked straight back into a rate-limited token
-#: endpoint, which is how a 429 becomes a Cloudflare 1010 ban.
-_CLAUDE_RENEWAL_STATE: dict[str, float] = {"attempts": 0.0, "next_at": 0.0}
-_RENEWAL_STATE_LOADED = False
-
-
-def _renewal_state_path() -> Path:
-    from .providers import default_state_dir
-
-    return default_state_dir() / "claude-refresh-gate.json"
-
-
-def _load_renewal_state() -> None:
-    global _RENEWAL_STATE_LOADED
-    if _RENEWAL_STATE_LOADED:
-        return
-    _RENEWAL_STATE_LOADED = True
-    try:
-        from .private_io import read_private_text
-
-        document = json.loads(read_private_text(_renewal_state_path(), max_bytes=64 * 1024))
-        renewal = document.get("renewal") if isinstance(document, dict) else None
-        if isinstance(renewal, dict):
-            _CLAUDE_RENEWAL_STATE["attempts"] = float(renewal.get("attempts", 0.0))
-            _CLAUDE_RENEWAL_STATE["next_at"] = float(renewal.get("next_at", 0.0))
-    except (OSError, TypeError, ValueError):
-        return
-
-
-def _save_renewal_state() -> None:
-    try:
-        from .private_io import atomic_private_write
-
-        atomic_private_write(
-            _renewal_state_path(),
-            json.dumps({"renewal": dict(_CLAUDE_RENEWAL_STATE)}, separators=(",", ":")),
-        )
-    except OSError:
-        pass
-
-
-def claude_renewal_allowed(now: float) -> bool:
-    _load_renewal_state()
-    return now >= _CLAUDE_RENEWAL_STATE["next_at"]
-
-
-def note_claude_renewal(*, now: float, succeeded: bool) -> None:
-    _load_renewal_state()
-    if succeeded:
-        _CLAUDE_RENEWAL_STATE["attempts"] = 0.0
-        _CLAUDE_RENEWAL_STATE["next_at"] = 0.0
-        _save_renewal_state()
-        return
-    attempts = int(_CLAUDE_RENEWAL_STATE["attempts"])
-    delay = CLAUDE_RENEWAL_BACKOFF_SECONDS[
-        min(attempts, len(CLAUDE_RENEWAL_BACKOFF_SECONDS) - 1)
-    ]
-    _CLAUDE_RENEWAL_STATE["attempts"] = float(attempts + 1)
-    _CLAUDE_RENEWAL_STATE["next_at"] = now + delay
-    _save_renewal_state()
-
-
-def _remember_claude_expiry(credential_store, expires_at: float | None) -> None:
+def _remember_claude_expiry(
+    credential_store,
+    expires_at: float | None,
+    *,
+    source_instance_id: str = "default",
+) -> None:
     """Persist the access token's lifetime beside the token itself.
 
     Without it the collector cannot know the token is stale and only
@@ -415,22 +345,41 @@ def _remember_claude_expiry(credential_store, expires_at: float | None) -> None:
     if expires_at is None:
         return
     try:
-        credential_store.set(
-            "claude", "oauth-expires-at", str(int(float(expires_at)))
-        )
+        if source_instance_id == "default":
+            credential_store.set(
+                "claude", "oauth-expires-at", str(int(float(expires_at)))
+            )
+        else:
+            credential_store.set_for_instance(
+                ProviderInstanceKey("claude", source_instance_id),
+                "oauth-expires-at",
+                str(int(float(expires_at))),
+            )
     except Exception:
         pass
 
 
-def claude_token_is_stale(credential_store, *, now: float, margin: float = 300.0) -> bool:
+def claude_token_is_stale(
+    credential_store,
+    *,
+    now: float,
+    margin: float = 300.0,
+    source_instance_id: str = "default",
+) -> bool:
     """True when the stored Claude token is expired or nearly so.
 
-    A missing or unreadable stamp counts as stale: better one extra
-    renewal than a guaranteed 401 (CodexBar treats an absent expiresAt
-    the same way in loadRecordWithAutoRefresh).
+    A missing or unreadable stamp counts as stale so the collector may
+    re-read Claude Code's item under an existing standing grant. It does
+    not authorize JR Bar to renew or mutate that external credential.
     """
     try:
-        read = credential_store.get("claude", "oauth-expires-at")
+        if source_instance_id == "default":
+            read = credential_store.get("claude", "oauth-expires-at")
+        else:
+            read = credential_store.get_for_instance(
+                ProviderInstanceKey("claude", source_instance_id),
+                "oauth-expires-at",
+            )
         raw = read.secret if getattr(read, "available", False) else None
         if raw is None:
             return True
@@ -439,97 +388,22 @@ def claude_token_is_stale(credential_store, *, now: float, margin: float = 300.0
         return True
 
 
-def _default_claude_keychain_writer(payload: str) -> bool:
-    from .credentials import CLAUDE_CODE_KEYCHAIN, write_keychain_secret
-
-    return write_keychain_secret(CLAUDE_CODE_KEYCHAIN, payload)
-
-
-def _renew_claude_from_payload(
-    raw: str,
-    credential_store,
-    *,
-    now: float,
-    keychain_writer: Callable[[str], bool] | None,
-    refresher,
-) -> RepairResult | None:
-    """One refresh attempt; None means the caller should fall back.
-
-    Write-back happens BEFORE our own store is updated: if the Keychain
-    write fails we abort with the fallback message rather than hold
-    rotated tokens Claude Code will never see (that is the failure mode
-    the old code's docstring feared -- a status readout that costs the
-    user their actual tooling).
-    """
-    from .claude_quota import (
-        CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN,
-        ClaudeQuotaUnavailableError,
-        refresh_claude_payload,
-    )
-
-    refresh = refresher or refresh_claude_payload
-    try:
-        new_payload, credential = refresh(raw, now=now)
-    except ClaudeQuotaUnavailableError as error:
-        note_claude_renewal(now=now, succeeded=False)
-        if str(error) == CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN:
-            return None
-        # Rate limited, offline, server trouble: the sign-in is fine and
-        # the last-known numbers stay on screen. Saying "sign in again"
-        # here sent the owner to a terminal for a 429 (2026-08-27).
-        return RepairResult(
-            "claude",
-            RepairOutcome.UNAVAILABLE,
-            "Claude's sign-in renewal was rate limited or unreachable — "
-            "the last known numbers stand and it retries on its own.",
-        )
-    # The refresh CONSUMED the old refresh token the moment it
-    # succeeded -- from here the only honest move is forward. Write the
-    # rotated tokens back for Claude Code first; if that write fails,
-    # still keep our access token (it works until expiry) and say
-    # plainly that `claude` may need a fresh sign-in.
-    note_claude_renewal(now=now, succeeded=True)
-    writer = keychain_writer or _default_claude_keychain_writer
-    wrote_back = writer(new_payload)
-    try:
-        credential_store.set("claude", "oauth-token", credential.access_token)
-        _remember_claude_expiry(credential_store, credential.expires_at)
-    except Exception:
-        return None
-    if wrote_back:
-        return RepairResult(
-            "claude",
-            RepairOutcome.REPAIRED,
-            "Claude Code's sign-in was renewed (rotated tokens written "
-            "back) — refreshing now.",
-            changed=True,
-        )
-    return RepairResult(
-        "claude",
-        RepairOutcome.REPAIRED,
-        "Claude usage was renewed, but writing the rotated sign-in back "
-        "to the Keychain failed — if `claude` logs out, sign in again "
-        "there.",
-        changed=True,
-    )
-
-
-def renew_claude_credential_in_background(
+def sync_claude_credential_in_background(
     credential_store,
     *,
     home: Path,
     now: float,
+    source_instance_id: str = "default",
 ) -> bool:
-    """Silent Claude renewal for the collect loop, grok-repair style.
+    """Copy a current Claude access token under an existing grant.
 
     Reads the Keychain WITHOUT prompt allowance -- the read only runs
     when a prior consented read recorded a standing grant, so no dialog
-    can surprise the user from a background thread. True means the
-    credential changed and a fresh collect is worth it right now.
+    can surprise the user from a background thread. It never consumes a
+    refresh token and never mutates Claude Code's Keychain item. True
+    means JR Bar's own stored access token changed.
     """
     del home  # signature symmetry with the other background repairs
-    if not claude_renewal_allowed(now):
-        return False
     try:
         from .credentials import (
             CLAUDE_CODE_KEYCHAIN,
@@ -551,6 +425,7 @@ def renew_claude_credential_in_background(
             credential_store,
             now=now,
             keychain_payload_reader=lambda: result.secret,
+            source_instance_id=source_instance_id,
         )
         return bool(repair.changed)
     except Exception:
@@ -649,7 +524,7 @@ def codex_activity_report(home: Path, now: float) -> str:
     return (
         f"The newest completed Codex session is {when} old, so the usage "
         "shown is that old too. Run one Codex prompt to completion — a "
-        "reply must finish, not just open — and SidePulse rescans within "
+        f"reply must finish, not just open — and {PRODUCT_DISPLAY_NAME} rescans within "
         "two minutes."
     )
 
@@ -671,26 +546,6 @@ class FailureGate:
     #: matching, the user signed in and the gate lifts immediately.
     terminal_fingerprint: tuple | None = None
     terminal: bool = False
-    #: SHA-256 of the refresh token that failed. Never the token itself.
-    #: A different lineage means the user signed in again, so the block
-    #: is about a credential that no longer exists.
-    terminal_token_hash: str | None = None
-
-
-def refresh_token_lineage(raw: object) -> str | None:
-    """A stable, non-reversible id for the refresh token in a payload."""
-    import hashlib
-
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    try:
-        oauth = json.loads(raw).get("claudeAiOauth")
-    except (AttributeError, ValueError):
-        return None
-    token = oauth.get("refreshToken") if isinstance(oauth, dict) else None
-    if not isinstance(token, str) or not token.strip():
-        return None
-    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
 
 
 def note_failure(
@@ -699,7 +554,6 @@ def note_failure(
     now: float,
     terminal: bool,
     fingerprint: tuple | None,
-    token_hash: str | None = None,
 ) -> FailureGate:
     if terminal:
         # An auth failure retries only when the credential source
@@ -710,7 +564,6 @@ def note_failure(
             strikes=gate.strikes,
             terminal_fingerprint=fingerprint,
             terminal=True,
-            terminal_token_hash=token_hash or gate.terminal_token_hash,
         )
     strikes = min(gate.strikes + 1, len(TRANSIENT_BACKOFF_SECONDS))
     return FailureGate(
@@ -725,7 +578,6 @@ def should_collect(
     now: float,
     fingerprint: tuple | None,
     forced: bool,
-    token_hash: str | None = None,
 ) -> bool:
     """May this provider's collector run right now?
 
@@ -735,14 +587,8 @@ def should_collect(
     """
     if forced:
         return True
-    if gate.terminal and token_hash is not None and (
-        token_hash != gate.terminal_token_hash
-    ):
-        # A different refresh-token lineage: whatever we were blocked on
-        # is gone, so the block is meaningless.
-        return True
-    if gate.terminal and fingerprint != gate.terminal_fingerprint:
-        return True
+    if gate.terminal:
+        return fingerprint != gate.terminal_fingerprint
     return now >= gate.retry_at
 
 

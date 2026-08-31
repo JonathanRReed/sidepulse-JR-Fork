@@ -5,6 +5,7 @@ struct KeychainStore {
     enum Key: String {
         case pushToken = "apns-device-token"
         case sharedSecret = "proxy-shared-secret"
+        case phoneGlanceSecret = "phone-glance-secret"
     }
 
     static let shared = KeychainStore()
@@ -12,16 +13,32 @@ struct KeychainStore {
     private let service = "com.inteliwear.SidePulse.credentials"
 
     func string(for key: Key) -> String? {
+        guard case .value(let value) = readString(for: key) else {
+            return nil
+        }
+        return value
+    }
+
+    func readString(for key: Key) -> PhoneGlanceSecretReadResult {
         var query = baseQuery(for: key)
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         query[kSecReturnData as String] = true
 
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else {
-            return nil
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        return Self.classifyRead(status: status, data: result as? Data)
+    }
+
+    static func classifyRead(status: OSStatus, data: Data?) -> PhoneGlanceSecretReadResult {
+        if status == errSecItemNotFound {
+            return .missing
         }
-        return String(data: data, encoding: .utf8)
+        guard status == errSecSuccess,
+              let data,
+              let value = String(data: data, encoding: .utf8) else {
+            return .unavailable
+        }
+        return .value(value)
     }
 
     @discardableResult

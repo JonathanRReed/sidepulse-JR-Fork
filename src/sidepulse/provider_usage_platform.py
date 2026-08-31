@@ -8,9 +8,13 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Final
 
+from .provider_instances import ProviderInstanceError, ProviderInstanceKey
+
 _PROVIDER_ID = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
 _LANE_ID = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
+_SOURCE_INSTANCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~:-]{0,63}\Z")
 _MAX_LANES: Final = 64
+DEFAULT_SOURCE_INSTANCE_ID: Final = "default"
 
 
 class ProviderSourceState(str, Enum):
@@ -216,15 +220,25 @@ class ProviderUsageSnapshot:
     cache_savings_usd: float | None
     credits_remaining: float | None
     incident: str | None
+    source_instance_id: str = DEFAULT_SOURCE_INSTANCE_ID
 
     def __post_init__(self) -> None:
         provider_descriptor(self.provider_id)
+        try:
+            instance_key = ProviderInstanceKey(
+                self.provider_id,
+                self.source_instance_id,
+            )
+        except ProviderInstanceError as exc:
+            raise ValueError("invalid provider usage snapshot instance") from exc
         if (
             isinstance(self.observed_at, bool)
             or not isinstance(self.observed_at, (int, float))
             or not math.isfinite(float(self.observed_at))
             or float(self.observed_at) < 0.0
             or type(self.state) is not ProviderSourceState
+            or not isinstance(self.source_instance_id, str)
+            or _SOURCE_INSTANCE_ID.fullmatch(self.source_instance_id) is None
             or type(self.lanes) is not tuple
             or len(self.lanes) > _MAX_LANES
             or not all(
@@ -266,6 +280,16 @@ class ProviderUsageSnapshot:
         ):
             raise ValueError("invalid provider reason code")
         object.__setattr__(self, "observed_at", float(self.observed_at))
+        object.__setattr__(
+            self,
+            "source_instance_id",
+            instance_key.source_instance_id.value,
+        )
+
+    @property
+    def identity(self) -> tuple[str, str]:
+        """The exact non-display key for this provider usage snapshot."""
+        return self.provider_id, self.source_instance_id
 
 
 def _model_from_lane(lane_id: str, label: str) -> str | None:
@@ -355,6 +379,13 @@ def most_constrained_lane(snapshot: ProviderUsageSnapshot) -> UsageLane | None:
     return min(eligible, key=lambda lane: lane.remaining_percent) if eligible else None
 
 
+def provider_usage_identity(snapshot: ProviderUsageSnapshot) -> tuple[str, str]:
+    """Return the composite identity used by stores, sync, and projections."""
+    if type(snapshot) is not ProviderUsageSnapshot:
+        raise ValueError("invalid provider usage snapshot")
+    return snapshot.identity
+
+
 def provider_status_line(snapshot: ProviderUsageSnapshot) -> str:
     label = provider_descriptor(snapshot.provider_id).label
     state_text = {
@@ -379,6 +410,7 @@ def provider_status_line(snapshot: ProviderUsageSnapshot) -> str:
 
 
 __all__ = [
+    "DEFAULT_SOURCE_INSTANCE_ID",
     "ProviderDescriptor",
     "ProviderSourceState",
     "ProviderUsageSnapshot",
@@ -388,5 +420,6 @@ __all__ = [
     "provider_descriptor",
     "provider_descriptors",
     "provider_status_line",
+    "provider_usage_identity",
     "select_authoritative_snapshot",
 ]

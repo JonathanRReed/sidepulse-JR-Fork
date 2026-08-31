@@ -9,6 +9,7 @@ import pytest
 @pytest.mark.parametrize(
     "module",
     (
+        "sidepulse.hook_client",
         "sidepulse.hook_entry",
         "sidepulse_cli.hook_entry",
         "agent_monitor.hook_entry",

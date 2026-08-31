@@ -67,6 +67,8 @@ def validate_dependency_policy(root: Path) -> tuple[str, ...]:
     pyproject_path = root / "pyproject.toml"
     constraints_path = root / "requirements" / "release-constraints.txt"
     document = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    project = document.get("project") or {}
+    optional = project.get("optional-dependencies") or {}
     requirements = _requirements(document)
     for requirement in requirements:
         if not _EXACT_REQUIREMENT.fullmatch(requirement):
@@ -90,6 +92,20 @@ def validate_dependency_policy(root: Path) -> tuple[str, ...]:
         name = _name(requirement)
         if name not in constrained_names and name not in {"tomli"}:
             failures.append(f"direct requirement is absent from constraints: {name}")
+
+    build_requirements = {
+        _name(str(requirement))
+        for requirement in (document.get("build-system") or {}).get("requires", ())
+    }
+    dev_requirements = {
+        _name(str(requirement)) for requirement in optional.get("dev", ())
+    }
+    missing_no_isolation = sorted(build_requirements - dev_requirements)
+    if missing_no_isolation:
+        failures.append(
+            "build requirements missing from dev extra for --no-isolation: "
+            + ", ".join(missing_no_isolation)
+        )
 
     bootstrap = (root / "scripts" / "bootstrap-dev.sh").read_text(encoding="utf-8")
     package_build = (root / "packaging" / "build_macos_pkg.sh").read_text(

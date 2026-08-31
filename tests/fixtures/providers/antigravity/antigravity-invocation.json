@@ -1,0 +1,9 @@
+{
+  "provider": "antigravity",
+  "fixtureType": "hook-event",
+  "fixtureVersion": 1,
+  "payload": {
+    "event": "PreInvocation",
+    "session_id": "synthetic-antigravity-session"
+  }
+}

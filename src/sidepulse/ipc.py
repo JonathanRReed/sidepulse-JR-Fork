@@ -17,7 +17,7 @@ from pathlib import Path
 from .capacity_types import SourceKey
 from .private_io import ensure_private_directory
 from .provider_facts import EventToken
-from .providers import default_state_dir
+from .providers import candidate_state_dirs, default_state_dir
 
 MAX_HINT_BYTES = 512
 MAX_EVENT_BYTES = MAX_HINT_BYTES
@@ -447,6 +447,16 @@ def default_event_socket_path() -> Path:
     return default_state_dir() / "events.sock"
 
 
+def candidate_event_socket_paths() -> tuple[Path, ...]:
+    return tuple(state_dir / "events.sock" for state_dir in candidate_state_dirs())
+
+
+def _event_socket_targets(socket_path: Path | None) -> tuple[Path, ...]:
+    if socket_path is not None:
+        return (Path(socket_path).expanduser(),)
+    return candidate_event_socket_paths()
+
+
 def default_latest_state_path() -> Path:
     return default_state_dir() / "latest.json"
 
@@ -552,18 +562,23 @@ def send_refresh_hint(
     is what leaves the ledger insisting everything has stopped -- so both are
     always worth the attempt even when the app is wedged.
     """
-    now = time.monotonic()
-    if not HOOK_SEND_BREAKER.should_attempt(event_name, now, socket_path):
-        return False
-    delivered = _send_refresh_hint_once(
-        hint, socket_path=socket_path, timeout=timeout
-    )
-    HOOK_SEND_BREAKER.record(
-        delivered=delivered,
-        now=now,
-        socket_path=socket_path,
-    )
-    return delivered
+    for target in _event_socket_targets(socket_path):
+        now = time.monotonic()
+        if not HOOK_SEND_BREAKER.should_attempt(event_name, now, target):
+            continue
+        delivered = _send_refresh_hint_once(
+            hint,
+            socket_path=target,
+            timeout=timeout,
+        )
+        HOOK_SEND_BREAKER.record(
+            delivered=delivered,
+            now=now,
+            socket_path=target,
+        )
+        if delivered:
+            return True
+    return False
 
 
 def _send_refresh_hint_once(
@@ -619,33 +634,28 @@ def send_hook_event(
     ).encode("utf-8")
     if len(payload) > MAX_EVENT_BYTES:
         return False
-    target = (socket_path or default_event_socket_path()).expanduser()
-    try:
-        guard, expected = _open_existing_socket_path(target)
-    except OSError:
-        return False
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(timeout)
-    try:
-        client.connect(str(target))
-        guard.assert_socket_identity(expected)
-        if not _same_uid_peer(client):
-            return False
-        client.sendall(payload)
+    for target in _event_socket_targets(socket_path):
         try:
+            guard, expected = _open_existing_socket_path(target)
+        except OSError:
+            continue
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(timeout)
+        try:
+            client.connect(str(target))
+            guard.assert_socket_identity(expected)
+            if not _same_uid_peer(client):
+                continue
+            client.sendall(payload)
             client.shutdown(socket.SHUT_WR)
-        except OSError:
-            return False
-        try:
             ack = client.recv(len(_RAW_EVENT_ACK))
+            return ack == _RAW_EVENT_ACK
         except OSError:
-            return False
-        return ack == _RAW_EVENT_ACK
-    except OSError:
-        return False
-    finally:
-        client.close()
-        guard.close()
+            continue
+        finally:
+            client.close()
+            guard.close()
+    return False
 
 
 def another_instance_alive(socket_path: Path | None = None, timeout: float = 0.3) -> bool:
@@ -655,22 +665,24 @@ def another_instance_alive(socket_path: Path | None = None, timeout: float = 0.3
     before. This is the single-instance probe: a second SidePulse used
     to steal the socket, and quitting it unlinked the path and
     permanently deafened the survivor."""
-    target = (socket_path or default_event_socket_path()).expanduser()
-    try:
-        guard, expected = _open_existing_socket_path(target)
-    except OSError:
-        return False
-    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    probe.settimeout(timeout)
-    try:
-        probe.connect(str(target))
-        guard.assert_socket_identity(expected)
-        return _same_uid_peer(probe)
-    except OSError:
-        return False
-    finally:
-        probe.close()
-        guard.close()
+    for target in _event_socket_targets(socket_path):
+        try:
+            guard, expected = _open_existing_socket_path(target)
+        except OSError:
+            continue
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(timeout)
+        try:
+            probe.connect(str(target))
+            guard.assert_socket_identity(expected)
+            if _same_uid_peer(probe):
+                return True
+        except OSError:
+            continue
+        finally:
+            probe.close()
+            guard.close()
+    return False
 
 
 class HookEventServer:

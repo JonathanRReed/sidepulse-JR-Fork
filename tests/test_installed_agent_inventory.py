@@ -618,9 +618,7 @@ def test_one_hundred_inventory_refreshes_keep_the_worker_to_one_running_and_one_
     assert snapshot.submitted == 100
     assert snapshot.replaced_pending == 98
     release.set()
-    deadline = time.monotonic() + 2.0
-    while worker.snapshot().completed < 2:
-        assert time.monotonic() < deadline
-        time.sleep(0.001)
+    assert worker.wait_idle(timeout_seconds=2.0)
+    assert worker.snapshot().completed >= 2
     assert results == []
     assert worker.close(timeout_seconds=1.0)

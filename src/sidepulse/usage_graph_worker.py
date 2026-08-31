@@ -13,6 +13,9 @@ project, land on the main thread, done.
 from __future__ import annotations
 
 import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -30,10 +33,42 @@ _LAST_BUILD_ATTR = "_usage_graph_last_build"
 _MODEL_REUSE_SECONDS = 60.0
 
 
+@dataclass(frozen=True, slots=True)
+class _UsageGraphSettingsSnapshot:
+    usage_graph_days: int
+    usage_display_mode: str
+    usage_graph_providers: tuple[str, ...]
+
+
+def _settings_snapshot(settings) -> _UsageGraphSettingsSnapshot:
+    if isinstance(settings, _UsageGraphSettingsSnapshot):
+        return settings
+    return _UsageGraphSettingsSnapshot(
+        usage_graph_days=int(getattr(settings, "usage_graph_days", 7) or 7),
+        usage_display_mode=str(
+            getattr(settings, "usage_display_mode", "tokens") or "tokens"
+        ),
+        usage_graph_providers=tuple(
+            getattr(settings, "usage_graph_providers", ()) or ()
+        ),
+    )
+
+
+def _period_start(days: int, *, now: datetime | None = None) -> datetime:
+    moment = datetime.now() if now is None else now
+    return (moment - timedelta(days=int(days) - 1)).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+
 def _build_payload(settings) -> tuple[dict, str | None]:
     """(chart model, scan summary line) for the CURRENT metric."""
-    days = int(getattr(settings, "usage_graph_days", 7) or 7)
-    mode = str(getattr(settings, "usage_display_mode", "tokens") or "tokens")
+    settings = _settings_snapshot(settings)
+    days = settings.usage_graph_days
+    mode = settings.usage_display_mode
     if mode == "percent":
         return (
             usage_percent_history.shared_percent_graph_model(
@@ -42,9 +77,7 @@ def _build_payload(settings) -> tuple[dict, str | None]:
             ),
             None,
         )
-    period_start = (datetime.now() - timedelta(days=days - 1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    period_start = _period_start(days)
     totals = usage_stats.scan_usage(
         Path.home() / ".claude" / "projects",
         default_state_dir() / "usage-scan-cache.json",
@@ -104,15 +137,16 @@ def _build_payload(settings) -> tuple[dict, str | None]:
 
 def build_usage_graph_model(settings) -> dict:
     """The chart model for the CURRENT metric, straight from the sources."""
-    return _build_payload(settings)[0]
+    return _build_payload(_settings_snapshot(settings))[0]
 
 
 def scanning_placeholder(settings) -> dict:
-    days = int(getattr(settings, "usage_graph_days", 7) or 7)
+    settings = _settings_snapshot(settings)
+    days = settings.usage_graph_days
     return {
         "days": days,
         "period_label": usage_stats.usage_period_label(days),
-        "metric": str(getattr(settings, "usage_display_mode", "tokens")),
+        "metric": settings.usage_display_mode,
         "labels": (),
         "series": (),
         "scale_max": 1.0,
@@ -121,10 +155,11 @@ def scanning_placeholder(settings) -> dict:
 
 
 def _build_key(settings) -> tuple:
+    settings = _settings_snapshot(settings)
     return (
-        int(getattr(settings, "usage_graph_days", 7) or 7),
-        str(getattr(settings, "usage_display_mode", "tokens") or "tokens"),
-        tuple(getattr(settings, "usage_graph_providers", ()) or ()),
+        settings.usage_graph_days,
+        settings.usage_display_mode,
+        settings.usage_graph_providers,
     )
 
 
@@ -141,13 +176,16 @@ def _drop_to_utility_qos() -> None:
         pass
 
 
-def refresh_usage_graph(target) -> None:
+def refresh_usage_graph(
+    target,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
     """Fire-and-forget rebuild; lands on main via AppHelper.callAfter."""
-    import time as _time
-
     fields = getattr(target, "settings_fields", {}) or {}
     graph = fields.get("profile_usage_graph")
-    key = _build_key(target.settings)
+    settings = _settings_snapshot(target.settings)
+    key = _build_key(settings)
 
     # Same inputs, recent result: serve the landed model without paying
     # the scan again (a pane switch rebuilds the view but not the data).
@@ -157,7 +195,7 @@ def refresh_usage_graph(target) -> None:
         model is not None
         and last is not None
         and last[0] == key
-        and _time.monotonic() - last[1] < _MODEL_REUSE_SECONDS
+        and monotonic() - last[1] < _MODEL_REUSE_SECONDS
     ):
         if graph is not None:
             try:
@@ -177,7 +215,7 @@ def refresh_usage_graph(target) -> None:
         or model.get("metric") != key[1]
     ):
         try:
-            graph.setModel_(scanning_placeholder(target.settings))
+            graph.setModel_(scanning_placeholder(settings))
         except Exception:
             pass
 
@@ -193,13 +231,12 @@ def refresh_usage_graph(target) -> None:
         _drop_to_utility_qos()
         model = None
         summary = None
-        # The key of what was ACTUALLY built: the scan reads live
-        # settings, so a range change that lands before the thread runs
-        # is already honored here -- and memoizing the requested key
-        # instead would force a pointless identical rescan right after.
-        built_key = _build_key(target.settings)
+        # Build from the same immutable scalar snapshot used for admission.
+        # A settings update during the scan marks a pending refresh, which
+        # captures a new snapshot after this one lands.
+        built_key = key
         try:
-            model, summary = _build_payload(target.settings)
+            model, summary = _build_payload(settings)
         except Exception:
             model = None
         finally:
@@ -210,7 +247,7 @@ def refresh_usage_graph(target) -> None:
                 if model is not None:
                     target.usage_graph_model = model
                     target._usage_local_scan_complete = True
-                    setattr(target, _LAST_BUILD_ATTR, (built_key, _time.monotonic()))
+                    setattr(target, _LAST_BUILD_ATTR, (built_key, monotonic()))
                     fields = getattr(target, "settings_fields", {}) or {}
                     view = fields.get("profile_usage_graph")
                     if view is not None:
@@ -229,7 +266,7 @@ def refresh_usage_graph(target) -> None:
                             except Exception:
                                 pass
                 if pending:
-                    refresh_usage_graph(target)
+                    refresh_usage_graph(target, monotonic=monotonic)
 
             try:
                 # AppHelper.callAfter is the PyObjC-blessed main-thread

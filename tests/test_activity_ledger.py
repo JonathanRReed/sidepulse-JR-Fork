@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -162,7 +163,11 @@ def _activity_item(menu):
     for index in range(menu.numberOfItems()):
         item = menu.itemAtIndex_(index)
         title = item.title()
-        if title.startswith("Since you left") or title == "Recent activity":
+        if (
+            title.startswith("Since you left")
+            or title.startswith("Since you were away")
+            or title == "Recent activity"
+        ):
             return item
     return None
 
@@ -746,6 +751,24 @@ def test_a_ledger_that_cannot_be_read_is_an_empty_section_not_a_crash(
 
     assert _activity_item(menu) is None
     assert target.activity_ledger == ActivityLedger()
+
+
+def test_malformed_away_summary_input_falls_back_to_legacy_activity_menu(
+    controller,
+) -> None:
+    target, status_bar, _path = controller
+    target.settings = replace(target.settings, operator_history_retention_days=7)
+    target.operator_history_store = SimpleNamespace(state="not-history")
+    working = _status("claude:session:one", AgentMode.WORKING, event_name="PreToolUse")
+    done = _status("claude:session:one", AgentMode.COMPLETED)
+    target.track_completions((working,))
+    target.track_completions((done,))
+
+    menu = status_bar.build_menu(_snapshot(stale=(done,)), status_bar.STATE_IDLE, target)
+    item = _activity_item(menu)
+
+    assert item is not None
+    assert item.title() == "Since you left · 1"
 
 
 # --------------------------------------------------------------------------

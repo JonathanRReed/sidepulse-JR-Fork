@@ -1,0 +1,37 @@
+name: Remote peer issue
+description: Report a Tailscale, SFTP, peer snapshot, freshness, or remote-read-only behavior problem.
+title: "[Remote peer]: "
+labels:
+  - remote-peer
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remote-peer support is read-only. Do not include private hostnames, addresses, keys, credentials, tokens, project names, prompts, transcripts, or personal data.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions and transport
+      placeholder: JR Bar version, macOS versions, Tailscale/SFTP transport
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Use synthetic peer names and describe connection, refresh, freshness, or authorization steps.
+    validations:
+      required: true
+  - type: textarea
+    id: observed_expected
+    attributes:
+      label: Observed versus expected
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Add sanitized status codes, timestamps, screenshots, or redacted logs. Remove host identifiers and secrets.
+    validations:
+      required: true

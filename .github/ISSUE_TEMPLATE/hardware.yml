@@ -1,0 +1,45 @@
+name: Hardware issue
+description: Report a physical device, display, LED, brightness, power, or firmware problem.
+title: "[Hardware]: "
+labels:
+  - hardware
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never attach private device paths, credentials, network identifiers, or personal data. Use a redacted diagnostic bundle and synthetic identifiers.
+  - type: input
+    id: device
+    attributes:
+      label: Device and firmware
+      placeholder: SidePulse Pro, SidePulse Dot, firmware version, or display model
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: macOS and JR Bar version
+      placeholder: macOS 15.x, JR Bar 0.5.0
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include setup, power state, connected displays, and exact steps.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed versus expected
+      description: Describe visible light, timing, brightness, error, or readback behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Provide a redacted photo, short video, sanitized log lines, or measured timing. Do not attach private paths or secrets.
+    validations:
+      required: true

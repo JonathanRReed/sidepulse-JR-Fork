@@ -29,6 +29,7 @@ from .operator_state import (
     SemanticEventKey,
     semantic_event_key_to_payload,
 )
+from .product_identity import PRODUCT_DISPLAY_NAME
 from .provider_facts import RequestKey
 
 MAX_INTERRUPTION_EVENTS: Final = 2_000
@@ -126,8 +127,8 @@ def generic_notification_copy(route: InterruptionRoute) -> GenericNotificationCo
     }:
         body = f"{article} {provider} session finished"
     else:
-        body = "SidePulse has 1 update"
-    return GenericNotificationCopy("SidePulse", body)
+        body = f"{PRODUCT_DISPLAY_NAME} has 1 update"
+    return GenericNotificationCopy(PRODUCT_DISPLAY_NAME, body)
 
 
 def issue_action_token(

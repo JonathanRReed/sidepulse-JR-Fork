@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+import os
 import threading
 import time
+from pathlib import Path
 from enum import Enum
 
 import objc
@@ -35,6 +37,7 @@ from Foundation import NSObject, NSRunLoop, NSRunLoopCommonModes, NSString
 from Quartz import CGContextFillRect, CGContextSetRGBFillColor
 
 from .accessibility_display import AccessibilityDisplayPreferences
+from .colors import hex_to_rgb, normalize_hex
 from .draw_guard import guard_draw
 from .alcove_observation import (
     ALCOVE_STATUS_LOG_LINES,
@@ -43,10 +46,26 @@ from .alcove_observation import (
     AlcoveObservationBuffer,
     AlcoveObservationReducer,
     AlcoveObservationWorker,
+    AlcoveSilhouette,
+    AlcoveConfidenceProjection,
+    AlcoveConfidenceState,
+    AlcoveGeometryIntent,
+    project_alcove_confidence,
+    latest_alcove_status,
+    reset_alcove_status,
     note_alcove_status,
     screen_recording_granted,
 )
 from .led_status import LedDisplayState, normalize_brightness, program_for_display_state
+from .announcer_content import (
+    ANNOUNCER_NAME_CAP as ANNOUNCER_NAME_CAP,
+    ANNOUNCER_QUESTION_CAP as ANNOUNCER_QUESTION_CAP,
+    project_announcer_content,
+)
+from .announcer_stack import AnnouncerStackPlan
+from .announcer_stack_view import AnnouncerStackPanel
+from .announcer_presenter import AnnouncerStackPresentationBridge
+from .answer_in_place import AnswerControlPlan
 from .led_wasm import LedWasmUnavailableError, SdLedWasmController
 from .presentation_policy import MotionClass
 from .presentation_scheduler import PresentationSchedulerInputs
@@ -64,6 +83,8 @@ from .render_policy import (
     runtime_render_environment,
 )
 from .screen_bar_pipeline import (
+    DEFAULT_PRESENTATION_METRICS,
+    PresentationMetricKind,
     PresentationTick,
     SamplerCommand,
     ScreenBarSampler,
@@ -116,6 +137,7 @@ ALCOVE_BUNDLE_ID = "com.henrikruscon.Alcove"
 #: because the phase anchor is absolute -- a reassert resumes the same
 #: phase rather than restarting the animation.
 SCREEN_BAR_REASSERT_SECONDS = 10.0
+PROFILE_STATE_SAMPLE_SECONDS = 5.0
 # CGWindowList reports an owner NAME, not a bundle id, so the window probe
 # matches on that while process detection matches the bundle id. The name
 # is DEFINED in alcove_observation (which also probes the window list for
@@ -169,6 +191,7 @@ from .alcove_observation import (  # noqa: E402, F401
     ALCOVE_HOLD_SECONDS,
     ALCOVE_OWNER_NAME,
 )
+
 WING_SAFETY_MARGIN = 28.0
 WING_MIN_USABLE = 24.0
 # The linked-hardware phase handshake only fires on programs that have
@@ -182,8 +205,6 @@ REANCHOR_STEADY_SECONDS = 5.0
 # camera housing), so the words live in a small pill just below the
 # notch, shown only while an actionable ask is live. Clicking it jumps
 # to the asking session, same as clicking the bar.
-ANNOUNCER_NAME_CAP = 40
-ANNOUNCER_QUESTION_CAP = 80
 ANNOUNCER_PILL_HEIGHT = 22.0
 ANNOUNCER_PILL_MAX_WIDTH = 460.0
 ANNOUNCER_PILL_PADDING = 14.0
@@ -192,14 +213,10 @@ ANNOUNCER_PILL_PADDING = 14.0
 def announcer_text_for_attention(projection) -> str | None:
     """One bounded line: session name plus the actual question."""
     rows = getattr(projection, "actionable_attention", ()) if projection else ()
-    if not rows:
-        return None
-    row = rows[0]
-    name = " ".join(str(getattr(row, "display_name", "") or "").split())
-    name = name[:ANNOUNCER_NAME_CAP] or str(getattr(row, "provider", "agent")).title()
-    message = getattr(getattr(row, "source_status", None), "message", None) or ""
-    question = " ".join(str(message).split())[:ANNOUNCER_QUESTION_CAP]
-    return f"{name} — {question}" if question else f"{name} needs you"
+    content = project_announcer_content(rows)
+    return content.text if content is not None else None
+
+
 # A wing that's just a flat horizontal strip fading sideways reads as a
 # line trailing off into nothing, not as light that's actually reaching
 # and wrapping the menu bar's own corner. A soft vertical riser at each
@@ -261,6 +278,8 @@ def _screen_bar_edge_inset() -> float:
         return float(EDGE_INSET)
     except Exception:
         return ALCOVE_ACCENT_EDGE_INSET
+
+
 WING_RISER_SOLID_FRACTION = 0.45
 LED_BLEND_RADIUS_LEDS = 1.5
 BLEND_COLUMN_WIDTH = 2.0
@@ -323,9 +342,7 @@ def virtual_display_state_for_projection(projection, active_signal=None) -> LedD
     return display_state_for_projection(projection, active_signal)
 
 
-def measured_notch_silhouette(
-    screen, below_window_number: int = 0, max_width: float | None = None
-):
+def measured_notch_silhouette(screen, below_window_number: int = 0, max_width: float | None = None):
     """The hardware notch's full measured outline: per-row black-run
     insets through the notch's depth, so the drawn body can follow the
     REAL corner curve instead of guessing a radius. The top-row width
@@ -338,9 +355,7 @@ def measured_notch_silhouette(
         depth = int(round(notch_depth_for_screen(screen)))
         if depth <= 2:
             return None
-        runs, scale, frame_x = _captured_notch_runs(
-            screen, rows=depth, below_window_number=below_window_number
-        )
+        runs, scale, frame_x = _captured_notch_runs(screen, rows=depth, below_window_number=below_window_number)
         return _validated_notch_silhouette(runs, scale, frame_x, max_width=max_width)
     except Exception:
         return None
@@ -351,13 +366,9 @@ def _captured_notch_runs(screen, *, rows: int, below_window_number: int = 0):
     import Quartz
 
     frame = screen.frame()
-    rect = Quartz.CGRectMake(
-        float(frame.origin.x), 0.0, float(frame.size.width), float(rows)
-    )
+    rect = Quartz.CGRectMake(float(frame.origin.x), 0.0, float(frame.size.width), float(rows))
     option = (
-        Quartz.kCGWindowListOptionOnScreenBelowWindow
-        if below_window_number
-        else Quartz.kCGWindowListOptionOnScreenOnly
+        Quartz.kCGWindowListOptionOnScreenBelowWindow if below_window_number else Quartz.kCGWindowListOptionOnScreenOnly
     )
     image = Quartz.CGWindowListCreateImage(
         rect, option, int(below_window_number), Quartz.kCGWindowImageNominalResolution
@@ -400,11 +411,7 @@ def _cgimage_black_runs(image, *, rows: int, width_px: int):
     runs = []
     for row in range(rows):
         y = min(row, available - 1)
-        runs.append(
-            _center_black_run_in_bytes(
-                data, y * bytes_per_row, width_px, bytes_per_pixel
-            )
-        )
+        runs.append(_center_black_run_in_bytes(data, y * bytes_per_row, width_px, bytes_per_pixel))
     return runs
 
 
@@ -425,10 +432,7 @@ def _center_black_run_in_bytes(data, base: int, width_px: int, bytes_per_pixel: 
     for x in range(width_px):
         i = base + x * bytes_per_pixel
         nonzero = (
-            (1 if data[i] else 0)
-            + (1 if data[i + 1] else 0)
-            + (1 if data[i + 2] else 0)
-            + (1 if data[i + 3] else 0)
+            (1 if data[i] else 0) + (1 if data[i + 1] else 0) + (1 if data[i + 2] else 0) + (1 if data[i + 3] else 0)
         )
         if nonzero <= 1:
             if run_start is None:
@@ -662,9 +666,7 @@ def space_hides_menu_bar(screen) -> bool:
     try:
         frame = screen.frame()
         visible = screen.visibleFrame()
-        top_inset = (frame.origin.y + frame.size.height) - (
-            visible.origin.y + visible.size.height
-        )
+        top_inset = (frame.origin.y + frame.size.height) - (visible.origin.y + visible.size.height)
         return top_inset < 1.0
     except Exception:
         return False
@@ -855,10 +857,7 @@ def _on_screen_windows() -> list:
         import Quartz
 
         return list(
-            Quartz.CGWindowListCopyWindowInfo(
-                Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID
-            )
-            or []
+            Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID) or []
         )
     except Exception:
         return []
@@ -908,19 +907,13 @@ def _screen_capture_values(screen):
         return None
     if (
         display_id <= 0
-        or not all(
-            math.isfinite(value)
-            for value in (screen_x, screen_y, screen_width, screen_height, scale)
-        )
+        or not all(math.isfinite(value) for value in (screen_x, screen_y, screen_width, screen_height, scale))
         or screen_width <= 0.0
         or screen_height <= 0.0
         or scale <= 0.0
     ):
         return None
-    screen_id = (
-        f"{display_id}:{screen_x:.3f}:{screen_y:.3f}:"
-        f"{screen_width:.3f}:{screen_height:.3f}"
-    )
+    screen_id = f"{display_id}:{screen_x:.3f}:{screen_y:.3f}:{screen_width:.3f}:{screen_height:.3f}"
     return (
         screen_id,
         display_id,
@@ -957,10 +950,7 @@ def _alcove_window_values(screen_x: float, screen_width: float):
             continue
         if (
             window_number <= 0
-            or not all(
-                math.isfinite(value)
-                for value in (window_x, window_y, window_width, window_height)
-            )
+            or not all(math.isfinite(value) for value in (window_x, window_y, window_width, window_height))
             or window_width < 40.0
             or window_height < 1.0
         ):
@@ -1233,9 +1223,7 @@ def fill_rect_with_color(rect, color) -> None:
     red, green, blue, alpha = color
     if max(red, green, blue, alpha) <= 0.001:
         return
-    NSColor.colorWithCalibratedRed_green_blue_alpha_(
-        red, green, blue, alpha
-    ).set()
+    NSColor.colorWithCalibratedRed_green_blue_alpha_(red, green, blue, alpha).set()
     NSBezierPath.bezierPathWithRect_(rect).fill()
 
 
@@ -1335,26 +1323,19 @@ def _glow_runs(
                 last[1] += column_width
             else:
                 runs.append([column_x, column_width, quantized])
-        return tuple(
-            None if run is None else (run[0], run[1], run[2]) for run in runs
-        )
+        return tuple(None if run is None else (run[0], run[1], run[2]) for run in runs)
 
     return paint_cache.get_or_build(paint_key, build_paint)
 
 
 def _gradient_color(color):
     red, green, blue, alpha = color
-    return NSColor.colorWithCalibratedRed_green_blue_alpha_(
-        red, green, blue, alpha
-    )
+    return NSColor.colorWithCalibratedRed_green_blue_alpha_(red, green, blue, alpha)
 
 
 def _riser_gradient_bucket(color):
     maximum = RISER_GRADIENT_COLOR_LEVELS - 1
-    return tuple(
-        round(max(0.0, min(1.0, float(channel))) * maximum) / maximum
-        for channel in color
-    )
+    return tuple(round(max(0.0, min(1.0, float(channel))) * maximum) / maximum for channel in color)
 
 
 def native_riser_gradients(
@@ -1412,6 +1393,7 @@ class VirtualLedView(NSView):
             self.compact_mode = False
             self.wings_only_mode = False
             self.alcove_silhouette = None
+            self.alcove_confidence = None
             self.render_screen_identity = "unknown"
             self.render_scale = 1.0
             self._target_sample_interval = TARGET_SAMPLE_INTERVAL_VIEW_CONTRACT
@@ -1460,29 +1442,38 @@ class VirtualLedView(NSView):
         self.setNeedsDisplay_(True)
 
     def setNotchInsets_(self, insets):
-        value = (
-            None
-            if not insets
-            else tuple((float(left), float(right)) for left, right in insets)
-        )
+        value = None if not insets else tuple((float(left), float(right)) for left, right in insets)
         if value == getattr(self, "notch_insets", None):
             return
         self.notch_insets = value
         self.setNeedsDisplay_(True)
 
     def setAlcoveSilhouette_(self, silhouette):
-        value = None
-        if silhouette is not None:
-            center_x, width, height, contour = silhouette
-            value = (
-                float(center_x),
-                float(width),
-                float(height),
-                tuple((float(x), float(y)) for x, y in contour),
-            )
+        if silhouette is not None and type(silhouette) is not AlcoveSilhouette:
+            return
+        value = silhouette
         if value == self.alcove_silhouette:
             return
         self.alcove_silhouette = value
+        self.setNeedsDisplay_(True)
+
+    def setAlcoveConfidence_(self, projection):
+        if type(projection) is not AlcoveConfidenceProjection:
+            return
+        if projection == getattr(self, "alcove_confidence", None):
+            return
+        self.alcove_confidence = projection
+        for selector, value in (
+            ("setAccessibilityLabel_", "JR Bar Screen Bar, Alcove following"),
+            ("setAccessibilityValue_", projection.accessibility_value),
+            ("setAccessibilityHelp_", projection.accessibility_help),
+        ):
+            setter = getattr(self, selector, None)
+            if callable(setter):
+                try:
+                    setter(value)
+                except Exception:
+                    pass
         self.setNeedsDisplay_(True)
 
     def setRenderGeometryIdentity_(self, identity):
@@ -1540,11 +1531,22 @@ class VirtualLedView(NSView):
             # decides whether pixels move; dirtying here forced a full
             # repaint of a static bar on every sync tick.
             return
-        self.current_program = str(program)
+        program_text = str(program)
+        normalized_static = normalize_hex(program_text.strip(), "")
+        self.current_program = normalized_static or program_text
         self._presentation_colors = None
-        self.fixed_colors = None
         self._target_sample = None
         self._frame_colors = None
+        if normalized_static:
+            red, green, blue = hex_to_rgb(normalized_static)
+            alpha = max(red, green, blue) / 255.0
+            color = (red / 255.0, green / 255.0, blue / 255.0, alpha)
+            self.fixed_colors = [color] * LED_COUNT
+            self.wasm_controller = None
+            self.started_at = started_at if started_at is not None else time.monotonic()
+            self.setNeedsDisplay_(True)
+            return
+        self.fixed_colors = None
         # started_at lets a caller anchor this program's animation phase to a
         # real-world instant that already happened (e.g. the moment a
         # physical device's write completed) instead of "now". Omitted, this
@@ -1566,9 +1568,7 @@ class VirtualLedView(NSView):
         warmed engine adopts the latest program."""
         if self.wasm_controller is not None:
             try:
-                self.wasm_controller.parse(
-                    self.current_program, int(self.started_at * 1000.0)
-                )
+                self.wasm_controller.parse(self.current_program, int(self.started_at * 1000.0))
             except Exception as exc:
                 self.wasm_error = str(exc)
             return
@@ -1586,6 +1586,8 @@ class VirtualLedView(NSView):
 
             def _adopt() -> None:
                 self._wasm_warming = False
+                if self.fixed_colors is not None:
+                    return
                 self.wasm_controller = controller
                 if self.current_program is not None:
                     try:
@@ -1606,9 +1608,7 @@ class VirtualLedView(NSView):
             except Exception:
                 _adopt()
 
-        threading.Thread(
-            target=_warm, name="SidePulseLedWarm", daemon=True
-        ).start()
+        threading.Thread(target=_warm, name="SidePulseLedWarm", daemon=True).start()
 
     def setPresentationProgram_startedAt_(self, program, started_at):
         """Record Screen Bar program identity without parsing it on AppKit's thread."""
@@ -1703,27 +1703,19 @@ class VirtualLedView(NSView):
         previous = getattr(self, "_smoothed_colors", None)
         last_time = getattr(self, "_smoothed_at", None)
         self._smoothed_at = now
-        if (
-            previous is None
-            or last_time is None
-            or len(previous) != len(target)
-            or (now - last_time) > 0.5
-        ):
+        if previous is None or last_time is None or len(previous) != len(target) or (now - last_time) > 0.5:
             self._smoothed_colors = [tuple(color) for color in target]
             return self._smoothed_colors
         blend = 1.0 - math.exp(-(now - last_time) / 0.045)
         self._smoothed_colors = [
-            tuple(p + (t - p) * blend for p, t in zip(prev, tgt))
-            for prev, tgt in zip(previous, target)
+            tuple(p + (t - p) * blend for p, t in zip(prev, tgt)) for prev, tgt in zip(previous, target)
         ]
         return self._smoothed_colors
 
     def _target_colors_for_draw(self):
         now = time.monotonic()
         cached = getattr(self, "_target_sample", None)
-        sample_interval = getattr(
-            self, "_target_sample_interval", TARGET_SAMPLE_INTERVAL_VIEW_CONTRACT
-        )
+        sample_interval = getattr(self, "_target_sample_interval", TARGET_SAMPLE_INTERVAL_VIEW_CONTRACT)
         if sample_interval is None:
             return cached[1] if cached is not None else self._compute_target_colors()
         if cached is not None and now - cached[0] < sample_interval:
@@ -1754,9 +1746,7 @@ class VirtualLedView(NSView):
                 ]
             except Exception as exc:
                 self.wasm_error = str(exc)
-        return virtual_led_colors(
-            self.state, time.monotonic() - self.started_at, self.brightness
-        )
+        return virtual_led_colors(self.state, time.monotonic() - self.started_at, self.brightness)
 
     @guard_draw
     def drawRect_(self, _rect):
@@ -1772,11 +1762,7 @@ class VirtualLedView(NSView):
         notch_width, wing_offset = self._notch_geometry()
         insets = getattr(self, "notch_insets", None)
         body_rect = ((wing_offset, 0.0), (notch_width, height))
-        body = (
-            notch_bar_path_from_insets(body_rect, insets)
-            if insets
-            else notch_bar_path(body_rect)
-        )
+        body = notch_bar_path_from_insets(body_rect, insets) if insets else notch_bar_path(body_rect)
         led_width = notch_width / LED_COUNT
         glow_height = min(LED_GLOW_HEIGHT, max(0.0, height - LED_BAND_HEIGHT))
 
@@ -1798,9 +1784,7 @@ class VirtualLedView(NSView):
         # notch-deep slab under its capsule read as a clunky black square
         # below the notch, so only the LED band renders there.
         if self.has_notch and self.alcove_silhouette is None and rim > 0.0:
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                0.006, 0.007, 0.010, 1.0
-            ).set()
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.006, 0.007, 0.010, 1.0).set()
             body.fill()
 
         cg_context = current_cg_context()
@@ -1810,8 +1794,15 @@ class VirtualLedView(NSView):
         NSGraphicsContext.saveGraphicsState()
         body.addClip()
         self._fill_glow_row(
-            cg_context, colors, led_width, notch_width, glow_height, height,
-            x_start=wing_offset, x_end=wing_offset + notch_width, wing_offset=wing_offset,
+            cg_context,
+            colors,
+            led_width,
+            notch_width,
+            glow_height,
+            height,
+            x_start=wing_offset,
+            x_end=wing_offset + notch_width,
+            wing_offset=wing_offset,
         )
 
         # Corner feather: the glow band used to run at full brightness
@@ -1822,11 +1813,7 @@ class VirtualLedView(NSView):
         # corners reading as clean black rounding. NOTCH DISPLAYS ONLY:
         # a notchless strip has no black housing behind it, so a black
         # feather composited dark smudges onto the menu bar there.
-        feather = (
-            min(14.0, notch_width / 8.0)
-            if self.has_notch and self.alcove_silhouette is None
-            else 0.0
-        )
+        feather = min(14.0, notch_width / 8.0) if self.has_notch and self.alcove_silhouette is None else 0.0
         if feather > 1.0:
             steps = 7
             segment = feather / steps
@@ -1870,9 +1857,7 @@ class VirtualLedView(NSView):
         # Housing displays only: a notchless strip has no black behind
         # the tips, so they'd float on pure LED color.
         if self.has_notch and self.alcove_silhouette is None:
-            self._draw_standing_gauges(
-                cg_context, height, edge_inset=wing_offset + 6.0
-            )
+            self._draw_standing_gauges(cg_context, height, edge_inset=wing_offset + 6.0)
         NSGraphicsContext.restoreGraphicsState()
 
     def _bracket_colors(self, colors):
@@ -1902,10 +1887,7 @@ class VirtualLedView(NSView):
         identity = self._bar_identity_color(colors)
         if identity[3] > 0.0005:
             self._last_visible_bracket_identity = identity
-        elif (
-            floor > 0.0
-            and str(getattr(self, "current_program", "")).strip().lower() != "off"
-        ):
+        elif floor > 0.0 and str(getattr(self, "current_program", "")).strip().lower() != "off":
             remembered = getattr(
                 self,
                 "_last_visible_bracket_identity",
@@ -2019,7 +2001,20 @@ class VirtualLedView(NSView):
         alpha = max(c[3] for c in lit)
         return (red, green, blue, alpha)
 
-    def _fill_glow_row(self, cg_context, colors, led_width, notch_width, glow_height, _height, *, x_start, x_end, wing_offset, wing_taper_floor=0.0):
+    def _fill_glow_row(
+        self,
+        cg_context,
+        colors,
+        led_width,
+        notch_width,
+        glow_height,
+        _height,
+        *,
+        x_start,
+        x_end,
+        wing_offset,
+        wing_taper_floor=0.0,
+    ):
         """Draws the 4-layer LED glow (bloom / soft falloff / core /
         hotline) across [x_start, x_end) -- see glow_color_for_column
         for how a wing's glow is colored versus the notch body's own
@@ -2042,11 +2037,7 @@ class VirtualLedView(NSView):
             x_end=x_end,
             wing_offset=wing_offset,
             wing_taper_floor=wing_taper_floor,
-            silhouette=(
-                self.alcove_silhouette[3]
-                if self.alcove_silhouette is not None
-                else "glow-row"
-            ),
+            silhouette=(self.alcove_silhouette[3] if self.alcove_silhouette is not None else "glow-row"),
             screen_identity=self.render_screen_identity,
             scale=self.render_scale,
         )
@@ -2077,35 +2068,25 @@ class VirtualLedView(NSView):
             fill_rect_with_cg(
                 cg_context,
                 ((run_x, bloom_y), (run_width, bloom_height)),
-                tone_mapped_led_color(
-                    red, green, blue, alpha, boost=0.82, alpha_scale=0.18
-                ),
+                tone_mapped_led_color(red, green, blue, alpha, boost=0.82, alpha_scale=0.18),
             )
             fill_rect_with_cg(
                 cg_context,
                 ((run_x, soft_y), (run_width, soft_height)),
-                tone_mapped_led_color(
-                    red, green, blue, alpha, boost=0.64, alpha_scale=0.07
-                ),
+                tone_mapped_led_color(red, green, blue, alpha, boost=0.64, alpha_scale=0.07),
             )
             fill_rect_with_cg(
                 cg_context,
                 ((run_x, base_y), (run_width, LED_BAND_HEIGHT)),
-                tone_mapped_led_color(
-                    red, green, blue, alpha, boost=LED_CORE_BOOST, alpha_scale=0.92
-                ),
+                tone_mapped_led_color(red, green, blue, alpha, boost=LED_CORE_BOOST, alpha_scale=0.92),
             )
             fill_rect_with_cg(
                 cg_context,
                 ((run_x, base_y), (run_width, 1.15)),
-                tone_mapped_led_color(
-                    red, green, blue, alpha, boost=LED_HOTLINE_BOOST, alpha_scale=0.72
-                ),
+                tone_mapped_led_color(red, green, blue, alpha, boost=LED_HOTLINE_BOOST, alpha_scale=0.72),
             )
 
-    def _draw_wing_riser(
-        self, cg_context, edge_color, x_start, x_end, height, *, outer_on_left: bool = True
-    ) -> None:
+    def _draw_wing_riser(self, cg_context, edge_color, x_start, x_end, height, *, outer_on_left: bool = True) -> None:
         """A vertical glow at one wing's outer edge, solid for its lower
         WING_RISER_SOLID_FRACTION and softly tapering above that -- see
         WING_RISER_WIDTH's comment for why. `edge_color` is the nearest
@@ -2168,13 +2149,9 @@ class VirtualLedView(NSView):
                 gradient_core_color,
                 gradient_soft_color,
             )
-            core_gradient.drawInRect_angle_(
-                ((core_rect_x, 0.0), (core_width, height)), 90.0
-            )
+            core_gradient.drawInRect_angle_(((core_rect_x, 0.0), (core_width, height)), 90.0)
             if soft_width > 0.0:
-                soft_gradient.drawInRect_angle_(
-                    ((soft_rect_x, 0.0), (soft_width, height)), 90.0
-                )
+                soft_gradient.drawInRect_angle_(((soft_rect_x, 0.0), (soft_width, height)), 90.0)
             return
         except Exception:
             pass
@@ -2200,6 +2177,7 @@ class VirtualLedView(NSView):
                     ((soft_rect_x, y_start), (soft_width, y_end - y_start)),
                     (*soft_color[:3], soft_color[3] * taper),
                 )
+
 
 class _AnnouncerPillView(NSView):
     def initWithFrame_(self, frame):
@@ -2232,9 +2210,7 @@ class _AnnouncerPillView(NSView):
         paragraph.setLineBreakMode_(NSLineBreakByTruncatingTail)
         attributes = {
             NSFontAttributeName: NSFont.systemFontOfSize_(11.0),
-            NSForegroundColorAttributeName: NSColor.colorWithCalibratedWhite_alpha_(
-                1.0, 0.92
-            ),
+            NSForegroundColorAttributeName: NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.92),
             NSParagraphStyleAttributeName: paragraph,
         }
         inset = ANNOUNCER_PILL_PADDING
@@ -2254,6 +2230,46 @@ class _AnnouncerPillView(NSView):
                 handler()
             except Exception:
                 pass
+
+
+def _apply_alcove_frame(
+    window,
+    frame,
+    previous_state: AlcoveConfidenceState | None,
+    current_state: AlcoveConfidenceState,
+    preferences: AccessibilityDisplayPreferences,
+) -> None:
+    """Apply one Screen Bar frame, settling only after Alcove recovery."""
+    settle = (
+        current_state is AlcoveConfidenceState.FRESH
+        and previous_state in (
+            AlcoveConfidenceState.STALE,
+            AlcoveConfidenceState.RECOVERING,
+        )
+        and not preferences.reduce_motion
+    )
+    if not settle:
+        window.setFrame_display_(frame, True)
+        return
+    applied = False
+    try:
+        from AppKit import NSAnimationContext
+
+        def _animate(context):
+            nonlocal applied
+            context.setDuration_(0.18)
+            context.setTimingFunction_(
+                Quartz.CAMediaTimingFunction.functionWithName_(
+                    Quartz.kCAMediaTimingFunctionEaseOut
+                )
+            )
+            window.animator().setFrame_display_(frame, True)
+            applied = True
+
+        NSAnimationContext.runAnimationGroup_completionHandler_(_animate, None)
+    except Exception:
+        if not applied:
+            window.setFrame_display_(frame, True)
 
 
 class AnnouncerPill:
@@ -2278,12 +2294,9 @@ class AnnouncerPill:
         window.setHasShadow_(False)
         window.setLevel_(STATUS_WINDOW_LEVEL)
         window.setCollectionBehavior_(
-            NSWindowCollectionBehaviorCanJoinAllSpaces
-            | NSWindowCollectionBehaviorFullScreenAuxiliary
+            NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary
         )
-        view = _AnnouncerPillView.alloc().initWithFrame_(
-            ((0, 0), (200.0, ANNOUNCER_PILL_HEIGHT))
-        )
+        view = _AnnouncerPillView.alloc().initWithFrame_(((0, 0), (200.0, ANNOUNCER_PILL_HEIGHT)))
         window.setContentView_(view)
         self.window = window
         self.view = view
@@ -2333,9 +2346,7 @@ class AnnouncerPill:
                 self.view.setNeedsDisplay_(True)
         self.text = text
         attributes = {NSFontAttributeName: NSFont.systemFontOfSize_(11.0)}
-        measured = NSString.stringWithString_(text).sizeWithAttributes_(
-            attributes
-        )
+        measured = NSString.stringWithString_(text).sizeWithAttributes_(attributes)
         width = min(
             ANNOUNCER_PILL_MAX_WIDTH,
             max(120.0, measured.width + 2.0 * ANNOUNCER_PILL_PADDING),
@@ -2384,9 +2395,7 @@ class AnnouncerPill:
             # Anchor at top-center so the scale grows DOWN from the notch;
             # re-pin position so changing the anchor doesn't shift the view.
             layer.setAnchorPoint_((0.5, 1.0))
-            layer.setPosition_(
-                (bounds.size.width / 2.0, bounds.size.height)
-            )
+            layer.setPosition_((bounds.size.width / 2.0, bounds.size.height))
             spring = Quartz.CASpringAnimation.animationWithKeyPath_("transform.scale")
             spring.setMass_(1.0)
             spring.setStiffness_(190.0)
@@ -2421,6 +2430,9 @@ class VirtualStatusDevice(NSObject):
             self.timer = None
             self._announcer_pill = None
             self._announcer_text = None
+            self._announcer_presenter = AnnouncerStackPresentationBridge(
+                AnnouncerStackPanel
+            )
             self.display_link = None
             # The rate the installed link was registered for; None when there
             # is no link. Compared against schedule.driver_fps so a panel that
@@ -2454,6 +2466,8 @@ class VirtualStatusDevice(NSObject):
             self._alcove_observer_factory = lambda buffer: AlcoveObservationWorker(buffer)
             self._alcove_request = None
             self._alcove_target_identity = None
+            self._alcove_status_identity = None
+            self._last_alcove_confidence_state = None
             self._alcove_generation = 0
             self._alcove_request_id = 0
             self._last_safe_colors = None
@@ -2476,6 +2490,26 @@ class VirtualStatusDevice(NSObject):
             # asked for, and the hold that is currently painting over it.
             self._live_program_call = None
             self._preview_hold = None
+            self._profile_visible = False
+            self._profile_tracker = None
+            self._profile_stop = None
+            self._profile_wake = None
+            self._profile_thread = None
+            profile_output = os.environ.get("SIDEPULSE_SCREEN_BAR_PROFILE_OUTPUT", "").strip()
+            if profile_output:
+                from .screen_bar_profile import ProfileScenarioTracker
+
+                scenario = os.environ.get("SIDEPULSE_SCREEN_BAR_PROFILE_SCENARIO", "").strip()
+                self._profile_tracker = ProfileScenarioTracker(scenario)
+                self._profile_stop = threading.Event()
+                self._profile_wake = threading.Event()
+                DEFAULT_PRESENTATION_METRICS.reset()
+                self._profile_thread = threading.Thread(
+                    target=self._profile_monitor_loop,
+                    name="jr-bar-screen-bar-profile-state",
+                    daemon=True,
+                )
+                self._profile_thread.start()
         return self
 
     @staticmethod
@@ -2582,7 +2616,14 @@ class VirtualStatusDevice(NSObject):
             self._alcove_reducer.apply(observation, request, now=now)
         return self._alcove_reducer.current(now=now)
 
-    def _record_alcove_status(self, status, *, now: float | None = None) -> bool:
+    def _record_alcove_status(
+        self,
+        status,
+        *,
+        now: float | None = None,
+        geometry_age_seconds: float | None = None,
+        geometry_available: bool | None = None,
+    ) -> bool:
         """Publish the outcome, and log it ONCE per transition.
 
         Per-frame logging at the 1.5s observation cadence is a log nobody
@@ -2592,7 +2633,16 @@ class VirtualStatusDevice(NSObject):
         """
         if type(status) is not AlcoveCaptureStatus:
             return False
-        changed = note_alcove_status(status, now=now)
+        if geometry_age_seconds is None and hasattr(self, "_alcove_pending_geometry_age"):
+            geometry_age_seconds = self._alcove_pending_geometry_age
+            geometry_available = self._alcove_pending_geometry_available
+        changed = note_alcove_status(
+            status,
+            now=now,
+            geometry_age_seconds=geometry_age_seconds,
+            geometry_available=geometry_available,
+        )
+        self._alcove_status_identity = getattr(self, "_alcove_target_identity", None)
         if not changed:
             return False
         line = ALCOVE_STATUS_LOG_LINES.get(status)
@@ -2645,11 +2695,7 @@ class VirtualStatusDevice(NSObject):
         if getattr(command, "motion", None) is not MotionClass.FINITE:
             return None
         deadline = getattr(command, "next_visual_change_at", None)
-        if (
-            type(deadline) not in {int, float}
-            or not math.isfinite(deadline)
-            or float(deadline) <= 0.0
-        ):
+        if type(deadline) not in {int, float} or not math.isfinite(deadline) or float(deadline) <= 0.0:
             return None
         return float(deadline)
 
@@ -2661,14 +2707,9 @@ class VirtualStatusDevice(NSObject):
             app_terminating=bool(self._terminating),
             animation_active=bool(self._frame_fallback_relevant),
             next_visual_change_at=self._presentation_deadline(),
-            alcove_enabled=bool(
-                self.wraps_menu_bar
-                and getattr(self, "follow_alcove_width", True)
-            ),
+            alcove_enabled=bool(self.wraps_menu_bar and getattr(self, "follow_alcove_width", True)),
             alcove_relevant=self._alcove_follow_relevant(),
-            pointer_interaction_relevant=bool(
-                self._pointer_interaction_relevant
-            ),
+            pointer_interaction_relevant=bool(self._pointer_interaction_relevant),
             frame_interval=getattr(self, "_frame_interval_current", None),
         )
 
@@ -2770,6 +2811,65 @@ class VirtualStatusDevice(NSObject):
         except Exception:
             return False
 
+    def _profile_state_sample(self):
+        from .screen_bar_profile import ProfileStateSample, current_focus_state
+
+        environment = runtime_render_environment(
+            visible=bool(self._profile_visible),
+            display_asleep=bool(self._display_asleep),
+        )
+        tracker = self._profile_tracker
+        focus_state = current_focus_state() if tracker is not None and tracker.scenario == "dnd" else "unknown"
+        return ProfileStateSample(
+            observed_at=time.monotonic(),
+            visible=environment.visible,
+            display_asleep=environment.display_asleep,
+            low_power=environment.low_power,
+            thermal=environment.thermal,
+            focus_state=focus_state,
+        )
+
+    def _observe_profile_state(self) -> None:
+        tracker = self._profile_tracker
+        if tracker is not None:
+            tracker.observe(self._profile_state_sample())
+
+    def _profile_monitor_loop(self) -> None:
+        stop = self._profile_stop
+        wake = self._profile_wake
+        if stop is None or wake is None:
+            return
+        while not stop.is_set():
+            try:
+                self._observe_profile_state()
+            except Exception:
+                pass
+            wake.wait(PROFILE_STATE_SAMPLE_SECONDS)
+            wake.clear()
+
+    def _request_profile_sample(self) -> None:
+        wake = self._profile_wake
+        if wake is not None:
+            wake.set()
+
+    def _finish_profile_monitor(self) -> dict[str, object] | None:
+        tracker = self._profile_tracker
+        if tracker is None:
+            return None
+        self._observe_profile_state()
+        stop = self._profile_stop
+        wake = self._profile_wake
+        thread = self._profile_thread
+        if stop is not None:
+            stop.set()
+        if wake is not None:
+            wake.set()
+        if thread is not None and thread.ident != threading.get_ident():
+            thread.join(2.0)
+            if thread.is_alive():
+                raise RuntimeError("Screen Bar profile monitor did not stop")
+        return tracker.summary()
+
     def _runtime_environment(self, *, force: bool = False):
         now = time.monotonic()
         cached = getattr(self, "_runtime_environment_cache", None)
@@ -2817,9 +2917,7 @@ class VirtualStatusDevice(NSObject):
         self._panel_refresh_cache = (now, refresh)
         return refresh
 
-    def _refresh_render_cadence(
-        self, animation_active: bool, *, force: bool = False
-    ):
+    def _refresh_render_cadence(self, animation_active: bool, *, force: bool = False):
         # CONTINUOUS motion is the app's RESTING state -- a slow breathe
         # that looks identical at a fraction of the framerate. Only
         # FINITE cues are real transitions worth the full pipeline.
@@ -2879,11 +2977,7 @@ class VirtualStatusDevice(NSObject):
                 and self._frame_fallback_relevant is bool(animation_active)
             )
         else:
-            installed = (
-                self.display_link is None
-                and self.timer is None
-                and not self._frame_fallback_relevant
-            )
+            installed = self.display_link is None and self.timer is None and not self._frame_fallback_relevant
         if not installed:
             self._apply_render_schedule(schedule)
         else:
@@ -2892,9 +2986,7 @@ class VirtualStatusDevice(NSObject):
 
     def _display_link_available(self) -> bool:
         """Return whether this macOS view exposes the macOS 14 display-link API."""
-        return callable(
-            getattr(self.view, "displayLinkWithTarget_selector_", None)
-        )
+        return callable(getattr(self.view, "displayLinkWithTarget_selector_", None))
 
     def _install_display_link(self, driver_fps: float | None = None) -> bool:
         """Register one native display callback, falling back on AppKit failure.
@@ -2935,9 +3027,7 @@ class VirtualStatusDevice(NSObject):
                 rate = display_link_fps(self._panel_refresh_hz())
             frame_range = make_frame_range(rate, rate, rate)
             set_frame_range(frame_range)
-            display_link.addToRunLoop_forMode_(
-                NSRunLoop.currentRunLoop(), NSRunLoopCommonModes
-            )
+            display_link.addToRunLoop_forMode_(NSRunLoop.currentRunLoop(), NSRunLoopCommonModes)
         except Exception:
             self._display_link_setup_failed = True
             if display_link is not None:
@@ -2978,9 +3068,7 @@ class VirtualStatusDevice(NSObject):
         if schedule.driver is RenderDriverKind.PAUSED:
             self._publish_presentation_schedule()
             return
-        if schedule.driver is RenderDriverKind.DISPLAY_LINK and self._install_display_link(
-            schedule.driver_fps
-        ):
+        if schedule.driver is RenderDriverKind.DISPLAY_LINK and self._install_display_link(schedule.driver_fps):
             self._publish_presentation_schedule()
             return
         # KNOWN HOLE, left open deliberately. _animation_active is False for
@@ -2995,9 +3083,7 @@ class VirtualStatusDevice(NSObject):
         # properly means carrying the schedule's interval into
         # PresentationSchedulerInputs first.
         self._frame_fallback_relevant = bool(self._animation_active)
-        self._frame_interval_current = (
-            schedule.cadence.interval if self._frame_fallback_relevant else None
-        )
+        self._frame_interval_current = schedule.cadence.interval if self._frame_fallback_relevant else None
         self._publish_presentation_schedule()
 
     def _promote_animation(self) -> None:
@@ -3062,9 +3148,7 @@ class VirtualStatusDevice(NSObject):
         if centre is None:
             return
         try:
-            centre.removeObserver_name_object_(
-                self, "NSApplicationDidChangeScreenParametersNotification", None
-            )
+            centre.removeObserver_name_object_(self, "NSApplicationDidChangeScreenParametersNotification", None)
         except Exception:
             pass
         self._screen_geometry_observer = None
@@ -3079,9 +3163,7 @@ class VirtualStatusDevice(NSObject):
             _NSObject.cancelPreviousPerformRequestsWithTarget_selector_object_(
                 self, b"applyScreenParameterChange:", None
             )
-            self.performSelector_withObject_afterDelay_(
-                b"applyScreenParameterChange:", None, 0.3
-            )
+            self.performSelector_withObject_afterDelay_(b"applyScreenParameterChange:", None, 0.3)
         except Exception:
             self.applyScreenParameterChange_(notification)
 
@@ -3132,6 +3214,7 @@ class VirtualStatusDevice(NSObject):
 
     def _set_display_asleep(self, display_asleep: bool) -> None:
         self._display_asleep = bool(display_asleep)
+        self._request_profile_sample()
         if self._display_asleep:
             self._invalidate_frame_driver()
             self._stop_sampler()
@@ -3177,6 +3260,7 @@ class VirtualStatusDevice(NSObject):
             if callable(apply_preferences):
                 apply_preferences(preferences)
             view.setNeedsDisplay_(True)
+        self._sync_announcer()
         return True
 
     def set_wraps_menu_bar(self, enabled: bool) -> None:
@@ -3191,11 +3275,7 @@ class VirtualStatusDevice(NSObject):
         """Arms the bar as a click target (an ask is active: clicking
         jumps to the asking session). None restores the fully
         click-through window -- the default, and the safe state."""
-        previous = (
-            getattr(self.view, "click_handler", None)
-            if self.view is not None
-            else None
-        )
+        previous = getattr(self.view, "click_handler", None) if self.view is not None else None
         if self.view is not None:
             self.view.click_handler = handler
             view_window = self.view.window()
@@ -3210,26 +3290,59 @@ class VirtualStatusDevice(NSObject):
         """The announcer's words: session name + the actual question,
         shown in the pill below the notch while an ask is live."""
         value = str(text) if text else None
-        if value == self._announcer_text:
+        cleared_hidden_empty_plan = self._announcer_presenter.clear_hidden_empty_plan_for_legacy_text(value)
+        if value == self._announcer_text and not cleared_hidden_empty_plan:
             return
         self._announcer_text = value
         self._sync_announcer()
 
+    def set_announcer_stack(
+        self,
+        plan: AnnouncerStackPlan | None,
+        intent_handler,
+        *,
+        answer_plan: AnswerControlPlan | None = None,
+        answer_handler=None,
+    ) -> None:
+        """Project one immutable stack plan through the native presenter."""
+        self._announcer_presenter.set(
+            plan,
+            intent_handler,
+            answer_plan=answer_plan,
+            answer_handler=answer_handler,
+        )
+        self._sync_announcer()
+
+    def can_present_announcer(self) -> bool:
+        """One truthful suppression gate for both announcer presentations."""
+        try:
+            return bool(
+                not self._terminating
+                and self._enabled
+                and not self._display_asleep
+                and self.window is not None
+                and self.window.isVisible()
+                and not getattr(self, "_fullscreen_hidden", False)
+                and not getattr(self, "_alcove_relevant", False)
+                and not getattr(self, "_compact_active", False)
+            )
+        except Exception:
+            return False
+
     def _sync_announcer(self) -> None:
+        if self._announcer_presenter.plan is not None:
+            if self._announcer_pill is not None:
+                self._announcer_pill.hide()
+            self._announcer_presenter.present(
+                self.window,
+                allowed=self.can_present_announcer(),
+                preferences=self._accessibility_display_preferences,
+            )
+            return
+        self._announcer_presenter.hide()
         pill = self._announcer_pill
         text = self._announcer_text
-        show = (
-            text is not None
-            and not self._terminating
-            and self._enabled
-            and not self._display_asleep
-            and self.window is not None
-            and self.window.isVisible()
-            # While Alcove runs, the space below the notch is Alcove's;
-            # the dropdown ledger still carries the words there.
-            and not getattr(self, "_alcove_relevant", False)
-            and not getattr(self, "_compact_active", False)
-        )
+        show = text is not None and self.can_present_announcer()
         if not show:
             if pill is not None:
                 pill.hide()
@@ -3265,9 +3378,7 @@ class VirtualStatusDevice(NSObject):
             # forcing it here refreshes a cache that may be holding a
             # "denied" the user has since fixed in System Settings.
             if screen_recording_granted(force=True) is False:
-                self._record_alcove_status(
-                    AlcoveCaptureStatus.SCREEN_RECORDING_DENIED
-                )
+                self._record_alcove_status(AlcoveCaptureStatus.SCREEN_RECORDING_DENIED)
         self._publish_presentation_schedule()
 
     def set_bracket_style(self, style: str) -> None:
@@ -3343,23 +3454,20 @@ class VirtualStatusDevice(NSObject):
                 screen = preferred_screen()
             except Exception:
                 return
-        hide = (
-            not getattr(self, "_show_in_full_screen", False)
-            and screen is not None
-            and space_hides_menu_bar(screen)
-        )
+        hide = not getattr(self, "_show_in_full_screen", False) and screen is not None and space_hides_menu_bar(screen)
         if hide == getattr(self, "_fullscreen_hidden", False):
+            self._sync_announcer()
             return
         self._fullscreen_hidden = hide
         if hide:
             window.orderOut_(None)
-            pill = getattr(self, "_announcer_pill", None)
-            if pill is not None:
-                pill.hide()
         elif self._enabled:
             from .window_presentation import present_window
 
             present_window(window, key=False)
+        self._sync_announcer()
+        self._profile_visible = self._is_surface_visible()
+        self._request_profile_sample()
 
     def show(self):
         if self._terminating or not self._enabled:
@@ -3375,8 +3483,7 @@ class VirtualStatusDevice(NSObject):
                 from .status_bar import log_status_bar
 
                 log_status_bar(
-                    "screen bar reposition: "
-                    f"{int((self._last_reposition_at - _reposition_started) * 1000)}ms"
+                    f"screen bar reposition: {int((self._last_reposition_at - _reposition_started) * 1000)}ms"
                 )
             except Exception:
                 pass
@@ -3392,15 +3499,13 @@ class VirtualStatusDevice(NSObject):
             self._display_link_setup_failed = False
         self._install_power_observers()
         self._install_screen_geometry_observer()
-        if (
-            self.timer is None
-            and self.display_link is None
-            and not self._frame_fallback_relevant
-        ):
+        if self.timer is None and self.display_link is None and not self._frame_fallback_relevant:
             self._refresh_render_cadence(self._animation_active, force=True)
         self._resume_sampler()
         self._resume_alcove_observer()
         self._publish_presentation_schedule()
+        self._profile_visible = self._is_surface_visible()
+        self._request_profile_sample()
 
     def hide(self):
         self._invalidate_frame_driver()
@@ -3408,6 +3513,7 @@ class VirtualStatusDevice(NSObject):
         self._stop_alcove_observer()
         if self._announcer_pill is not None:
             self._announcer_pill.hide()
+        self._announcer_presenter.hide()
         if self.window is not None:
             self.window.orderOut_(None)
         self._remove_power_observers()
@@ -3417,6 +3523,8 @@ class VirtualStatusDevice(NSObject):
         self._display_asleep = False
         self._frame_interval_current = None
         self._publish_presentation_schedule()
+        self._profile_visible = False
+        self._request_profile_sample()
 
     def terminate(self) -> None:
         """Bound teardown and permanently reject later driver or sampler work."""
@@ -3427,6 +3535,16 @@ class VirtualStatusDevice(NSObject):
         self._invalidate_frame_driver()
         self._stop_sampler()
         self._stop_alcove_observer()
+        try:
+            profile_summary = self._finish_profile_monitor()
+            self._write_profile_if_requested(profile_summary)
+        except Exception:
+            try:
+                from .status_bar import log_status_bar
+
+                log_status_bar("Screen Bar profile export failed closed")
+            except Exception:
+                pass
         self._remove_power_observers()
         self._remove_screen_geometry_observer()
         self._remove_space_observer()
@@ -3436,6 +3554,7 @@ class VirtualStatusDevice(NSObject):
             except Exception:
                 pass
             self._announcer_pill = None
+        self._announcer_presenter.close()
         try:
             if self.window is not None:
                 self.window.orderOut_(None)
@@ -3445,6 +3564,43 @@ class VirtualStatusDevice(NSObject):
             self.view = None
             self.window = None
             self._publish_presentation_schedule()
+
+    def _write_profile_if_requested(
+        self,
+        summary: dict[str, object] | None = None,
+    ) -> Path | None:
+        output_value = os.environ.get("SIDEPULSE_SCREEN_BAR_PROFILE_OUTPUT", "").strip()
+        if not output_value:
+            return None
+        scenario = os.environ.get("SIDEPULSE_SCREEN_BAR_PROFILE_SCENARIO", "").strip()
+        if not scenario or summary is None:
+            raise ValueError("Screen Bar profile scenario observations are required")
+
+        from .screen_bar_profile import (
+            create_runtime_profile,
+            write_json,
+        )
+
+        view = self.view
+        screen_identity = str(getattr(view, "render_screen_identity", "unknown"))
+        profile = create_runtime_profile(
+            scenario=scenario,
+            started_at=float(summary["started_at"]),
+            ended_at=float(summary["ended_at"]),
+            metrics=DEFAULT_PRESENTATION_METRICS.snapshot(),
+            screen_identity=screen_identity,
+            panel_refresh_hz=self._panel_refresh_hz() or 0.0,
+            visible=bool(summary["visible"]),
+            display_asleep=bool(summary["display_asleep"]),
+            low_power=bool(summary["low_power"]),
+            thermal=str(summary["thermal"]),
+            focus_state=str(summary["focus_state"]),
+            state_samples=int(summary["state_samples"]),
+            state_violations=int(summary["state_violations"]),
+        )
+        output = Path(output_value).expanduser()
+        write_json(output, profile)
+        return output
 
     def set_state(
         self,
@@ -3620,10 +3776,7 @@ class VirtualStatusDevice(NSObject):
             self._resume_sampler()
         else:
             self._sampler.reconcile(self._sampler_command)
-        if (
-            self._sampler_command.motion is MotionClass.FINITE
-            and self._presentation_deadline() is None
-        ):
+        if self._sampler_command.motion is MotionClass.FINITE and self._presentation_deadline() is None:
             self._demote_finite_presentation()
             return
         self._refresh_render_cadence(self._animation_active, force=True)
@@ -3658,9 +3811,7 @@ class VirtualStatusDevice(NSObject):
         anchor = float(started_at)
         if not math.isfinite(anchor) or abs(anchor - command.parse_anchor) < 0.05:
             return False
-        record_program = getattr(
-            self.view, "setPresentationProgram_startedAt_", None
-        )
+        record_program = getattr(self.view, "setPresentationProgram_startedAt_", None)
         if callable(record_program):
             record_program(command.program, anchor)
         else:
@@ -3713,9 +3864,7 @@ class VirtualStatusDevice(NSObject):
         gap_override = getattr(self, "gap_width_override", None)
         wing_override = getattr(self, "wing_length_override", None)
         self._alcove_relevant = bool(
-            alcove_active
-            and wing_override is None
-            and getattr(self, "follow_alcove_width", True)
+            alcove_active and wing_override is None and getattr(self, "follow_alcove_width", True)
         )
         effective_gap = gap_override
         measured_notch_insets = None
@@ -3733,8 +3882,8 @@ class VirtualStatusDevice(NSObject):
             cache_key = (round(frame.size.width), round(frame.size.height))
             cache = getattr(self, "_notch_measure_cache", None)
             cache_stale = cache is None or cache[0] != cache_key
-            retry_due = cache is not None and cache[1] is None and (
-                now >= getattr(self, "_notch_measure_retry_at", 0.0)
+            retry_due = (
+                cache is not None and cache[1] is None and (now >= getattr(self, "_notch_measure_retry_at", 0.0))
             )
             if (
                 not alcove_active
@@ -3775,14 +3924,14 @@ class VirtualStatusDevice(NSObject):
         follow_width = None
         follow_center_x = None
         follow_observation = None
+        screen_values = None
+        window_values = None
         # Measure whenever Alcove is up, not only in wrap mode. Gating
         # this on wings_only meant compact -- the POLITE mode, chosen by
         # someone who does not want us wrapping their menu bar -- never
         # followed the capsule at all and silently sized itself to the
         # hardware notch instead.
-        follow_enabled = wing_override is None and getattr(
-            self, "follow_alcove_width", True
-        )
+        follow_enabled = wing_override is None and getattr(self, "follow_alcove_width", True)
         # Preflighted, cached, and never a prompt. Denied is a state the
         # user can be told about and fix, so it gets its own branch rather
         # than being discovered one failed capture at a time.
@@ -3791,18 +3940,13 @@ class VirtualStatusDevice(NSObject):
             # A capture thread that can only come back denied is pure cost
             # and, worse, looks identical to "Alcove isn't running".
             self._stop_alcove_observer()
-            self._record_alcove_status(
-                AlcoveCaptureStatus.SCREEN_RECORDING_DENIED, now=now
-            )
+            self._record_alcove_status(AlcoveCaptureStatus.SCREEN_RECORDING_DENIED, now=now)
         elif alcove_active and follow_enabled:
             band = max(24.0, window_height_for_notch_depth(notch_depth_for_screen(screen)))
             screen_values = render_screen_values
-            window_values = (
-                None
-                if screen_values is None
-                else _alcove_window_values(screen_values[2], screen_values[4])
-            )
+            window_values = None if screen_values is None else _alcove_window_values(screen_values[2], screen_values[4])
             observation = None
+            target_changed = False
             if screen_values is not None and window_values is not None:
                 (
                     screen_id,
@@ -3816,10 +3960,13 @@ class VirtualStatusDevice(NSObject):
                 window_number, window_x, window_y, window_width = window_values
                 target_identity = (screen_id, window_number)
                 if target_identity != self._alcove_target_identity:
+                    target_changed = True
                     self._alcove_generation += 1
                     self._alcove_target_identity = target_identity
                     self._alcove_buffer.clear()
                     self._alcove_reducer.reset()
+                    self._alcove_status_identity = None
+                    reset_alcove_status()
                 else:
                     observation = self._apply_latest_alcove_observation(now=now)
                 self._alcove_request_id += 1
@@ -3862,13 +4009,30 @@ class VirtualStatusDevice(NSObject):
             # main-thread lookup losing the window outranks a stale worker
             # status: we KNOW there is nothing to capture right now.
             if screen_values is None or window_values is None:
-                self._record_alcove_status(
-                    AlcoveCaptureStatus.WINDOW_UNAVAILABLE, now=now
-                )
+                self._record_alcove_status(AlcoveCaptureStatus.WINDOW_UNAVAILABLE, now=now)
             else:
-                self._record_alcove_status(
-                    getattr(self._alcove_observer, "last_status", None), now=now
-                )
+                if not target_changed:
+                    self._alcove_pending_geometry_age = self._alcove_reducer.last_good_age(now=now)
+                    self._alcove_pending_geometry_available = follow_observation is not None
+                    observed_status = getattr(self._alcove_observer, "last_status", None)
+                    status_identity = getattr(self._alcove_observer, "last_status_identity", None)
+                    current_status_identity = (screen_id, window_number, self._alcove_generation)
+                    status_is_current = status_identity == current_status_identity
+                    # Test doubles from older callers have no identity
+                    # property. A successful current-generation observation
+                    # is still sufficient evidence for those doubles; a
+                    # status-only result is not.
+                    if status_identity is not None and not status_is_current:
+                        observed_status = None
+                    elif status_identity is None and follow_observation is None:
+                        observed_status = None
+                    if type(observed_status) is not AlcoveCaptureStatus:
+                        if follow_observation is not None:
+                            observed_status = AlcoveCaptureStatus.CAPTURED
+                    if type(observed_status) is AlcoveCaptureStatus:
+                        self._record_alcove_status(observed_status, now=now)
+                    self._alcove_pending_geometry_age = None
+                    self._alcove_pending_geometry_available = None
             # _UNSET, not None: the previous sentinel was None, which is
             # also the value follow_width has when nothing was measured --
             # so the very first (and, when following is broken, the ONLY)
@@ -3888,11 +4052,31 @@ class VirtualStatusDevice(NSObject):
         else:
             self._stop_alcove_observer()
             self._record_alcove_status(
-                AlcoveCaptureStatus.NOT_FOLLOWING
-                if not follow_enabled
-                else AlcoveCaptureStatus.WINDOW_UNAVAILABLE,
+                AlcoveCaptureStatus.NOT_FOLLOWING if not follow_enabled else AlcoveCaptureStatus.WINDOW_UNAVAILABLE,
                 now=now,
             )
+        blocker = None
+        if not follow_enabled:
+            blocker = AlcoveCaptureStatus.NOT_FOLLOWING
+        elif screen_recording is False:
+            blocker = AlcoveCaptureStatus.SCREEN_RECORDING_DENIED
+        elif screen_values is None or window_values is None:
+            blocker = AlcoveCaptureStatus.WINDOW_UNAVAILABLE
+        status_snapshot = latest_alcove_status()
+        if self._alcove_status_identity != getattr(self, "_alcove_target_identity", None):
+            status_snapshot = None
+        projection = project_alcove_confidence(
+            following=bool(follow_enabled),
+            snapshot=status_snapshot,
+            blocker=blocker,
+            now=now,
+        )
+        previous_confidence_state = self._last_alcove_confidence_state
+        self._last_alcove_confidence_state = projection.state
+        if projection.geometry_intent is AlcoveGeometryIntent.USE_SCREEN_BAR_GEOMETRY:
+            follow_width = None
+            follow_center_x = None
+            follow_observation = None
         window_frame = virtual_window_frame_for_screen(
             screen,
             wrap_menu_bar=self.wraps_menu_bar,
@@ -3900,11 +4084,7 @@ class VirtualStatusDevice(NSObject):
             wing_length=wing_override,
             alcove_total_width=follow_width,
             alcove_center_x=follow_center_x,
-            alcove_total_height=(
-                follow_observation.height
-                if follow_observation is not None
-                else None
-            ),
+            alcove_total_height=(follow_observation.height if follow_observation is not None else None),
         )
         current = self.window.frame()
         frame_changed = (
@@ -3914,7 +4094,13 @@ class VirtualStatusDevice(NSObject):
             or abs(current.size.height - window_frame[1][1]) > 0.5
         )
         if frame_changed:
-            self.window.setFrame_display_(window_frame, True)
+            _apply_alcove_frame(
+                self.window,
+                window_frame,
+                previous_confidence_state,
+                projection.state,
+                self._accessibility_display_preferences,
+            )
         # Read back what AppKit actually granted, and size the view from THAT.
         #
         # setFrame_display_ is a request, not an assignment: AppKit clamps to
@@ -3932,17 +4118,11 @@ class VirtualStatusDevice(NSObject):
             (granted.origin.x, granted.origin.y),
             (granted.size.width, granted.size.height),
         )
-        self.window.setLevel_(
-            alcove_window_level() if alcove_active else STATUS_WINDOW_LEVEL
-        )
+        self.window.setLevel_(alcove_window_level() if alcove_active else STATUS_WINDOW_LEVEL)
         if self.view is not None:
-            set_geometry_identity = getattr(
-                self.view, "setRenderGeometryIdentity_", None
-            )
+            set_geometry_identity = getattr(self.view, "setRenderGeometryIdentity_", None)
             if render_screen_values is not None and callable(set_geometry_identity):
-                set_geometry_identity(
-                    (render_screen_values[0], render_screen_values[6])
-                )
+                set_geometry_identity((render_screen_values[0], render_screen_values[6]))
             self.view.setHasNotch_(screen_has_notch(screen))
             self.view.setCompactMode_(compact)
             self._compact_active = compact
@@ -3952,13 +4132,16 @@ class VirtualStatusDevice(NSObject):
                 set_alcove_silhouette(
                     None
                     if follow_observation is None
-                    else (
+                    else AlcoveSilhouette(
                         follow_observation.center_x,
                         follow_observation.width,
                         follow_observation.height,
                         follow_observation.contour,
                     )
                 )
+            set_alcove_confidence = getattr(self.view, "setAlcoveConfidence_", None)
+            if callable(set_alcove_confidence):
+                set_alcove_confidence(projection)
             if frame_changed:
                 self.view.setFrame_(((0, 0), window_frame[1]))
             if self.wraps_menu_bar:
@@ -4045,25 +4228,21 @@ class VirtualStatusDevice(NSObject):
 
     @objc.IBAction
     def redraw_(self, sender):
-        if (
-            self._terminating
-            or not self._enabled
-            or self._display_asleep
-            or not self._is_surface_visible()
-        ):
+        if self._terminating or not self._enabled or self._display_asleep or not self._is_surface_visible():
+            DEFAULT_PRESENTATION_METRICS.increment(PresentationMetricKind.SUPPRESSED_CALLBACK)
             return
         view = self.view
         if view is None:
+            DEFAULT_PRESENTATION_METRICS.increment(PresentationMetricKind.SUPPRESSED_CALLBACK)
             return
         callback_timestamp = time.monotonic()
         if not self._due_for_presentation(callback_timestamp):
+            DEFAULT_PRESENTATION_METRICS.increment(PresentationMetricKind.SUPPRESSED_CALLBACK)
             return
         # Peek before the pipeline runs: two attribute loads, and it is the
         # only way to tell a real frame from the fallback afterwards --
         # display_colors_for_tick returns colours either way.
-        carries_sampler_output = (
-            self._sample_buffer.read(self._presentation_generation) is not None
-        )
+        carries_sampler_output = self._sample_buffer.read(self._presentation_generation) is not None
         if carries_sampler_output:
             self._mark_presented(callback_timestamp)
         target_timestamp = presentation_time(
@@ -4088,10 +4267,8 @@ class VirtualStatusDevice(NSObject):
             present(frame_colors)
         else:
             view._presentation_colors = frame_colors
-        painted = tuple(
-            tuple(int(round(channel * 1024.0)) for channel in color)
-            for color in frame_colors
-        )
+        DEFAULT_PRESENTATION_METRICS.increment(PresentationMetricKind.PRESENTED_FRAME)
+        painted = tuple(tuple(int(round(channel * 1024.0)) for channel in color) for color in frame_colors)
         if painted != self._last_marked_colors:
             self._last_marked_colors = painted
             view.setNeedsDisplay_(True)

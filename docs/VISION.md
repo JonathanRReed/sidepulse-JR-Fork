@@ -1,4 +1,4 @@
-# JR-BAR — the vision
+# JR Bar — the vision
 
 Synthesized 2026-08-14 from source-first study of CodexBar (`c4ed34d0`) and
 t3code (`b73232bd`) plus research into the notch-utility landscape, the
@@ -7,7 +7,7 @@ agent-management market. Opinionated on purpose.
 
 ## 1. Thesis
 
-JR-BAR is the ambient nervous system for developers who run more than one AI coding agent at a time. It is not an orchestrator — it never drives your agents, never touches your repo, never asks for GitHub write access. It watches every harness you already use (Claude Code, Codex, Cursor, Gemini, Devin, Grok, OpenCode, Hermes, Antigravity) and answers one question continuously, without you asking: **which one needs you right now?** The sentence that sells it: *"Stop keeping five agents in your head. The light tells you when one wants you, and only then."* The documented pain is not missing features — it is cognitive overload ("you need to keep the state of every agent in your head... the constant context-switching is brutal"; "my brain starts falling apart within minutes"). We sell the end of that, not a dashboard.
+JR Bar is the ambient nervous system for developers who run more than one AI coding agent at a time. It is not an orchestrator — it never drives your agents, never touches your repo, never asks for GitHub write access. It watches every harness you already use (Claude Code, Codex, Cursor, Gemini, Devin, Grok, OpenCode, Hermes, Antigravity) and answers one question continuously, without you asking: **which one needs you right now?** The sentence that sells it: *"Stop keeping five agents in your head. The light tells you when one wants you, and only then."* The documented pain is not missing features — it is cognitive overload ("you need to keep the state of every agent in your head... the constant context-switching is brutal"; "my brain starts falling apart within minutes"). We sell the end of that, not a dashboard.
 
 THE THREE SURFACES ARE NOT THREE COPIES. Today they are — `virtual_device.py` mirrors the LED animation onto the notch, which means we ship one signal three times and call it a product. That must end. Each surface answers a different question, on a different timescale, in a different part of the visual field:
 
@@ -15,13 +15,28 @@ THE THREE SURFACES ARE NOT THREE COPIES. Today they are — `virtual_device.py` 
 
 **Screen Bar (notch) — THE ANNOUNCER AND THE ROLL CALL.** Question: *what just happened, and who is who?* This is the surface that answers the strongest objection to the whole product ("a light tells you something changed; it can't tell you what"). Default state is a near-invisible hairline of identity ticks — one tick per live session, stable left-to-right creation order, so the LED slot map is legible on screen. On a state change it **announces**: expands for ~4 seconds with the harness glyph, the session name, and the actual question ("Claude/api-refactor · Run tests? y/n"). On hover it stays; on hold it expands to the full ask with Allow/Deny inline. Then it collapses back to a hairline. It is **transient and situational**, following Apple's own Live Activity discipline — never a persistent dashboard, never fake-interactive chrome in the compact state. It is also the **teacher**: it is where a user learns that amber-breathing means "needs you," because they see the light and the words at the same moment.
 
+Status on 2026-08-30: P3.35 through P3.38 are finalized in source. P3.39 safe
+Clear Agents is the next roadmap tranche.
+P3.35 provides in source a passive collapsed Screen Bar pill for one ask, a truthful
+multi-ask summary, and an expanded native announcer stack with Previous, Next,
+Open, Mark Seen, and Close plus exact keyboard and accessibility receipts.
+P3.36 adds source-verified answer-in-place controls, capability-gated reply and
+send actions, timeout, retry, cancel, and Jump fallback in the expanded Screen
+Bar and Agent Browser. P3.37 adds a visible Reveal Current Ask command and an
+optional user-recorded global shortcut with explicit conflict and failure
+states. P3.38 adds five explicit DND choices, one daily local-time schedule,
+temporary Resume, opt-in public macOS Focus following, exact return-time copy,
+and one shared presentation projection across LEDs, Screen Bar, announcers,
+notifications, Settings, the compact menu, Why This Light, and local health.
+The hairline roll-call state and broader action inventory remain future work.
+
 **Menu bar title + dropdown — THE LEDGER.** Question: *what exactly, across everything, and what do I do about it?* Text, numbers, provenance, actions, history, quota. The title is a user-composed token layout capped at two lines (adopt CodexBar's `MenuBarLayout` model wholesale). The dropdown opens with the Needs-You inbox and nothing else above it. This is the only surface allowed to be dense, and it is the only one you have to deliberately go to.
 
 Rule that keeps them honest: **no fact appears on more than one rung of the ladder.** If the dropdown says it, the light does not try to.
 
 ## 2. The light language
 
-This is the soul of the product and it is currently wrong in the code. `signals.py` ships nine patterns (breathe, blink, double-blink, solid, sweep, ripple, comet, sparkle, heartbeat), twelve signal types, three escalation tiers, and a user-authored DSL Studio on top. Miller's absolute-judgment ceiling is ~7 categories on a single perceptual channel, and the applied color-coding literature (Christ 1975) puts the practical cap at **4 for casual users**. The Ambient Orb had full RGB and used three states. The build-light tradition that is JR-BAR's true ancestor used two. We are encoding nine patterns × twelve sources and expecting recall that no human has.
+This is the soul of the product and it is currently wrong in the code. `signals.py` ships nine patterns (breathe, blink, double-blink, solid, sweep, ripple, comet, sparkle, heartbeat), twelve signal types, three escalation tiers, and a user-authored DSL Studio on top. Miller's absolute-judgment ceiling is ~7 categories on a single perceptual channel, and the applied color-coding literature (Christ 1975) puts the practical cap at **4 for casual users**. The Ambient Orb had full RGB and used three states. The build-light tradition that is JR Bar's true ancestor used two. We are encoding nine patterns × twelve sources and expecting recall that no human has.
 
 **THE STATE AXIS — FOUR LIT STATES PLUS OFF. That is the whole vocabulary.**
 
@@ -51,7 +66,7 @@ Hue-as-identity gets exactly one narrow license: **when nothing is urgent**, a w
 
 **DEGRADATION — SidePulse Dot (2 LEDs).** Positional identity is impossible, so Dot does not fake it. LED A = the single highest-priority state present. LED B = "is there more than one" (off = one thing, dim = several). Honest reduction, not a squeezed copy.
 
-**NIGHT PROFILE — built in by default, not left to the user to discover.** The classic BlackBerry-era complaint was that the light kept people awake. After the user's night window (or system sunset), brightness caps at 8%, hues shift warm, one-shot sweeps and pulses are suppressed entirely, and only NEEDS YOU may animate — at the slow rhythm. This also aligns with circadian guidance (blue is the worst offender; warm and dim is the safe zone) and with Apple's own 25%-duty-cycle sleep-light reasoning. And there is a Focus/DND contract, the equivalent of iOS's "Flash on Silent": when the user is in a Do Not Disturb Focus, non-agent signals are fully suppressed and agent NEEDS YOU is capped at 40% with no escalation.
+**NIGHT PROFILE AND DND ARE DIFFERENT TOOLS.** Night warmth and optional night dim shape the ordinary ambient presentation. DND is an explicit dimensional policy over the same current truth. Mute keeps the lights truthful while holding banners, sounds, and notification webhooks. Dim scales brightness without changing admission. Pause keeps only critical asks, failures, escalation, and low battery. Asks Only keeps only a current actionable ask and its escalation. Fully Dark withholds every visual and outbound interruption at authoritative zero brightness. A daily local-time schedule, temporary override, and opt-in public macOS Focus status all compose by the strictest display, brightness, and outbound axes. Ending DND restores current standing truth, never an expired sweep, blink, sound, banner, webhook, or other finite cue.
 
 **WHAT WE REFUSE TO ENCODE.** Which harness a session belongs to (position and the Screen Bar carry that; color cannot). Progress percentage or token counts on the light. Subagent depth or count — t3code proved the right move is collapsing a rich tree to one flag for the ambient surface. Message content. Any distinction requiring a legend the user must memorize beyond four states. Music visualization, decorative sweeps, or "fun" animation as a default — Nothing's Glyph reviews are unambiguous that expressive/decorative uses read as gimmick while state-holding uses (battery meter, DND override, countdown) read as genuinely useful. Anything decorative is opt-in polish that ships after the language is loved, never before.
 
@@ -93,7 +108,7 @@ Explicitly **not** in the dropdown: diffs, transcripts, cost history charts, cal
 
 **ACKNOWLEDGMENT IS PER-SURFACE, NOT GLOBAL.** t3code's read-receipt model applies directly and non-obviously: the LED, the Screen Bar, and the dropdown are three independent viewers of the same truth. Each tracks its own last-acknowledged timestamp. Dismissing the Screen Bar announcement must **not** clear the LED — the light's job is to persist until you actually deal with it. Opening the dropdown clears the dropdown's unseen markers and clears green (done) on the LED, but never clears amber (needs you); only responding to the ask clears amber. That distinction is the entire difference between a notification and a queue, and the queue is what people loved about the BlackBerry light.
 
-**REFRESH.** Adopt CodexBar's `AdaptiveRefreshPolicyCore` shape: a pure decision function over {now, last menu open, last coding activity, low-power, thermal} with menu-recency tiers, a coding-activity clamp, and thermal backoff — plus one JR-BAR addition it lacks: **per-session urgency**, so a session near its context limit or with an unanswered ask polls faster than an idle one. Adopt its request coalescing (one in-flight fetch per source, generation-tracked) as-is. Adopt its **consent gate**: process-list inspection asks first and declining falls back to time-based refresh. We are a passive observer with agent-adjacent access on a developer's machine; consent theater is not optional for us, it is the trust foundation.
+**REFRESH.** Adopt CodexBar's `AdaptiveRefreshPolicyCore` shape: a pure decision function over {now, last menu open, last coding activity, low-power, thermal} with menu-recency tiers, a coding-activity clamp, and thermal backoff — plus one JR Bar addition it lacks: **per-session urgency**, so a session near its context limit or with an unanswered ask polls faster than an idle one. Adopt its request coalescing (one in-flight fetch per source, generation-tracked) as-is. Adopt its **consent gate**: process-list inspection asks first and declining falls back to time-based refresh. We are a passive observer with agent-adjacent access on a developer's machine; consent theater is not optional for us, it is the trust foundation.
 
 ## 4. The notification engine
 
@@ -197,7 +212,7 @@ Crucially: `jrbar signal` also **reads** — `jrbar status --json` gives the who
 
 **Why.** 'Every harness or provider' is the promise, and a hooks-first pipeline can only see harnesses that support hooks AND that the user successfully configured. t3code reads transcripts specifically so usage stays complete for turns never driven through their product — we are a passive observer, so this applies to us even more strongly. Until this lands, our coverage claims are aspirational. ClaudeBar already lists 12 providers; CodexBar lists 69. We cannot win on breadth with bespoke integrations.
 
-**Proof it worked.** A harness we have never integrated becomes visible by adding one manifest file with no Python changes. Sessions started before JR-BAR was installed appear correctly. Two JR-BAR instances reading the same physical directory do not double-count.
+**Proof it worked.** A harness we have never integrated becomes visible by adding one manifest file with no Python changes. Sessions started before JR Bar was installed appear correctly. Two JR Bar instances reading the same physical directory do not double-count.
 
 ### 7. The open Signal API and its trust model  ·  RETIRED
 

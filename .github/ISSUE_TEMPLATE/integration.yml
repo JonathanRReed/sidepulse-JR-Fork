@@ -1,0 +1,44 @@
+name: Integration issue
+description: Report a hook, CLI, agent harness, webhook, notification, or other integration problem.
+title: "[Integration]: "
+labels:
+  - integration
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use synthetic fixtures and redact all credentials, tokens, prompts, transcripts, account identifiers, private paths, and personal data. Suspected vulnerabilities belong in SECURITY.md, not here.
+  - type: input
+    id: integration
+    attributes:
+      label: Integration and version
+      placeholder: Agent CLI, hook, webhook, notification target, and versions
+    validations:
+      required: true
+  - type: textarea
+    id: configuration
+    attributes:
+      label: Relevant configuration
+      description: Describe safe settings and capabilities only. Do not paste config files containing secrets or private endpoints.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include the smallest synthetic input and exact steps.
+    validations:
+      required: true
+  - type: textarea
+    id: observed_expected
+    attributes:
+      label: Observed versus expected
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Add sanitized logs, screenshots, public docs, or a redacted diagnostic bundle.
+    validations:
+      required: true

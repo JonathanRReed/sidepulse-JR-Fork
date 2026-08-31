@@ -99,171 +99,29 @@ def claude_payload(*, access="tok", expires_at=None, refresh="refresh-token"):
     return json.dumps({"claudeAiOauth": oauth})
 
 
-def _failing_refresher(raw, *, now):
-    from sidepulse.claude_quota import ClaudeQuotaUnavailableError
-
-    raise ClaudeQuotaUnavailableError("claude_remote_quota_network")
-
-
-def test_repair_claude_renews_an_expired_token_and_writes_back():
-    """The CodexBar contract: refresh with Claude Code's client, write
-    the ROTATED tokens back so `claude` itself keeps working."""
-    from sidepulse.claude_quota import ClaudeOAuthCredential
-
-    store = FakeStore()
-    written = []
-
-    def refresher(raw, *, now):
-        return (
-            '{"claudeAiOauth":{"accessToken":"fresh"}}',
-            ClaudeOAuthCredential(access_token="fresh", expires_at=now + 3600),
-        )
-
-    result = repair_claude_credential(
-        store,
-        now=2_000_000_000.0,
-        keychain_payload_reader=lambda: claude_payload(
-            access="a" * 32, expires_at=1_000_000_000.0
-        ),
-        keychain_writer=lambda payload: (written.append(payload), True)[1],
-        refresher=refresher,
-    )
-    assert result.outcome is RepairOutcome.REPAIRED
-    assert result.changed
-    assert written == ['{"claudeAiOauth":{"accessToken":"fresh"}}'], (
-        "write-back precedes everything; without it Claude Code is "
-        "stranded on a spent refresh token"
-    )
-    assert store.secrets[("claude", "oauth-token")] == "fresh"
-
-
-def test_repair_claude_keeps_the_token_when_write_back_fails():
-    """A successful refresh already consumed the old refresh token --
-    dropping the new one would strand BOTH apps. Keep ours, say so."""
-    from sidepulse.claude_quota import ClaudeOAuthCredential
-
-    store = FakeStore()
-    result = repair_claude_credential(
-        store,
-        now=2_000_000_000.0,
-        keychain_payload_reader=lambda: claude_payload(
-            access="a" * 32, expires_at=1_000_000_000.0
-        ),
-        keychain_writer=lambda payload: False,
-        refresher=lambda raw, *, now: (
-            "{}",
-            ClaudeOAuthCredential(access_token="fresh"),
-        ),
-    )
-    assert result.outcome is RepairOutcome.REPAIRED
-    assert store.secrets[("claude", "oauth-token")] == "fresh"
-    assert "Keychain failed" in result.message
-
-
-def test_a_rate_limited_renewal_never_reads_as_a_dead_sign_in():
-    """429 is the token endpoint saying 'later', not 'sign in again' --
-    the owner was sent to a terminal for a transient limit while their
-    refresh token still had 20 days on it (2026-08-27)."""
-    from sidepulse.provider_reconnect import note_claude_renewal
-
-    note_claude_renewal(now=0.0, succeeded=True)  # clear any backoff
-    store = FakeStore()
-    result = repair_claude_credential(
-        store,
-        now=2_000_000_000.0,
-        keychain_payload_reader=lambda: claude_payload(
-            access="a" * 32, expires_at=1_000_000_000.0
-        ),
-        keychain_writer=lambda payload: True,
-        refresher=_failing_refresher,
-    )
-    assert result.outcome is RepairOutcome.UNAVAILABLE
-    assert not store.stored
-    assert "rate limited" in result.message
-    assert "sign in" not in result.message.lower()
-
-
-def test_a_spent_refresh_token_does_ask_for_a_sign_in():
-    from sidepulse.claude_quota import (
-        CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN,
-        ClaudeQuotaUnavailableError,
-    )
-
-    def refused(raw, *, now):
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN)
-
-    store = FakeStore()
-    payload = json.dumps(
-        {
-            "claudeAiOauth": {
-                "accessToken": "a" * 32,
-                "refreshToken": "spent",
-                "expiresAt": 1_000_000_000_000,
-                "refreshTokenExpiresAt": 1_500_000_000_000,
-            }
-        }
-    )
-    result = repair_claude_credential(
-        store,
-        now=2_000_000_000.0,
-        keychain_payload_reader=lambda: payload,
-        keychain_writer=lambda payload: True,
-        refresher=refused,
-    )
-    assert result.outcome is RepairOutcome.NEEDS_SIGN_IN
-    assert "fully expired" in result.message
-
-
-def test_renewal_backs_off_instead_of_hammering_the_token_endpoint():
-    """A renewal on every collect cycle is what produced the 429 wall."""
-    from sidepulse.provider_reconnect import (
-        claude_renewal_allowed,
-        note_claude_renewal,
-    )
-
-    note_claude_renewal(now=1000.0, succeeded=True)
-    assert claude_renewal_allowed(1000.0)
-    note_claude_renewal(now=1000.0, succeeded=False)
-    assert not claude_renewal_allowed(1030.0), "a minute of quiet, minimum"
-    assert claude_renewal_allowed(1100.0)
-    note_claude_renewal(now=1100.0, succeeded=False)
-    assert not claude_renewal_allowed(1300.0), "the ladder doubles"
-    note_claude_renewal(now=1400.0, succeeded=True)
-    assert claude_renewal_allowed(1400.0), "success clears the ladder"
-
-
-def test_repair_claude_rejects_signed_out_shape():
-    from sidepulse.provider_reconnect import note_claude_renewal
-
-    note_claude_renewal(now=0.0, succeeded=True)
+def test_repair_claude_names_refresh_token_only_shape_as_provider_owned():
     store = FakeStore()
     result = repair_claude_credential(
         store,
         now=1000.0,
         keychain_payload_reader=lambda: claude_payload(access=""),
-        keychain_writer=lambda payload: True,
-        refresher=_failing_refresher,
     )
-    assert result.outcome is RepairOutcome.UNAVAILABLE
+    assert result.outcome is RepairOutcome.NEEDS_PROVIDER_REFRESH
     assert not store.stored
+    assert "Claude Code owns" in result.message
+    assert "sign in" not in result.message.lower()
 
 
-def test_repair_claude_without_a_refresh_token_never_attempts_renewal():
+def test_repair_claude_rejects_an_empty_signed_out_shape():
     store = FakeStore()
-
-    def exploding_refresher(raw, *, now):
-        raise AssertionError("no refresh token, nothing to try")
-
     result = repair_claude_credential(
         store,
-        now=2_000_000_000.0,
-        keychain_payload_reader=lambda: claude_payload(
-            access="", refresh="", expires_at=None
-        ),
-        refresher=exploding_refresher,
+        now=1000.0,
+        keychain_payload_reader=lambda: claude_payload(access="", refresh=""),
     )
     assert result.outcome is RepairOutcome.NEEDS_SIGN_IN
-    assert "empty" in result.message
+    assert not store.stored
+    assert "sign in" in result.message.lower()
 
 
 def test_repair_claude_stores_fresh_token_and_reports_change():
@@ -380,8 +238,8 @@ def test_terminal_gate_lifts_on_credential_change():
     assert not should_collect(gate, now=10.0, fingerprint=fingerprint, forced=False)
     changed = (("x", 9, 9, 9),)
     assert should_collect(gate, now=10.0, fingerprint=changed, forced=False)
-    # Never permanently quiet: the ladder cap still re-checks eventually.
-    assert should_collect(
+    # Terminal auth failures retry only after external evidence changes.
+    assert not should_collect(
         gate,
         now=TRANSIENT_BACKOFF_SECONDS[-1] + 1.0,
         fingerprint=fingerprint,
@@ -477,7 +335,7 @@ def test_the_claude_gate_can_lift_when_the_keychain_item_changes():
     assert isinstance(before, tuple)
 
 
-def test_a_stored_expiry_drives_proactive_renewal():
+def test_a_stored_expiry_drives_read_only_sync():
     from sidepulse.provider_reconnect import claude_token_is_stale
 
     class Store:
@@ -494,48 +352,3 @@ def test_a_stored_expiry_drives_proactive_renewal():
     assert claude_token_is_stale(Store(None), now=1000.0), "unknown = stale"
     assert claude_token_is_stale(Store("1200"), now=1000.0), "inside the margin"
     assert not claude_token_is_stale(Store("9000"), now=1000.0)
-
-
-def test_a_relaunch_does_not_re_attack_a_rate_limited_endpoint(tmp_path, monkeypatch):
-    """The ladder is persisted. Forgetting it on relaunch is how a 429
-    becomes a Cloudflare 1010 ban (2026-08-27)."""
-    from sidepulse import provider_reconnect as module
-
-    monkeypatch.setattr(module, "_renewal_state_path", lambda: tmp_path / "gate.json")
-    module._RENEWAL_STATE_LOADED = False
-    module._CLAUDE_RENEWAL_STATE.update(attempts=0.0, next_at=0.0)
-
-    module.note_claude_renewal(now=1000.0, succeeded=False)
-    assert not module.claude_renewal_allowed(1030.0)
-
-    # A fresh process: in-memory state is gone, the file is not.
-    module._RENEWAL_STATE_LOADED = False
-    module._CLAUDE_RENEWAL_STATE.update(attempts=0.0, next_at=0.0)
-    assert not module.claude_renewal_allowed(1030.0), "the backoff survived"
-    assert module.claude_renewal_allowed(1100.0)
-
-
-def test_a_new_sign_in_lifts_the_terminal_block_immediately():
-    """Keyed to the refresh-token lineage: once the user signs in again,
-    the credential we were blocked on no longer exists."""
-    from sidepulse.provider_reconnect import (
-        FailureGate,
-        note_failure,
-        refresh_token_lineage,
-        should_collect,
-    )
-
-    old_hash = refresh_token_lineage('{"claudeAiOauth":{"refreshToken":"spent"}}')
-    new_hash = refresh_token_lineage('{"claudeAiOauth":{"refreshToken":"fresh"}}')
-    assert old_hash and new_hash and old_hash != new_hash
-    assert "spent" not in old_hash, "the token itself is never stored"
-
-    gate = note_failure(
-        FailureGate(), now=1000.0, terminal=True, fingerprint=None, token_hash=old_hash
-    )
-    assert not should_collect(
-        gate, now=1001.0, fingerprint=None, forced=False, token_hash=old_hash
-    )
-    assert should_collect(
-        gate, now=1001.0, fingerprint=None, forced=False, token_hash=new_hash
-    )

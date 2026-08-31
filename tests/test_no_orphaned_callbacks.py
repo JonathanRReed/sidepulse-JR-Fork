@@ -28,6 +28,9 @@ CONTROLLER_FILES = (
 # orphan must not be able to hide behind a prefix.
 FRAMEWORK_CALLBACKS = frozenset(
     {
+        # NSApplication invokes this delegate callback directly during
+        # activation. It is intentionally framework-owned, not orphaned.
+        "applicationDidBecomeActive_",
         "drawRect_",
         "menuDidClose_",
         "numberOfRowsInTableView_",

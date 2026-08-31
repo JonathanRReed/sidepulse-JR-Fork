@@ -42,6 +42,13 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _relative_artifact_path(path: Path, *, root: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"artifact is outside release root: {path}") from exc
+
+
 def _license(metadata) -> list[dict[str, object]]:
     expression = metadata.get("License-Expression")
     if isinstance(expression, str) and expression.strip():
@@ -81,6 +88,7 @@ def build_sbom(
     *,
     application_version: str,
     artifacts: tuple[Path, ...] = (),
+    root: Path | None = None,
 ) -> dict[str, object]:
     components_by_ref: dict[str, dict[str, object]] = {}
     for distribution in importlib.metadata.distributions():
@@ -90,11 +98,19 @@ def build_sbom(
     components = [components_by_ref[key] for key in sorted(components_by_ref)]
 
     artifact_properties = []
+    artifact_root = (root or Path.cwd()).resolve()
     for artifact in sorted(artifacts, key=lambda item: item.name):
+        relative_path = _relative_artifact_path(artifact, root=artifact_root)
         artifact_properties.extend(
             (
-                {"name": f"sidepulse:artifact:{artifact.name}:sha256", "value": _sha256(artifact)},
-                {"name": f"sidepulse:artifact:{artifact.name}:bytes", "value": str(artifact.stat().st_size)},
+                {
+                    "name": f"sidepulse:artifact:{relative_path}:sha256",
+                    "value": _sha256(artifact),
+                },
+                {
+                    "name": f"sidepulse:artifact:{relative_path}:bytes",
+                    "value": str(artifact.stat().st_size),
+                },
             )
         )
 
@@ -113,14 +129,14 @@ def build_sbom(
                 "components": [
                     {
                         "type": "application",
-                        "name": "SidePulse SBOM Generator",
+                        "name": "JR Bar SBOM Generator",
                         "version": "1",
                     }
                 ]
             },
             "component": {
                 "type": "application",
-                "name": "SidePulse",
+                "name": "JR Bar",
                 "version": application_version,
                 "bom-ref": f"pkg:github/JonathanRReed/sidepulse-JR-Fork@{application_version}",
                 "properties": [
@@ -137,6 +153,7 @@ def build_sbom(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--application-version", required=True)
     parser.add_argument("--artifact", action="append", type=Path, default=[])
     args = parser.parse_args()
@@ -148,6 +165,7 @@ def main() -> int:
         document = build_sbom(
             application_version=str(args.application_version),
             artifacts=artifacts,
+            root=args.root.resolve(),
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(

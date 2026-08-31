@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import stat
-import time
 
 from sidepulse.provider_usage_platform import (
     ProviderSourceState,
@@ -123,10 +122,10 @@ def test_runner_invokes_the_executable_with_event_argv(tmp_path) -> None:
         (snapshot((lane(18.0),)),),
         thresholds=THRESHOLDS,
     )
-    run_usage_hooks(str(script), events)
-    deadline = time.time() + 5.0
-    while time.time() < deadline and not record.exists():
-        time.sleep(0.05)
+    worker = run_usage_hooks(str(script), events)
+    assert worker is not None
+    worker.join(timeout=1.0)
+    assert not worker.is_alive()
     assert record.read_text().strip() == "quota_low claude weekly 18"
 
 

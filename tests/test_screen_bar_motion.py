@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from sidepulse.accessibility_display import AccessibilityDisplayPreferences
 from sidepulse.presentation_policy import MotionClass
 from sidepulse.presentation_scheduler import plan_presentation_schedule
 from sidepulse.render_policy import (
@@ -13,6 +14,229 @@ from sidepulse.render_policy import (
     alcove_bracket_corner_radius,
     choose_render_schedule,
 )
+
+
+@pytest.mark.parametrize(
+    ("previous", "current", "reduce_motion", "animated"),
+    [
+        ("stale", "fresh", False, True),
+        ("recovering", "fresh", False, True),
+        ("fresh", "fresh", False, False),
+        ("permission_denied", "fresh", False, False),
+        ("disconnected", "fresh", False, False),
+        ("unsupported", "fresh", False, False),
+        ("not_following", "fresh", False, False),
+        ("recovering", "fresh", True, False),
+    ],
+)
+def test_alcove_recovery_motion_transitions_are_bounded(
+    monkeypatch, previous, current, reduce_motion, animated
+) -> None:
+    from sidepulse.alcove_observation import AlcoveConfidenceState
+    from sidepulse.virtual_device import _apply_alcove_frame
+
+    class Window:
+        def __init__(self):
+            self.frames = []
+
+        def animator(self):
+            return self
+
+        def setFrame_display_(self, frame, display):
+            self.frames.append((frame, display))
+
+    class Context:
+        duration = None
+        timing_function = None
+
+        def setDuration_(self, value):
+            self.duration = value
+
+        def setTimingFunction_(self, value):
+            self.timing_function = value
+
+    context = Context()
+    class AnimationContext:
+        @staticmethod
+        def runAnimationGroup_completionHandler_(configure, completion):
+            configure(context)
+            if completion is not None:
+                completion()
+
+    monkeypatch.setattr("AppKit.NSAnimationContext", AnimationContext, raising=False)
+    window = Window()
+    _apply_alcove_frame(
+        window,
+        ((1.0, 2.0), (3.0, 4.0)),
+        AlcoveConfidenceState(previous),
+        AlcoveConfidenceState(current),
+        AccessibilityDisplayPreferences(reduce_motion=reduce_motion),
+    )
+    assert len(window.frames) == 1
+    assert (context.duration == 0.18) is animated
+
+
+def test_alcove_recovery_animation_failure_applies_frame_once(monkeypatch) -> None:
+    from sidepulse.alcove_observation import AlcoveConfidenceState
+    from sidepulse.virtual_device import _apply_alcove_frame
+
+    class Window:
+        def __init__(self):
+            self.frames = []
+
+        def animator(self):
+            return self
+
+        def setFrame_display_(self, frame, display):
+            self.frames.append((frame, display))
+
+    class AnimationContext:
+        @staticmethod
+        def runAnimationGroup_completionHandler_(_configure, _completion):
+            raise RuntimeError("animation unavailable")
+
+    monkeypatch.setattr("AppKit.NSAnimationContext", AnimationContext, raising=False)
+    window = Window()
+    _apply_alcove_frame(
+        window,
+        ((1.0, 2.0), (3.0, 4.0)),
+        AlcoveConfidenceState.STALE,
+        AlcoveConfidenceState.FRESH,
+        AccessibilityDisplayPreferences(),
+    )
+    assert window.frames == [(((1.0, 2.0), (3.0, 4.0)), True)]
+
+
+def test_alcove_recovery_post_apply_failure_does_not_retry(monkeypatch) -> None:
+    from sidepulse.alcove_observation import AlcoveConfidenceState
+    from sidepulse.virtual_device import _apply_alcove_frame
+
+    class Window:
+        def __init__(self):
+            self.frames = []
+
+        def animator(self):
+            return self
+
+        def setFrame_display_(self, frame, display):
+            self.frames.append((frame, display))
+
+    class AnimationContext:
+        @staticmethod
+        def runAnimationGroup_completionHandler_(configure, _completion):
+            configure(type("Context", (), {
+                "setDuration_": lambda _self, _value: None,
+                "setTimingFunction_": lambda _self, _value: None,
+            })())
+            raise RuntimeError("completion unavailable")
+
+    monkeypatch.setattr("AppKit.NSAnimationContext", AnimationContext, raising=False)
+    window = Window()
+    _apply_alcove_frame(
+        window,
+        ((1.0, 2.0), (3.0, 4.0)),
+        AlcoveConfidenceState.RECOVERING,
+        AlcoveConfidenceState.FRESH,
+        AccessibilityDisplayPreferences(),
+    )
+    assert window.frames == [(((1.0, 2.0), (3.0, 4.0)), True)]
+
+
+def test_reposition_passes_ordered_alcove_motion_state_to_frame_boundary(monkeypatch) -> None:
+    from sidepulse import virtual_device
+    from sidepulse.alcove_observation import AlcoveConfidenceState, AlcoveGeometryIntent
+
+    class Screen:
+        def frame(self):
+            return SimpleNamespace(
+                origin=SimpleNamespace(x=0.0, y=0.0),
+                size=SimpleNamespace(width=1512.0, height=982.0),
+            )
+
+        def safeAreaInsets(self):
+            return SimpleNamespace(top=32.0)
+
+        def auxiliaryTopLeftArea(self):
+            return SimpleNamespace(origin=SimpleNamespace(x=0.0, y=0.0), size=SimpleNamespace(width=640.0, height=24.0))
+
+        def auxiliaryTopRightArea(self):
+            return SimpleNamespace(origin=SimpleNamespace(x=872.0, y=0.0), size=SimpleNamespace(width=640.0, height=24.0))
+
+    class Window:
+        def __init__(self):
+            self.current = SimpleNamespace(
+                origin=SimpleNamespace(x=-1000.0, y=-1000.0),
+                size=SimpleNamespace(width=1.0, height=1.0),
+            )
+
+        def frame(self):
+            return self.current
+
+        def setFrame_display_(self, frame, _display):
+            self.current = SimpleNamespace(
+                origin=SimpleNamespace(x=frame[0][0], y=frame[0][1]),
+                size=SimpleNamespace(width=frame[1][0], height=frame[1][1]),
+            )
+
+        def setLevel_(self, _level):
+            pass
+
+    class View:
+        def __getattr__(self, _name):
+            return lambda *_args: None
+
+    states = iter(
+        (
+            AlcoveConfidenceState.RECOVERING,
+            AlcoveConfidenceState.FRESH,
+            AlcoveConfidenceState.STALE,
+            AlcoveConfidenceState.FRESH,
+            AlcoveConfidenceState.FRESH,
+            AlcoveConfidenceState.DISCONNECTED,
+        )
+    )
+    calls = []
+    frames = iter((220.0, 221.0, 222.0, 223.0, 224.0, 225.0))
+
+    def project(**_kwargs):
+        state = next(states)
+        return SimpleNamespace(state=state, geometry_intent=AlcoveGeometryIntent.USE_SCREEN_BAR_GEOMETRY)
+
+    def apply(window, frame, previous, current, preferences):
+        calls.append((previous, current, preferences))
+        window.setFrame_display_(frame, True)
+
+    monkeypatch.setattr(virtual_device, "preferred_screen", lambda: Screen())
+    monkeypatch.setattr(virtual_device, "_screen_capture_values", lambda _screen: None)
+    monkeypatch.setattr(virtual_device, "space_hides_menu_bar", lambda _screen: True)
+    monkeypatch.setattr(virtual_device, "screen_recording_granted", lambda **_kwargs: True)
+    monkeypatch.setattr(virtual_device, "_apply_alcove_frame", apply)
+    monkeypatch.setattr(virtual_device, "project_alcove_confidence", project)
+    monkeypatch.setattr(virtual_device, "AlcovePresenceProbe", lambda: SimpleNamespace(running=lambda **_kwargs: False))
+    monkeypatch.setattr(
+        virtual_device,
+        "virtual_window_frame_for_screen",
+        lambda *_args, **_kwargs: ((next(frames), 950.0), (220.0, 37.0)),
+    )
+    monkeypatch.setattr(virtual_device, "alcove_window_level", lambda: 25)
+
+    device = virtual_device.VirtualStatusDevice.alloc().init()
+    device.window = Window()
+    device.view = View()
+    device._accessibility_display_preferences = AccessibilityDisplayPreferences(reduce_motion=True)
+    for _ in range(6):
+        device.reposition()
+
+    assert [(previous, current) for previous, current, _ in calls] == [
+        (None, AlcoveConfidenceState.RECOVERING),
+        (AlcoveConfidenceState.RECOVERING, AlcoveConfidenceState.FRESH),
+        (AlcoveConfidenceState.FRESH, AlcoveConfidenceState.STALE),
+        (AlcoveConfidenceState.STALE, AlcoveConfidenceState.FRESH),
+        (AlcoveConfidenceState.FRESH, AlcoveConfidenceState.FRESH),
+        (AlcoveConfidenceState.FRESH, AlcoveConfidenceState.DISCONNECTED),
+    ]
+    assert all(preferences.reduce_motion for _, _, preferences in calls)
+    assert device._last_alcove_confidence_state is AlcoveConfidenceState.DISCONNECTED
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +273,66 @@ def test_explicit_off_program_remains_invisible_with_a_minimum_glow() -> None:
     assert view._bracket_colors([(0.0, 0.0, 0.0, 0.0)] * 8) == [
         (0.0, 0.0, 0.0, 0.0)
     ] * 8
+
+
+def test_alcove_view_boundaries_are_typed_and_change_gated(monkeypatch) -> None:
+    from sidepulse.alcove_observation import (
+        AlcoveConfidenceProjection,
+        AlcoveConfidenceState,
+        AlcoveGeometryIntent,
+        AlcoveMotionIntent,
+        AlcoveSilhouette,
+    )
+    from sidepulse.virtual_device import VirtualLedView
+
+    view = VirtualLedView.alloc().initWithFrame_(((0, 0), (220.0, 37.0)))
+    repaints: list[bool] = []
+    monkeypatch.setattr(view, "setNeedsDisplay_", repaints.append)
+    silhouette = AlcoveSilhouette(
+        80.0, 80.0, 20.0, ((40.0, 0.0), (40.0, 20.0), (120.0, 20.0), (120.0, 0.0), (40.0, 0.0))
+    )
+    view.setAlcoveSilhouette_((80.0, 80.0, 20.0, silhouette.contour))
+    assert view.alcove_silhouette is None
+    view.setAlcoveSilhouette_(silhouette)
+    view.setAlcoveSilhouette_(silhouette)
+    assert view.alcove_silhouette == silhouette
+    assert len(repaints) == 1
+
+    projection = AlcoveConfidenceProjection(
+        AlcoveConfidenceState.FRESH, "message", "Fresh", "help",
+        AlcoveGeometryIntent.FOLLOW_LIVE, AlcoveMotionIntent.TRACK, False,
+    )
+    view.setAlcoveConfidence_(projection)
+    view.setAlcoveConfidence_(projection)
+    assert len(repaints) == 2
+
+
+def test_alcove_confidence_accessibility_failures_are_headless_safe(monkeypatch) -> None:
+    from sidepulse.alcove_observation import (
+        AlcoveConfidenceProjection,
+        AlcoveConfidenceState,
+        AlcoveGeometryIntent,
+        AlcoveMotionIntent,
+    )
+    from sidepulse.virtual_device import VirtualLedView
+
+    view = VirtualLedView.alloc().initWithFrame_(((0, 0), (220.0, 37.0)))
+    monkeypatch.setattr(view, "setNeedsDisplay_", lambda _value: None)
+    monkeypatch.setattr(view, "setAccessibilityValue_", lambda _value: (_ for _ in ()).throw(RuntimeError("headless")))
+    projection = AlcoveConfidenceProjection(
+        AlcoveConfidenceState.RECOVERING, "message", "Recovering", "help",
+        AlcoveGeometryIntent.USE_SCREEN_BAR_GEOMETRY, AlcoveMotionIntent.STATIC, False,
+    )
+    view.setAlcoveConfidence_(projection)
+    assert view.alcove_confidence is projection
+
+    missing = VirtualLedView.alloc().initWithFrame_(((0, 0), (220.0, 37.0)))
+    monkeypatch.setattr(missing, "setNeedsDisplay_", lambda _value: None)
+    monkeypatch.setattr(missing, "setAccessibilityLabel_", None)
+    monkeypatch.setattr(missing, "setAccessibilityValue_", None)
+    monkeypatch.setattr(missing, "setAccessibilityHelp_", None)
+    missing.setAlcoveConfidence_(projection)
+    assert missing.alcove_confidence is projection
 
 
 class _DisplayLink:
@@ -869,6 +1153,9 @@ def test_reposition_submits_plain_alcove_request_and_applies_validated_center(
         def setAlcoveSilhouette_(self, value) -> None:
             self.silhouettes.append(value)
 
+        def setAlcoveConfidence_(self, value) -> None:
+            self.confidence = value
+
         def setFrame_(self, _frame) -> None:
             pass
 
@@ -959,7 +1246,18 @@ def test_reposition_submits_plain_alcove_request_and_applies_validated_center(
     inset = virtual_device._screen_bar_edge_inset()
     assert device.window.current.origin.x == pytest.approx(464.0 - inset)
     assert device.window.current.size.width == pytest.approx(272.0 + 2 * inset)
-    assert device.view.silhouettes[-1] == (600.0, 272.0, 32.0, contour)
+    from sidepulse.alcove_observation import AlcoveSilhouette
+
+    assert device.view.silhouettes[-1] == AlcoveSilhouette(600.0, 272.0, 32.0, contour)
+
+    # A new Alcove window must not inherit the old observer's status or shape.
+    monkeypatch.setattr(virtual_device, "_alcove_window_values", lambda *_args: (100, 444.0, 0.0, 624.0))
+    device.reposition()
+    assert device.view.silhouettes[-1] is None
+    assert device.view.confidence.state.value == "recovering"
+    from sidepulse.alcove_observation import latest_alcove_status
+
+    assert latest_alcove_status() is None
 
     previous_request_count = len(observer.requests)
     monkeypatch.setattr(virtual_device, "_alcove_window_values", lambda *_args: None)
@@ -970,8 +1268,8 @@ def test_reposition_submits_plain_alcove_request_and_applies_validated_center(
     assert device._alcove_request is None
     assert observer.closes == 1
     assert len(observer.requests) == previous_request_count
-    assert device.window.current.origin.x == pytest.approx(464.0 - inset)
-    assert device.view.silhouettes[-1] == (600.0, 272.0, 32.0, contour)
+    assert device.window.current.origin.x == pytest.approx(632.0)
+    assert device.view.silhouettes[-1] is None
 
     monkeypatch.setattr(
         virtual_device.time,
@@ -1889,3 +2187,17 @@ def test_compact_mode_width_follows_the_capsule_too() -> None:
     # edge inset before passing it here; the frame honors the total.
     assert followed[1][0] == 204.0
     assert followed[1][0] != bare[1][0]
+
+
+def test_announcer_suppression_gate_includes_fullscreen_and_compact_modes() -> None:
+    """A visible Screen Bar must not leak an announcer into either exclusion."""
+    from sidepulse.virtual_device import VirtualStatusDevice
+
+    device = VirtualStatusDevice.alloc().init()
+    device.window = SimpleNamespace(isVisible=lambda: True)
+    assert device.can_present_announcer()
+    device._fullscreen_hidden = True
+    assert not device.can_present_announcer()
+    device._fullscreen_hidden = False
+    device._compact_active = True
+    assert not device.can_present_announcer()

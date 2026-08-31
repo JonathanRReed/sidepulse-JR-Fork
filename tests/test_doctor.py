@@ -63,7 +63,7 @@ def test_manifest_and_result_are_frozen_exact_and_bounded() -> None:
     assert isinstance(DIAGNOSTIC_MANIFEST, DiagnosticManifest)
     # Adding a check changes the exported document's shape, so the version
     # moves with it -- a v1 reader must not silently miss a whole row.
-    assert DIAGNOSTIC_MANIFEST.version == DOCTOR_VERSION == 3
+    assert DIAGNOSTIC_MANIFEST.version == DOCTOR_VERSION == 4
     assert tuple(field.check for field in DIAGNOSTIC_MANIFEST.fields) == tuple(DiagnosticCheck)
     assert tuple(field.name for field in fields(DiagnosticResult)) == (
         "manifest_version",
@@ -149,6 +149,29 @@ def test_collection_sanitizes_probe_failures_and_never_copies_private_values() -
     for value in private_corpus:
         assert value not in encoded
         assert value not in rendered
+
+
+def test_alcove_probe_exception_is_a_legal_recovering_nothing() -> None:
+    def failed_alcove_probe() -> DiagnosticFinding:
+        raise RuntimeError("capture failed")
+
+    probes = tuple(
+        DiagnosticProbe(
+            finding.check,
+            (
+                failed_alcove_probe
+                if finding.check is DiagnosticCheck.ALCOVE_FOLLOW_STATE
+                else (lambda row=finding: row)
+            ),
+        )
+        for finding in _result().findings
+    )
+
+    result = collect_diagnostics(probes=probes)
+    finding = result.finding(DiagnosticCheck.ALCOVE_FOLLOW_STATE)
+
+    assert finding.code is DiagnosticCode.RECOVERING
+    assert (finding.count, finding.limit) == (0, 0)
 
 
 def test_default_collection_uses_only_read_only_local_probes(tmp_path: Path) -> None:

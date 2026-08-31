@@ -19,7 +19,7 @@ def test_package_never_replaces_an_unowned_cli_path() -> None:
     text = (ROOT / "packaging" / "scripts" / "postinstall").read_text()
 
     assert "readlink" in text
-    assert 'left existing $CLI_LINK unchanged' in text
+    assert "left existing $CLI_LINK unchanged" in text
     assert 'ln -sfn "$APP_BINARY" "$CLI_LINK"' in text
     assert 'elif [ -L "$CLI_LINK" ]' in text
 
@@ -38,3 +38,5 @@ def test_supported_uninstaller_removes_only_owned_integrations() -> None:
     assert 'readlink "$CLI_LINK"' in text
     assert "--purge-state" in text
     assert "--keep-app" in text
+    assert 'PACKAGE_ID="io.sidepulse.app"' in text
+    assert 'pkgutil --forget "$PACKAGE_ID"' in text

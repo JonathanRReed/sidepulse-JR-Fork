@@ -35,6 +35,8 @@ from AppKit import (
 from Foundation import NSIndexSet, NSObject
 
 from .agent_browser import AgentBrowserProjection
+from .announcer_content import _single_line
+from .answer_in_place import MAX_ANSWER_REPLY_LENGTH, AnswerActionKind
 from .mailbox import MailboxSectionKind
 from .navigation_policy import OperatorActionDescriptor, OperatorActionKind
 from .provider_facts import WorkKey
@@ -66,6 +68,41 @@ class AgentBrowserActionPayload:
             )
         ):
             raise ValueError("invalid agent browser action payload")
+
+
+@dataclass(frozen=True, slots=True)
+class AgentBrowserAnswerPayload:
+    work_key: WorkKey
+    generation: int
+    request_identity: str
+    action: AnswerActionKind
+    reply_text: str | None = None
+
+    def __post_init__(self) -> None:
+        reply_valid = (
+            self.reply_text is None
+            or (
+                type(self.reply_text) is str
+                and 1 <= len(self.reply_text) <= MAX_ANSWER_REPLY_LENGTH
+                and self.reply_text == _single_line(self.reply_text)
+                and self.reply_text.isprintable()
+            )
+        )
+        if not (
+            type(self.work_key) is WorkKey
+            and type(self.generation) is int
+            and self.generation >= 0
+            and type(self.request_identity) is str
+            and 1 <= len(self.request_identity) <= 4096
+            and self.request_identity.isprintable()
+            and type(self.action) is AnswerActionKind
+            and reply_valid
+            and (
+                (self.action is AnswerActionKind.REPLY and self.reply_text is not None)
+                or (self.action is not AnswerActionKind.REPLY and self.reply_text is None)
+            )
+        ):
+            raise ValueError("invalid agent browser answer payload")
 
 
 @dataclass(frozen=True, slots=True)

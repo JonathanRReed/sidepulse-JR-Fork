@@ -107,9 +107,12 @@ def native_usage_menu_item(target):
     import time
 
     from . import status_bar as _host
+    from .provider_feature_settings import (
+        ProviderInstancePolicyProjection,
+        ProviderPresentationSettings,
+    )
     from .provider_usage_menu import project_usage_menu
     from .provider_usage_runtime import ProviderUsageState
-    from .provider_usage_settings import load_provider_usage_settings
     from .status_feeds import incident_row_title, shared_status_feed_poller
 
     _legacy = getattr(_host, "_legacy", _host)
@@ -120,21 +123,37 @@ def native_usage_menu_item(target):
         ProviderUsageState((), None, None, False),
     )
     try:
-        settings = load_provider_usage_settings().settings
+        settings = target._usage_menu_settings()
+        if type(settings) is not ProviderPresentationSettings:
+            raise ValueError("provider usage settings are not ready")
         display = settings.menu_display
         hidden = settings.hidden_menu_providers()
+        hidden_instances = settings.hidden_menu_instances()
         thresholds = {
-            preference.provider_id: preference.threshold_remaining
+            preference.identity: preference.threshold_remaining
             for preference in settings.providers
         }
     except Exception:
-        display, hidden, thresholds = None, frozenset(), None
+        display, hidden, hidden_instances, thresholds = (
+            None,
+            frozenset(),
+            frozenset(),
+            None,
+        )
+    policies = getattr(target, "_sidepulse_provider_instance_policies", None)
+    visual = (
+        policies.visual
+        if type(policies) is ProviderInstancePolicyProjection
+        else None
+    )
     projection = project_usage_menu(
         state,
         now=time.time(),
         display=display,
         hidden_providers=hidden,
+        hidden_instances=hidden_instances,
         thresholds=thresholds,
+        visual=visual,
     )
     item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         projection.title,
@@ -206,7 +225,11 @@ def native_usage_menu_item(target):
             )
             action.setTarget_(target)
             action.setRepresentedObject_(
-                {"provider_id": row.provider_id, "action": row.action_label}
+                {
+                    "provider_id": row.provider_id,
+                    "source_instance_id": row.source_instance_id,
+                    "action": row.action_label,
+                }
             )
             provider_menu.addItem_(action)
         provider_item.setSubmenu_(provider_menu)

@@ -1,8 +1,44 @@
 import Foundation
 import UIKit
 
+enum ProductIdentity {
+    static let displayName = "JR Bar"
+}
+
+enum PhoneGlanceLoadState: Equatable {
+    case unconfigured
+    case idle
+    case loading
+    case ready(VerifiedPhoneGlance)
+    case stale(VerifiedPhoneGlance)
+    case unavailable
+
+    var statusMessage: String {
+        switch self {
+        case .unconfigured:
+            return "Computer glance is not configured"
+        case .idle:
+            return "Computer glance is ready to check"
+        case .loading:
+            return "Checking computer glance"
+        case .ready:
+            return "Computer glance verified"
+        case .stale:
+            return "Last verified computer glance may be out of date"
+        case .unavailable:
+            return "Computer glance is unavailable"
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
+    enum PhoneGlanceConfigurationSaveResult {
+        case saved
+        case validationFailure
+        case keychainStorageFailure
+    }
+
     static let shared = AppModel()
 
     @Published private(set) var pushToken: String
@@ -25,6 +61,10 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var sharedSecret: String
 
+    @Published private(set) var phoneGlanceHost: String
+    @Published private(set) var phoneGlancePort: String
+    @Published private(set) var phoneGlanceLoadState: PhoneGlanceLoadState
+
     @Published var lastMessage: String = "Ready"
     @Published var eventLog: [String] = []
     @Published var receivedPushes: [ReceivedPush] {
@@ -37,7 +77,41 @@ final class AppModel: ObservableObject {
         static let receivedPushes = "receivedPushes"
     }
 
-    private init() {
+    private let phoneGlanceStateStore: PhoneGlanceStateStore
+    private let readPhoneGlanceSecret: () -> PhoneGlanceSecretReadResult
+    private let writePhoneGlanceSecret: (String) -> Bool
+    private let fetchPhoneGlance: (
+        PhoneGlanceEndpoint,
+        Data,
+        Int64?
+    ) async throws -> VerifiedPhoneGlance
+    private var lastVerifiedPhoneGlance: VerifiedPhoneGlance?
+    private var isRefreshingPhoneGlance = false
+
+    init(
+        phoneGlanceStateStore: PhoneGlanceStateStore = PhoneGlanceStateStore(),
+        readPhoneGlanceSecret: @escaping () -> PhoneGlanceSecretReadResult = {
+            KeychainStore.shared.readString(for: .phoneGlanceSecret)
+        },
+        writePhoneGlanceSecret: @escaping (String) -> Bool = {
+            KeychainStore.shared.set($0, for: .phoneGlanceSecret)
+        },
+        fetchPhoneGlance: @escaping (
+            PhoneGlanceEndpoint,
+            Data,
+            Int64?
+        ) async throws -> VerifiedPhoneGlance = { endpoint, secret, lastSequence in
+            try await PhoneGlanceClient.fetch(
+                endpoint: endpoint,
+                secret: secret,
+                lastSequence: lastSequence
+            )
+        }
+    ) {
+        self.phoneGlanceStateStore = phoneGlanceStateStore
+        self.readPhoneGlanceSecret = readPhoneGlanceSecret
+        self.writePhoneGlanceSecret = writePhoneGlanceSecret
+        self.fetchPhoneGlance = fetchPhoneGlance
         let keychain = KeychainStore.shared
         keychain.migrateLegacySecrets()
         self.pushToken = keychain.string(for: .pushToken) ?? ""
@@ -49,10 +123,89 @@ final class AppModel: ObservableObject {
         let savedBaseURL = UserDefaults.standard.string(forKey: Defaults.serverBaseURL) ?? "http://127.0.0.1:8787"
         self.serverBaseURL = Self.sanitizedBaseURL(savedBaseURL) ?? "http://127.0.0.1:8787"
         self.sharedSecret = keychain.string(for: .sharedSecret) ?? ""
+        if let endpoint = phoneGlanceStateStore.loadEndpoint() {
+            self.phoneGlanceHost = endpoint.host
+            self.phoneGlancePort = String(endpoint.port)
+            switch readPhoneGlanceSecret() {
+            case .value(let secret) where !secret.isEmpty:
+                self.phoneGlanceLoadState = .idle
+            case .missing, .value:
+                self.phoneGlanceLoadState = .unconfigured
+            case .unavailable:
+                self.phoneGlanceLoadState = .unavailable
+            }
+        } else {
+            self.phoneGlanceHost = ""
+            self.phoneGlancePort = ""
+            self.phoneGlanceLoadState = .unconfigured
+            phoneGlanceStateStore.clearConfiguration()
+        }
         self.receivedPushes = Self.loadReceivedPushes()
         self.eventLog = EventLog.entries()
         UserDefaults.standard.set(self.serverBaseURL, forKey: Defaults.serverBaseURL)
         refreshFolderStatus()
+    }
+
+    @discardableResult
+    func savePhoneGlanceConfiguration(
+        host: String,
+        port: String,
+        secret: String
+    ) -> PhoneGlanceConfigurationSaveResult {
+        let trimmedPort = port.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsedPort = Int(trimmedPort),
+              let endpoint = try? PhoneGlanceEndpoint(host: host, port: parsedPort),
+              !secret.isEmpty else {
+            phoneGlanceLoadState = lastVerifiedPhoneGlance.map(PhoneGlanceLoadState.stale) ?? .unconfigured
+            return .validationFailure
+        }
+
+        guard writePhoneGlanceSecret(secret) else {
+            phoneGlanceLoadState = lastVerifiedPhoneGlance.map(PhoneGlanceLoadState.stale) ?? .unavailable
+            return .keychainStorageFailure
+        }
+
+        lastVerifiedPhoneGlance = nil
+        phoneGlanceHost = endpoint.host
+        phoneGlancePort = String(endpoint.port)
+        phoneGlanceStateStore.saveConfiguration(endpoint)
+        phoneGlanceLoadState = .idle
+        return .saved
+    }
+
+    func refreshPhoneGlance() async {
+        guard !isRefreshingPhoneGlance else { return }
+        guard let endpoint = phoneGlanceEndpoint() else {
+            phoneGlanceLoadState = lastVerifiedPhoneGlance.map(PhoneGlanceLoadState.stale) ?? .unconfigured
+            return
+        }
+        let secret: String
+        switch readPhoneGlanceSecret() {
+        case .value(let storedSecret) where !storedSecret.isEmpty:
+            secret = storedSecret
+        case .missing, .value:
+            phoneGlanceLoadState = lastVerifiedPhoneGlance.map(PhoneGlanceLoadState.stale) ?? .unconfigured
+            return
+        case .unavailable:
+            phoneGlanceLoadState = lastVerifiedPhoneGlance.map(PhoneGlanceLoadState.stale) ?? .unavailable
+            return
+        }
+
+        isRefreshingPhoneGlance = true
+        phoneGlanceLoadState = .loading
+        defer { isRefreshingPhoneGlance = false }
+
+        do {
+            let verified = try await fetchPhoneGlance(endpoint, Data(secret.utf8), nil)
+            guard verified.sequence > (phoneGlanceStateStore.lastAcceptedSequence(for: verified.sourceID) ?? 0) else {
+                throw PhoneGlanceError.invalidResponse
+            }
+            phoneGlanceStateStore.saveAcceptedSequence(verified.sequence, for: verified.sourceID)
+            lastVerifiedPhoneGlance = verified
+            phoneGlanceLoadState = .ready(verified)
+        } catch {
+            phoneGlanceLoadState = lastVerifiedPhoneGlance.map(PhoneGlanceLoadState.stale) ?? .unavailable
+        }
     }
 
     func setPushToken(from deviceToken: Data) {
@@ -201,6 +354,13 @@ final class AppModel: ObservableObject {
             return nil
         }
         return result.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    private func phoneGlanceEndpoint() -> PhoneGlanceEndpoint? {
+        guard let port = Int(phoneGlancePort) else {
+            return nil
+        }
+        return try? PhoneGlanceEndpoint(host: phoneGlanceHost, port: port)
     }
 
     private func persistReceivedPushes() {

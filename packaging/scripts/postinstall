@@ -10,11 +10,11 @@ COMPLETE_RECEIPT="$RECEIPT_DIR/setup-complete"
 LAUNCH_AGENT_NAME="io.sidepulse.agentstatus.plist"
 
 log() {
-    /bin/echo "SidePulse postinstall: $*"
+    /bin/echo "JR Bar postinstall: $*"
 }
 
 fail() {
-    /bin/echo "SidePulse postinstall: $*" >&2
+    /bin/echo "JR Bar postinstall: $*" >&2
     exit 1
 }
 
@@ -32,7 +32,7 @@ if [ ! -e "$CLI_LINK" ] && [ ! -L "$CLI_LINK" ]; then
 elif [ -L "$CLI_LINK" ] && [ "$(/usr/bin/readlink "$CLI_LINK")" = "$APP_BINARY" ]; then
     /bin/ln -sfn "$APP_BINARY" "$CLI_LINK"
 else
-    log "left existing $CLI_LINK unchanged because SidePulse does not own it"
+    log "left existing $CLI_LINK unchanged because JR Bar does not own it"
 fi
 
 # A package install owns only package payload. Provider hooks, LaunchAgents,
@@ -49,12 +49,12 @@ if [ -n "$CONSOLE_HOME" ] && [ -f "$CONSOLE_HOME/Library/LaunchAgents/$LAUNCH_AG
     /bin/date -u '+%Y-%m-%dT%H:%M:%SZ' > "$COMPLETE_RECEIPT"
     /bin/chmod 644 "$COMPLETE_RECEIPT"
     /bin/rm -f "$PENDING_RECEIPT"
-    log "application upgraded; existing explicit SidePulse setup remains in place"
+    log "application upgraded; existing explicit JR Bar setup remains in place"
 else
     /bin/date -u '+%Y-%m-%dT%H:%M:%SZ' > "$PENDING_RECEIPT"
     /bin/chmod 644 "$PENDING_RECEIPT"
     /bin/rm -f "$COMPLETE_RECEIPT"
-    log "application installed; open SidePulse and complete the reviewed first-run setup"
+    log "application installed; open JR Bar and complete the reviewed first-run setup"
 fi
 
 exit 0

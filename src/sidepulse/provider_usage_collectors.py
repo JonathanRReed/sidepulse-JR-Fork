@@ -332,21 +332,6 @@ DEVIN_BROWSER_USER_AGENT = (
 )
 
 
-def _import_devin_browser_session():
-    """The user's own Devin session, read from a Firefox-family profile.
-
-    Isolated behind a function so a failure to read a browser can never
-    take down a usage refresh -- worst case there is no session and the
-    caller falls back to asking for one.
-    """
-    try:
-        from .browser_session_import import import_devin_session
-
-        return import_devin_session(Path.home())
-    except Exception:
-        return None
-
-
 def collect_devin(
     preference: ProviderPreference,
     *,
@@ -358,23 +343,6 @@ def collect_devin(
     organization = preference.option("organization")
     organization_id = preference.option("organization_id")
     secret = token.secret if token.available else None
-
-    if preference.browser_sources:
-        # "Enable browser access" is the consent, so honour it: lift the
-        # session Devin already wrote in the user's own browser instead
-        # of demanding an API key.
-        #
-        # The browser wins over a stored copy on purpose. Devin rotates
-        # these tokens, and a frozen import that outranks the live one
-        # buys a 401 -> "Reconnect Devin" -> re-import cycle every time
-        # it turns over: the card would appear to break by itself on a
-        # schedule. Reading the one origin costs a small local SQLite
-        # read, and it makes rotation invisible.
-        session = _import_devin_browser_session()
-        if session is not None:
-            secret = session.token
-            organization = session.organization or organization
-            organization_id = session.internal_organization_id or organization_id
 
     if secret is None:
         return _failure(

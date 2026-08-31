@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from sidepulse.provider_usage_sync_settings import (
     PROVIDER_SYNC_SETTINGS_SCHEMA_VERSION,
     ProviderSyncSettingsWriteRefusedError,
@@ -109,3 +111,31 @@ def test_host_and_remote_path_reject_command_or_batch_injection() -> None:
             pass
         else:
             raise AssertionError("unsafe peer configuration accepted")
+
+
+def test_loaded_sync_settings_exposes_source_digest_and_refuses_external_edit(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "sync.json"
+    save_provider_sync_settings(default_provider_sync_settings(), target)
+    loaded = load_provider_sync_settings(target)
+
+    assert loaded.source_digest
+    external = json.loads(target.read_text(encoding="utf-8"))
+    external["external_owner"] = {"keep": True}
+    target.write_text(json.dumps(external), encoding="utf-8")
+
+    with pytest.raises(ProviderSyncSettingsWriteRefusedError):
+        save_provider_sync_settings(loaded.settings, target, loaded=loaded)
+    assert json.loads(target.read_text(encoding="utf-8")) == external
+
+
+def test_loaded_missing_sync_settings_refuses_file_that_appears_before_save(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "sync.json"
+    loaded = load_provider_sync_settings(target)
+    target.write_text('{"owner":"external"}', encoding="utf-8")
+
+    with pytest.raises(ProviderSyncSettingsWriteRefusedError):
+        save_provider_sync_settings(loaded.settings, target, loaded=loaded)

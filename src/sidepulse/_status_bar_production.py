@@ -1,9 +1,11 @@
-"""Stable facade for SidePulse's historical AppKit controller.
+"""Stable production layer for SidePulse's historical AppKit controller.
 
 The original controller remains the compatibility runtime while production
 boundaries are extracted into small, testable modules. The facade preserves
 the public ``sidepulse.status_bar`` contract, including test monkeypatches and
-source introspection.
+source introspection. Runtime mutation is owned by
+``sidepulse.application_composition`` and never happens merely by importing
+this module.
 """
 
 from __future__ import annotations
@@ -14,28 +16,113 @@ import time
 from types import ModuleType
 
 from . import status_bar_legacy as _legacy
+from .ambient_effect_consumer import (
+    active_hardware_ambient_presentation,
+    active_screen_bar_ambient_presentation,
+)
 from .battery_runtime import BatteryObservation, BatteryObservationService
 from .core_state import CoreDomain, CoreStateStore, StateDelta
 from .device_projection import light_rows_for_provider, projection_for_provider
+from .effect_studio_physical_preview import (
+    EffectStudioPhysicalPreviewAdapter,
+    PreviewReleaseReason,
+)
+from .effect_studio_window import EffectStudioWindowController
+from .hardware_write_policy import hardware_coalesce_key
 from .intake_runtime import IntakeProbeResult, IntakeProbeService
 from .ledger_runtime import LedgerPublishResult, RemoteLedgerPublisher
+from .local_health import LocalHealthMonitor, LocalHealthSnapshot, format_local_health
 from .performance_metrics import PerformanceRegistry, PerformanceSnapshot
 from .refresh_admission import RefreshAdmission, admit_refresh
+from .screen_bar_pipeline import DEFAULT_PRESENTATION_METRICS
 from .transcript_runtime import TranscriptFallbackBatch, TranscriptFallbackService
 from .webhook_delivery import (
     WebhookDeliveryReceipt,
     WebhookDeliveryService,
 )
+from .why_light_context import OutputTimingSource
+from .why_light_runtime import project_current_why_light_context
 
 EVENT_COALESCE_SECONDS = 0.05
 FULL_REFRESH_HEARTBEAT_SECONDS = 1.0
 
-_LegacyStatusBarController = _legacy.StatusBarController
-_legacy._AppKitStatusBarController = _LegacyStatusBarController
+_LegacyStatusBarController = _legacy._AppKitStatusBarController
 
 
-if _legacy.StatusBarController.__name__ == "JRStatusBarController":
-    JRStatusBarController = _legacy.StatusBarController
+def _release_effect_studio_preview(
+    controller,
+    reason: PreviewReleaseReason,
+) -> bool:
+    adapter = getattr(
+        controller,
+        "_effect_studio_physical_preview_adapter",
+        None,
+    )
+    if adapter is None:
+        return False
+    active = getattr(adapter, "active_session", None)
+    session_id = getattr(active, "session_id", None)
+    try:
+        released = bool(adapter.release(reason))
+    except Exception:
+        released = False
+    if not released:
+        return False
+    window = getattr(controller, "_effect_studio_window_controller", None)
+    callback = getattr(window, "physicalPreviewDidRelease_", None)
+    if callable(callback):
+        callback({"session_id": session_id, "reason": reason.value})
+    return True
+
+
+def _terminate_controller(controller, notification, *, legacy_terminate=None):
+    if getattr(controller, "_runtime_termination_started", False):
+        return None
+    started = time.perf_counter()
+    outcome = "ok"
+    terminate = (
+        _LegacyStatusBarController.applicationWillTerminate_
+        if legacy_terminate is None
+        else legacy_terminate
+    )
+    try:
+        preview_released = _release_effect_studio_preview(
+            controller,
+            PreviewReleaseReason.APP_TERMINATION,
+        )
+        writer = getattr(controller, "_hardware_write_worker", None)
+        if preview_released and writer is not None:
+            wait_idle = getattr(writer, "wait_idle", None)
+            if callable(wait_idle):
+                wait_idle(timeout_seconds=1.0)
+        for attribute in (
+            "_production_battery_service",
+            "_production_transcript_service",
+            "_production_intake_service",
+            "_production_ledger_publisher",
+            "_production_webhook_service",
+        ):
+            service = getattr(controller, attribute, None)
+            if service is not None:
+                service.close()
+        return terminate(controller, notification)
+    except BaseException:
+        outcome = "error"
+        raise
+    finally:
+        controller._performance().record(
+            "shutdown",
+            (time.perf_counter() - started) * 1000.0,
+            outcome=outcome,
+        )
+
+
+_existing_controller = globals().get("JRStatusBarController")
+if (
+    isinstance(_existing_controller, type)
+    and _existing_controller.__name__ == "JRStatusBarController"
+):
+    JRStatusBarController = _existing_controller
 else:
 
     class JRStatusBarController(_LegacyStatusBarController):
@@ -51,11 +138,222 @@ else:
         def performance_snapshot(self) -> PerformanceSnapshot:
             return self._performance().snapshot()
 
-        def performance_diagnostics_text(self) -> str:
-            report = self.performance_snapshot()
+        def _effect_studio_preview_runtime(
+            self,
+        ) -> EffectStudioPhysicalPreviewAdapter:
+            adapter = getattr(
+                self,
+                "_effect_studio_physical_preview_adapter",
+                None,
+            )
+            if not isinstance(adapter, EffectStudioPhysicalPreviewAdapter):
+                adapter = EffectStudioPhysicalPreviewAdapter(self)
+                self._effect_studio_physical_preview_adapter = adapter
+            return adapter
+
+        @_legacy.objc.IBAction
+        def openEffectStudio_(self, _sender) -> None:
+            """Open the Studio through one retained AppKit owner and runtime cache."""
+
+            controller = getattr(self, "_effect_studio_window_controller", None)
+            if not isinstance(controller, EffectStudioWindowController):
+                controller = EffectStudioWindowController.alloc().init()
+                self._effect_studio_window_controller = controller
+            controller.open(
+                assignment_cache=getattr(
+                    self,
+                    "_effect_assignment_cache",
+                    None,
+                ),
+                physical_preview=self._effect_studio_preview_runtime(),
+            )
+
+        def _schedule_effect_studio_preview_timeout(
+            self,
+            session_id: str,
+            duration_seconds: float,
+        ) -> None:
+            self._cancel_effect_studio_preview_timeout()
+            self._effect_studio_preview_timer = (
+                _legacy.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    min(30.0, max(0.001, float(duration_seconds))),
+                    self,
+                    "effectStudioPreviewExpired:",
+                    session_id,
+                    False,
+                )
+            )
+
+        def _cancel_effect_studio_preview_timeout(self) -> None:
+            timer = getattr(self, "_effect_studio_preview_timer", None)
+            self._effect_studio_preview_timer = None
+            if timer is not None:
+                timer.invalidate()
+
+        @_legacy.objc.IBAction
+        def effectStudioPreviewExpired_(self, timer) -> None:
+            session_id = str(timer.userInfo() or "")
+            adapter = self._effect_studio_preview_runtime()
+            active = adapter.active_session
+            if active is None or active.session_id != session_id:
+                return
+            _release_effect_studio_preview(self, PreviewReleaseReason.TIMEOUT)
+
+        @_legacy.objc.IBAction
+        def effectStudioPreviewWriteFailed_(self, payload) -> None:
+            adapter = self._effect_studio_preview_runtime()
+            active = adapter.active_session
+            hardware_device_id = str(
+                payload.get("hardware_device_id") or ""
+            ) if payload else ""
+            session_id = str(payload.get("session_id") or "") if payload else ""
+            if (
+                active is None
+                or not session_id
+                or active.session_id != session_id
+                or active.hardware_device_id != hardware_device_id
+            ):
+                return
+            _release_effect_studio_preview(self, PreviewReleaseReason.ERROR)
+
+        def _restore_effect_studio_physical_output(self, device_id: str) -> None:
+            self.reset_led_controllers_for_device(device_id)
+            snapshot = getattr(self, "last_snapshot", None)
+            if snapshot is None:
+                self.refresh_(None)
+                return
+            projection = getattr(self, "current_attention_projection", None)
+            self.sync_leds(
+                snapshot.aggregate.mode,
+                self.last_battery_snapshot,
+                self.active_led_display_kind(self.last_battery_snapshot),
+                tuple(snapshot.statuses),
+                projection=projection,
+            )
+
+        def dndWorkspaceWillSleep_(self, notification) -> None:
+            _release_effect_studio_preview(self, PreviewReleaseReason.SLEEP)
+            return _LegacyStatusBarController.dndWorkspaceWillSleep_(
+                self,
+                notification,
+            )
+
+        def dndScreensDidSleep_(self, notification) -> None:
+            _release_effect_studio_preview(self, PreviewReleaseReason.SLEEP)
+            return _LegacyStatusBarController.dndScreensDidSleep_(
+                self,
+                notification,
+            )
+
+        def local_health_snapshot(
+            self,
+            *,
+            performance: PerformanceSnapshot | None = None,
+        ) -> LocalHealthSnapshot:
+            monitor = getattr(self, "_production_local_health_monitor", None)
+            if monitor is None:
+                monitor = LocalHealthMonitor()
+                self._production_local_health_monitor = monitor
+
+            registry = getattr(self, "_runtime_worker_registry", None)
+            try:
+                workers = tuple(registry.snapshot()) if registry is not None else ()
+            except Exception:
+                workers = ()
+
+            source_ages: list[float] = []
+            statuses = getattr(getattr(self, "last_snapshot", None), "statuses", ())
+            for status in statuses:
+                age_seconds = getattr(status, "age_seconds", None)
+                if not callable(age_seconds):
+                    continue
+                try:
+                    source_ages.append(age_seconds())
+                except Exception:
+                    continue
+
+            return monitor.observe(
+                presentation=DEFAULT_PRESENTATION_METRICS.snapshot(),
+                performance=(
+                    performance
+                    if type(performance) is PerformanceSnapshot
+                    else self._performance().snapshot()
+                ),
+                workers=workers,
+                source_ages_seconds=source_ages,
+                dnd_projection=(
+                    self.current_dnd_projection()
+                    if callable(getattr(self, "current_dnd_projection", None))
+                    else None
+                ),
+            )
+
+        def _why_light_context_from_health(self, health: LocalHealthSnapshot):
+            screen_bar_active = bool(
+                _legacy.SCREEN_BAR_FEATURE_ENABLED
+                and getattr(
+                    getattr(self, "settings", None),
+                    "virtual_status_device_enabled",
+                    False,
+                )
+            )
+            physical_surfaces_active = bool(
+                getattr(self, "leds_enabled", False)
+                and getattr(self, "_device_inventory_candidates", ())
+            )
+            timing = (
+                getattr(health, "screen_bar_renderer_latency", None)
+                if screen_bar_active
+                else None
+            )
+            timing_source = (
+                OutputTimingSource.SCREEN_BAR_RENDERER
+                if timing is not None
+                else OutputTimingSource.UNAVAILABLE
+            )
+            if timing is None and physical_surfaces_active:
+                timing = getattr(health, "hardware_write_latency", None)
+                if timing is not None:
+                    timing_source = OutputTimingSource.PHYSICAL_HARDWARE_WRITE
+            return project_current_why_light_context(
+                self,
+                screen_bar_feature_enabled=_legacy.SCREEN_BAR_FEATURE_ENABLED,
+                focus_observation_ttl_seconds=_legacy.BRIGHTNESS_WATCH_SECONDS + 1.0,
+                source_age=health.source_freshness_seconds,
+                renderer_sample_count=(timing.count if timing is not None else 0),
+                renderer_latest_ms=(timing.latest_ms if timing is not None else 0.0),
+                renderer_p50_ms=(timing.p50_ms if timing is not None else 0.0),
+                renderer_p95_ms=(timing.p95_ms if timing is not None else 0.0),
+                renderer_timing_source=timing_source,
+            )
+
+        def current_why_light_context(self):
+            """Add existing active-renderer timing to the cached explanation."""
+            return self._why_light_context_from_health(
+                self.local_health_snapshot()
+            )
+
+        def performance_diagnostics_text(
+            self,
+            *,
+            health: LocalHealthSnapshot | None = None,
+            report: PerformanceSnapshot | None = None,
+        ) -> str:
+            if type(report) is not PerformanceSnapshot:
+                report = self._performance().snapshot()
+            if type(health) is not LocalHealthSnapshot:
+                health = JRStatusBarController.local_health_snapshot(
+                    self,
+                    performance=report,
+                )
+            lines = [
+                format_local_health(health),
+                "",
+                "Detailed timings (current run)",
+            ]
             if not report.metrics:
-                return "Performance\nNo timing observations in this run."
-            lines = ["Performance (current run)"]
+                lines.append("No timing observations in this run.")
+                return "\n".join(lines)
             for metric in report.metrics:
                 lines.append(
                     f"{metric.name}: P50 {metric.p50_ms:.1f} ms · "
@@ -331,6 +629,23 @@ else:
                 self.settings.colors,
             )
 
+        def _ambient_bar(self, setter, brightness) -> bool:
+            preferences = self._accessibility_display_preferences
+            ambient = active_screen_bar_ambient_presentation(
+                self,
+                reduce_motion=bool(getattr(preferences, "reduce_motion", False)),
+                brightness=brightness,
+            )
+            if ambient is None:
+                return False
+            presentation = ambient.screen_bar_program
+            setter(
+                _legacy.apply_brightness(presentation.dsl, brightness),
+                presentation,
+            )
+            self._ambient_accessibility_text = ambient.accessibility_text
+            return True
+
         def sync_leds(self, *args, **kwargs):
             self._capture_hardware_render_colors()
             return _LegacyStatusBarController.sync_leds(self, *args, **kwargs)
@@ -339,12 +654,70 @@ else:
             started = time.perf_counter()
             outcome = "ok"
             try:
+                if request.override_program is not None:
+                    controller = self.agent_controller_for_device(request.device)
+                    write = controller.sync_program(
+                        request.override_program,
+                        request.override_state,
+                    )
+                    return _legacy.HardwareWriteResult(
+                        request=request,
+                        write=write,
+                        label=(
+                            f"{request.device.name} Ambient effect"
+                            if request.coalesce_identity.startswith("ambient-")
+                            else (
+                                f"{request.device.name} Effect Studio preview"
+                                if request.coalesce_identity
+                                == "preview-effect-studio"
+                                else f"{request.device.name} Calibration preview"
+                            )
+                        ),
+                        agent_display_rendered=False,
+                        completed_at=self._runtime_worker_monotonic(),
+                    )
+                if request.display_kind == _legacy.LED_DISPLAY_AGENT:
+                    controller = self.agent_controller_for_device(request.device)
+                    preferences = request.accessibility_preferences
+                    ambient = active_hardware_ambient_presentation(
+                        self,
+                        device_id=request.device.device_id,
+                        led_count=_legacy.led_count_for_target(request.device.target),
+                        reduce_motion=bool(
+                            getattr(preferences, "reduce_motion", False)
+                        ),
+                        brightness=controller.brightness,
+                    )
+                    if ambient is not None:
+                        write = controller.sync_program(
+                            ambient.program,
+                            ambient.led_state,
+                        )
+                        return _legacy.HardwareWriteResult(
+                            request=request,
+                            write=write,
+                            label=f"{request.device.name} Ambient effect",
+                            agent_display_rendered=False,
+                            completed_at=self._runtime_worker_monotonic(),
+                        )
                 return _LegacyStatusBarController._sync_hardware_device(
                     self,
                     request,
                 )
             except BaseException:
                 outcome = "error"
+                if request.coalesce_identity == "preview-effect-studio":
+                    try:
+                        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                            "effectStudioPreviewWriteFailed:",
+                            {
+                                "hardware_device_id": request.device.device_id,
+                                "session_id": request.preview_session_id,
+                            },
+                            False,
+                        )
+                    except Exception:
+                        pass
                 raise
             finally:
                 self._performance().record(
@@ -352,6 +725,170 @@ else:
                     (time.perf_counter() - started) * 1000.0,
                     outcome=outcome,
                 )
+
+        def _apply_hardware_write_result(self, command, result) -> None:
+            applied = _LegacyStatusBarController._apply_hardware_write_result(
+                self,
+                command,
+                result,
+            )
+            if type(result) is not _legacy.HardwareWriteResult:
+                return applied
+            adapter = getattr(
+                self,
+                "_effect_studio_physical_preview_adapter",
+                None,
+            )
+            if adapter is None:
+                return applied
+            preview_session_id = result.request.preview_session_id
+            if adapter.handle_write_result(
+                result.request,
+                error=result.write.error,
+            ):
+                window = getattr(
+                    self,
+                    "_effect_studio_window_controller",
+                    None,
+                )
+                callback = getattr(window, "physicalPreviewDidRelease_", None)
+                if callable(callback):
+                    callback(
+                        {
+                            "session_id": preview_session_id,
+                            "reason": PreviewReleaseReason.ERROR.value,
+                        }
+                    )
+            return applied
+
+        def _send_calibration_test(self) -> None:
+            calibration = self.calibration_test
+            if calibration is None or calibration[0] == _legacy.VIRTUAL_DEVICE_ID:
+                return _LegacyStatusBarController._send_calibration_test(self)
+            if not getattr(self, "_hardware_write_active", False):
+                return
+            device_id, hex_color = calibration
+            device = next(
+                (
+                    entry
+                    for entry in self.status_bar_devices(remember=False)
+                    if entry.device_id == device_id and entry.connected
+                ),
+                None,
+            )
+            if device is None:
+                return
+            controller = self.agent_controller_for_device(device)
+            program = _legacy.apply_brightness(
+                f"{hex_color} 500ms\nrepeat",
+                controller.brightness,
+            )
+            snapshot = self.last_snapshot
+            request = _legacy.HardwareWriteRequest(
+                device=device,
+                mode=(
+                    snapshot.aggregate.mode
+                    if snapshot is not None
+                    else _legacy.AgentMode.IDLE_READY
+                ),
+                battery_snapshot=self.last_battery_snapshot,
+                statuses=(snapshot.statuses if snapshot is not None else ()),
+                projection=self.current_attention_projection,
+                relay_elapsed_seconds=max(
+                    0.0,
+                    time.monotonic() - self._relay_epoch,
+                ),
+                accessibility_preferences=self._accessibility_display_preferences,
+                display_kind=_legacy.LED_DISPLAY_TEST,
+                write_priority=_legacy.RuntimeWorkPriority.EXPLICIT,
+                coalesce_identity="preview-calibration",
+                override_program=program,
+                override_state=_legacy.LedDisplayState.ASK,
+            )
+            worker_key = self._hardware_worker_key(device)
+            prefix = f"{worker_key}:"
+            self._hardware_write_worker.discard_pending_prefix(prefix)
+            preview_key = hardware_coalesce_key(
+                worker_key,
+                request.coalesce_identity,
+            )
+            self._active_calibration_preview_key = preview_key
+            now = self._runtime_worker_monotonic()
+            self._hardware_write_worker.submit(
+                _legacy.RuntimeWorkCommand(
+                    domain=_legacy.RuntimeWorkerDomain.HARDWARE_WRITE,
+                    key=worker_key,
+                    generation=self._hardware_write_generation,
+                    deadline=now + 30.0,
+                    payload=request,
+                    priority=_legacy.RuntimeWorkPriority.EXPLICIT,
+                    coalesce_key=preview_key,
+                )
+            )
+
+        def play_transition_flourish(self, label, animation) -> None:
+            if not self.leds_enabled:
+                return _LegacyStatusBarController.play_transition_flourish(
+                    self,
+                    label,
+                    animation,
+                )
+            try:
+                _legacy.validate_lid_animation(animation)
+            except _legacy.DeviceWriteError:
+                return _LegacyStatusBarController.play_transition_flourish(
+                    self,
+                    label,
+                    animation,
+                )
+            previous_generation = self._hardware_write_generation
+            self._hardware_write_generation += 1
+            self._hardware_write_worker.cancel_generation(previous_generation)
+            return _LegacyStatusBarController.play_transition_flourish(
+                self,
+                label,
+                animation,
+            )
+
+        def play_transition_flourish_worker(
+            self,
+            label,
+            animation,
+            devices,
+            token,
+        ) -> None:
+            if not self._hardware_write_worker.wait_idle(timeout_seconds=1.0):
+                _legacy.log_status_bar(
+                    f"animation refused {label}: hardware writer remained active"
+                )
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "restoreLedDisplay:",
+                    str(token),
+                    False,
+                )
+                return
+            return _LegacyStatusBarController.play_transition_flourish_worker(
+                self,
+                label,
+                animation,
+                devices,
+                token,
+            )
+
+        def popoverDidClose_(self, notification):
+            calibration = self.calibration_test
+            preview_key = getattr(
+                self,
+                "_active_calibration_preview_key",
+                None,
+            )
+            result = _LegacyStatusBarController.popoverDidClose_(self, notification)
+            if calibration is None or calibration[0] == _legacy.VIRTUAL_DEVICE_ID:
+                return result
+            if type(preview_key) is str:
+                self._hardware_write_worker.discard_pending(preview_key)
+            self._active_calibration_preview_key = None
+            return result
 
         def _core_state_store(self) -> CoreStateStore:
             store = getattr(self, "_production_core_state", None)
@@ -437,6 +974,12 @@ else:
                 }
             )
 
+        def refresh_why_panel(self) -> bool:
+            if getattr(self, "_production_refresh_active", False):
+                self._production_why_panel_refresh_pending = True
+                return False
+            return _LegacyStatusBarController.refresh_why_panel(self)
+
         @_legacy.objc.IBAction
         def refresh_(self, sender):
             # Any completed refresh satisfies pending event wake-ups, no
@@ -493,6 +1036,17 @@ else:
                 )
                 self._production_last_full_refresh = time.monotonic()
                 self._production_refresh_active = False
+                why_panel_pending = bool(
+                    getattr(self, "_production_why_panel_refresh_pending", False)
+                )
+                self._production_why_panel_refresh_pending = False
+                try:
+                    if why_panel_pending:
+                        _LegacyStatusBarController.refresh_why_panel(self)
+                    else:
+                        self.local_health_snapshot()
+                except Exception:
+                    pass
                 pending = bool(
                     getattr(self, "_production_refresh_pending", False)
                 )
@@ -534,6 +1088,11 @@ else:
             self.refresh_(None)
 
         def applicationDidFinishLaunching_(self, notification):
+            if (
+                getattr(self, "_runtime_started", False)
+                or getattr(self, "_runtime_termination_started", False)
+            ):
+                return None
             started = time.perf_counter()
             outcome = "ok"
             try:
@@ -615,9 +1174,23 @@ else:
                     outcome=outcome,
                 )
 
-        def why_panel_body(self) -> str:
-            body = _LegacyStatusBarController.why_panel_body(self)
-            return f"{body}\n\n{self.performance_diagnostics_text()}"
+        def why_panel_body(self, *, why_context=None) -> str:
+            report = self._performance().snapshot()
+            health = self.local_health_snapshot(performance=report)
+            context = (
+                self._why_light_context_from_health(health)
+                if why_context is None
+                else why_context
+            )
+            body = _LegacyStatusBarController.why_panel_body(
+                self,
+                why_context=context,
+            )
+            diagnostics = self.performance_diagnostics_text(
+                health=health,
+                report=report,
+            )
+            return f"{body}\n\n{diagnostics}"
 
         @_legacy.objc.IBAction
         def applyEscalationWebhook_(self, sender):
@@ -655,7 +1228,11 @@ else:
         def post_webhook(self, payload_dict: dict) -> None:
             """Queue privacy-minimized JSON on one bounded delivery worker."""
             url = (self.settings.escalation_webhook_url or "").strip()
-            if not url or not isinstance(payload_dict, dict):
+            if (
+                not url
+                or not isinstance(payload_dict, dict)
+                or not self.webhook_effect_allowed(payload_dict)
+            ):
                 return
             reason = self._webhook_service().submit(
                 url,
@@ -671,22 +1248,14 @@ else:
                 )
 
         def applicationWillTerminate_(self, notification):
-            for attribute in (
-                "_production_battery_service",
-                "_production_transcript_service",
-                "_production_intake_service",
-                "_production_ledger_publisher",
-                "_production_webhook_service",
-            ):
-                service = getattr(self, attribute, None)
-                if service is not None:
-                    service.close()
-            return _LegacyStatusBarController.applicationWillTerminate_(
-                self,
-                notification,
-            )
+            return _terminate_controller(self, notification)
 
+
+
+def install_status_bar_production():
+    """Install the production controller layer at the explicit app boundary."""
     _legacy.StatusBarController = JRStatusBarController
+    return JRStatusBarController
 
 
 class _StatusBarFacade(ModuleType):
@@ -721,7 +1290,11 @@ class _StatusBarFacade(ModuleType):
         return sorted(set(super().__dir__()) | set(dir(_legacy)))
 
 
-__all__ = tuple(name for name in dir(_legacy) if not name.startswith("_"))
+__all__ = (
+    *(name for name in dir(_legacy) if not name.startswith("_")),
+    "JRStatusBarController",
+    "install_status_bar_production",
+)
 _facade_module = sys.modules[__name__]
 _facade_module.__class__ = _StatusBarFacade
 _facade_module.__file__ = _legacy.__file__

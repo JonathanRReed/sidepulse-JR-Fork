@@ -1,0 +1,42 @@
+name: Accessibility issue
+description: Report a barrier involving vision, motion, hearing, input, contrast, or assistive technology.
+title: "[Accessibility]: "
+labels:
+  - accessibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please share only what is needed to reproduce the barrier. Do not include private prompts, transcripts, account information, or secrets.
+  - type: input
+    id: version
+    attributes:
+      label: JR Bar and macOS version
+      placeholder: JR Bar 0.5.0, macOS 15.x
+    validations:
+      required: true
+  - type: textarea
+    id: assistive_context
+    attributes:
+      label: Accessibility context
+      description: Optionally describe the relevant setting or assistive technology, without sharing health information.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Give exact steps, input method, and affected screen or hardware surface.
+    validations:
+      required: true
+  - type: textarea
+    id: observed_expected
+    attributes:
+      label: Observed versus expected
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Add a redacted screenshot, recording, or sanitized diagnostic output.
+    validations:
+      required: true

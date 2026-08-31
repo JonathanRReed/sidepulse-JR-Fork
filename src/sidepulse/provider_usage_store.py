@@ -6,13 +6,14 @@ import json
 from pathlib import Path
 
 from .provider_usage_platform import (
+    DEFAULT_SOURCE_INSTANCE_ID,
     ProviderSourceState,
     ProviderUsageSnapshot,
     UsageLane,
 )
 from .provider_usage_runtime import ProviderUsageState
 
-PROVIDER_USAGE_STORE_SCHEMA_VERSION = 1
+PROVIDER_USAGE_STORE_SCHEMA_VERSION = 2
 MAX_STORE_BYTES = 2 * 1024 * 1024
 
 
@@ -53,6 +54,7 @@ def _snapshot_document(snapshot: ProviderUsageSnapshot) -> dict[str, object]:
         "cache_savings_usd": snapshot.cache_savings_usd,
         "credits_remaining": snapshot.credits_remaining,
         "incident": snapshot.incident,
+        "source_instance_id": snapshot.source_instance_id,
     }
 
 
@@ -128,6 +130,7 @@ def _snapshot(value: object) -> ProviderUsageSnapshot | None:
             cache_savings_usd=value.get("cache_savings_usd"),
             credits_remaining=value.get("credits_remaining"),
             incident=value.get("incident"),
+            source_instance_id=value.get("source_instance_id", DEFAULT_SOURCE_INSTANCE_ID),
         )
     except (TypeError, ValueError):
         return None
@@ -145,7 +148,10 @@ def load_provider_usage_state(
         return ProviderUsageState((), None, None, False)
     if (
         not isinstance(document, dict)
-        or document.get("schema_version") != PROVIDER_USAGE_STORE_SCHEMA_VERSION
+        or document.get("schema_version") not in {
+            1,
+            PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+        }
     ):
         return ProviderUsageState((), None, None, False)
     snapshots = []
@@ -153,8 +159,8 @@ def load_provider_usage_state(
     if isinstance(raw_snapshots, list):
         for raw_snapshot in raw_snapshots[:16]:
             snapshot = _snapshot(raw_snapshot)
-            if snapshot is not None and snapshot.provider_id not in {
-                existing.provider_id for existing in snapshots
+            if snapshot is not None and snapshot.identity not in {
+                existing.identity for existing in snapshots
             }:
                 snapshots.append(snapshot)
     refreshed_at = document.get("refreshed_at")

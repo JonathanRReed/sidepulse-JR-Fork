@@ -259,17 +259,17 @@ def collect_claude(
 ) -> ProviderUsageSnapshot:
     del preference
     local = local_scanner(Path(home), observed_at)
-    # Renew BEFORE asking, not after a 401. The reactive path made the
-    # dropdown flash "reconnect" once per token lifetime while the fix
-    # was already automatic (2026-08-27 owner report).
+    # Re-read BEFORE asking when JR Bar's copy is stale. This is a
+    # read-only sync under a previously recorded standing grant. Claude
+    # Code remains the sole owner of refresh and Keychain mutation.
     try:
         from .provider_reconnect import (
             claude_token_is_stale,
-            renew_claude_credential_in_background,
+            sync_claude_credential_in_background,
         )
 
         if claude_token_is_stale(credentials, now=observed_at):
-            renew_claude_credential_in_background(
+            sync_claude_credential_in_background(
                 credentials, home=Path(home), now=observed_at
             )
     except Exception:

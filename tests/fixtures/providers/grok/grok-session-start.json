@@ -1,0 +1,9 @@
+{
+  "provider": "grok",
+  "fixtureType": "hook-event",
+  "fixtureVersion": 1,
+  "payload": {
+    "event": "SessionStart",
+    "session_id": "synthetic-grok-session"
+  }
+}

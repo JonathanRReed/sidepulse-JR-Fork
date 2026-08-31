@@ -65,7 +65,7 @@ import subprocess
 import tempfile
 import time
 import unicodedata
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,6 +75,11 @@ from .freshness import bounded_age_seconds
 from .models import MODE_PRIORITY, AgentMode, AgentStatus
 from .private_io import atomic_private_write, ensure_private_directory, read_private_text
 from .providers import default_state_dir
+from .remote_observation import (
+    RemoteObservationBatch,
+    RemoteObservationReceiver,
+    collect_remote_observations,
+)
 
 # --- Bounds -----------------------------------------------------------
 # Every number here is a ceiling, not a target. This app has been bitten
@@ -1531,4 +1536,27 @@ def collect_remote_ledgers(
         per_peer_timeout_seconds=active.per_peer_timeout_seconds,
         overall_deadline_seconds=active.refresh_deadline_seconds,
         max_peers=active.max_peers,
+    )
+
+
+def collect_authenticated_remote_observations(
+    *,
+    event_stream: object | None,
+    receiver: RemoteObservationReceiver,
+    now: float | None = None,
+    now_monotonic: Callable[[], float] = time.monotonic,
+) -> RemoteObservationBatch:
+    """Collect a bounded read-only event stream with no command fallback.
+
+    The legacy ledger viewer and the live observation plane intentionally
+    remain separate authorities. This facade exposes only the authenticated
+    event-stream protocol. It has no remote command, shell, identity-file, or
+    generic RPC parameter to accidentally widen later.
+    """
+
+    return collect_remote_observations(
+        event_stream=event_stream,
+        receiver=receiver,
+        now=now,
+        monotonic=now_monotonic,
     )

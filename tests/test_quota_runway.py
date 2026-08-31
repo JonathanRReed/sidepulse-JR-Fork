@@ -4,6 +4,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from sidepulse.provider_feature_settings import (
+    ProviderInstancePolicyProjection,
+    ProviderInstanceRetentionProjection,
+    ProviderInstanceSessionActionProjection,
+    ProviderInstanceSharingProjection,
+    ProviderInstanceVisualPolicy,
+    ProviderInstanceVisualProjection,
+)
 from sidepulse.provider_usage_platform import (
     ProviderSourceState,
     ProviderUsageSnapshot,
@@ -34,7 +42,13 @@ def _lane(provider, lane_id, remaining, *, bindable=True, reset_at=NOW + 3_600.0
     )
 
 
-def _snapshot(provider, lanes, *, state=ProviderSourceState.READY):
+def _snapshot(
+    provider,
+    lanes,
+    *,
+    state=ProviderSourceState.READY,
+    source_instance_id="default",
+):
     return ProviderUsageSnapshot(
         provider_id=provider,
         account_label=None,
@@ -51,6 +65,7 @@ def _snapshot(provider, lanes, *, state=ProviderSourceState.READY):
         cache_savings_usd=None,
         credits_remaining=None,
         incident=None,
+        source_instance_id=source_instance_id,
     )
 
 
@@ -163,3 +178,85 @@ def test_controller_seam_returns_none_without_lanes() -> None:
         _usage_menu_settings=lambda: None,
     )
     assert quota_runway_state_for_controller(controller) is None
+
+
+def _instance_policies(*visual_policies) -> ProviderInstancePolicyProjection:
+    return ProviderInstancePolicyProjection(
+        visual=ProviderInstanceVisualProjection(tuple(visual_policies)),
+        retention=ProviderInstanceRetentionProjection(()),
+        sharing=ProviderInstanceSharingProjection(()),
+        session_action=ProviderInstanceSessionActionProjection(()),
+    )
+
+
+def test_controller_seam_uses_exact_instance_profile_identity() -> None:
+    class Colors:
+        @staticmethod
+        def agent_color(_provider_id):
+            return "#D97757"
+
+    controller = SimpleNamespace(
+        provider_usage_state=SimpleNamespace(
+            snapshots=(
+                _snapshot(
+                    "claude",
+                    (_lane("claude", "weekly", 25.0),),
+                    source_instance_id="work",
+                ),
+            )
+        ),
+        settings=SimpleNamespace(colors=Colors()),
+        _usage_menu_settings=lambda: None,
+        _sidepulse_provider_instance_policies=_instance_policies(
+            ProviderInstanceVisualPolicy(
+                provider_id="claude",
+                source_instance_id="work",
+                label="Client Claude",
+                color_override="#112233",
+            )
+        ),
+    )
+
+    state = quota_runway_state_for_controller(controller)
+
+    assert state is not None
+    assert state.source_instance_id == "work"
+    assert state.provider_label == "Client Claude"
+    assert state.color == "#112233"
+
+
+def test_controller_seam_keeps_provider_color_without_exact_override() -> None:
+    class Colors:
+        @staticmethod
+        def agent_color(provider_id):
+            assert provider_id == "claude"
+            return "#D97757"
+
+    controller = SimpleNamespace(
+        provider_usage_state=SimpleNamespace(
+            snapshots=(
+                _snapshot(
+                    "claude",
+                    (_lane("claude", "weekly", 25.0),),
+                    source_instance_id="personal",
+                ),
+            )
+        ),
+        settings=SimpleNamespace(colors=Colors()),
+        _usage_menu_settings=lambda: None,
+        _sidepulse_provider_instance_policies=_instance_policies(
+            ProviderInstanceVisualPolicy(
+                provider_id="claude",
+                source_instance_id="work",
+                label="Client Claude",
+                color_override="#112233",
+            )
+        ),
+    )
+
+    state = quota_runway_state_for_controller(controller)
+
+    assert state is not None
+    assert state.source_instance_id == "personal"
+    assert state.provider_label == "Claude"
+    assert state.color == "#D97757"

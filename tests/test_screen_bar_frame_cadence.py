@@ -40,7 +40,12 @@ from sidepulse.render_policy import (
     deliverable_fps,
     presentation_hold_seconds,
 )
-from sidepulse.screen_bar_pipeline import ColorSample, SamplePair
+from sidepulse.screen_bar_pipeline import (
+    DEFAULT_PRESENTATION_METRICS,
+    ColorSample,
+    PresentationMetricKind,
+    SamplePair,
+)
 
 LED_COUNT = 8
 _LIT = ((0.0, 0.9, 1.0, 1.0),) * LED_COUNT
@@ -118,9 +123,7 @@ def _drive(
         start = clock["now"]
         ticks = int(callback_hz * seconds)
         for index in range(ticks):
-            clock["now"] = start + index / callback_hz + (
-                noise.uniform(0.0, jitter) if jitter else 0.0
-            )
+            clock["now"] = start + index / callback_hz + (noise.uniform(0.0, jitter) if jitter else 0.0)
             if fed:
                 _publish(device, clock["now"])
             device.redraw_(None)
@@ -142,12 +145,8 @@ def _drive(
 def test_the_pipeline_runs_at_the_policy_rate_not_the_callback_rate(
     monkeypatch, callback_hz: float, policy_fps: float, expected: int
 ) -> None:
-    device, clock, virtual_device = _device(
-        monkeypatch, policy_fps, driver_fps=callback_hz
-    )
-    frames = _drive(
-        device, clock, virtual_device, callback_hz=callback_hz, seconds=1.0
-    )
+    device, clock, virtual_device = _device(monkeypatch, policy_fps, driver_fps=callback_hz)
+    frames = _drive(device, clock, virtual_device, callback_hz=callback_hz, seconds=1.0)
     # One frame either way for where the window lands against the tick grid.
     assert abs(frames - expected) <= 1
     assert frames < callback_hz or policy_fps >= callback_hz
@@ -157,6 +156,41 @@ def test_a_callback_with_no_schedule_still_presents_every_tick(monkeypatch) -> N
     """No policy, no gate -- anything driving redraw_ directly is unaffected."""
     device, clock, virtual_device = _device(monkeypatch, None)
     assert _drive(device, clock, virtual_device, callback_hz=60.0, seconds=1.0) == 60
+
+
+def test_runtime_metrics_distinguish_presented_and_suppressed_callbacks(
+    monkeypatch,
+) -> None:
+    device, clock, virtual_device = _device(
+        monkeypatch,
+        30.0,
+        driver_fps=60.0,
+    )
+    before = DEFAULT_PRESENTATION_METRICS.snapshot()
+
+    delivered = _drive(
+        device,
+        clock,
+        virtual_device,
+        callback_hz=60.0,
+        seconds=1.0,
+    )
+
+    after = DEFAULT_PRESENTATION_METRICS.snapshot()
+    assert (
+        after.counter(PresentationMetricKind.PROCESSED_CALLBACK)
+        - before.counter(PresentationMetricKind.PROCESSED_CALLBACK)
+        == delivered
+    )
+    assert (
+        after.counter(PresentationMetricKind.PRESENTED_FRAME) - before.counter(PresentationMetricKind.PRESENTED_FRAME)
+        == delivered
+    )
+    assert (
+        after.counter(PresentationMetricKind.SUPPRESSED_CALLBACK)
+        - before.counter(PresentationMetricKind.SUPPRESSED_CALLBACK)
+        == 60 - delivered
+    )
 
 
 def test_a_stall_never_cascades_into_a_burst_of_catch_up_frames(monkeypatch) -> None:
@@ -216,18 +250,14 @@ def test_the_gate_still_rate_limits_once_real_frames_are_flowing(
     """The C1 fix must not become 'never gate'. With the sampler feeding
     every tick, a 30 fps cadence still costs 30 pipeline runs, not 60."""
     device, clock, virtual_device = _device(monkeypatch, 30.0, driver_fps=60.0)
-    assert (
-        _drive(device, clock, virtual_device, callback_hz=60.0, seconds=1.0) == 30
-    )
+    assert _drive(device, clock, virtual_device, callback_hz=60.0, seconds=1.0) == 30
 
 
 # --- C2: jitter must not become dropped frames -----------------------------
 
 
 @pytest.mark.parametrize("jitter_ms", [1.0, 2.0, 4.0, 8.0])
-def test_main_thread_jitter_does_not_drop_frames_at_the_driver_rate(
-    monkeypatch, jitter_ms: float
-) -> None:
+def test_main_thread_jitter_does_not_drop_frames_at_the_driver_rate(monkeypatch, jitter_ms: float) -> None:
     """A FINITE cue asks for 60 fps and the driver runs at 60 Hz. The old
     fixed 10% tolerance left 1.67 ms of headroom, and because the stamp came
     from the jittered callback time, one late tick made the next measurement
@@ -268,14 +298,10 @@ def test_the_hold_is_half_a_driver_period_short_of_the_interval() -> None:
             cadence=RenderCadence(fps=cadence_fps, sample_fps=cadence_fps),
             driver_fps=driver_fps,
         )
-        assert presentation_hold_seconds(schedule) == pytest.approx(
-            (ticks - 0.5) / driver_fps
-        )
+        assert presentation_hold_seconds(schedule) == pytest.approx((ticks - 0.5) / driver_fps)
     # An unstated driver keeps the old fixed tolerance rather than inventing a
     # period from nothing.
-    unstated = RenderSchedule(
-        driver=RenderDriverKind.TIMER, cadence=RenderCadence(fps=30.0, sample_fps=30.0)
-    )
+    unstated = RenderSchedule(driver=RenderDriverKind.TIMER, cadence=RenderCadence(fps=30.0, sample_fps=30.0))
     assert presentation_hold_seconds(unstated) == pytest.approx(0.9 / 30.0)
 
 
@@ -339,9 +365,7 @@ def test_every_reachable_schedule_delivers_exactly_what_it_names(
     )
     assert abs(delivered / 4.0 - schedule.cadence.fps) <= 0.5
     # And the ceiling the environment asked for is still respected.
-    ceiling = choose_render_cadence(
-        RenderEnvironment(thermal=thermal, low_power=low_power), True
-    )
+    ceiling = choose_render_cadence(RenderEnvironment(thermal=thermal, low_power=low_power), True)
     assert schedule.cadence.fps <= ceiling.fps + 1e-9
 
 
@@ -364,17 +388,11 @@ def _thermal_transition(monkeypatch, device, thermal: str, *, low_power: bool = 
     monkeypatch.setattr(
         type(device),
         "_runtime_environment",
-        lambda self, force=False: RenderEnvironment(
-            thermal=thermal, low_power=low_power
-        ),
+        lambda self, force=False: RenderEnvironment(thermal=thermal, low_power=low_power),
         raising=False,
     )
-    monkeypatch.setattr(
-        type(device), "_panel_refresh_hz", lambda self: 60.0, raising=False
-    )
-    monkeypatch.setattr(
-        type(device), "_display_link_available", lambda self: False, raising=False
-    )
+    monkeypatch.setattr(type(device), "_panel_refresh_hz", lambda self: 60.0, raising=False)
+    monkeypatch.setattr(type(device), "_display_link_available", lambda self: False, raising=False)
     return device._refresh_render_cadence(True)
 
 
@@ -450,8 +468,6 @@ def test_the_clamps_the_policy_already_computes_now_reach_the_screen(
         )
         device, clock, _module = _device(monkeypatch, None)
         device._render_schedule = schedule
-        counts.append(
-            _drive(device, clock, virtual_device, callback_hz=60.0, seconds=1.0)
-        )
+        counts.append(_drive(device, clock, virtual_device, callback_hz=60.0, seconds=1.0))
     assert counts == [30, 15]
     assert math.isclose(counts[0] / counts[1], 2.0)

@@ -33,6 +33,12 @@ from unittest.mock import patch
 import pytest
 
 from sidepulse import signals
+from sidepulse.dnd_policy import DndMode, DndOverride, OutboundAdmission
+from sidepulse.focus_status import (
+    FocusActivity,
+    FocusAuthorization,
+    FocusStatusObservation,
+)
 from sidepulse.models import AgentMode, AgentStatus
 from sidepulse.settings import AgentMonitorSettings
 
@@ -163,6 +169,105 @@ def test_no_focus_and_no_snooze_lets_the_courtesy_signals_through() -> None:
         grant = signals.grant_interrupt(kind, budget=signals.InterruptBudget())
         assert grant.allowed, kind
         assert grant.reason == signals.INTERRUPT_GRANTED
+
+
+@pytest.mark.parametrize(
+    ("admission", "kind", "outbound_allowed"),
+    (
+        (OutboundAdmission.ALL, signals.SIGNAL_COMPLETION, True),
+        (OutboundAdmission.CRITICAL, signals.SIGNAL_COMPLETION, False),
+        (OutboundAdmission.CRITICAL, signals.INTERRUPT_FAILURE, True),
+        (OutboundAdmission.CRITICAL, signals.INTERRUPT_ASK, True),
+        (OutboundAdmission.ASKS, signals.INTERRUPT_FAILURE, False),
+        (OutboundAdmission.ASKS, signals.SIGNAL_LOW_BATTERY, False),
+        (OutboundAdmission.ASKS, signals.INTERRUPT_ASK, True),
+        (OutboundAdmission.ASKS, signals.INTERRUPT_ESCALATION, True),
+        (OutboundAdmission.NONE, signals.INTERRUPT_ASK, False),
+    ),
+)
+def test_dnd_outbound_admission_has_exact_five_mode_capabilities(
+    admission: OutboundAdmission,
+    kind: str,
+    outbound_allowed: bool,
+) -> None:
+    grant = signals.grant_interrupt(
+        kind,
+        budget=signals.InterruptBudget(outbound_admission=admission),
+    )
+
+    assert grant.allowed, "DND outbound policy must not hide an admitted visual"
+    assert grant.banner_allowed is outbound_allowed
+    assert grant.audible is outbound_allowed
+    assert grant.webhook_allowed is outbound_allowed
+    assert grant.outbound_reason == (
+        signals.INTERRUPT_GRANTED
+        if outbound_allowed
+        else signals.INTERRUPT_REFUSED_DND
+    )
+
+
+def test_mute_keeps_visuals_while_refusing_every_outbound_effect() -> None:
+    grant = signals.grant_interrupt(
+        signals.SIGNAL_COMPLETION,
+        budget=signals.InterruptBudget(
+            outbound_admission=OutboundAdmission.NONE,
+            banner_allowed=False,
+            audible_allowed=False,
+            webhook_allowed=False,
+        ),
+    )
+
+    assert grant.allowed
+    assert grant.reason == signals.INTERRUPT_GRANTED
+    assert not grant.banner_allowed
+    assert not grant.audible
+    assert not grant.webhook_allowed
+
+
+@pytest.mark.parametrize(
+    ("banner", "audible", "webhook", "expected"),
+    (
+        (False, True, True, (False, True, True)),
+        (True, False, True, (True, False, True)),
+        (True, True, False, (True, True, False)),
+    ),
+)
+def test_outbound_effect_axes_are_independent(
+    banner: bool,
+    audible: bool,
+    webhook: bool,
+    expected: tuple[bool, bool, bool],
+) -> None:
+    grant = signals.grant_interrupt(
+        signals.INTERRUPT_ESCALATION,
+        budget=signals.InterruptBudget(
+            banner_allowed=banner,
+            audible_allowed=audible,
+            webhook_allowed=webhook,
+        ),
+    )
+
+    assert (grant.banner_allowed, grant.audible, grant.webhook_allowed) == expected
+
+
+def test_silent_focus_outbound_reason_uses_the_final_effect_axes() -> None:
+    grant = signals.grant_interrupt(
+        signals.INTERRUPT_ESCALATION,
+        budget=signals.InterruptBudget(
+            focus_active=True,
+            focus_policy=signals.FOCUS_POLICY_SILENT,
+            banner_allowed=False,
+            audible_allowed=True,
+            webhook_allowed=False,
+        ),
+    )
+
+    assert grant.allowed, "Silent Focus never hides the critical visual"
+    assert not grant.banner_allowed
+    assert not grant.audible
+    assert not grant.webhook_allowed
+    assert not grant.outbound_allowed
+    assert grant.outbound_reason == signals.INTERRUPT_REFUSED_DND
 
 
 # --- B. One budget ----------------------------------------------------
@@ -332,6 +437,25 @@ def controller(tmp_path, monkeypatch):
     from sidepulse import status_bar
 
     built = status_bar.StatusBarController.alloc().init()
+    built.settings = built.settings.with_focus_sync_enabled(True)
+    built._test_public_focus_activity = FocusActivity.INACTIVE
+
+    class _PublicFocusClient:
+        def observe(self):
+            return FocusStatusObservation(
+                FocusAuthorization.AUTHORIZED,
+                built._test_public_focus_activity,
+            )
+
+        def request_authorization(self, _completion):
+            return False
+
+    built.dnd_controller._focus_client = _PublicFocusClient()
+    built.dnd_controller._named_focus_reader = lambda: (
+        ("com.apple.donotdisturb.mode.default",)
+        if built._test_public_focus_activity is FocusActivity.ACTIVE
+        else ()
+    )
     yield built
     worker = getattr(built, "led_worker_thread", None)
     if worker is not None and worker.is_alive():
@@ -339,7 +463,17 @@ def controller(tmp_path, monkeypatch):
 
 
 def _turn_on_a_focus(controller) -> None:
-    controller._focus_ids_cache = (float("inf"), ["com.apple.donotdisturb.mode.default"])
+    controller._test_public_focus_activity = FocusActivity.ACTIVE
+    if controller.dnd_controller.started:
+        controller.dnd_controller.refresh()
+    else:
+        controller.dnd_controller.start()
+
+
+def _turn_off_a_focus(controller) -> None:
+    controller._test_public_focus_activity = FocusActivity.INACTIVE
+    if controller.dnd_controller.started:
+        controller.dnd_controller.refresh()
 
 
 def _device(status_bar, display=None):
@@ -393,7 +527,7 @@ def test_a_focus_takes_the_courtesy_claims_off_the_bar(controller) -> None:
     _turn_on_a_focus(controller)
     assert (
         controller.active_led_display_kind_for_device(device, None)
-        == status_bar.LED_DISPLAY_AGENT
+        == status_bar.LED_DISPLAY_DND_DARK
     )
     for kind in (
         signals.SIGNAL_COMPLETION,
@@ -478,7 +612,7 @@ def test_a_completion_banner_during_a_focus_is_not_delivered(controller) -> None
     controller.post_completion_notification(status)
     assert delivered == [], "a Focus holds the banner"
 
-    controller._focus_ids_cache = (float("inf"), [])
+    _turn_off_a_focus(controller)
     controller.post_completion_notification(status)
     assert delivered, "and without one, the very same call delivers"
 
@@ -501,12 +635,19 @@ def test_a_focus_takes_the_weather_heartbeat_off_the_bar(controller) -> None:
     _turn_on_a_focus(controller)
     assert (
         controller.active_led_display_kind_for_device(device, None)
-        == status_bar.LED_DISPLAY_AGENT
+        == status_bar.LED_DISPLAY_DND_DARK
     )
 
     # Quiet Hour is not Focus: the emergency still lands there.
-    controller._focus_ids_cache = (float("inf"), [])
-    controller.quiet_until_monotonic = time.monotonic() + 60.0
+    _turn_off_a_focus(controller)
+    now = time.time()
+    controller.dnd_controller.set_override(
+        DndOverride.for_mode(
+            DndMode.MUTE,
+            created_epoch=now,
+            until_epoch=now + 60.0,
+        )
+    )
     assert (
         controller.active_led_display_kind_for_device(device, None)
         == status_bar.LED_DISPLAY_WEATHER
@@ -638,6 +779,7 @@ def test_an_escalation_chime_is_hushed_only_by_an_explicit_silent_focus(
     controller.settings = controller.settings.with_focus_signal_policy(
         "com.apple.donotdisturb.mode.default", signals.FOCUS_POLICY_SILENT
     )
+    controller.dnd_controller.refresh()
     assert not controller.interrupt_grant(signals.INTERRUPT_ESCALATION).audible
     # And the light is untouched either way.
     assert controller.may_interrupt(signals.INTERRUPT_ESCALATION)
@@ -646,14 +788,23 @@ def test_an_escalation_chime_is_hushed_only_by_an_explicit_silent_focus(
 def test_the_controller_budget_carries_the_three_inputs_the_law_needs(
     controller,
 ) -> None:
-    """The gate is fed, not hardcoded: burst, Focus, Quiet Hour."""
+    """The gate is fed, not hardcoded: burst plus one retained DND projection."""
     controller.settings = controller.settings.with_alert_burst(4)
     _turn_on_a_focus(controller)
-    controller.quiet_until_monotonic = time.monotonic() + 60.0
+    now = time.time()
+    controller.dnd_controller.set_override(
+        DndOverride.for_mode(
+            DndMode.MUTE,
+            created_epoch=now,
+            until_epoch=now + 60.0,
+        )
+    )
     budget = controller.interrupt_budget()
     assert budget.burst == 4
-    assert budget.focus_active is True
-    assert budget.quiet_hour is True
+    assert budget.outbound_admission is OutboundAdmission.NONE
+    assert budget.banner_allowed is False
+    assert budget.audible_allowed is False
+    assert budget.webhook_allowed is False
 
 
 def test_a_reminder_that_arrives_during_a_focus_is_not_replayed_later(
@@ -677,7 +828,7 @@ def test_a_reminder_that_arrives_during_a_focus_is_not_replayed_later(
         assert controller.reminders_glow_until == 0.0
         assert first in controller.reminders_seen
 
-        controller._focus_ids_cache = (float("inf"), [])
+        _turn_off_a_focus(controller)
         controller._apply_reminders_observation_result(
             RemindersObservationResult(available=True, identifiers=(first,))
         )
@@ -719,11 +870,11 @@ def test_the_dim_afterthought_and_the_budget_are_different_questions(
 ) -> None:
     """Focus sync dims a signal that already won the bar. The budget
     decides whether it may fire at all. The regression this guards: the
-    dimming toggle being off must not re-open the interrupt."""
+    Follow Focus toggle being off must leave both questions inactive."""
     controller.settings = controller.settings.with_focus_sync_enabled(False)
     _turn_on_a_focus(controller)
     assert controller.focus_sync_scale_factor() == 1.0, "no dimming"
-    assert not controller.may_interrupt(signals.SIGNAL_COMPLETION), "still held"
+    assert controller.may_interrupt(signals.SIGNAL_COMPLETION), "Follow Focus is off"
 
 
 def test_a_stale_focus_reading_is_refreshed_within_a_second(controller) -> None:
@@ -860,7 +1011,7 @@ def test_reset_celebration_claims_the_strip_and_respects_focus(controller) -> No
     _turn_on_a_focus(controller)
     assert (
         controller.active_led_display_kind_for_device(device, None)
-        == status_bar.LED_DISPLAY_AGENT
+        == status_bar.LED_DISPLAY_DND_DARK
     )
 
     for led_count in (2, 8):

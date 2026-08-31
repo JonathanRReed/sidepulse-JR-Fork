@@ -42,6 +42,9 @@ FIREFOX_FAMILY_PROFILE_ROOTS: tuple[tuple[str, str], ...] = (
     ("LibreWolf", "LibreWolf/Profiles"),
     ("Waterfox", "Waterfox/Profiles"),
 )
+_FIREFOX_PROFILE_ROOT_BY_BROWSER = {
+    label.lower(): relative for label, relative in FIREFOX_FAMILY_PROFILE_ROOTS
+}
 
 #: A local-storage database bigger than this is not a session store.
 MAX_LOCAL_STORAGE_BYTES = 64 * 1024 * 1024
@@ -100,6 +103,57 @@ def firefox_profile_directories(home: Path) -> list[tuple[str, Path]]:
     return found
 
 
+def firefox_profile_directory(
+    home: Path,
+    *,
+    browser: str,
+    profile: str,
+) -> Path | None:
+    """Resolve one named Firefox-family profile without scanning siblings."""
+    relative = _FIREFOX_PROFILE_ROOT_BY_BROWSER.get(str(browser).lower())
+    if (
+        relative is None
+        or not isinstance(profile, str)
+        or not profile
+        or profile in {".", ".."}
+        or Path(profile).name != profile
+        or "\x00" in profile
+    ):
+        return None
+    root = Path(home) / "Library" / "Application Support" / relative
+    candidate = root / profile
+    try:
+        if root.is_symlink() or not root.is_dir():
+            return None
+        if candidate.is_symlink() or not candidate.is_dir():
+            return None
+    except OSError:
+        return None
+    return candidate
+
+
+def _devin_database_for_profile(profile_root: Path) -> Path | None:
+    """Resolve Devin's Firefox localStorage DB with no symlinked component."""
+    parts = (
+        "storage",
+        "default",
+        origin_directory_name(DEVIN_ORIGIN),
+        "ls",
+        "data.sqlite",
+    )
+    candidate = Path(profile_root)
+    for index, part in enumerate(parts):
+        candidate = candidate / part
+        try:
+            if candidate.is_symlink():
+                return None
+            if index < len(parts) - 1 and not candidate.is_dir():
+                return None
+        except OSError:
+            return None
+    return candidate
+
+
 def _decoded(value: object) -> str | None:
     if isinstance(value, bytes):
         for encoding in ("utf-8", "utf-16-le"):
@@ -112,7 +166,7 @@ def _decoded(value: object) -> str | None:
 
 
 def read_local_storage(database: Path) -> dict[str, str]:
-    """Every uncompressed key/value in one origin's local storage.
+    """Only Devin session and organization fields from one origin.
 
     Opened ``immutable=1``: no lock is taken and no journal is written,
     so a running browser is never disturbed and a read can never corrupt
@@ -134,8 +188,24 @@ def read_local_storage(database: Path) -> dict[str, str]:
     try:
         with connection:
             rows = connection.execute(
-                "SELECT key, value, compression_type FROM data LIMIT ?",
-                (MAX_STORAGE_ROWS,),
+                """
+                SELECT key, value, compression_type
+                FROM data
+                WHERE key GLOB ?
+                   OR key GLOB ?
+                   OR key GLOB ?
+                   OR key GLOB ?
+                   OR key GLOB ?
+                LIMIT ?
+                """,
+                (
+                    f"*{_AUTH1_SUFFIX}",
+                    f"*{_AUTH0_MARKER}*",
+                    f"{_EXTERNAL_ORG_PREFIX}*",
+                    f"*{_ORG_NAME_MARKER}*",
+                    f"{_FEATURE_FLAG_ORG_PREFIX}*",
+                    MAX_STORAGE_ROWS,
+                ),
             ).fetchall()
     except sqlite3.Error:
         return {}
@@ -309,6 +379,37 @@ def import_devin_sessions(home: Path) -> list[BrowserSession]:
     return sorted(sessions, key=_session_rank, reverse=True)
 
 
+def import_devin_session_from_profile(
+    *,
+    home: Path,
+    browser: str,
+    profile: str,
+) -> BrowserSession | None:
+    """Read exactly one consented Firefox-family browser profile."""
+    profile_root = firefox_profile_directory(
+        Path(home),
+        browser=browser,
+        profile=profile,
+    )
+    if profile_root is None:
+        return None
+    database = _devin_database_for_profile(profile_root)
+    if database is None:
+        return None
+    entries = read_local_storage(database)
+    if not entries:
+        return None
+    label = next(
+        (
+            display
+            for display, _relative in FIREFOX_FAMILY_PROFILE_ROOTS
+            if display.lower() == str(browser).lower()
+        ),
+        str(browser).title(),
+    )
+    return devin_session_from_entries(entries, source_label=f"{label} {profile}")
+
+
 def import_devin_session(home: Path) -> BrowserSession | None:
     sessions = import_devin_sessions(Path(home))
     return sessions[0] if sessions else None
@@ -320,7 +421,9 @@ __all__ = [
     "BrowserSession",
     "devin_session_from_entries",
     "firefox_profile_directories",
+    "firefox_profile_directory",
     "import_devin_session",
+    "import_devin_session_from_profile",
     "import_devin_sessions",
     "is_internal_organization_id",
     "origin_directory_name",

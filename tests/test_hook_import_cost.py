@@ -28,6 +28,9 @@ FORBIDDEN = (
     "sidepulse.settings",
     "sidepulse.device_writer",
     "sidepulse.usage_stats",
+    "sidepulse.hook",
+    "sidepulse.provider_adapters",
+    "sidepulse.providers",
 )
 
 
@@ -66,8 +69,19 @@ def test_the_module_the_hook_actually_runs_stays_lean() -> None:
     microsecond later drags in the entire app.
     """
     loaded = _imported_modules("from sidepulse.hook import hook_log_main")
+    legacy_forbidden = set(FORBIDDEN) - {
+        "sidepulse.hook",
+        "sidepulse.provider_adapters",
+        "sidepulse.providers",
+    }
+    leaked = sorted(loaded & legacy_forbidden)
+    assert not leaked, f"the synchronous fallback path now loads {leaked}"
+
+
+def test_thin_hook_client_does_not_load_processing_or_app_modules() -> None:
+    loaded = _imported_modules("import sidepulse.hook_client")
     leaked = sorted(loaded & set(FORBIDDEN))
-    assert not leaked, f"the live hook path now loads {leaked}"
+    assert not leaked, f"the hook admission client now loads {leaked}"
 
 
 def test_package_import_is_lazy() -> None:

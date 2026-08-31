@@ -1,0 +1,38 @@
+name: Performance issue
+description: Report latency, CPU, memory, refresh, battery, or responsiveness regression.
+title: "[Performance]: "
+labels:
+  - performance
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Sanitize diagnostics before attaching them. Do not include private paths, prompts, transcripts, account identifiers, tokens, or unrelated personal data.
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: JR Bar version, macOS version, Mac model, display and hardware setup
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include the workload, duration, refresh settings, and exact steps.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact and expected baseline
+      description: Include observed CPU, memory, latency, frame rate, battery, or interaction impact and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Add sanitized measurements, Instruments summaries, screenshots, or timestamps.
+    validations:
+      required: true

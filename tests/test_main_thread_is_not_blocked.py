@@ -117,9 +117,11 @@ class _BlockingProbe:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.release = threading.Event()
+        self.started = threading.Event()
 
     def __call__(self) -> bool:
         self.calls.append(threading.current_thread().name)
+        self.started.set()
         self.release.wait(timeout=5.0)
         return True
 
@@ -142,14 +144,13 @@ def test_a_stale_alcove_answer_is_refreshed_off_the_main_thread() -> None:
     presence = virtual_device.AlcovePresenceProbe(probe=probe, ttl_seconds=3.0)
     presence.running(now=100.0)
     main_thread = threading.current_thread().name
+    probe.started.clear()
 
     started = time.monotonic()
     assert presence.running(now=200.0) is True
     elapsed = time.monotonic() - started
 
-    deadline = time.monotonic() + 5.0
-    while len(probe.calls) < 2 and time.monotonic() < deadline:
-        time.sleep(0.01)
+    assert probe.started.wait(2.0)
 
     assert elapsed < 0.05
     assert len(probe.calls) == 2

@@ -2,17 +2,31 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-BROWSER_CONSENT_SCHEMA_VERSION = 1
+from .provider_contracts import ContractValidationError, SourceInstanceIdentifier
+
+BROWSER_CONSENT_SCHEMA_VERSION = 2
 _PROVIDER = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
 _DOMAIN = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\Z")
 _FIELD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}\Z")
-_ALLOWED_BROWSERS = frozenset({"chrome", "chromium", "brave", "edge", "firefox"})
+_ALLOWED_BROWSERS = frozenset(
+    {
+        "brave",
+        "chrome",
+        "chromium",
+        "edge",
+        "firefox",
+        "librewolf",
+        "waterfox",
+        "zen",
+    }
+)
 
 
 class BrowserConsentError(ValueError):
@@ -32,15 +46,23 @@ class BrowserConsent:
     fields: tuple[str, ...]
     background_repair: bool
     granted_at: float
+    source_instance_id: str = "default"
 
     def __post_init__(self) -> None:
         normalized_domains = tuple(domain.lower().strip(".") for domain in self.domains)
+        try:
+            source_instance = SourceInstanceIdentifier(self.source_instance_id)
+        except (ContractValidationError, TypeError, ValueError) as exc:
+            raise BrowserConsentError("invalid browser consent source instance") from exc
         if (
             _PROVIDER.fullmatch(self.provider_id or "") is None
             or self.browser not in _ALLOWED_BROWSERS
             or not isinstance(self.profile, str)
             or not self.profile
             or len(self.profile) > 256
+            or self.profile in {".", ".."}
+            or Path(self.profile).name != self.profile
+            or "\x00" in self.profile
             or type(self.domains) is not tuple
             or not self.domains
             or len(normalized_domains) != len(set(normalized_domains))
@@ -57,10 +79,11 @@ class BrowserConsent:
             raise BrowserConsentError("invalid browser consent")
         object.__setattr__(self, "domains", normalized_domains)
         object.__setattr__(self, "granted_at", float(self.granted_at))
+        object.__setattr__(self, "source_instance_id", source_instance.value)
 
     @property
-    def identity(self) -> tuple[str, str, str]:
-        return self.provider_id, self.browser, self.profile
+    def identity(self) -> tuple[str, str, str, str]:
+        return self.provider_id, self.source_instance_id, self.browser, self.profile
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +113,7 @@ class BrowserConsentStore:
         fields: tuple[str, ...],
         background_repair: bool,
         granted_at: float,
+        source_instance_id: str = "default",
     ) -> BrowserConsentStore:
         consent = BrowserConsent(
             provider_id,
@@ -99,13 +123,21 @@ class BrowserConsentStore:
             fields,
             background_repair,
             granted_at,
+            source_instance_id,
         )
         rows = [current for current in self.consents if current.identity != consent.identity]
         rows.append(consent)
         return BrowserConsentStore(tuple(sorted(rows, key=lambda row: row.identity)))
 
-    def revoke(self, provider_id: str, browser: str, profile: str) -> BrowserConsentStore:
-        identity = (provider_id, browser, profile)
+    def revoke(
+        self,
+        provider_id: str,
+        browser: str,
+        profile: str,
+        *,
+        source_instance_id: str = "default",
+    ) -> BrowserConsentStore:
+        identity = (provider_id, source_instance_id, browser, profile)
         return BrowserConsentStore(
             tuple(consent for consent in self.consents if consent.identity != identity)
         )
@@ -118,10 +150,11 @@ class BrowserConsentStore:
         profile: str,
         domain: str,
         field: str,
+        source_instance_id: str = "default",
     ) -> bool:
         domain = domain.lower().strip(".")
         return any(
-            consent.identity == (provider_id, browser, profile)
+            consent.identity == (provider_id, source_instance_id, browser, profile)
             and domain in consent.domains
             and field in consent.fields
             for consent in self.consents
@@ -133,6 +166,13 @@ class LoadedBrowserConsents:
     store: BrowserConsentStore
     read_only: bool
     unknown_fields: tuple[tuple[str, object], ...]
+    source_revision: str | None = None
+    source_path: Path | None = None
+
+    @property
+    def source_digest(self) -> str | None:
+        """Compatibility name for the content-addressed source revision."""
+        return self.source_revision
 
 
 def default_browser_consent_path(home: Path | None = None) -> Path:
@@ -152,9 +192,30 @@ def _consent_from_document(value: object) -> BrowserConsent | None:
             fields=tuple(value.get("fields", ())),
             background_repair=value.get("background_repair", False),
             granted_at=value.get("granted_at", 0.0),
+            source_instance_id=value.get("source_instance_id", "default"),
         )
     except (BrowserConsentError, TypeError, ValueError):
         return None
+
+
+def _document_digest(document: dict[str, object]) -> str:
+    encoded = json.dumps(
+        document,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _read_real_document(target: Path) -> dict[str, object]:
+    from .private_io import read_private_text
+
+    document = json.loads(read_private_text(target))
+    if not isinstance(document, dict):
+        raise ValueError("browser consent document must be an object")
+    return document
 
 
 def load_browser_consents(
@@ -162,8 +223,11 @@ def load_browser_consents(
     *,
     reader: Callable[[Path], str] | None = None,
 ) -> LoadedBrowserConsents:
-    target = default_browser_consent_path() if path is None else Path(path)
+    target = (
+        default_browser_consent_path() if path is None else Path(path)
+    ).expanduser().absolute()
     read = reader
+    real_path = read is None
     if read is None:
         from .private_io import read_private_text
 
@@ -171,15 +235,30 @@ def load_browser_consents(
     try:
         document = json.loads(read(target))
     except (FileNotFoundError, OSError, UnicodeError, ValueError):
-        return LoadedBrowserConsents(BrowserConsentStore.empty(), False, ())
+        return LoadedBrowserConsents(
+            BrowserConsentStore.empty(),
+            False,
+            (),
+            None,
+            target if real_path else None,
+        )
     if not isinstance(document, dict):
-        return LoadedBrowserConsents(BrowserConsentStore.empty(), True, ())
+        return LoadedBrowserConsents(
+            BrowserConsentStore.empty(),
+            True,
+            (),
+            None,
+            target if real_path else None,
+        )
+    source_revision = _document_digest(document)
     version = document.get("settings_schema_version")
     if type(version) is not int or version > BROWSER_CONSENT_SCHEMA_VERSION:
         return LoadedBrowserConsents(
             BrowserConsentStore.empty(),
             True,
             tuple(document.items()),
+            source_revision,
+            target if real_path else None,
         )
     rows = document.get("consents", ())
     consents = []
@@ -199,6 +278,8 @@ def load_browser_consents(
         BrowserConsentStore(tuple(sorted(consents, key=lambda item: item.identity))),
         False,
         unknown,
+        source_revision,
+        target if real_path else None,
     )
 
 
@@ -213,11 +294,28 @@ def save_browser_consents(
         raise BrowserConsentError("invalid browser consent store")
     if loaded is not None and loaded.read_only:
         raise BrowserConsentWriteRefusedError("browser consent settings are read-only")
+    target = (
+        default_browser_consent_path() if path is None else Path(path)
+    ).expanduser().absolute()
+    if loaded is not None and loaded.source_path == target:
+        try:
+            current_revision = _document_digest(_read_real_document(target))
+        except FileNotFoundError:
+            current_revision = None
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise BrowserConsentWriteRefusedError(
+                "browser consent settings could not be verified; reload before saving"
+            ) from exc
+        if current_revision != loaded.source_revision:
+            raise BrowserConsentWriteRefusedError(
+                "browser consent settings changed after they were loaded; reload before saving"
+            )
     document = dict(loaded.unknown_fields if loaded is not None else ())
     document["settings_schema_version"] = BROWSER_CONSENT_SCHEMA_VERSION
     document["consents"] = [
         {
             "provider_id": consent.provider_id,
+            "source_instance_id": consent.source_instance_id,
             "browser": consent.browser,
             "profile": consent.profile,
             "domains": list(consent.domains),
@@ -227,7 +325,6 @@ def save_browser_consents(
         }
         for consent in store.consents
     ]
-    target = default_browser_consent_path() if path is None else Path(path)
     text = json.dumps(document, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     write = writer
     if write is None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -45,3 +46,29 @@ def test_successful_save_refreshes_the_expected_document_digest(
     save_settings(updated, target)
 
     assert json.loads(target.read_text(encoding="utf-8"))["tips_enabled"] is False
+
+
+def test_concurrent_write_refuses_dnd_override_without_partial_durable_state(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "settings.json"
+    save_settings(AgentMonitorSettings(), target)
+    loaded = load_settings_document(target)
+    candidate = replace(
+        loaded.settings,
+        dnd_override_mode="mute",
+        dnd_override_created_epoch=1_800_000_000.0,
+        dnd_override_until_epoch=1_800_003_600.0,
+    )
+    external = json.loads(target.read_text(encoding="utf-8"))
+    external["external_owner"] = "keep"
+    target.write_text(json.dumps(external), encoding="utf-8")
+
+    with pytest.raises(SettingsConcurrentWriteError):
+        save_settings(candidate, target, compatibility=loaded.compatibility)
+
+    durable = json.loads(target.read_text(encoding="utf-8"))
+    assert durable == external
+    assert durable["dnd_override_mode"] is None
+    assert durable["dnd_override_created_epoch"] is None
+    assert durable["dnd_override_until_epoch"] is None

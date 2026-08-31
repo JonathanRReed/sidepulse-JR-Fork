@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import TextIO
 
 from .provider_credential_store import ProviderCredentialStore
+from .provider_feature_settings import project_instance_policies
 from .provider_usage_pairing import export_pairing_document, import_pairing_document
+from .provider_usage_settings import (
+    default_provider_usage_settings_path,
+    load_provider_usage_settings,
+)
 from .provider_usage_store import load_provider_usage_state
 from .provider_usage_sync_runtime import ProviderSyncRuntime
 from .provider_usage_sync_service import ProviderSyncService, ProviderSyncServiceState
@@ -250,6 +255,11 @@ def main(
         )
         runtime = ProviderSyncRuntime(
             settings_loader=lambda: load_provider_sync_settings(target),
+            sharing_loader=lambda: project_instance_policies(
+                load_provider_usage_settings(
+                    default_provider_usage_settings_path(root)
+                ).settings
+            ).sharing,
             credentials=credential_store,
             local_directory=root
             / ".local"

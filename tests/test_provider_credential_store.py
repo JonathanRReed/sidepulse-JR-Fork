@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from sidepulse.provider_credential_store import ProviderCredentialStore
+from sidepulse.provider_instances import ProviderInstanceKey
 
 
 class FakeBackend:
@@ -51,3 +52,34 @@ def test_invalid_provider_or_empty_secret_is_rejected() -> None:
             pass
         else:
             raise AssertionError("invalid credential accepted")
+
+
+def test_same_provider_credentials_are_scoped_to_the_exact_source_instance() -> None:
+    backend = FakeBackend()
+    store = ProviderCredentialStore(backend=backend)
+    work = ProviderInstanceKey("devin", "work")
+    personal = ProviderInstanceKey("devin", "personal")
+
+    store.set_for_instance(work, "token", "work-secret")
+    store.set_for_instance(personal, "token", "personal-secret")
+
+    assert store.get_for_instance(work, "token").secret == "work-secret"
+    assert store.get_for_instance(personal, "token").secret == "personal-secret"
+    assert (
+        "io.sidepulse.provider.devin.work",
+        "token",
+    ) in backend.values
+    assert (
+        "io.sidepulse.provider.devin.personal",
+        "token",
+    ) in backend.values
+
+
+def test_default_instance_credential_methods_reuse_legacy_keychain_identity() -> None:
+    backend = FakeBackend()
+    store = ProviderCredentialStore(backend=backend)
+    default = ProviderInstanceKey("devin", "default")
+
+    store.set("devin", "token", "legacy-secret")
+
+    assert store.get_for_instance(default, "token").secret == "legacy-secret"

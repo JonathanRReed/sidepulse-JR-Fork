@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Final
+
+from .app_bundle import running_inside_bundle
+from .product_identity import PRODUCT_DISPLAY_NAME
 
 _USER_NOTIFICATIONS_FRAMEWORK: Final = "/System/Library/Frameworks/UserNotifications.framework"
 _AUTHORIZATION_OPTION_ALERT: Final = 1 << 2
@@ -27,7 +31,7 @@ _PRIVATE_COPY: Final = re.compile(
 _GENERIC_BODY: Final = re.compile(
     r"(?:An? [A-Za-z][A-Za-z0-9 ]{0,31} session (?:needs you|finished)|"
     r"An? [A-Za-z][A-Za-z0-9 ]{0,31} limit is running low|"
-    r"SidePulse has [1-9][0-9]{0,2} updates?)\Z"
+    rf"{re.escape(PRODUCT_DISPLAY_NAME)} has [1-9][0-9]{{0,2}} updates?)\Z"
 )
 _MAX_PENDING_DELIVERIES: Final = 256
 
@@ -38,6 +42,47 @@ class NotificationAuthorizationState(str, Enum):
     AUTHORIZED = "authorized"
     PROVISIONAL = "provisional"
     UNAVAILABLE = "unavailable"
+
+
+def start_authorization_refresh(
+    controller: object,
+    *,
+    client_factory: Callable[[], object],
+    thread_factory: Callable[..., object],
+) -> bool:
+    """Start one authorization observation or expose a retryable failure."""
+    if (
+        controller._notification_authorization_checked
+        or controller._notification_authorization_refresh_in_flight
+    ):
+        controller.refresh_notification_authorization_controls()
+        return False
+
+    controller._notification_authorization_generation += 1
+    generation = controller._notification_authorization_generation
+    controller._notification_authorization_refresh_in_flight = True
+
+    try:
+        client = client_factory()
+
+        def observe() -> None:
+            try:
+                state = client.authorization_state()
+            except Exception:
+                state = NotificationAuthorizationState.UNAVAILABLE
+            controller._publish_notification_authorization_state(generation, state)
+
+        worker = thread_factory(target=observe, daemon=True)
+        worker.start()
+    except Exception:
+        controller.notification_authorization_state = (
+            NotificationAuthorizationState.UNAVAILABLE
+        )
+        controller._notification_authorization_checked = True
+        controller._notification_authorization_refresh_in_flight = False
+        controller.refresh_notification_authorization_controls()
+        return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +112,8 @@ def _block_metadata(*argument_types: bytes) -> dict[str, object]:
 
 
 def _load_user_notifications_bridge() -> _NotificationBridge | None:
+    if not running_inside_bundle():
+        return None
     try:
         import objc
 
@@ -124,7 +171,7 @@ def _valid_delivery(
     if not (
         type(identifier) is str
         and _REQUEST_IDENTIFIER.fullmatch(identifier) is not None
-        and title == "SidePulse"
+        and title == PRODUCT_DISPLAY_NAME
         and type(body) is str
         and 1 <= len(body) <= 96
         and body.isprintable()
@@ -174,6 +221,7 @@ class MacOSNotificationClient:
         self._cached_authorization_state = NotificationAuthorizationState.UNAVAILABLE
         self._delivery_condition = threading.Condition()
         self._pending_deliveries: dict[str, _NotificationDelivery] = {}
+        self._active_deliveries = 0
         self._delivery_thread: threading.Thread | None = None
         self._closed = False
         self.last_diagnostic = "Notification authorization unavailable" if center is None else "Ready"
@@ -342,20 +390,47 @@ class MacOSNotificationClient:
                     return
                 identifier = next(iter(self._pending_deliveries))
                 delivery = self._pending_deliveries.pop(identifier)
+                self._active_deliveries += 1
             self._deliver_one(delivery)
 
+    def wait_idle(self, *, timeout_seconds: float) -> bool:
+        """Wait for queued and in-flight deliveries with a bounded timeout."""
+        if (
+            type(timeout_seconds) not in {int, float}
+            or not 0.0 <= float(timeout_seconds) <= 5.0
+        ):
+            raise ValueError("invalid notification wait timeout")
+        end = time.monotonic() + float(timeout_seconds)
+        with self._delivery_condition:
+            while self._pending_deliveries or self._active_deliveries:
+                remaining = end - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                self._delivery_condition.wait(remaining)
+            return True
+
     def _deliver_one(self, delivery: _NotificationDelivery) -> None:
-        assert self._content_factory is not None
-        assert self._request_factory is not None
+        completion_lock = threading.Lock()
+        completed = False
 
         def delivered(error) -> None:
+            nonlocal completed
+            with completion_lock:
+                if completed:
+                    return
+                completed = True
             self.last_diagnostic = (
                 "Notification delivered"
                 if error is None
                 else "Notification delivery failed"
             )
+            with self._delivery_condition:
+                self._active_deliveries -= 1
+                self._delivery_condition.notify_all()
 
         try:
+            assert self._content_factory is not None
+            assert self._request_factory is not None
             content = self._content_factory()
             content.setTitle_(delivery.title)
             content.setBody_(delivery.body)
@@ -368,6 +443,7 @@ class MacOSNotificationClient:
             )
         except Exception:
             self.last_diagnostic = "Notification delivery failed"
+            delivered(RuntimeError("notification request failed"))
 
     def close(self, *, timeout_seconds: float) -> bool:
         if (
@@ -375,20 +451,27 @@ class MacOSNotificationClient:
             or not 0.0 <= float(timeout_seconds) <= 5.0
         ):
             raise ValueError("invalid notification close timeout")
+        deadline = time.monotonic() + float(timeout_seconds)
         with self._delivery_condition:
             self._closed = True
             self._pending_deliveries.clear()
             self._delivery_condition.notify_all()
             worker = self._delivery_thread
-        if worker is None:
-            return True
-        if worker.ident == threading.get_ident():
+        if worker is not None and worker.ident == threading.get_ident():
             return False
-        worker.join(float(timeout_seconds))
-        return not worker.is_alive()
+        if worker is not None:
+            worker.join(max(0.0, deadline - time.monotonic()))
+        with self._delivery_condition:
+            while self._active_deliveries:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                self._delivery_condition.wait(remaining)
+            return worker is None or not worker.is_alive()
 
 
 __all__ = [
     "MacOSNotificationClient",
     "NotificationAuthorizationState",
+    "start_authorization_refresh",
 ]

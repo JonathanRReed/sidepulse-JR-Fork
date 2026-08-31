@@ -33,4 +33,5 @@ def test_status_bar_reload_does_not_replace_originals_with_its_own_wrappers() ->
         in normalized
     )
     assert "_legacy._sidepulse_original_build_menu = _ORIGINAL_BUILD_MENU" in source
-    assert "_legacy._sidepulse_device_identity_cache = _DEVICE_IDENTITIES" in source
+    assert "_legacy._sidepulse_device_identity_cache = cache" in source
+    assert "def install_status_bar_facade" in source

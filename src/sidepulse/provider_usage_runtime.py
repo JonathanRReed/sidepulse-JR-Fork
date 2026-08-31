@@ -4,26 +4,37 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 
+from .adaptive_refresh import (
+    AdaptiveRefreshPlan,
+    plan_adaptive_refresh_cadence,
+)
+from .provider_feature_settings import (
+    ProviderPresentationSettings,
+    project_collection_settings,
+)
+from .provider_instances import ProviderInstanceKey
 from .provider_reconnect import (
     FailureGate,
     credential_fingerprint,
     note_failure,
-    renew_claude_credential_in_background,
     repair_grok_credential,
     should_collect,
 )
 from .provider_usage_platform import (
     ProviderSourceState,
     ProviderUsageSnapshot,
-    most_constrained_lane,
     provider_descriptor,
     select_authoritative_snapshot,
 )
 from .provider_usage_settings import ProviderUsageSettings
+
+ProviderRefreshScope = str | tuple[str, str]
 
 #: States that arm a failure gate. NEEDS_SIGN_IN is terminal (only a
 #: fresh credential can fix it); the rest are transient and ride the
@@ -43,6 +54,79 @@ Collector = Callable[[object, Path, float, object], ProviderUsageSnapshot]
 
 
 @dataclass(frozen=True, slots=True)
+class _UnavailableCredentialRead:
+    available: bool = False
+    secret: None = None
+    reason: str = "instance_credential_unavailable"
+
+
+class _InstanceCredentialView:
+    """Collector-facing credential lookup fixed to one provider instance."""
+
+    __slots__ = ("_key", "_store")
+
+    def __init__(self, store: object, key: ProviderInstanceKey) -> None:
+        self._store = store
+        self._key = key
+
+    def get(self, provider_id: str, account: str):
+        expected_provider, source_instance_id = self._key.value
+        if provider_id != expected_provider:
+            return _UnavailableCredentialRead(reason="provider_identity_mismatch")
+        exact = getattr(self._store, "get_for_instance", None)
+        if callable(exact):
+            return exact(self._key, account)
+        if source_instance_id == "default":
+            legacy = getattr(self._store, "get", None)
+            if callable(legacy):
+                return legacy(provider_id, account)
+        return _UnavailableCredentialRead()
+
+    def set(self, provider_id: str, account: str, secret: str) -> None:
+        """Keep repair helpers instance-scoped when they receive this view."""
+        expected_provider, source_instance_id = self._key.value
+        if provider_id != expected_provider:
+            raise ValueError("provider identity mismatch")
+        if source_instance_id == "default":
+            setter = getattr(self._store, "set", None)
+            if callable(setter):
+                setter(provider_id, account, secret)
+                return
+        setter = getattr(self._store, "set_for_instance", None)
+        if not callable(setter):
+            raise ValueError("instance credential storage unavailable")
+        setter(self._key, account, secret)
+
+
+class RefreshPublicationOutcome(str, Enum):
+    ACCEPTED = "accepted"
+    SUPERSEDED = "superseded"
+    REFUSED = "refused"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshPublicationReceipt:
+    sequence: int
+    settings_revision: int
+    outcome: RefreshPublicationOutcome
+    error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.sequence) is not int or self.sequence <= 0:
+            raise ValueError("invalid refresh receipt sequence")
+        if type(self.settings_revision) is not int or self.settings_revision < 0:
+            raise ValueError("invalid refresh receipt revision")
+        if type(self.outcome) is not RefreshPublicationOutcome:
+            raise ValueError("invalid refresh receipt outcome")
+        if self.outcome is RefreshPublicationOutcome.FAILED:
+            if self.error_code != "state_persistence_failed":
+                raise ValueError("invalid refresh failure code")
+        elif self.error_code is not None:
+            raise ValueError("unexpected refresh receipt error code")
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderUsageState:
     snapshots: tuple[ProviderUsageSnapshot, ...]
     refreshed_at: float | None
@@ -50,9 +134,46 @@ class ProviderUsageState:
     refreshing: bool
 
     def by_provider(self, provider_id: str) -> ProviderUsageSnapshot:
-        return next(
+        matches = tuple(
             snapshot for snapshot in self.snapshots if snapshot.provider_id == provider_id
         )
+        if len(matches) > 1:
+            raise ValueError("provider usage lookup is ambiguous; choose a source instance")
+        if not matches:
+            raise KeyError(provider_id)
+        return matches[0]
+
+    def by_instance(
+        self,
+        provider_id: str,
+        source_instance_id: str = "default",
+    ) -> ProviderUsageSnapshot:
+        try:
+            return next(
+                snapshot
+                for snapshot in self.snapshots
+                if snapshot.identity == (provider_id, source_instance_id)
+            )
+        except StopIteration as exc:
+            raise KeyError((provider_id, source_instance_id)) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderUsageApply:
+    state: ProviderUsageState
+    settings: ProviderPresentationSettings
+    #: The durable document used by collection and Settings checkboxes. Keep
+    #: this beside, rather than inside, the presentation projection so a
+    #: worker apply cannot erase the identity-bearing source of truth.
+    usage_settings: ProviderUsageSettings | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.state) is not ProviderUsageState:
+            raise ValueError("invalid provider usage state")
+        if type(self.settings) is not ProviderPresentationSettings:
+            raise ValueError("invalid provider usage settings")
+        if self.usage_settings is not None and type(self.usage_settings) is not ProviderUsageSettings:
+            raise ValueError("invalid durable provider usage settings")
 
 
 def _empty_snapshot(
@@ -62,6 +183,7 @@ def _empty_snapshot(
     state: ProviderSourceState,
     reason: str | None = None,
     action: str | None = None,
+    source_instance_id: str = "default",
 ) -> ProviderUsageSnapshot:
     return ProviderUsageSnapshot(
         provider_id=provider_id,
@@ -79,6 +201,7 @@ def _empty_snapshot(
         cache_savings_usd=None,
         credits_remaining=None,
         incident=None,
+        source_instance_id=source_instance_id,
     )
 
 
@@ -133,34 +256,6 @@ def _default_collectors() -> dict[str, Collector]:
     }
 
 
-#: Attention ladder: how recently the owner looked at the menu decides
-#: the base cadence. CodexBar's cadence deliberately does NOT consider
-#: quota level -- a nearly-empty meter is not a reason to poll harder,
-#: it is a reason the number matters, and polling every 30s unattended
-#: burned battery for nobody (2026-08-27 mining).
-_MENU_AGE_LADDER: tuple[tuple[float, float], ...] = (
-    (300.0, 120.0),
-    (3600.0, 300.0),
-    (14400.0, 900.0),
-)
-_IDLE_INTERVAL_SECONDS = 1800.0
-#: Low Power Mode / serious thermals: one cadence, generously slow.
-_CONSTRAINED_INTERVAL_SECONDS = 1800.0
-#: Our one deliberate divergence: JR-BAR celebrates quota resets, so it
-#: must actually SEE the boundary cross. 120s, not CodexBar's ordinary
-#: cadence and not the old 30s hammer.
-_RESET_WATCH_WINDOW_SECONDS = 600.0
-_RESET_WATCH_INTERVAL_SECONDS = 120.0
-
-
-#: When the LED bar is showing Quota Runway, the number is on a surface
-#: the owner can read WITHOUT opening anything -- so "menu age" stops
-#: being a fair proxy for attention. This is our one adaptation of
-#: CodexBar's ladder, and it exists because we have surfaces they do
-#: not: the idle rung tightens from 30 minutes to 5.
-_AMBIENT_VISIBLE_CEILING_SECONDS = 300.0
-
-
 def _interval_for(
     snapshots: tuple[ProviderUsageSnapshot, ...],
     observed_at: float,
@@ -169,39 +264,14 @@ def _interval_for(
     constrained: bool = False,
     ambient_usage_visible: bool = False,
 ) -> float:
-    """Seconds until the next refresh. Pure, so it stays testable."""
-    if constrained:
-        # Low Power Mode outranks everything, ambient surfaces included:
-        # the owner asked the machine to stop working so hard.
-        return _CONSTRAINED_INTERVAL_SECONDS
-    # None means "not opened since launch" -- an INFINITE age, not an
-    # age measured from the epoch (which read as 'looked at it recently'
-    # for every timestamp after 1970 and pinned the ladder to 900s).
-    interval = _IDLE_INTERVAL_SECONDS
-    if menu_last_opened_at is not None:
-        age = float(observed_at) - float(menu_last_opened_at)
-        for ceiling, candidate in _MENU_AGE_LADDER:
-            if age <= ceiling:
-                interval = candidate
-                break
-    if ambient_usage_visible:
-        interval = min(interval, _AMBIENT_VISIBLE_CEILING_SECONDS)
-    for snapshot in snapshots:
-        if snapshot.state in {
-            ProviderSourceState.NEEDS_CONSENT,
-            ProviderSourceState.NEEDS_SIGN_IN,
-            ProviderSourceState.SOURCE_NOT_FOUND,
-            ProviderSourceState.ERROR,
-            ProviderSourceState.UNAVAILABLE,
-        }:
-            interval = min(interval, 120.0)
-        lane = most_constrained_lane(snapshot)
-        if lane is None or lane.reset_at is None:
-            continue
-        until_reset = lane.reset_at - observed_at
-        if 0.0 <= until_reset <= _RESET_WATCH_WINDOW_SECONDS:
-            interval = min(interval, _RESET_WATCH_INTERVAL_SECONDS)
-    return interval
+    """Compatibility projection of the observable adaptive cadence plan."""
+    return plan_adaptive_refresh_cadence(
+        snapshots,
+        observed_at=observed_at,
+        menu_last_opened_at=menu_last_opened_at,
+        constrained=constrained,
+        ambient_usage_visible=ambient_usage_visible,
+    ).interval_seconds
 
 
 def _machine_is_constrained() -> bool:
@@ -229,6 +299,7 @@ class ProviderUsageService:
         clock: Callable[[], float] = time.time,
         state_loader: Callable[[], ProviderUsageState] | None = None,
         state_saver: Callable[[ProviderUsageState], object] | None = None,
+        receipt_handler: Callable[[RefreshPublicationReceipt], object] | None = None,
     ) -> None:
         self._settings_loader = settings_loader
         self._credentials = credentials
@@ -236,8 +307,14 @@ class ProviderUsageService:
         self._collectors = dict(_default_collectors() if collectors is None else collectors)
         self._clock = clock
         self._state_saver = state_saver
+        if receipt_handler is not None and not callable(receipt_handler):
+            raise ValueError("invalid refresh receipt handler")
+        self._receipt_handler = receipt_handler
         self._lock = threading.RLock()
         self._closed = False
+        self._settings_snapshot: ProviderUsageSettings | None = None
+        self._settings_revision = 0
+        self._explicit_settings_revision: int | None = None
         loaded_state = (
             state_loader()
             if state_loader is not None
@@ -245,8 +322,8 @@ class ProviderUsageService:
         )
         if type(loaded_state) is not ProviderUsageState or loaded_state.refreshing:
             loaded_state = ProviderUsageState((), None, None, False)
-        self._last_known_good: dict[str, ProviderUsageSnapshot] = {
-            snapshot.provider_id: snapshot
+        self._last_known_good: dict[tuple[str, str], ProviderUsageSnapshot] = {
+            snapshot.identity: snapshot
             for snapshot in loaded_state.snapshots
             if snapshot.state in {ProviderSourceState.READY, ProviderSourceState.STALE}
         }
@@ -257,54 +334,161 @@ class ProviderUsageService:
         # auth failures wait for the credential source to change,
         # transient failures ride an exponential ladder. In-memory only
         # -- a relaunch deliberately retries everything once.
-        self._failure_gates: dict[str, FailureGate] = {}
+        self._failure_gates: dict[tuple[str, str], FailureGate] = {}
         # Providers the NEXT worker run must collect even through a
         # gate, because a person just clicked something.
         self._forced_providers: set[str] = set()
         self._rerun_requested = False
+        self._refresh_receipts: deque[RefreshPublicationReceipt] = deque(maxlen=32)
+        self._refresh_sequence = 0
+        self._last_publication_outcome: RefreshPublicationOutcome | None = None
+        self._last_publication_revision: int | None = None
         #: When the owner last opened the menu -- the cadence ladder's
         #: only attention signal. None means 'not since launch'.
         self._menu_last_opened_at: float | None = None
         #: True while the LED bar renders Quota Runway.
         self._ambient_usage_visible = False
+        self._last_cadence_plan = plan_adaptive_refresh_cadence(
+            (),
+            observed_at=0.0,
+        )
 
     def note_ambient_usage_visible(self, visible: bool) -> None:
         """Tell the cadence whether a usage number is on screen already."""
-        self._ambient_usage_visible = bool(visible)
+        with self._lock:
+            self._ambient_usage_visible = bool(visible)
+            self._replan_cached_cadence_locked(float(self._clock()))
 
     def note_menu_opened(self, *, now: float | None = None) -> None:
         """Record a visit; the cadence ladder keys off how long ago."""
         with self._lock:
-            self._menu_last_opened_at = self._clock() if now is None else float(now)
+            observed_at = float(self._clock()) if now is None else float(now)
+            self._menu_last_opened_at = observed_at
+            self._replan_cached_cadence_locked(observed_at)
+
+    def _replan_cached_cadence_locked(self, observed_at: float) -> None:
+        """Shorten an accepted schedule when a local attention signal changes."""
+        plan = plan_adaptive_refresh_cadence(
+            self._state.snapshots,
+            observed_at=observed_at,
+            menu_last_opened_at=self._menu_last_opened_at,
+            constrained=self._last_cadence_plan.constrained,
+            ambient_usage_visible=self._ambient_usage_visible,
+        )
+        next_refresh_at = self._state.next_refresh_at
+        if next_refresh_at is not None:
+            next_refresh_at = min(
+                next_refresh_at,
+                observed_at + plan.interval_seconds,
+            )
+            self._state = replace(self._state, next_refresh_at=next_refresh_at)
+        self._last_cadence_plan = plan
 
     def snapshot(self) -> ProviderUsageState:
         with self._lock:
             return self._state
 
+    def settings_snapshot(self) -> ProviderUsageSettings | None:
+        with self._lock:
+            return self._settings_snapshot
+
+    def cadence_plan(self) -> AdaptiveRefreshPlan:
+        """Return the current scheduled cadence without reading system state."""
+        with self._lock:
+            return self._last_cadence_plan
+
+    def refresh_receipts(self) -> tuple[RefreshPublicationReceipt, ...]:
+        with self._lock:
+            return tuple(self._refresh_receipts)
+
+    def _record_receipt(
+        self,
+        outcome: RefreshPublicationOutcome,
+        settings_revision: int,
+        *,
+        error_code: str | None = None,
+    ) -> RefreshPublicationReceipt:
+        with self._lock:
+            self._refresh_sequence += 1
+            receipt = RefreshPublicationReceipt(
+                self._refresh_sequence,
+                settings_revision,
+                outcome,
+                error_code,
+            )
+            self._refresh_receipts.append(receipt)
+            self._last_publication_outcome = outcome
+            handler = self._receipt_handler
+        if handler is not None:
+            try:
+                handler(receipt)
+            except Exception:
+                pass
+        return receipt
+
+    def note_settings_updated(self, settings: ProviderUsageSettings) -> None:
+        if type(settings) is not ProviderUsageSettings:
+            raise ValueError("invalid provider usage settings")
+        with self._lock:
+            self._settings_revision += 1
+            self._settings_snapshot = settings
+            self._explicit_settings_revision = self._settings_revision
+
     def _settings(self) -> ProviderUsageSettings:
+        settings, _revision = self._settings_with_revision()
+        return settings
+
+    def _settings_with_revision(self) -> tuple[ProviderUsageSettings, int]:
+        with self._lock:
+            starting_revision = self._settings_revision
         loaded = self._settings_loader()
         settings = getattr(loaded, "settings", loaded)
         if type(settings) is not ProviderUsageSettings:
             raise ValueError("invalid provider usage settings")
-        return settings
+        with self._lock:
+            # A user may save a menu preference while this load is in
+            # flight. The worker can finish its already-started collection
+            # with the version it read, but it must not overwrite the newer
+            # explicit-action snapshot that AppKit should project.
+            if self._settings_revision == starting_revision:
+                if self._explicit_settings_revision == starting_revision:
+                    # A bounded rerun can read a lagging source again. Keep
+                    # the explicit edit as the projected snapshot for that
+                    # rerun, then allow later ordinary loads to refresh it.
+                    self._explicit_settings_revision = None
+                else:
+                    self._settings_snapshot = settings
+        return settings, starting_revision
 
     def _run_refresh(
         self,
         *,
-        providers: tuple[str, ...] | None,
+        providers: tuple[ProviderRefreshScope, ...] | None,
         force: bool = False,
     ) -> ProviderUsageState:
         observed_at = float(self._clock())
-        settings = self._settings()
+        settings, settings_revision = self._settings_with_revision()
+        collection_settings = project_collection_settings(settings)
         selected = None if providers is None else frozenset(providers)
+        selected_provider_ids = frozenset(
+            item for item in selected or () if isinstance(item, str)
+        )
+        selected_instances = frozenset(
+            item for item in selected or ()
+            if isinstance(item, tuple) and len(item) == 2
+        )
         previous_by_provider = {
-            snapshot.provider_id: snapshot for snapshot in self.snapshot().snapshots
+            snapshot.identity: snapshot for snapshot in self.snapshot().snapshots
         }
         snapshots: list[ProviderUsageSnapshot] = []
-        for preference in settings.providers:
+        for preference in collection_settings.providers:
             provider_id = preference.provider_id
-            if selected is not None and provider_id not in selected:
-                previous = previous_by_provider.get(provider_id)
+            identity = preference.identity
+            if selected is not None and (
+                provider_id not in selected_provider_ids
+                and identity not in selected_instances
+            ):
+                previous = previous_by_provider.get(identity)
                 if previous is not None:
                     snapshots.append(previous)
                 continue
@@ -312,12 +496,13 @@ class ProviderUsageService:
                 # A disabled provider's old failure gate must not
                 # outlive the disable: re-enabling should probe fresh,
                 # not serve the pre-disable failure for up to an hour.
-                self._failure_gates.pop(provider_id, None)
+                self._failure_gates.pop(identity, None)
                 snapshots.append(
                     _empty_snapshot(
                         provider_id,
                         observed_at=observed_at,
                         state=ProviderSourceState.DISABLED,
+                        source_instance_id=preference.source_instance_id,
                     )
                 )
                 continue
@@ -330,25 +515,13 @@ class ProviderUsageService:
                         state=ProviderSourceState.SOURCE_NOT_FOUND,
                         reason="collector_not_configured",
                         action=f"Configure {provider_descriptor(provider_id).label}",
+                        source_instance_id=preference.source_instance_id,
                     )
                 )
                 continue
-            gate = self._failure_gates.get(provider_id, FailureGate())
+            gate = self._failure_gates.get(identity, FailureGate())
             fingerprint = credential_fingerprint(self._home, provider_id)
-            if provider_id == "claude" and gate.terminal:
-                # A terminal Claude auth gate has no credential FILE to
-                # fingerprint (the sign-in lives in the Keychain), so
-                # left alone it never lifts. Try the silent CodexBar
-                # renewal -- standing consent only, never a dialog --
-                # and treat success as the changed-credential signal.
-                if renew_claude_credential_in_background(
-                    self._credentials,
-                    home=self._home,
-                    now=observed_at,
-                ):
-                    gate = FailureGate()
-                    self._failure_gates.pop(provider_id, None)
-            previous = previous_by_provider.get(provider_id)
+            previous = previous_by_provider.get(identity)
             if previous is not None and not should_collect(
                 gate,
                 now=observed_at,
@@ -363,6 +536,7 @@ class ProviderUsageService:
                 continue
             if (
                 provider_id == "grok"
+                and preference.source_instance_id == "default"
                 and gate.terminal
                 and fingerprint != gate.terminal_fingerprint
             ):
@@ -382,10 +556,21 @@ class ProviderUsageService:
                     preference,
                     self._home,
                     observed_at,
-                    self._credentials,
+                    _InstanceCredentialView(
+                        self._credentials,
+                        ProviderInstanceKey(
+                            provider_id,
+                            preference.source_instance_id,
+                        ),
+                    ),
                 )
                 if type(candidate) is not ProviderUsageSnapshot:
                     raise ValueError("collector returned invalid snapshot")
+                if candidate.identity != identity:
+                    candidate = replace(
+                        candidate,
+                        source_instance_id=preference.source_instance_id,
+                    )
             except Exception:
                 candidate = _empty_snapshot(
                     provider_id,
@@ -393,24 +578,25 @@ class ProviderUsageService:
                     state=ProviderSourceState.ERROR,
                     reason="collector_failed",
                     action="Retry",
+                    source_instance_id=preference.source_instance_id,
                 )
             if candidate.state in _TERMINAL_FAILURE_STATES:
-                self._failure_gates[provider_id] = note_failure(
+                self._failure_gates[identity] = note_failure(
                     gate,
                     now=observed_at,
                     terminal=True,
                     fingerprint=fingerprint,
                 )
             elif candidate.state in _TRANSIENT_FAILURE_STATES:
-                self._failure_gates[provider_id] = note_failure(
+                self._failure_gates[identity] = note_failure(
                     gate,
                     now=observed_at,
                     terminal=False,
                     fingerprint=None,
                 )
             else:
-                self._failure_gates.pop(provider_id, None)
-            previous_good = self._last_known_good.get(provider_id)
+                self._failure_gates.pop(identity, None)
+            previous_good = self._last_known_good.get(identity)
             if (
                 candidate.state is ProviderSourceState.READY
                 and not candidate.lanes
@@ -432,7 +618,7 @@ class ProviderUsageService:
                     )
                 )
             elif candidate.state is ProviderSourceState.READY:
-                self._last_known_good[provider_id] = candidate
+                self._last_known_good[identity] = candidate
                 snapshots.append(candidate)
             elif candidate.state is ProviderSourceState.STALE and candidate.lanes:
                 # A stale-but-real reading is NEWER information than the
@@ -451,40 +637,67 @@ class ProviderUsageService:
             else:
                 snapshots.append(candidate)
         ordered = tuple(snapshots)
+        cadence_plan = plan_adaptive_refresh_cadence(
+            ordered,
+            observed_at=observed_at,
+            menu_last_opened_at=getattr(self, "_menu_last_opened_at", None),
+            constrained=_machine_is_constrained(),
+            ambient_usage_visible=bool(
+                getattr(self, "_ambient_usage_visible", False)
+            ),
+        )
         state = ProviderUsageState(
             snapshots=ordered,
             refreshed_at=observed_at,
-            next_refresh_at=observed_at
-            + _interval_for(
-                ordered,
-                observed_at,
-                menu_last_opened_at=getattr(self, "_menu_last_opened_at", None),
-                constrained=_machine_is_constrained(),
-                ambient_usage_visible=bool(
-                    getattr(self, "_ambient_usage_visible", False)
-                ),
-            ),
+            next_refresh_at=observed_at + cadence_plan.interval_seconds,
             refreshing=False,
         )
+        # State publication and its durable save are one revision-fenced
+        # critical section. An explicit settings edit cannot land between
+        # the check and the save, and an older worker therefore cannot leak
+        # either state or persistence past the edit.
+        publication_outcome: RefreshPublicationOutcome
+        publication_error: str | None = None
         with self._lock:
-            self._state = state
-        if self._state_saver is not None:
-            try:
-                self._state_saver(state)
-            except Exception:
-                pass
-        return state
+            if self._closed:
+                publication_outcome = RefreshPublicationOutcome.REFUSED
+                result = self._state
+            elif settings_revision != self._settings_revision:
+                publication_outcome = RefreshPublicationOutcome.SUPERSEDED
+                result = self._state
+            else:
+                self._state = state
+                self._last_cadence_plan = cadence_plan
+                self._last_publication_revision = settings_revision
+                result = state
+                publication_outcome = RefreshPublicationOutcome.ACCEPTED
+                if self._state_saver is not None:
+                    try:
+                        self._state_saver(state)
+                    except Exception:
+                        publication_outcome = RefreshPublicationOutcome.FAILED
+                        publication_error = "state_persistence_failed"
+        self._record_receipt(
+            publication_outcome,
+            settings_revision,
+            error_code=publication_error,
+        )
+        return result
 
     def refresh_now(
         self,
         *,
-        providers: tuple[str, ...] | None = None,
+        providers: tuple[ProviderRefreshScope, ...] | None = None,
         force: bool = False,
     ) -> ProviderUsageState:
         # `force` used to be deleted here, which meant a user-initiated
         # reconnect could not push through a failure gate. Now it can.
         with self._lock:
             if self._closed:
+                self._record_receipt(
+                    RefreshPublicationOutcome.REFUSED,
+                    self._settings_revision,
+                )
                 return self._state
         return self._run_refresh(providers=providers, force=force)
 
@@ -492,15 +705,19 @@ class ProviderUsageService:
         self,
         *,
         callback: Callable[[ProviderUsageState], None],
-        providers: tuple[str, ...] | None = None,
+        providers: tuple[ProviderRefreshScope, ...] | None = None,
         force: bool = False,
     ) -> ProviderUsageState:
         if not callable(callback):
             raise TypeError("callback must be callable")
         with self._lock:
             if self._closed:
+                self._record_receipt(
+                    RefreshPublicationOutcome.REFUSED,
+                    self._settings_revision,
+                )
                 return self._state
-            now = time.time()
+            now = float(self._clock())
             if (
                 not force
                 and self._state.next_refresh_at is not None
@@ -532,7 +749,7 @@ class ProviderUsageService:
     def _worker_main(
         self,
         *,
-        providers: tuple[str, ...] | None,
+        providers: tuple[ProviderRefreshScope, ...] | None,
         force: bool = False,
     ) -> None:
         pending_providers = providers
@@ -542,16 +759,29 @@ class ProviderUsageService:
                 providers=pending_providers, force=pending_force
             )
             with self._lock:
-                if self._rerun_requested:
-                    pending_providers = (
-                        tuple(sorted(self._forced_providers)) or None
+                if (
+                    self._rerun_requested
+                    or self._last_publication_outcome
+                    is RefreshPublicationOutcome.SUPERSEDED
+                    or (
+                        self._last_publication_outcome
+                        is RefreshPublicationOutcome.ACCEPTED
+                        and self._last_publication_revision
+                        != self._settings_revision
                     )
+                ):
+                    pending_providers = (
+                        tuple(sorted(self._forced_providers, key=repr)) or None
+                    )
+                    if pending_providers is None:
+                        pending_providers = providers
                     pending_force = True
                     self._rerun_requested = False
                     self._forced_providers.clear()
                     continue
                 callbacks = tuple(self._callbacks)
                 self._callbacks.clear()
+                publication_revision = self._last_publication_revision
                 # Retire the worker UNDER THE LOCK, in the same critical
                 # section as the final rerun check. The exit used to
                 # happen while `is_alive()` was still true, so a forced
@@ -560,12 +790,29 @@ class ProviderUsageService:
                 # the click was swallowed and the leaked flags fired a
                 # spurious forced run up to five minutes later.
                 self._worker = None
-                break
-        for callback in callbacks:
-            try:
-                callback(state)
-            except Exception:
+            superseded_callbacks = False
+            for index, callback in enumerate(callbacks):
+                # Keep the revision check and callback invocation in one
+                # critical section. A settings update from another thread
+                # therefore either precedes this callback and suppresses it,
+                # or waits until the callback has begun and is ordered after
+                # the publication it observes.
+                with self._lock:
+                    if publication_revision != self._settings_revision:
+                        self._callbacks = list(callbacks[index:]) + self._callbacks
+                        self._rerun_requested = True
+                        self._worker = threading.current_thread()
+                        superseded_callbacks = True
+                        break
+                    try:
+                        callback(state)
+                    except Exception:
+                        continue
+            if superseded_callbacks:
+                pending_providers = providers
+                pending_force = True
                 continue
+            break
 
     def close(self) -> None:
         with self._lock:
@@ -575,4 +822,11 @@ class ProviderUsageService:
             worker.join(timeout=1.0)
 
 
-__all__ = ["ProviderUsageService", "ProviderUsageState"]
+__all__ = [
+    "ProviderRefreshScope",
+    "ProviderUsageApply",
+    "ProviderUsageService",
+    "ProviderUsageState",
+    "RefreshPublicationOutcome",
+    "RefreshPublicationReceipt",
+]

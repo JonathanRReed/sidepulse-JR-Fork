@@ -1,0 +1,9 @@
+{
+  "provider": "kiro",
+  "fixtureType": "hook-event",
+  "fixtureVersion": 1,
+  "payload": {
+    "event": "SessionStart",
+    "session_id": "synthetic-kiro-session"
+  }
+}

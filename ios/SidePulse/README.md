@@ -1,6 +1,6 @@
-# SidePulse for iOS
+# JR Bar for iOS
 
-SidePulse is a push inbox that can optionally write LED programs to `LEDS.LED`
+JR Bar is a push inbox that can optionally write LED programs to `LEDS.LED`
 on a SidePulse Dot USB drive attached to an iPhone or iPad.
 
 The app supports:
@@ -33,9 +33,42 @@ The bundle identifier is `io.sidepulse.app`.
 If no SidePulse Dot folder is configured, pushes still appear in the inbox. The app
 does not treat that as a user-facing failure.
 
+## Computer Glance
+
+Computer Glance is an optional, read-only status feed from a Mac running
+SidePulse. It is designed for one explicit private-network address, not
+discovery, a public hostname, a cloud relay, or remote control.
+
+On the Mac, choose its current private IP address and start the glance listener:
+
+```sh
+export SIDEPULSE_PHONE_GLANCE_SECRET="choose-a-separate-glance-secret"
+sidepulse glance --bind-address 192.168.1.20 --port 8738
+```
+
+Replace `192.168.1.20` with the Mac's actual RFC 1918 or link-local IP literal.
+The command refuses hostnames, loopback, wildcard, and public addresses. Keep
+`SIDEPULSE_PHONE_GLANCE_SECRET` in the Mac environment. Do not put it in the
+command arguments, a screenshot, source control, or a log. Enter the same
+secret in **Settings > Computer Glance** on the iPhone or iPad, where it is
+stored in the iOS Keychain.
+
+The Mac and iPhone or iPad must be on the same local network. The feed is
+signed, minimized, and read-only, but its private-LAN HTTP transport is not
+encrypted. Do not treat it as confidential and do not expose the listener
+beyond the local network.
+
+JR Bar requests one Computer Glance refresh only when it becomes active or when
+you choose **Refresh Computer Glance** or **Test Computer Glance**. It does not
+poll in the background. If the card is unavailable, confirm that the Mac
+listener is running, the private IP and port are correct, both devices share a
+local network, and the secrets match, then use the manual refresh or test
+control again. A stale card keeps the last verified status visible until a later
+manual refresh succeeds.
+
 ## Background pushes
 
-SidePulse handles silent pushes in
+JR Bar handles silent pushes in
 `application(_:didReceiveRemoteNotification:fetchCompletionHandler:)`. Silent
 delivery is still controlled by iOS: Background App Refresh must be enabled, the
 app must not be force-quit, and delivery can be delayed. Visible alert pushes

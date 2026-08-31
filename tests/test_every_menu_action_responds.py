@@ -10,13 +10,29 @@ even dispatch?".
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 from test_sidepulse import isolate_controller
 
+from sidepulse.capacity_types import SourceKey
+from sidepulse.dnd_policy import (
+    DndMode,
+    DndOverride,
+    DndSource,
+    compose_dnd_contributions,
+    contribution_for_mode,
+)
+from sidepulse.global_actions import (
+    GlobalActionID,
+    ShortcutChord,
+    ShortcutModifier,
+    format_shortcut,
+)
 from sidepulse.models import AgentMode, AgentStatus
+from sidepulse.provider_facts import WorkIdentifier, WorkKey
 
 
 def _status(provider, sid, mode, event="PreToolUse"):
@@ -136,6 +152,182 @@ def test_open_agent_browser_survives_stale_menus_and_missing_payloads(request):
 
     unpayloaded = SimpleNamespace(representedObject=lambda: None)
     assert controller.openAgentBrowser_(unpayloaded) is True
+
+
+def test_clear_agents_is_the_only_completion_cleanup_selector(request):
+    case = SimpleNamespace(
+        addCleanup=lambda fn, *a, **k: request.addfinalizer(lambda: fn(*a, **k)),
+    )
+    isolate_controller(case)
+    controller = case.controller
+    source = SourceKey("codex", "hooks", "local", "live_agent_events")
+    status = AgentStatus(
+        provider="codex",
+        agent_id="codex:session:clearable",
+        display_name="Codex",
+        mode=AgentMode.COMPLETED,
+        updated_at=datetime.now(timezone.utc),
+        event_name="Stop",
+        session_id="clearable",
+        work_key=WorkKey(source, WorkIdentifier("session.clearable")),
+    )
+    snapshot = SimpleNamespace(
+        statuses=(status,),
+        stale_statuses=(),
+        collected_at=datetime.now(timezone.utc),
+    )
+    controller.last_snapshot = snapshot
+    controller.update_attention_projection(snapshot)
+
+    menu = case.status_bar.build_menu(
+        snapshot,
+        case.status_bar.STATE_IDLE,
+        controller,
+    )
+    items = [menu.itemAtIndex_(index) for index in range(menu.numberOfItems())]
+    clear_items = [item for item in items if str(item.title()) == "Clear Agents…"]
+
+    assert len(clear_items) == 1
+    assert str(clear_items[0].action()) == "clearAgents:"
+    assert clear_items[0].target() is controller
+    assert callable(controller.clearAgents_)
+    assert all(str(item.action()) != "clearCompleted:" for item in items)
+    assert not any(str(item.title()).startswith("Clear Finished") for item in items)
+
+
+def test_reveal_current_ask_menu_item_uses_the_single_controller_selector(request):
+    case = SimpleNamespace(
+        addCleanup=lambda fn, *a, **k: request.addfinalizer(lambda: fn(*a, **k)),
+    )
+    isolate_controller(case)
+    controller = case.controller
+    chord = ShortcutChord(
+        key_code=40,
+        key_label="K",
+        modifiers=frozenset({ShortcutModifier.CONTROL, ShortcutModifier.SHIFT}),
+    )
+    controller.settings = replace(
+        controller.settings,
+        global_action_shortcuts={
+            GlobalActionID.REVEAL_CURRENT_ASK.value: chord.to_dict()
+        },
+    )
+    snapshot = SimpleNamespace(
+        statuses=(),
+        stale_statuses=(),
+        collected_at=datetime.now(timezone.utc),
+    )
+
+    menu = case.status_bar.build_menu(
+        snapshot,
+        case.status_bar.STATE_IDLE,
+        controller,
+    )
+    items = [menu.itemAtIndex_(index) for index in range(menu.numberOfItems())]
+    reveal = next(item for item in items if str(item.title()).startswith("Reveal Current Ask"))
+
+    assert str(reveal.action()) == "performRevealCurrentAsk:"
+    assert reveal.target() is controller
+    assert format_shortcut(chord) in str(reveal.title())
+
+
+def test_compact_root_replaces_quiet_with_one_bounded_dnd_submenu(request):
+    case = SimpleNamespace(
+        addCleanup=lambda fn, *a, **k: request.addfinalizer(lambda: fn(*a, **k)),
+    )
+    isolate_controller(case)
+    snapshot = SimpleNamespace(
+        statuses=(),
+        stale_statuses=(),
+        collected_at=datetime.now(timezone.utc),
+    )
+
+    menu = case.status_bar.build_menu(
+        snapshot,
+        case.status_bar.STATE_IDLE,
+        case.controller,
+    )
+    root_items = [menu.itemAtIndex_(index) for index in range(menu.numberOfItems())]
+    titled = [item for item in root_items if str(item.title() or "").strip()]
+    dnd = [item for item in titled if str(item.title()).startswith("DND:")]
+
+    assert len(titled) <= 15
+    assert len(dnd) == 1
+    assert str(dnd[0].title()) == "DND: Off"
+    assert not any(
+        str(item.title()) == "Quiet" or str(item.title()).startswith("End Quiet")
+        for item in titled
+    )
+    submenu = dnd[0].submenu()
+    assert submenu is not None
+    assert [
+        str(submenu.itemAtIndex_(index).title())
+        for index in range(submenu.numberOfItems())
+    ] == [
+        "Mute for One Hour",
+        "Dim for One Hour",
+        "Pause for One Hour",
+        "Asks Only for One Hour",
+        "Fully Dark for One Hour",
+        "DND Settings…",
+    ]
+
+
+def test_compact_dnd_contextual_actions_are_visible_and_resolve(request):
+    case = SimpleNamespace(
+        addCleanup=lambda fn, *a, **k: request.addfinalizer(lambda: fn(*a, **k)),
+    )
+    isolate_controller(case)
+    now = datetime.now(timezone.utc).timestamp()
+    override = DndOverride.for_mode(
+        DndMode.MUTE,
+        created_epoch=now - 60.0,
+        until_epoch=now + 3_600.0,
+    )
+    case.controller.settings = case.controller.settings.with_dnd_override(override)
+    case.controller.dnd_controller = SimpleNamespace(
+        projection=compose_dnd_contributions(
+            (
+                contribution_for_mode(DndSource.MANUAL, DndMode.MUTE),
+                contribution_for_mode(DndSource.SCHEDULE, DndMode.DIM),
+            ),
+            next_transition_epoch=now + 600.0,
+        )
+    )
+    snapshot = SimpleNamespace(
+        statuses=(),
+        stale_statuses=(),
+        collected_at=datetime.now(timezone.utc),
+    )
+
+    menu = case.status_bar.build_menu(
+        snapshot,
+        case.status_bar.STATE_IDLE,
+        case.controller,
+    )
+    dnd = next(
+        menu.itemAtIndex_(index)
+        for index in range(menu.numberOfItems())
+        if str(menu.itemAtIndex_(index).title()).startswith("DND:")
+    )
+    submenu = dnd.submenu()
+    assert submenu is not None
+    assert str(dnd.title()).startswith("DND: Manual Mute + Scheduled Dim until ")
+    actions = {
+        str(submenu.itemAtIndex_(index).title()): str(
+            submenu.itemAtIndex_(index).action()
+        )
+        for index in range(submenu.numberOfItems())
+    }
+
+    assert (
+        actions["Resume Schedule Until Next Change"]
+        == "resumeDndUntilNextChange:"
+    )
+    assert actions["End Temporary Override"] == "endDndOverride:"
+    walker = _Walker(case.controller)
+    walker.walk(submenu, "/DND")
+    assert walker.dead == []
 
 
 def test_sampler_serves_frames_from_one_batched_engine_call() -> None:

@@ -29,6 +29,16 @@ def test_settings_navigation_has_eight_stable_categories() -> None:
     assert len({category.key for category in SETTINGS_CATEGORIES}) == 8
 
 
+def test_global_action_recorder_stays_inside_existing_overview_page() -> None:
+    overview = category_for_key("profile")
+
+    assert overview.label == "Overview"
+    assert [(page.key, page.label) for page in overview.pages] == [
+        ("profile", "Overview")
+    ]
+    assert "global_actions" not in legacy_page_keys()
+
+
 def test_every_retained_pane_has_exactly_one_visible_home() -> None:
     pages = [
         page.key

@@ -1,12 +1,12 @@
 #!/bin/sh
-# SidePulse field diagnostics -- pure shell, for the support case where
+# JR Bar field diagnostics -- pure shell, for the support case where
 # Python itself is broken. Prints redacted environment facts only:
 # never transcripts, prompts, tool payloads, or tokens.
 set -u
 
 section() { printf '\n== %s\n' "$1"; }
 
-echo "SidePulse field diagnostics ($(date '+%Y-%m-%dT%H:%M:%S%z'))"
+echo "JR Bar field diagnostics ($(date '+%Y-%m-%dT%H:%M:%S%z'))"
 
 section "system"
 sw_vers 2>/dev/null || echo "sw_vers unavailable"

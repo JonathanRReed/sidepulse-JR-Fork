@@ -4,22 +4,26 @@ All controller behavior lives in ``_status_bar_production``. This module keeps
 legacy imports, monkeypatches, direct module execution, and source
 introspection compatible without defining or rebinding another Objective-C
 subclass. Small module-level adapters provide stable device identity and a
-compact menu without adding business logic to the retained controller.
+compact menu without adding business logic to the retained controller. The
+adapters are installed only by ``sidepulse.application_composition``.
 """
 
 from __future__ import annotations
 
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 from . import _status_bar_production as _production
 from .device_identity import DeviceKind, device_kind, normalize_device_label
 from .device_inventory import DeviceIdentityCache
+from .dnd_policy import DndMode, DndOverride, DndProjection, DndSource
 from .menu_projection import (
     MenuProjectionInputs,
     _glance_title,
+    project_dnd_submenu,
     project_root_menu,
 )
 
@@ -43,20 +47,22 @@ _ORIGINAL_PERSISTABLE_DEVICE_IDENTITY = getattr(
 _ORIGINAL_BUILD_MENU = getattr(
     _legacy, "_sidepulse_original_build_menu", _legacy.build_menu
 )
-_legacy._sidepulse_original_device_id_for_root = _ORIGINAL_DEVICE_ID_FOR_ROOT
-_legacy._sidepulse_original_persistable_device_identity = (
-    _ORIGINAL_PERSISTABLE_DEVICE_IDENTITY
-)
-_legacy._sidepulse_original_build_menu = _ORIGINAL_BUILD_MENU
-
-_DEVICE_IDENTITIES = getattr(_legacy, "_sidepulse_device_identity_cache", None)
-if type(_DEVICE_IDENTITIES) is not DeviceIdentityCache:
-    _DEVICE_IDENTITIES = DeviceIdentityCache()
-    _legacy._sidepulse_device_identity_cache = _DEVICE_IDENTITIES
-    _DEVICE_IDENTITIES.request_refresh()
+_DEVICE_IDENTITIES = None
+_FACADE_INSTALLED = False
 _LAST_DEVICE_REFRESH_REQUEST = float(
     getattr(_legacy, "_sidepulse_last_device_refresh_request", 0.0) or 0.0
 )
+
+
+def _device_identity_cache() -> DeviceIdentityCache:
+    global _DEVICE_IDENTITIES
+    if type(_DEVICE_IDENTITIES) is DeviceIdentityCache:
+        return _DEVICE_IDENTITIES
+    retained = getattr(_legacy, "_sidepulse_device_identity_cache", None)
+    _DEVICE_IDENTITIES = (
+        retained if type(retained) is DeviceIdentityCache else DeviceIdentityCache()
+    )
+    return _DEVICE_IDENTITIES
 
 
 def _request_device_identity_refresh(now: float | None = None) -> None:
@@ -66,13 +72,13 @@ def _request_device_identity_refresh(now: float | None = None) -> None:
         return
     _LAST_DEVICE_REFRESH_REQUEST = reference
     _legacy._sidepulse_last_device_refresh_request = reference
-    _DEVICE_IDENTITIES.request_refresh()
+    _device_identity_cache().request_refresh()
 
 
 def device_id_for_root(root: Path) -> str:
     """Return the stable cached hardware key without blocking AppKit."""
     _request_device_identity_refresh()
-    identity = _DEVICE_IDENTITIES.identity_for_mount(Path(root))
+    identity = _device_identity_cache().identity_for_mount(Path(root))
     return identity.key if identity is not None else _ORIGINAL_DEVICE_ID_FOR_ROOT(root)
 
 
@@ -80,7 +86,7 @@ def persistable_device_identity(device_id: str, path: str) -> bool:
     """Reject path ghosts once stable inventory owns that physical device."""
     if device_id == _legacy.VIRTUAL_DEVICE_ID or path == _legacy.VIRTUAL_DEVICE_ID:
         return True
-    snapshot = _DEVICE_IDENTITIES.snapshot()
+    snapshot = _device_identity_cache().snapshot()
     if isinstance(device_id, str) and device_id.startswith("sidepulse:"):
         # A stable-keyed entry whose mount is now owned by a DIFFERENT
         # stable key is a ghost of a re-keyed device (e.g. a Pro that
@@ -202,11 +208,91 @@ def _setup_required(target) -> bool:
     return not completed or bool(_intake_warnings(target))
 
 
-def _unseen_finished_count(snapshot, target) -> int:
+def _clearable_presented_count(snapshot, target) -> int:
     try:
-        return len(_legacy.unseen_completions(snapshot, target))
+        count = _legacy.clearable_presented_count(snapshot, target)
     except Exception:
         return 0
+    return count if type(count) is int and count >= 0 else 0
+
+
+def _local_datetime(epoch: float | None) -> datetime | None:
+    if epoch is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(epoch)).astimezone()
+    except (OSError, OverflowError, TypeError, ValueError):
+        return None
+
+
+def _dnd_menu_fields(
+    target,
+    *,
+    now_epoch: float | None = None,
+) -> tuple[
+    DndMode | None,
+    DndSource | None,
+    tuple[DndSource, ...],
+    str,
+    datetime | None,
+    bool,
+    bool,
+]:
+    """Adapt the retained typed controller to the compact menu contract."""
+    controller = getattr(target, "dnd_controller", None)
+    projection = getattr(controller, "projection", None)
+    if type(projection) is not DndProjection:
+        return (None, None, (), "DND: Off", None, False, False)
+
+    reference = time.time() if now_epoch is None else now_epoch
+    override = None
+    settings = getattr(target, "settings", None)
+    dnd_settings = getattr(settings, "dnd_settings", None)
+    if callable(dnd_settings):
+        try:
+            override = dnd_settings().override
+        except Exception:
+            override = None
+    if type(override) is not DndOverride:
+        override = None
+    try:
+        override_active = override is not None and override.active_at(reference)
+    except (TypeError, ValueError):
+        override_active = False
+
+    if override_active and not override.resume:
+        mode = override.mode
+        source = DndSource.MANUAL
+    else:
+        contribution = next(
+            (
+                item
+                for item in projection.contributions
+                if item.mode is not None
+            ),
+            None,
+        )
+        mode = contribution.mode if contribution is not None else None
+        source = contribution.source if contribution is not None else None
+
+    active_sources = projection.active_sources
+    if len(active_sources) > 1:
+        return_time = _local_datetime(projection.next_transition_epoch)
+    elif override_active and not override.resume:
+        return_time = _local_datetime(override.until_epoch)
+    else:
+        return_time = _local_datetime(projection.next_transition_epoch)
+
+    resume_available = DndSource.SCHEDULE in projection.active_sources
+    return (
+        mode,
+        source,
+        active_sources,
+        projection.summary,
+        return_time,
+        override_active,
+        resume_available,
+    )
 
 
 def _normalise_device_item_title(item) -> None:
@@ -219,9 +305,117 @@ def _normalise_device_item_title(item) -> None:
             pass
 
 
+def _install_dnd_menu(menu, target, inputs: MenuProjectionInputs, plan_by_key) -> None:
+    items = _menu_items(menu)
+    replaced_index = None
+    for item in list(items):
+        title = _safe_title(item)
+        if title == "Quiet" or title.startswith("End Quiet") or title.startswith("DND:"):
+            if replaced_index is None:
+                replaced_index = items.index(item)
+            _remove_item(menu, item)
+
+    if replaced_index is None:
+        current = _menu_items(menu)
+        settings_index = next(
+            (
+                index
+                for index, item in enumerate(current)
+                if _safe_title(item) == "Settings…"
+            ),
+            len(current) - 1,
+        )
+        replaced_index = min(len(current), settings_index + 1)
+
+    submenu = _legacy.NSMenu.alloc().init()
+    submenu.setAutoenablesItems_(False)
+    for row in project_dnd_submenu(inputs):
+        item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            row.title,
+            row.action,
+            "",
+        )
+        item.setTarget_(target)
+        item.setEnabled_(row.enabled)
+        submenu.addItem_(item)
+    parent = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        plan_by_key["dnd"].title,
+        None,
+        "",
+    )
+    parent.setSubmenu_(submenu)
+    menu.insertItem_atIndex_(parent, replaced_index)
+
+
+def _install_clear_agents_action(menu, target, plan_by_key) -> None:
+    items = _menu_items(menu)
+    replaced_index = None
+    for item in list(items):
+        title = _safe_title(item)
+        if title == "Clear Agents…":
+            if replaced_index is None:
+                replaced_index = items.index(item)
+            _remove_item(menu, item)
+
+    row = plan_by_key.get("clear_agents")
+    if row is None:
+        return
+    if replaced_index is None:
+        current = _menu_items(menu)
+        replaced_index = next(
+            (
+                index
+                for index, item in enumerate(current)
+                if _safe_title(item).startswith("Quit ")
+            ),
+            len(current),
+        )
+    item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        row.title,
+        row.action,
+        "",
+    )
+    item.setTarget_(target)
+    item.setEnabled_(row.enabled)
+    menu.insertItem_atIndex_(item, min(replaced_index, len(_menu_items(menu))))
+
+
+def _install_effect_studio_action(menu, target) -> None:
+    """Expose the native Studio beside the app's other windows."""
+
+    items = _menu_items(menu)
+    if any(_safe_title(item) == "Effect Studio…" for item in items):
+        return
+    settings_index = next(
+        (
+            index
+            for index, item in enumerate(items)
+            if _safe_title(item) == "Settings…"
+        ),
+        len(items),
+    )
+    studio = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Effect Studio…",
+        "openEffectStudio:",
+        "",
+    )
+    studio.setTarget_(target)
+    studio.setEnabled_(True)
+    menu.insertItem_atIndex_(studio, settings_index)
+
+
 def _compact_existing_menu(menu, snapshot, target):
     """Group implementation inventory into semantic root rows."""
     active, needs_you, ready = _mailbox_counts(target)
+    (
+        dnd_mode,
+        dnd_source,
+        dnd_active_sources,
+        dnd_summary,
+        dnd_return_time,
+        dnd_override_active,
+        dnd_resume_available,
+    ) = _dnd_menu_fields(target)
     inputs = MenuProjectionInputs(
         active_count=active,
         needs_you_count=needs_you,
@@ -233,8 +427,14 @@ def _compact_existing_menu(menu, snapshot, target):
         ),
         warning_rows=_intake_warnings(target),
         setup_required=_setup_required(target),
-        quiet_active=bool(_legacy.target_quiet_active(target)),
-        unseen_finished_count=_unseen_finished_count(snapshot, target),
+        dnd_mode=dnd_mode,
+        dnd_source=dnd_source,
+        dnd_active_sources=dnd_active_sources,
+        dnd_summary=dnd_summary,
+        dnd_return_time=dnd_return_time,
+        dnd_override_active=dnd_override_active,
+        dnd_resume_available=dnd_resume_available,
+        clearable_presented_count=_clearable_presented_count(snapshot, target),
     )
     plan = project_root_menu(inputs)
     plan_by_key = {row.key: row for row in plan.rows}
@@ -296,10 +496,11 @@ def _compact_existing_menu(menu, snapshot, target):
                 "Brightness",
                 "Keep Awake With Lid Closed",
                 "No devices yet",
-                "Plug in a SidePulse, or add the Screen Bar below",
+                "Plug in a SidePulse Pro or SidePulse Dot, or add the Screen Bar below",
             }
             or title.startswith("Sleep warning:")
-            or (title.startswith("SidePulse") and title != "Quit JR-BAR")
+            or title.startswith("SidePulse Pro")
+            or title.startswith("SidePulse Dot")
         ):
             _normalise_device_item_title(item)
             device_items.append(item)
@@ -317,6 +518,10 @@ def _compact_existing_menu(menu, snapshot, target):
         )
         parent.setSubmenu_(submenu)
         menu.insertItem_atIndex_(parent, first_index)
+
+    _install_dnd_menu(menu, target, inputs, plan_by_key)
+    _install_clear_agents_action(menu, target, plan_by_key)
+    _install_effect_studio_action(menu, target)
 
     diagnostics_index = next(
         (
@@ -368,9 +573,6 @@ _ORIGINAL_CANONICAL_ROOT_SNAPSHOT = getattr(
     "_sidepulse_original_canonical_root_snapshot",
     _legacy._canonical_agent_root_snapshot,
 )
-_legacy._sidepulse_original_canonical_root_snapshot = (
-    _ORIGINAL_CANONICAL_ROOT_SNAPSHOT
-)
 
 
 def _compact_canonical_root_snapshot(snapshot, target, *, menu=None):
@@ -414,12 +616,33 @@ def _compact_canonical_root_snapshot(snapshot, target, *, menu=None):
     return updated, items
 
 
-_legacy._canonical_agent_root_snapshot = _compact_canonical_root_snapshot
-
-
-_legacy.device_id_for_root = device_id_for_root
-_legacy.persistable_device_identity = persistable_device_identity
-_legacy.build_menu = build_menu
+def install_status_bar_facade():
+    """Install compact-menu and device adapters after production composition."""
+    global _FACADE_INSTALLED
+    if (
+        _FACADE_INSTALLED
+        and _legacy.StatusBarController is JRStatusBarController
+        and _legacy.build_menu is build_menu
+    ):
+        return JRStatusBarController
+    _production.install_status_bar_production()
+    _legacy._sidepulse_original_device_id_for_root = _ORIGINAL_DEVICE_ID_FOR_ROOT
+    _legacy._sidepulse_original_persistable_device_identity = (
+        _ORIGINAL_PERSISTABLE_DEVICE_IDENTITY
+    )
+    _legacy._sidepulse_original_build_menu = _ORIGINAL_BUILD_MENU
+    _legacy._sidepulse_original_canonical_root_snapshot = (
+        _ORIGINAL_CANONICAL_ROOT_SNAPSHOT
+    )
+    cache = _device_identity_cache()
+    _legacy._sidepulse_device_identity_cache = cache
+    _legacy._canonical_agent_root_snapshot = _compact_canonical_root_snapshot
+    _legacy.device_id_for_root = device_id_for_root
+    _legacy.persistable_device_identity = persistable_device_identity
+    _legacy.build_menu = build_menu
+    _legacy.StatusBarController = JRStatusBarController
+    _FACADE_INSTALLED = True
+    return JRStatusBarController
 
 
 class _StatusBarFacade(ModuleType):
@@ -470,6 +693,7 @@ __all__ = tuple(
             "StatusBarController",
             "build_menu",
             "device_id_for_root",
+            "install_status_bar_facade",
             "persistable_device_identity",
         }
     )

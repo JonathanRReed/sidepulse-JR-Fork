@@ -13,6 +13,7 @@ from apns_client import APNsClient, APNsConfig, APNsConfigError, APNsResponse
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from patterns import PATTERNS, pattern_names
+from product_identity import PRODUCT_DISPLAY_NAME
 
 DEFAULT_PORT = 8787
 MAX_REQUEST_BODY_BYTES = 4096
@@ -25,7 +26,7 @@ FIXED_APNS_HEADERS = {
 }
 
 
-app = FastAPI(title="SidePulse Push Server", version="2.0")
+app = FastAPI(title=f"{PRODUCT_DISPLAY_NAME} Push Server", version="2.0")
 
 
 async def require_bearer_auth(authorization: str | None = Header(default=None)) -> None:
@@ -201,14 +202,14 @@ def index_html() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SidePulse Push Server</title>
+  <title>{PRODUCT_DISPLAY_NAME} Push Server</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; max-width: 760px; color: #111827; }}
     code {{ background: #f1f5f9; border-radius: 4px; padding: 0.15rem 0.3rem; }}
   </style>
 </head>
 <body>
-  <h1>SidePulse Push Server</h1>
+  <h1>{PRODUCT_DISPLAY_NAME} Push Server</h1>
   <p>Mutation is limited to authenticated JSON requests for finite catalog patterns.</p>
   <p>Configure credentials in the server environment. This page never renders them.</p>
   <h2>Available push patterns</h2>
@@ -220,7 +221,7 @@ def index_html() -> str:
 def main() -> int:
     host = os.environ.get("SIDEPULSE_SERVER_HOST", "127.0.0.1")
     port = int(os.environ.get("SIDEPULSE_SERVER_PORT", str(DEFAULT_PORT)))
-    print(f"Serving SidePulse push server at http://{host}:{port}")
+    print(f"Serving {PRODUCT_DISPLAY_NAME} push server at http://{host}:{port}")
     uvicorn.run("server:app", host=host, port=port, log_level=os.environ.get("SIDEPULSE_LOG_LEVEL", "info"))
     return 0
 

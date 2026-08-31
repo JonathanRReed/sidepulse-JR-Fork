@@ -1,0 +1,9 @@
+{
+  "provider": "codex",
+  "fixtureType": "hook-event",
+  "fixtureVersion": 1,
+  "payload": {
+    "event": "SessionStart",
+    "session_id": "synthetic-codex-session"
+  }
+}

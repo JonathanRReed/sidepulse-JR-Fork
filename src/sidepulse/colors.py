@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .device_writer import MAX_LED_BYTES, MAX_LED_LINES
+from .fleet_bands import FleetMember, FleetPlan, plan_fleet_bands
 from .led_status import (
     ANIMATION_STYLE_BLINK,
     ANIMATION_STYLE_CHOICES,
@@ -45,6 +46,7 @@ from .led_status import (
     srgb_to_linear,
 )
 from .models import MODE_PRIORITY, AgentMode, AgentStatus
+from .product_identity import PRODUCT_DISPLAY_NAME
 from .providers import PROVIDER_SPECS
 
 # --- Mode color keys -------------------------------------------------------
@@ -2778,6 +2780,77 @@ def program_for_snapshot(
     )
 
 
+_FLEET_LIFECYCLE_PRIORITY = {
+    "waiting": 0,
+    "active": 1,
+    "failed_visible": 2,
+    "completed_recently": 3,
+    "idle": 4,
+    "unknown": 5,
+}
+
+
+def _fleet_identity_for_row(row) -> str:
+    status = row.source_status
+    origin = getattr(status, "origin", None)
+    if isinstance(origin, str) and origin.strip():
+        return f"project:{origin.strip()}"
+    work_key = getattr(row, "work_key", None)
+    source_key = getattr(work_key, "source_key", None)
+    source_instance_id = getattr(source_key, "source_instance_id", None)
+    if isinstance(source_instance_id, str) and source_instance_id.strip():
+        return f"machine:{source_instance_id.strip()}"
+    return f"session:{row.agent_id}"
+
+
+def _fleet_representative_rows(projection) -> dict[str, object]:
+    representatives: dict[str, object] = {}
+    for row in tuple(projection.light_rows):
+        if row.is_subagent:
+            continue
+        identity = _fleet_identity_for_row(row)
+        current = representatives.get(identity)
+        if current is None:
+            representatives[identity] = row
+            continue
+        current_priority = _FLEET_LIFECYCLE_PRIORITY.get(
+            current.lifecycle_mode.value,
+            99,
+        )
+        candidate_priority = _FLEET_LIFECYCLE_PRIORITY.get(
+            row.lifecycle_mode.value,
+            99,
+        )
+        if (candidate_priority, row.agent_id) < (
+            current_priority,
+            current.agent_id,
+        ):
+            representatives[identity] = row
+    return representatives
+
+
+def plan_fleet_projection(
+    projection,
+    *,
+    previous_layout: FleetPlan | None = None,
+    led_count: int = 8,
+    screen_bar_width: float = 1.0,
+) -> FleetPlan:
+    """Project main rows into stable project or machine bands."""
+
+    representatives = _fleet_representative_rows(projection)
+    members = tuple(
+        FleetMember(identity=identity, semantic=row.lifecycle_mode)
+        for identity, row in representatives.items()
+    )
+    return plan_fleet_bands(
+        members,
+        previous_layout=previous_layout,
+        led_count=led_count,
+        screen_bar_width=screen_bar_width,
+    )
+
+
 def program_for_projection(
     projection,
     *,
@@ -2787,6 +2860,7 @@ def program_for_projection(
     brightness: float = 255,
     relay_elapsed_seconds: float = 0.0,
     include_attention_arrival: bool = False,
+    fleet_plan: FleetPlan | None = None,
 ) -> tuple[LedDisplayState, str]:
     """Render only semantics already decided by ``AttentionProjection``."""
     from .attention import LifecycleMode
@@ -2860,19 +2934,86 @@ def program_for_projection(
         LifecycleMode.IDLE: 1,
         LifecycleMode.UNKNOWN: 1,
     }
-    agents = [
-        _ActiveAgent(
-            provider=row.provider,
-            color=readable_identity_hex(
-                settings.session_color(row.agent_id)
-                or identity.get(row.agent_id)
-                or settings.agent_color(row.provider)
+    row_agents = [
+        (
+            row,
+            _ActiveAgent(
+                provider=row.provider,
+                color=readable_identity_hex(
+                    settings.session_color(row.agent_id)
+                    or identity.get(row.agent_id)
+                    or settings.agent_color(row.provider)
+                ),
+                state=state_by_lifecycle[row.lifecycle_mode],
+                weight=weight_by_lifecycle[row.lifecycle_mode],
             ),
-            state=state_by_lifecycle[row.lifecycle_mode],
-            weight=weight_by_lifecycle[row.lifecycle_mode],
         )
         for row in ordered
     ]
+    agents = [agent for _row, agent in row_agents]
+    if (
+        type(fleet_plan) is FleetPlan
+        and fleet_plan.accepted
+        and fleet_plan.led_count == led_count
+        and len(fleet_plan.member_slots) > 1
+    ):
+        representatives = _fleet_representative_rows(projection)
+        if fleet_plan.mode == "shared":
+            shared_lifecycle = fleet_plan.shared_semantic
+            shared_state = state_by_lifecycle.get(shared_lifecycle, state)
+            program = program_for_display_state(
+                shared_state,
+                led_count=led_count,
+                brightness=brightness,
+                idle_color=settings.mode_color(MODE_IDLE),
+                working_color=settings.mode_color(MODE_WORKING),
+                done_color=settings.mode_color(MODE_DONE),
+                ask_color=settings.mode_color(MODE_ASK),
+                done_celebrate=settings.done_celebration_enabled,
+                **_fade_kwargs_for_all_modes(settings),
+            )
+            attention = _attention_motion_programs(
+                program,
+                agents,
+                led_count=led_count,
+                settings=settings,
+                brightness=brightness,
+            )
+            return shared_state, _selected_attention_program(
+                attention,
+                include_arrival=include_attention_arrival,
+            )
+        if fleet_plan.mode == "segmented":
+            agent_by_id = {row.agent_id: agent for row, agent in row_agents}
+            fleet_agents: list[_ActiveAgent] = []
+            for identity, _start, _end in fleet_plan.member_slots:
+                row = representatives.get(identity)
+                if row is None:
+                    fleet_agents = []
+                    break
+                agent = agent_by_id.get(row.agent_id)
+                if agent is None:
+                    fleet_agents = []
+                    break
+                fleet_agents.append(replace(agent, weight=1))
+            if len(fleet_agents) == len(fleet_plan.member_slots):
+                program = _spatial_split_program(
+                    fleet_agents,
+                    led_count=led_count,
+                    brightness=brightness,
+                    settings=settings,
+                )
+                attention = _attention_motion_programs(
+                    program,
+                    fleet_agents,
+                    led_count=led_count,
+                    settings=settings,
+                    brightness=brightness,
+                )
+                return _representative_state(fleet_agents), _selected_attention_program(
+                    attention,
+                    include_arrival=include_attention_arrival,
+                )
     if settings.blend_mode == BLEND_MODE_CLASSIC:
         program = program_for_display_state(
             state,
@@ -3593,7 +3734,7 @@ SWATCH_GROUP_LABELS: dict[str, str] = {
     SWATCH_GROUP_CUSTOM: "Custom",
 }
 SWATCH_GROUP_HINTS: dict[str, str] = {
-    SWATCH_GROUP_DEFAULT: "What SidePulse ships for this one.",
+    SWATCH_GROUP_DEFAULT: f"What {PRODUCT_DISPLAY_NAME} ships for this one.",
     SWATCH_GROUP_BRAND: "Official colors, straight from the makers.",
     SWATCH_GROUP_PALETTE: "System hues, chosen to stay far apart from each other.",
     SWATCH_GROUP_CUSTOM: "Anything else you pick.",

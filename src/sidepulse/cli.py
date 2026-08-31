@@ -17,6 +17,7 @@ from .battery import (
     render_battery_snapshot,
 )
 from .collector import AgentMonitor, SourceSpec, default_sources
+from .demo_sandbox import available_scenarios, build_demo_run
 from .device_writer import DEFAULT_FILE_NAME, DeviceWriteError, write_led_program
 from .doctor import (
     PUBLIC_COLLECTION_ERROR_MESSAGE,
@@ -27,8 +28,10 @@ from .doctor import (
     write_diagnostic_export,
 )
 from .hook import hook_log_main
+from .hook_client import hook_client_main
 from .install import (
     HookVerificationError,
+    hook_command_arguments,
     install_provider_hooks,
     uninstall_provider_hooks,
 )
@@ -40,6 +43,7 @@ from .lid_sleep import (
     uninstall_sleep_helper,
 )
 from .models import AgentStatus
+from .product_identity import PRODUCT_DISPLAY_NAME
 from .providers import (
     HOOK_PROVIDERS,
     default_log_path,
@@ -52,6 +56,9 @@ from .settings import (
     save_settings,
 )
 from .trusted_tools import trusted_system_tool
+from .watch_run import WatchRunPlanError, execute_watch_run, plan_watch_run
+
+PHONE_GLANCE_SECRET_ENV = "SIDEPULSE_PHONE_GLANCE_SECRET"
 
 
 def main(argv: list[str] | None = None, *, prog: str = "agent-monitor") -> int:
@@ -77,30 +84,29 @@ def sidepulse_main(argv: list[str] | None = None) -> int:
 def build_sidepulse_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sidepulse",
-        description="SidePulse command line tools.",
+        description=f"{PRODUCT_DISPLAY_NAME} command line tools.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     doctor = subparsers.add_parser(
         "doctor",
-        help="Show privacy-safe local SidePulse diagnostics.",
+        help=f"Show privacy-safe local {PRODUCT_DISPLAY_NAME} diagnostics.",
     )
     add_doctor_arguments(doctor)
     doctor.set_defaults(func=cmd_doctor)
     serve_parser = subparsers.add_parser(
         "serve",
-        help="Serve agent + usage state as JSON on loopback (Stream Deck, Waybar, scripts).",
+        help="Serve redacted agent + quota state on loopback (Stream Deck, Waybar, scripts).",
     )
-    serve_parser.add_argument(
-        "--port",
-        type=int,
-        default=8737,
-        help="Loopback port (default 8737).",
-    )
+    add_serve_arguments(serve_parser)
     serve_parser.set_defaults(func=cmd_serve)
+    add_glance_arguments(subparsers)
     subparsers.add_parser(
         "agent-monitor",
         help="Install hooks and show live AI agent statuses.",
     )
+    add_watch_run_parser(subparsers)
+    add_demo_parser(subparsers)
+    add_effects_parser(subparsers)
     setup = subparsers.add_parser(
         "setup",
         help="Install agent hooks and start the macOS status-bar app.",
@@ -160,7 +166,7 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
 def add_sidepulse_status_bar_parser(subparsers: argparse._SubParsersAction) -> None:
     status_bar = subparsers.add_parser(
         "status-bar",
-        help="Start or stop the macOS SidePulse menu-bar app.",
+        help=f"Start or stop the macOS {PRODUCT_DISPLAY_NAME} menu-bar app.",
     )
     status_bar.add_argument(
         "status_bar_command",
@@ -625,28 +631,26 @@ def print_sd_eject_guard_result(result) -> None:
 def build_parser(prog: str = "agent-monitor") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=prog,
-        description="Collect and aggregate local AI agent statuses.",
+        description=(
+            f"Collect and aggregate local AI agent statuses for {PRODUCT_DISPLAY_NAME}."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     doctor = subparsers.add_parser(
         "doctor",
-        help="Show privacy-safe local SidePulse diagnostics.",
+        help=f"Show privacy-safe local {PRODUCT_DISPLAY_NAME} diagnostics.",
     )
     add_doctor_arguments(doctor)
     doctor.set_defaults(func=cmd_doctor)
 
     monitor_serve = subparsers.add_parser(
         "serve",
-        help="Serve agent + usage state as JSON on loopback (Stream Deck, Waybar, scripts).",
+        help="Serve redacted agent + quota state on loopback (Stream Deck, Waybar, scripts).",
     )
-    monitor_serve.add_argument(
-        "--port",
-        type=int,
-        default=8737,
-        help="Loopback port (default 8737).",
-    )
+    add_serve_arguments(monitor_serve)
     monitor_serve.set_defaults(func=cmd_serve)
+    add_glance_arguments(subparsers)
 
     status = subparsers.add_parser("status", help="Show current aggregate status once.")
     add_status_args(status)
@@ -654,6 +658,8 @@ def build_parser(prog: str = "agent-monitor") -> argparse.ArgumentParser:
 
     add_live_parser(subparsers, "live", "Show live statuses in the terminal.")
     add_live_parser(subparsers, "watch", "Alias for live.")
+    add_watch_run_parser(subparsers)
+    add_demo_parser(subparsers)
 
     leds = subparsers.add_parser("leds", help="Mirror aggregate agent status to SidePulse Pro/SidePulse Dot LEDs.")
     add_status_args(leds, include_json=False)
@@ -709,6 +715,14 @@ def build_parser(prog: str = "agent-monitor") -> argparse.ArgumentParser:
     hook_log.add_argument("--log", type=Path, required=True)
     hook_log.set_defaults(func=cmd_hook_log)
 
+    hook_client = subparsers.add_parser(
+        "hook-client",
+        help="Internal bounded hook-ingress entry point.",
+    )
+    hook_client.add_argument("--provider", choices=HOOK_PROVIDERS, required=True)
+    hook_client.add_argument("--log", type=Path, required=True)
+    hook_client.set_defaults(func=cmd_hook_client)
+
     return parser
 
 
@@ -728,6 +742,47 @@ def add_live_parser(
     )
     live.add_argument("--no-color", action="store_true", help="Disable ANSI color output.")
     live.set_defaults(func=cmd_watch)
+
+
+def add_watch_run_parser(subparsers: argparse._SubParsersAction) -> None:
+    watch_run = subparsers.add_parser(
+        "watch-run",
+        help="Observe one Claude invocation without changing its saved configuration.",
+    )
+    watch_run.add_argument(
+        "provider",
+        choices=("claude",),
+        help="Native provider to observe. Claude is the first supported provider.",
+    )
+    watch_run.add_argument(
+        "provider_command",
+        nargs=argparse.REMAINDER,
+        help="Provider command after --, for example: -- claude -p 'task'.",
+    )
+    watch_run.set_defaults(func=cmd_watch_run)
+
+
+def add_demo_parser(subparsers: argparse._SubParsersAction) -> None:
+    demo = subparsers.add_parser(
+        "demo",
+        help="Run a deterministic, no-I/O JR Bar preview scenario.",
+    )
+    demo.add_argument(
+        "scenario",
+        choices=available_scenarios(),
+        nargs="?",
+        default="overview",
+        help="Synthetic scenario to preview. Default: overview.",
+    )
+    demo.add_argument("--seed", type=int, default=0, help="Deterministic fixture seed.")
+    demo.add_argument(
+        "--max-events",
+        type=int,
+        default=128,
+        help="Maximum synthetic events, from 1 to 128.",
+    )
+    demo.add_argument("--json", action="store_true", help="Print a machine-readable summary.")
+    demo.set_defaults(func=cmd_demo)
 
 
 def add_status_args(parser: argparse.ArgumentParser, include_json: bool = True) -> None:
@@ -763,11 +818,244 @@ def add_doctor_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_serve_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8737,
+        help="Loopback port (default 8737).",
+    )
+    parser.add_argument(
+        "--phone-glance",
+        action="store_true",
+        help=(
+            "Enable signed /glance.json using the secret in "
+            f"{PHONE_GLANCE_SECRET_ENV}."
+        ),
+    )
+    parser.add_argument(
+        "--phone-glance-source-id",
+        default="sidepulse",
+        help="Bounded opaque source identity for signed phone glances.",
+    )
+
+
+def add_glance_arguments(subparsers: argparse._SubParsersAction) -> None:
+    glance = subparsers.add_parser(
+        "glance",
+        aliases=("phone-glance",),
+        help="Serve only a signed phone glance on an explicit private IP.",
+    )
+    glance.add_argument(
+        "--bind-address",
+        "--bind",
+        dest="bind_address",
+        required=True,
+        help="Private or link-local IP literal to bind, never a hostname or wildcard.",
+    )
+    glance.add_argument(
+        "--port",
+        type=_glance_port,
+        default=8738,
+        help="Private glance port (default 8738).",
+    )
+    glance.add_argument(
+        "--source-id",
+        "--phone-glance-source-id",
+        dest="glance_source_id",
+        default="sidepulse",
+        help="Bounded opaque source identity for the signed glance.",
+    )
+    glance.set_defaults(func=cmd_glance)
+
+
+def _glance_port(value: str) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("glance port must be an integer") from exc
+    if not 1 <= port <= 65_535:
+        raise argparse.ArgumentTypeError("glance port must be between 1 and 65535")
+    return port
+
+
+def add_effects_parser(subparsers) -> None:
+    effects = subparsers.add_parser(
+        "effects",
+        help="Manage data-only effect and Scene packs, gallery rows, and history.",
+    )
+    actions = effects.add_subparsers(dest="action", required=True)
+
+    def common(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "--store-dir",
+            type=Path,
+            help="Use an explicit private pack store directory.",
+        )
+        command.add_argument(
+            "--json",
+            action="store_true",
+            help="Print machine-readable JSON.",
+        )
+        command.set_defaults(func=cmd_effects)
+
+    install = actions.add_parser("install", help="Install a validated effect pack.")
+    install.add_argument("source", type=Path)
+    common(install)
+
+    update = actions.add_parser("update", help="Update an installed effect pack.")
+    update.add_argument("source", type=Path)
+    common(update)
+
+    remove = actions.add_parser("remove", help="Remove an installed effect pack.")
+    remove.add_argument("pack_id")
+    common(remove)
+
+    duplicate = actions.add_parser(
+        "duplicate",
+        help="Copy an installed effect pack under a new identity.",
+    )
+    duplicate.add_argument("pack_id")
+    duplicate.add_argument("new_pack_id")
+    duplicate.add_argument("new_name")
+    common(duplicate)
+
+    rename = actions.add_parser(
+        "rename",
+        help="Rename an installed effect pack and its identity.",
+    )
+    rename.add_argument("pack_id")
+    rename.add_argument("new_pack_id")
+    rename.add_argument("new_name")
+    common(rename)
+
+    list_parser = actions.add_parser("list", help="List installed effect packs.")
+    common(list_parser)
+
+    inspect = actions.add_parser("inspect", help="Inspect one installed effect pack.")
+    inspect.add_argument("pack_id")
+    common(inspect)
+
+    export = actions.add_parser("export", help="Export one installed effect pack.")
+    export.add_argument("pack_id")
+    export.add_argument("target", type=Path, nargs="?")
+    common(export)
+
+    gallery = actions.add_parser("gallery", help="Browse installed or built-in effects.")
+    gallery.add_argument("--builtin", action="store_true")
+    gallery.add_argument("--query", default="")
+    common(gallery)
+
+    history = actions.add_parser("history", help="Show content-free effect history.")
+    history.add_argument("--history-path", type=Path)
+    common(history)
+
+    scene_install = actions.add_parser(
+        "scene-install",
+        help="Install a validated data-only Scene pack.",
+    )
+    scene_install.add_argument("source", type=Path)
+    common(scene_install)
+
+    scene_update = actions.add_parser(
+        "scene-update",
+        help="Update an installed Scene pack.",
+    )
+    scene_update.add_argument("source", type=Path)
+    common(scene_update)
+
+    scene_remove = actions.add_parser(
+        "scene-remove",
+        help="Remove an installed Scene pack.",
+    )
+    scene_remove.add_argument("pack_id")
+    common(scene_remove)
+
+    scene_list = actions.add_parser(
+        "scene-list",
+        help="List installed Scene packs.",
+    )
+    common(scene_list)
+
+    scene_inspect = actions.add_parser(
+        "scene-inspect",
+        help="Inspect one installed Scene pack.",
+    )
+    scene_inspect.add_argument("pack_id")
+    common(scene_inspect)
+
+    scene_export = actions.add_parser(
+        "scene-export",
+        help="Export one installed Scene pack.",
+    )
+    scene_export.add_argument("pack_id")
+    scene_export.add_argument("target", type=Path, nargs="?")
+    common(scene_export)
+
+    scene_preview = actions.add_parser(
+        "scene-preview",
+        help="Validate and preview a Scene pack without importing it.",
+    )
+    scene_preview.add_argument("source", type=Path)
+    common(scene_preview)
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from .serve import serve
 
-    serve(port=int(getattr(args, "port", 8737)))
+    glance_secret = None
+    if bool(getattr(args, "phone_glance", False)):
+        raw_secret = os.environ.get(PHONE_GLANCE_SECRET_ENV)
+        if not raw_secret:
+            print(
+                f"sidepulse serve: {PHONE_GLANCE_SECRET_ENV} is required "
+                "with --phone-glance",
+                file=sys.stderr,
+            )
+            return 2
+        glance_secret = raw_secret.encode("utf-8")
+    try:
+        serve(
+            port=int(getattr(args, "port", 8737)),
+            glance_secret=glance_secret,
+            glance_source_id=str(
+                getattr(args, "phone_glance_source_id", "sidepulse")
+            ),
+        )
+    except ValueError:
+        print("sidepulse serve: invalid phone glance configuration", file=sys.stderr)
+        return 2
     return 0
+
+
+def cmd_glance(args: argparse.Namespace) -> int:
+    from .glance_server import glance_serve, validate_bind_address
+
+    raw_secret = os.environ.get(PHONE_GLANCE_SECRET_ENV)
+    if not raw_secret:
+        print(
+            f"sidepulse glance: {PHONE_GLANCE_SECRET_ENV} is required",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        bind_address = validate_bind_address(str(args.bind_address))
+        glance_serve(
+            bind_address=bind_address,
+            port=int(args.port),
+            glance_secret=raw_secret.encode("utf-8"),
+            glance_source_id=str(args.glance_source_id),
+        )
+    except (OSError, ValueError):
+        print("sidepulse glance: invalid private listener configuration", file=sys.stderr)
+        return 2
+    return 0
+
+
+def cmd_effects(args: argparse.Namespace) -> int:
+    from .effect_cli import dispatch_effect_command
+
+    return dispatch_effect_command(args)
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -839,6 +1127,84 @@ def cmd_watch(args: argparse.Namespace) -> int:
     finally:
         if sys.stdout.isatty():
             print("\033[?25h", end="")
+
+
+def cmd_watch_run(args: argparse.Namespace) -> int:
+    command = tuple(args.provider_command)
+    if command[:1] == ("--",):
+        command = command[1:]
+    if not command:
+        command = (args.provider,)
+    observer = hook_command_arguments(
+        args.provider,
+        default_log_path(args.provider),
+    )
+    try:
+        plan = plan_watch_run(
+            args.provider,
+            command,
+            observer_command=observer,
+        )
+        result = execute_watch_run(plan)
+    except WatchRunPlanError as error:
+        print(f"watch-run: refused ({error.refusal.value})", file=sys.stderr)
+        return 2
+    except OSError:
+        print("watch-run: provider invocation could not be started", file=sys.stderr)
+        return 127
+    return result.exit_code
+
+
+def cmd_demo(args: argparse.Namespace) -> int:
+    try:
+        run = build_demo_run(
+            args.scenario,
+            seed=args.seed,
+            max_events=args.max_events,
+        )
+    except (TypeError, ValueError) as error:
+        print(f"demo: {error}", file=sys.stderr)
+        return 2
+    final = run.final_snapshot
+    render = final.to_render_input()
+    payload = {
+        "scenario": run.scenario.value,
+        "seed": run.seed,
+        "event_count": len(run.events),
+        "event_kinds": [event.kind for event in run.events],
+        "snapshot_count": len(run.snapshots),
+        "safety": run.safety.as_dict(),
+        "final": {
+            "at": final.at.isoformat(),
+            "agents": list(final.to_projection_rows()),
+            "quota_count": len(final.quotas),
+            "device_count": len(final.devices),
+            "remote_machine_count": len(final.machines),
+            "weather": final.weather.condition if final.weather is not None else None,
+            "dnd": final.dnd,
+            "low_power": final.low_power,
+            "light": {
+                "mode": render.light_mode,
+                "pattern": render.pattern,
+                "color": render.color,
+                "brightness": render.brightness,
+            },
+        },
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
+    print(f"JR Bar demo: {run.scenario.value}")
+    print(
+        f"  {len(run.events)} events, {len(final.agents)} agents, "
+        f"{len(final.devices)} devices, {len(final.machines)} remote machines"
+    )
+    print(
+        f"  light: {render.light_mode} / {render.pattern} / "
+        f"{render.brightness}%"
+    )
+    print("  safety: no hooks, credentials, network, filesystem, or hardware access")
+    return 0
 
 
 def cmd_leds(args: argparse.Namespace) -> int:
@@ -949,6 +1315,10 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 
 def cmd_hook_log(args: argparse.Namespace) -> int:
     return hook_log_main(args.provider, args.log)
+
+
+def cmd_hook_client(args: argparse.Namespace) -> int:
+    return hook_client_main(args.provider, args.log)
 
 
 def monitor_from_args(args: argparse.Namespace) -> AgentMonitor:

@@ -10,6 +10,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from .power_policy import configure_caffeinate_display_assertion
 from .settings import (
     CLOSED_LID_AWAKE_AGENTS,
     CLOSED_LID_AWAKE_ALWAYS,
@@ -23,7 +24,7 @@ from .settings import (
 CAFFEINATE_SELF_EXPIRE_SECONDS = 1800
 CAFFEINATE_CLOSED_LID_COMMAND = (
     "/usr/bin/caffeinate",
-    "-dimsu",
+    "-imsu",
     "-t",
     str(CAFFEINATE_SELF_EXPIRE_SECONDS),
 )
@@ -295,6 +296,7 @@ class ClosedLidAwakeController:
         watch_current_process: bool = True,
         use_system_disable: bool = False,
         renewal_path: Path | None = None,
+        keep_display_awake: bool = False,
     ) -> None:
         self.command = tuple(command)
         self.process_factory = process_factory or subprocess.Popen
@@ -302,6 +304,7 @@ class ClosedLidAwakeController:
         self.sleep_disabled_setter = sleep_disabled_setter
         self.watch_current_process = watch_current_process
         self.use_system_disable = use_system_disable
+        self.keep_display_awake = bool(keep_display_awake)
         self.process = None
         self.changed_system_disable = False
         self.system_disable_attempted = False
@@ -321,6 +324,18 @@ class ClosedLidAwakeController:
         self.orphan_reclaim_attempted = False
         if not enabled:
             self.release_system_disable()
+
+    def set_keep_display_awake(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if self.keep_display_awake == enabled:
+            return
+        self.keep_display_awake = enabled
+        was_running = self.process_running()
+        if was_running:
+            errors: list[str] = []
+            self._terminate_caffeinate(errors)
+            if self.last_requested:
+                self.ensure_awake()
 
     def update(self, policy: str, *, agents_active: bool) -> bool:
         should_hold = closed_lid_awake_should_hold(policy, agents_active=agents_active)
@@ -391,8 +406,6 @@ class ClosedLidAwakeController:
         self.last_error = "; ".join(errors) if errors else None
 
     def release(self) -> None:
-        process = self.process
-        self.process = None
         errors: list[str] = []
         # Clean release retires the heartbeat; the watchdog sees the file
         # gone on its next poll and exits without touching anything.
@@ -400,20 +413,26 @@ class ClosedLidAwakeController:
             self.renewal_path.unlink(missing_ok=True)
         except OSError:
             pass
-        if process is not None:
-            try:
-                if process.poll() is None:
-                    process.terminate()
-                    process.wait(timeout=1)
-            except Exception:
-                try:
-                    process.kill()
-                except Exception as exc:
-                    errors.append(f"caffeinate: {exc}")
+        self._terminate_caffeinate(errors)
 
         self.release_system_disable(errors=errors)
 
         self.last_error = "; ".join(errors) if errors else None
+
+    def _terminate_caffeinate(self, errors: list[str]) -> None:
+        process = self.process
+        self.process = None
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=1)
+        except Exception:
+            try:
+                process.kill()
+            except Exception as exc:
+                errors.append(f"caffeinate: {exc}")
 
     def release_system_disable(self, *, errors: list[str] | None = None) -> None:
         active_errors = errors if errors is not None else []
@@ -453,7 +472,12 @@ class ClosedLidAwakeController:
         return self.process is not None and self.process.poll() is None
 
     def caffeinate_command(self) -> list[str]:
-        command = list(self.command)
+        command = list(
+            configure_caffeinate_display_assertion(
+                self.command,
+                keep_display_awake=self.keep_display_awake,
+            )
+        )
         if self.watch_current_process:
             command.extend(["-w", str(os.getpid())])
         return command

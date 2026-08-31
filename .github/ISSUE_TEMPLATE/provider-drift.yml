@@ -1,0 +1,47 @@
+name: Provider drift
+description: Report a provider schema, quota, auth, or status change that JR Bar no longer represents correctly.
+title: "[Provider drift]: "
+labels:
+  - provider-drift
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include tokens, cookies, private prompts, transcripts, account identifiers, or other sensitive provider data. Use synthetic or redacted examples.
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and surface
+      description: Which provider and integration surface are affected?
+      placeholder: Claude CLI, Codex CLI, remote quota, or provider hook
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: JR Bar version or commit
+      placeholder: 0.5.0 or abbreviated commit
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction and observed behavior
+      description: Give the smallest synthetic steps and the incorrect result.
+      placeholder: 1. Enable ... 2. Refresh ... 3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Add redacted screenshots, sanitized error codes, docs links, or timestamps. Remove secrets and personal data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected provider contract
+      description: Describe the expected schema, quota window, status, or auth behavior and cite a public source if available.
+    validations:
+      required: true

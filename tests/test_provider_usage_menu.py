@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from sidepulse.provider_feature_settings import (
+    ProviderInstanceVisualPolicy,
+    ProviderInstanceVisualProjection,
+)
 from sidepulse.provider_usage_menu import project_usage_menu
 from sidepulse.provider_usage_platform import (
     ProviderSourceState,
@@ -11,7 +15,16 @@ from sidepulse.provider_usage_platform import (
 from sidepulse.provider_usage_runtime import ProviderUsageState
 
 
-def snapshot(provider, label, remaining, *, state=ProviderSourceState.READY, action=None):
+def snapshot(
+    provider,
+    label,
+    remaining,
+    *,
+    state=ProviderSourceState.READY,
+    action=None,
+    account_label=None,
+    source_instance_id="default",
+):
     lanes = ()
     reason = None
     if remaining is not None:
@@ -33,7 +46,7 @@ def snapshot(provider, label, remaining, *, state=ProviderSourceState.READY, act
         reason = "fixture_reason"
     return ProviderUsageSnapshot(
         provider_id=provider,
-        account_label=None,
+        account_label=account_label,
         observed_at=1000,
         state=state,
         reason_code=reason,
@@ -47,6 +60,7 @@ def snapshot(provider, label, remaining, *, state=ProviderSourceState.READY, act
         cache_savings_usd=0.25,
         credits_remaining=None,
         incident=None,
+        source_instance_id=source_instance_id,
     )
 
 
@@ -183,6 +197,38 @@ def test_hidden_providers_leave_the_rows_and_the_title():
     assert projection.title == "Usage · ▰▰▰▰▰▰▱▱  Codex 71%"
 
 
+def test_hidden_instances_hide_only_the_matching_source_instance():
+    state = ProviderUsageState(
+        (
+            snapshot(
+                "claude",
+                "Weekly",
+                36,
+                account_label="personal@example.invalid",
+                source_instance_id="personal",
+            ),
+            snapshot(
+                "claude",
+                "Weekly",
+                72,
+                account_label="work@example.invalid",
+                source_instance_id="work",
+            ),
+        ),
+        1000,
+        1100,
+        False,
+    )
+    projection = project_usage_menu(
+        state,
+        now=1000,
+        hidden_instances=frozenset({("claude", "work")}),
+    )
+
+    assert [row.source_instance_id for row in projection.rows] == ["personal"]
+    assert projection.rows[0].title.startswith("Claude · personal@example.invalid")
+
+
 def test_lanes_past_their_threshold_are_flagged_for_alert_rendering():
     projection = project_usage_menu(
         ProviderUsageState(
@@ -197,6 +243,86 @@ def test_lanes_past_their_threshold_are_flagged_for_alert_rendering():
     by_provider = {row.provider_id: row for row in projection.rows}
     assert by_provider["claude"].alert_lane_indexes == (0,)
     assert by_provider["codex"].alert_lane_indexes == ()
+
+
+def test_menu_renders_distinct_same_provider_instance_labels():
+    state = ProviderUsageState(
+        (
+            snapshot("claude", "Weekly", 36, account_label="personal@example.invalid", source_instance_id="personal"),
+            snapshot("claude", "Weekly", 72, account_label="work@example.invalid", source_instance_id="work"),
+        ),
+        1000,
+        1100,
+        False,
+    )
+    projection = project_usage_menu(state, now=1000)
+    assert len(projection.rows) == 2
+    assert "personal@example.invalid" in projection.rows[0].title
+    assert "work@example.invalid" in projection.rows[1].title
+    assert {row.source_instance_id for row in projection.rows} == {"personal", "work"}
+
+
+def test_menu_uses_exact_profile_labels_in_rows_and_aggregate_title():
+    state = ProviderUsageState(
+        (
+            snapshot(
+                "claude",
+                "Weekly",
+                36,
+                source_instance_id="work",
+            ),
+        ),
+        1000,
+        1100,
+        False,
+    )
+    visual = ProviderInstanceVisualProjection(
+        (
+            ProviderInstanceVisualPolicy(
+                provider_id="claude",
+                source_instance_id="work",
+                label="Client Claude",
+                color_override="#112233",
+            ),
+        )
+    )
+
+    projection = project_usage_menu(state, now=1000, visual=visual)
+
+    assert projection.rows[0].title == "Client Claude · 36% left"
+    assert "Client Claude 36%" in projection.title
+    assert "· work" not in projection.title
+
+
+def test_menu_keeps_provider_and_raw_instance_fallback_without_exact_profile():
+    state = ProviderUsageState(
+        (
+            snapshot(
+                "claude",
+                "Weekly",
+                36,
+                source_instance_id="personal",
+            ),
+        ),
+        1000,
+        1100,
+        False,
+    )
+    visual = ProviderInstanceVisualProjection(
+        (
+            ProviderInstanceVisualPolicy(
+                provider_id="claude",
+                source_instance_id="work",
+                label="Client Claude",
+                color_override="#112233",
+            ),
+        )
+    )
+
+    projection = project_usage_menu(state, now=1000, visual=visual)
+
+    assert projection.rows[0].title == "Claude · personal · 36% left"
+    assert "Claude · personal 36%" in projection.title
 
 
 def test_menu_bar_glance_prefers_running_providers_then_tightest():

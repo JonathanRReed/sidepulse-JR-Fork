@@ -1,0 +1,35 @@
+name: Bug report
+description: Report a reproducible JR Bar problem that is not specific to another issue form.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use synthetic examples and redact credentials, tokens, prompts, transcripts, account identifiers, private paths, hostnames, and personal data. Suspected security or privacy vulnerabilities should be emailed privately using the link in the issue chooser.
+  - type: input
+    id: version
+    attributes:
+      label: JR Bar and macOS version
+      placeholder: JR Bar 0.5.0, macOS 15.x
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Give the smallest safe example and exact steps.
+    validations:
+      required: true
+  - type: textarea
+    id: observed_expected
+    attributes:
+      label: Observed versus expected
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Add sanitized logs, screenshots, or a public link. Never include secrets.

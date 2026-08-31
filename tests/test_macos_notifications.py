@@ -7,10 +7,33 @@ from types import SimpleNamespace
 
 import pytest
 
+import sidepulse.macos_notifications as notifications
 from sidepulse.macos_notifications import (
     MacOSNotificationClient,
     NotificationAuthorizationState,
 )
+
+
+def test_real_bridge_is_not_loaded_outside_the_sealed_app_bundle(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    fake_objc = SimpleNamespace(
+        loadBundle=lambda *_args, **_kwargs: calls.append("load"),
+        registerMetaDataForSelector=lambda *_args, **_kwargs: None,
+        lookUpClass=lambda _name: object(),
+        _C_NSBOOL=b"B",
+    )
+    monkeypatch.setattr(
+        notifications,
+        "running_inside_bundle",
+        lambda: False,
+        raising=False,
+    )
+    monkeypatch.setitem(__import__("sys").modules, "objc", fake_objc)
+
+    assert notifications._load_user_notifications_bridge() is None
+    assert calls == []
 
 
 class FakeCenter:
@@ -43,6 +66,25 @@ class FakeCenter:
         self.delivery_thread_ids.append(threading.get_ident())
         self.notification_requests.append(request)
         if self.delivery_callbacks_enabled:
+            callback(self.delivery_error)
+
+
+class AsyncFakeCenter(FakeCenter):
+    def __init__(self, authorization_status: int) -> None:
+        super().__init__(authorization_status)
+        self.delivery_callbacks: list[object] = []
+        self.delivery_started = threading.Event()
+
+    def addNotificationRequest_withCompletionHandler_(self, request, callback) -> None:
+        self.delivery_thread_ids.append(threading.get_ident())
+        self.notification_requests.append(request)
+        self.delivery_callbacks.append(callback)
+        self.delivery_started.set()
+
+    def complete_next_delivery(self, *, repeat: bool = False) -> None:
+        callback = self.delivery_callbacks.pop(0)
+        callback(self.delivery_error)
+        if repeat:
             callback(self.delivery_error)
 
 
@@ -104,11 +146,11 @@ def test_delivery_requires_authorized_or_provisional_state() -> None:
         is NotificationAuthorizationState.NOT_DETERMINED
     )
 
-    assert denied_client.deliver("completion.a", "SidePulse", "Finished", {}) is False
+    assert denied_client.deliver("completion.a", "JR Bar", "Finished", {}) is False
     assert (
         not_determined_client.deliver(
             "completion.a",
-            "SidePulse",
+            "JR Bar",
             "Finished",
             {},
         )
@@ -131,24 +173,22 @@ def test_authorized_delivery_uses_stable_identifier_and_opaque_metadata(
 
     assert notification_client.deliver(
         "completion.semantic-01",
-        "SidePulse",
+        "JR Bar",
         "A Codex session finished",
         {"action_token": "A" * 43},
     )
 
-    deadline = time.monotonic() + 1.0
-    while not center.notification_requests and time.monotonic() < deadline:
-        time.sleep(0.005)
+    assert notification_client.wait_idle(timeout_seconds=1.0)
     request = center.notification_requests[0]
     assert request.identifier == "completion.semantic-01"
     assert request.trigger is None
-    assert request.content.title == "SidePulse"
+    assert request.content.title == "JR Bar"
     assert request.content.body == "A Codex session finished"
     assert request.content.user_info == {"action_token": "A" * 43}
 
 
 def test_delivery_uses_cached_authorization_without_blocking_the_caller() -> None:
-    center = FakeCenter(2)
+    center = AsyncFakeCenter(2)
     notification_client = MacOSNotificationClient(
         center=center,
         content_factory=FakeContent,
@@ -166,12 +206,10 @@ def test_delivery_uses_cached_authorization_without_blocking_the_caller() -> Non
         is NotificationAuthorizationState.AUTHORIZED
     )
     center.authorization_callbacks_enabled = False
-    center.delivery_callbacks_enabled = False
-
     started_at = time.monotonic()
     accepted = notification_client.deliver(
         "completion.semantic-02",
-        "SidePulse",
+        "JR Bar",
         "A Codex session finished",
         {"action_token": "B" * 43},
     )
@@ -179,12 +217,75 @@ def test_delivery_uses_cached_authorization_without_blocking_the_caller() -> Non
 
     assert accepted is True
     assert elapsed < 0.1
-    deadline = time.monotonic() + 1.0
-    while not center.notification_requests and time.monotonic() < deadline:
-        time.sleep(0.005)
+    assert center.delivery_started.wait(1.0)
+    assert notification_client.wait_idle(timeout_seconds=0.05) is False
+    center.complete_next_delivery()
+    assert notification_client.wait_idle(timeout_seconds=1.0)
     assert len(center.notification_requests) == 1
     assert center.delivery_thread_ids != [caller_thread]
     assert notification_client.close(timeout_seconds=1.0) is True
+
+
+def test_async_delivery_stays_active_until_duplicate_safe_completion_callback() -> None:
+    center = AsyncFakeCenter(2)
+    notification_client = client(center)
+    assert (
+        notification_client.authorization_state()
+        is NotificationAuthorizationState.AUTHORIZED
+    )
+
+    assert notification_client.deliver(
+        "completion.async",
+        "JR Bar",
+        "A Codex session finished",
+        {},
+    )
+    assert center.delivery_started.wait(1.0)
+    assert notification_client.wait_idle(timeout_seconds=0.05) is False
+    assert notification_client.close(timeout_seconds=0.05) is False
+
+    center.complete_next_delivery(repeat=True)
+
+    assert notification_client.wait_idle(timeout_seconds=1.0) is True
+    assert notification_client.close(timeout_seconds=1.0) is True
+
+
+def test_close_uses_its_deadline_to_wait_for_async_completion() -> None:
+    center = AsyncFakeCenter(2)
+    notification_client = client(center)
+    assert (
+        notification_client.authorization_state()
+        is NotificationAuthorizationState.AUTHORIZED
+    )
+    assert notification_client.deliver(
+        "completion.close-wait",
+        "JR Bar",
+        "A Codex session finished",
+        {},
+    )
+    assert center.delivery_started.wait(1.0)
+
+    close_started = threading.Event()
+    close_results: list[bool] = []
+
+    def close_client() -> None:
+        close_started.set()
+        close_results.append(notification_client.close(timeout_seconds=1.0))
+
+    closer = threading.Thread(target=close_client, daemon=True)
+    closer.start()
+    assert close_started.wait(1.0)
+    worker = notification_client._delivery_thread
+    assert worker is not None
+    worker.join(1.0)
+    assert not worker.is_alive()
+    assert closer.is_alive()
+
+    center.complete_next_delivery()
+    closer.join(1.0)
+
+    assert not closer.is_alive()
+    assert close_results == [True]
 
 
 def test_request_authorization_is_explicit_and_alert_only() -> None:
@@ -220,11 +321,12 @@ def test_explicit_request_reports_the_resolved_authorization_state() -> None:
 @pytest.mark.parametrize(
     ("identifier", "title", "body", "metadata"),
     [
-        ("completion.a", "SidePulse", "Finished", {"agent_id": "private"}),
+        ("completion.a", "JR Bar", "Finished", {"agent_id": "private"}),
         ("completion.a", "Bearer secret", "Finished", {}),
-        ("completion.a", "SidePulse", "/Users/private/session", {}),
-        ("completion private", "SidePulse", "Finished", {}),
-        ("completion.a", "SidePulse", "Finished", {"action_token": "too-short"}),
+        ("completion.a", "SidePulse", "Finished", {}),
+        ("completion.a", "JR Bar", "/Users/private/session", {}),
+        ("completion private", "JR Bar", "Finished", {}),
+        ("completion.a", "JR Bar", "Finished", {"action_token": "too-short"}),
     ],
 )
 def test_delivery_rejects_private_or_unbounded_inputs(
@@ -250,16 +352,11 @@ def test_delivery_failure_exposes_only_product_owned_diagnostic() -> None:
 
     assert notification_client.deliver(
         "completion.a",
-        "SidePulse",
+        "JR Bar",
         "A Codex session finished",
         {},
     )
-    deadline = time.monotonic() + 1.0
-    while (
-        notification_client.last_diagnostic != "Notification delivery failed"
-        and time.monotonic() < deadline
-    ):
-        time.sleep(0.005)
+    assert notification_client.wait_idle(timeout_seconds=1.0)
     assert notification_client.last_diagnostic == "Notification delivery failed"
     assert "private" not in repr(notification_client)
 

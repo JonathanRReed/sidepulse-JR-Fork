@@ -2,10 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(/usr/bin/dirname "$0")/.." && /bin/pwd)"
-VERSION="$(/usr/bin/sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT_DIR/pyproject.toml" | /usr/bin/head -1)"
 ARCH="$(/usr/bin/uname -m)"
 BUILD_DIR="${BUILD_ROOT:-$ROOT_DIR/build/macos-pkg}"
 DIST_DIR="${OUTPUT_ROOT:-$ROOT_DIR/dist}"
+RAW_EVIDENCE_DIR="$BUILD_DIR/release-evidence-raw"
+SPARKLE_DISTRIBUTION="$BUILD_DIR/sparkle-distribution"
+APP_NOTARY_ZIP="$BUILD_DIR/SidePulse-app-notary.zip"
 REQUESTED_BUILD_PYTHON="${BUILD_PYTHON:-}"
 CONSTRAINTS="$ROOT_DIR/requirements/release-constraints.txt"
 PINNED_PIP="26.1.2"
@@ -13,15 +15,20 @@ PINNED_PYINSTALLER="6.21.0"
 VENV_DIR="$BUILD_DIR/venv"
 APP_PATH="$BUILD_DIR/pyinstaller/SidePulse.app"
 COMPONENT_PKG="$BUILD_DIR/SidePulse-component.pkg"
-OUTPUT_PKG="$DIST_DIR/SidePulse-${VERSION}-${ARCH}.pkg"
 ENVIRONMENT_SNAPSHOT="$DIST_DIR/release-environment.txt"
 APP_ID="io.sidepulse.app"
-APPLE_EVENTS_USAGE_DESCRIPTION="SidePulse uses Automation only to open a reviewed resume command in Terminal or iTerm2 when you choose Open."
+PRODUCT_DISPLAY_NAME="JR Bar"
+MINIMUM_SUPPORTED_MACOS="11.0"
+APPLE_EVENTS_USAGE_DESCRIPTION="JR Bar uses Automation only to open a reviewed resume command in Terminal or iTerm2 when you choose Open."
+FOCUS_STATUS_USAGE_DESCRIPTION="JR Bar uses Focus Status only when you choose Allow Focus Status, so Do Not Disturb can follow whether a macOS Focus is active."
+SPARKLE_FEED_URL="https://github.com/JonathanRReed/sidepulse-JR-Fork/releases/download/updates/appcast.xml"
+SPARKLE_PUBLIC_KEY_FILE="$ROOT_DIR/packaging/sparkle_public_ed_key.txt"
 
 APP_SIGN_IDENTITY="${APP_SIGN_IDENTITY:-}"
 INSTALLER_SIGN_IDENTITY="${INSTALLER_SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 ALLOW_UNSIGNED="${ALLOW_UNSIGNED:-0}"
+SPARKLE_ARCHIVE="${SPARKLE_ARCHIVE:-}"
 
 select_build_python() {
     local candidate resolved
@@ -59,10 +66,6 @@ select_build_python() {
     return 1
 }
 
-if [ -z "$VERSION" ]; then
-    echo "Could not read the SidePulse version from pyproject.toml." >&2
-    exit 2
-fi
 if [ ! -f "$CONSTRAINTS" ]; then
     echo "Missing reviewed release constraints: $CONSTRAINTS" >&2
     exit 2
@@ -70,15 +73,54 @@ fi
 
 BUILD_PYTHON="$(select_build_python || true)"
 if [ -z "$BUILD_PYTHON" ]; then
-    echo "SidePulse requires Python 3.10+ to build the macOS package." >&2
+    echo "JR Bar requires Python 3.10+ to build the macOS package." >&2
     echo "Install Homebrew Python 3.13 or set BUILD_PYTHON to a supported interpreter." >&2
     exit 2
 fi
-
-if { [ -z "$APP_SIGN_IDENTITY" ] || [ -z "$INSTALLER_SIGN_IDENTITY" ]; } && [ "$ALLOW_UNSIGNED" != "1" ]; then
-    echo "Set APP_SIGN_IDENTITY to a Developer ID Application identity and" >&2
-    echo "INSTALLER_SIGN_IDENTITY to a Developer ID Installer identity." >&2
+if ! VERSION="$("$BUILD_PYTHON" "$ROOT_DIR/scripts/validate_release_version.py")"; then
+    echo "Could not validate the JR Bar release version." >&2
     exit 2
+fi
+OUTPUT_PKG="$("$BUILD_PYTHON" "$ROOT_DIR/scripts/release_artifact_contract.py" \
+    --version "$VERSION" \
+    --architecture "$ARCH" \
+    --dist-dir "$DIST_DIR" \
+    --format path)"
+OUTPUT_ZIP="$("$BUILD_PYTHON" "$ROOT_DIR/scripts/release_artifact_contract.py" \
+    --version "$VERSION" \
+    --architecture "$ARCH" \
+    --dist-dir "$DIST_DIR" \
+    --format updater-path)"
+
+if [ ! -f "$SPARKLE_PUBLIC_KEY_FILE" ]; then
+    echo "Missing reviewed Sparkle public key: $SPARKLE_PUBLIC_KEY_FILE" >&2
+    exit 2
+fi
+if ! SPARKLE_PUBLIC_ED_KEY="$("$BUILD_PYTHON" -c '
+import base64
+import binascii
+import pathlib
+import sys
+
+key = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").strip()
+try:
+    decoded = base64.b64decode(key, validate=True)
+except (binascii.Error, ValueError):
+    raise SystemExit(1)
+if len(decoded) != 32:
+    raise SystemExit(1)
+print(key)
+' "$SPARKLE_PUBLIC_KEY_FILE")"; then
+    echo "Sparkle public key must be one base64-encoded Ed25519 public key." >&2
+    exit 2
+fi
+
+if [ "$ALLOW_UNSIGNED" != "1" ]; then
+    if [ -z "$APP_SIGN_IDENTITY" ] || [ -z "$INSTALLER_SIGN_IDENTITY" ] || [ -z "$NOTARY_PROFILE" ]; then
+        echo "Production packaging requires APP_SIGN_IDENTITY," >&2
+        echo "INSTALLER_SIGN_IDENTITY, and NOTARY_PROFILE." >&2
+        exit 2
+    fi
 fi
 
 case "$BUILD_DIR" in
@@ -105,13 +147,14 @@ if [ ! -x "$BUILD_PYTHON" ]; then
     exit 2
 fi
 "$BUILD_PYTHON" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' || {
-    echo "SidePulse requires Python 3.10+; got $($BUILD_PYTHON -V 2>&1)." >&2
+    echo "JR Bar requires Python 3.10+; got $($BUILD_PYTHON -V 2>&1)." >&2
     exit 2
 }
 
-echo "Building SidePulse $VERSION for $ARCH with $($BUILD_PYTHON -V 2>&1)"
+echo "Building JR Bar $VERSION for $ARCH with $($BUILD_PYTHON -V 2>&1)"
 /bin/rm -rf "$BUILD_DIR"
 /bin/mkdir -p "$BUILD_DIR" "$DIST_DIR"
+/bin/mkdir -m 700 "$RAW_EVIDENCE_DIR"
 export PIP_CACHE_DIR="$BUILD_DIR/pip-cache"
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 export PIP_CONSTRAINT="$CONSTRAINTS"
@@ -146,12 +189,48 @@ LC_ALL=C "$VENV_DIR/bin/python" -m pip list --format=freeze \
     --collect-data sidepulse.resources \
     "$ROOT_DIR/packaging/sidepulse_entry.py"
 
+if [ -n "$SPARKLE_ARCHIVE" ]; then
+    "$VENV_DIR/bin/python" "$ROOT_DIR/scripts/prepare_sparkle.py" --output "$SPARKLE_DISTRIBUTION" \
+        --archive "$SPARKLE_ARCHIVE"
+else
+    "$VENV_DIR/bin/python" "$ROOT_DIR/scripts/prepare_sparkle.py" --output "$SPARKLE_DISTRIBUTION"
+fi
+if [ -e "$APP_PATH/Contents/Frameworks/Sparkle.framework" ] || \
+    [ -L "$APP_PATH/Contents/Frameworks/Sparkle.framework" ]; then
+    echo "Refusing to overwrite an unexpected embedded Sparkle.framework." >&2
+    exit 2
+fi
+/bin/mkdir -p \
+    "$APP_PATH/Contents/Frameworks" \
+    "$APP_PATH/Contents/Resources/ThirdPartyLicenses"
+# ditto preserves the framework's reviewed relative symlinks and executable bits.
+/usr/bin/ditto \
+    "$SPARKLE_DISTRIBUTION/Sparkle.framework" \
+    "$APP_PATH/Contents/Frameworks/Sparkle.framework"
+/usr/bin/ditto \
+    "$SPARKLE_DISTRIBUTION/LICENSE" \
+    "$APP_PATH/Contents/Resources/ThirdPartyLicenses/Sparkle.txt"
+
 /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP_PATH/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $VERSION" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
     /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$APP_PATH/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string $PRODUCT_DISPLAY_NAME" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $PRODUCT_DISPLAY_NAME" "$APP_PATH/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string $MINIMUM_SUPPORTED_MACOS" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $MINIMUM_SUPPORTED_MACOS" "$APP_PATH/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :NSAppleEventsUsageDescription string $APPLE_EVENTS_USAGE_DESCRIPTION" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
     /usr/libexec/PlistBuddy -c "Set :NSAppleEventsUsageDescription $APPLE_EVENTS_USAGE_DESCRIPTION" "$APP_PATH/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :NSFocusStatusUsageDescription string $FOCUS_STATUS_USAGE_DESCRIPTION" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :NSFocusStatusUsageDescription $FOCUS_STATUS_USAGE_DESCRIPTION" "$APP_PATH/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :SUFeedURL string $SPARKLE_FEED_URL" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :SUFeedURL $SPARKLE_FEED_URL" "$APP_PATH/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $SPARKLE_PUBLIC_ED_KEY" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $SPARKLE_PUBLIC_ED_KEY" "$APP_PATH/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :SURequireSignedFeed bool true" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :SURequireSignedFeed true" "$APP_PATH/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :SUVerifyUpdateBeforeExtraction bool true" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :SUVerifyUpdateBeforeExtraction true" "$APP_PATH/Contents/Info.plist"
 
 # Downloads and copied workspace resources can carry Finder or provenance
 # metadata that codesign rejects. Limit cleanup to the isolated candidate.
@@ -187,66 +266,81 @@ fi
 
 "$VENV_DIR/bin/python" "$ROOT_DIR/packaging/verify_macos_app.py" "$APP_PATH"
 "$VENV_DIR/bin/python" "$ROOT_DIR/packaging/verify_entitlements.py" "$APP_PATH"
-
-if [ ! -x "$ROOT_DIR/packaging/scripts/postinstall" ]; then
-    echo "packaging/scripts/postinstall must be executable" >&2
-    exit 2
+sparkle_verify_args=("$APP_PATH")
+if [ "$ALLOW_UNSIGNED" != "1" ]; then
+    sparkle_verify_args+=(--production --expected-team "$SIGNED_TEAM")
 fi
+"$VENV_DIR/bin/python" "$ROOT_DIR/packaging/verify_sparkle_bundle.py" \
+    "${sparkle_verify_args[@]}"
+
 export COPYFILE_DISABLE=1
-/usr/bin/pkgbuild \
-    --component "$APP_PATH" \
-    --install-location /Applications \
-    --identifier "$APP_ID" \
-    --version "$VERSION" \
-    --scripts "$ROOT_DIR/packaging/scripts" \
-    "$COMPONENT_PKG"
+package_args=(
+    --app "$APP_PATH"
+    --scripts "$ROOT_DIR/packaging/scripts"
+    --component-pkg "$COMPONENT_PKG"
+    --output-pkg "$OUTPUT_PKG"
+    --identifier "$APP_ID"
+    --version "$VERSION"
+)
 if [ -n "$INSTALLER_SIGN_IDENTITY" ]; then
-    /usr/bin/productbuild --package "$COMPONENT_PKG" \
-        --sign "$INSTALLER_SIGN_IDENTITY" \
-        --timestamp "$OUTPUT_PKG"
-    /usr/sbin/pkgutil --check-signature "$OUTPUT_PKG"
-else
-    /usr/bin/productbuild --package "$COMPONENT_PKG" "$OUTPUT_PKG"
+    package_args+=(--installer-sign-identity "$INSTALLER_SIGN_IDENTITY")
 fi
 
-if [ -n "$NOTARY_PROFILE" ] && [ -n "$INSTALLER_SIGN_IDENTITY" ]; then
-    /usr/bin/xcrun notarytool submit "$OUTPUT_PKG" --keychain-profile "$NOTARY_PROFILE" --wait
+if [ "$ALLOW_UNSIGNED" != "1" ]; then
+    /usr/bin/ditto -c -k --keepParent "$APP_PATH" "$APP_NOTARY_ZIP"
+    app_notary_response="$RAW_EVIDENCE_DIR/app-notary-submission.json"
+    app_notary_log="$RAW_EVIDENCE_DIR/app-notary-log.json"
+    app_submitted_sha="$RAW_EVIDENCE_DIR/app-notary-submitted-zip.sha256"
+    /usr/bin/shasum -a 256 "$APP_NOTARY_ZIP" \
+        | /usr/bin/awk '{print $1}' > "$app_submitted_sha"
+    /usr/bin/xcrun notarytool submit "$APP_NOTARY_ZIP" \
+        --keychain-profile "$NOTARY_PROFILE" \
+        --wait \
+        --output-format json > "$app_notary_response"
+    app_submission_id="$("$BUILD_PYTHON" "$ROOT_DIR/scripts/release_evidence.py" \
+        notary-submission-id \
+        --response "$app_notary_response")"
+    /usr/bin/xcrun notarytool log "$app_submission_id" \
+        --keychain-profile "$NOTARY_PROFILE" \
+        "$app_notary_log"
+    /bin/chmod 600 "$app_notary_response" "$app_notary_log" "$app_submitted_sha"
+    /usr/bin/xcrun stapler staple "$APP_PATH"
+    /usr/bin/xcrun stapler validate "$APP_PATH"
+
+    "$VENV_DIR/bin/python" "$ROOT_DIR/packaging/verify_macos_app.py" "$APP_PATH"
+    "$VENV_DIR/bin/python" "$ROOT_DIR/packaging/verify_sparkle_bundle.py" \
+        "$APP_PATH" \
+        --production \
+        --expected-team "$SIGNED_TEAM"
+    "$VENV_DIR/bin/python" "$ROOT_DIR/scripts/package_sparkle_archive.py" \
+        --app "$APP_PATH" \
+        --output "$OUTPUT_ZIP"
+    "$VENV_DIR/bin/python" "$ROOT_DIR/scripts/package_macos_artifact.py" \
+        "${package_args[@]}"
+
+    notary_response="$RAW_EVIDENCE_DIR/notary-submission.json"
+    notary_log="$RAW_EVIDENCE_DIR/notary-log.json"
+    submitted_sha="$RAW_EVIDENCE_DIR/notary-submitted-pkg.sha256"
+    /usr/bin/shasum -a 256 "$OUTPUT_PKG" \
+        | /usr/bin/awk '{print $1}' > "$submitted_sha"
+    /usr/bin/xcrun notarytool submit "$OUTPUT_PKG" \
+        --keychain-profile "$NOTARY_PROFILE" \
+        --wait \
+        --output-format json > "$notary_response"
+    submission_id="$("$BUILD_PYTHON" "$ROOT_DIR/scripts/release_evidence.py" \
+        notary-submission-id \
+        --response "$notary_response")"
+    /usr/bin/xcrun notarytool log "$submission_id" \
+        --keychain-profile "$NOTARY_PROFILE" \
+        "$notary_log"
+    /bin/chmod 600 "$notary_response" "$notary_log" "$submitted_sha"
     /usr/bin/xcrun stapler staple "$OUTPUT_PKG"
     /usr/bin/xcrun stapler validate "$OUTPUT_PKG"
 else
+    "$VENV_DIR/bin/python" "$ROOT_DIR/scripts/package_macos_artifact.py" \
+        "${package_args[@]}"
     echo "Built package: $OUTPUT_PKG"
-    if [ -n "$INSTALLER_SIGN_IDENTITY" ]; then
-        echo "Set NOTARY_PROFILE to submit and staple it automatically."
-    else
-        echo "Local verification build only: this package is not Developer ID signed or notarized."
-    fi
-fi
-
-# --- Distributable app archive ------------------------------------------
-# A Developer ID INSTALLER certificate is a separate purchase-time
-# artifact, and a .pkg cannot be notarized without one. A notarized ZIP
-# of the .app needs only the Developer ID APPLICATION identity, which is
-# what most menu-bar apps actually ship (CodexBar distributes the app,
-# not an installer package). So when we can make a distributable
-# archive, make it -- and say plainly what is missing when we cannot.
-OUTPUT_ZIP="${OUTPUT_PKG%.pkg}.zip"
-if [ -n "$APP_SIGN_IDENTITY" ]; then
-    /usr/bin/ditto -c -k --keepParent "$APP_PATH" "$OUTPUT_ZIP"
-    if [ -n "$NOTARY_PROFILE" ]; then
-        /usr/bin/xcrun notarytool submit "$OUTPUT_ZIP"             --keychain-profile "$NOTARY_PROFILE" --wait
-        # Staple the .app, then re-zip: a zip itself holds no ticket.
-        /usr/bin/xcrun stapler staple "$APP_PATH"
-        /usr/bin/xcrun stapler validate "$APP_PATH"
-        rm -f "$OUTPUT_ZIP"
-        /usr/bin/ditto -c -k --keepParent "$APP_PATH" "$OUTPUT_ZIP"
-        echo "Notarized and stapled app archive: $OUTPUT_ZIP"
-        echo "This one is safe to hand to another Mac."
-    else
-        echo "Signed app archive (NOT notarized): $OUTPUT_ZIP"
-        echo "Gatekeeper will still warn on another Mac. To finish, run once:"
-        echo "  xcrun notarytool store-credentials sidepulse \\"
-        echo "    --apple-id <your-apple-id> --team-id AJ9VWBRNZN \\"
-        echo "    --password <app-specific-password>"
-        echo "then rebuild with NOTARY_PROFILE=sidepulse."
-    fi
+    echo "ALLOW_UNSIGNED is local-only."
+    echo "No updater archive or updater evidence was produced."
+    echo "This package is not a production update candidate."
 fi

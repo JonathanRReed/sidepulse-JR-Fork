@@ -244,46 +244,6 @@ def test_a_denial_revokes_the_standing_grant(tmp_path):
     )
 
 
-def test_keychain_write_resolves_the_items_own_account():
-    """add-generic-password REQUIRES -a. Claude Code files its item under
-    the macOS short user name, so the account is read off the item --
-    omitting it made every write-back a silent usage-error no-op."""
-    import subprocess
-
-    from sidepulse.credentials import _run_security_write, keychain_account_for
-
-    def finder(args, **kwargs):
-        assert args[:3] == ["/usr/bin/security", "find-generic-password", "-s"]
-        return subprocess.CompletedProcess(
-            args,
-            0,
-            stdout='    "acct"<blob>="someone"\n    "svce"<blob>="Claude Code-credentials"\n',
-        )
-
-    import sidepulse.credentials as module
-
-    original = module.subprocess.run
-    module.subprocess.run = finder
-    try:
-        assert keychain_account_for(CLAUDE_CODE_KEYCHAIN) == "someone"
-        seen = {}
-
-        def writer(args, **kwargs):
-            seen["args"] = args
-            return subprocess.CompletedProcess(args, 0, stdout="")
-
-        module.subprocess.run = lambda args, **kw: (
-            finder(args, **kw)
-            if args[1] == "find-generic-password"
-            else writer(args, **kw)
-        )
-        _run_security_write(CLAUDE_CODE_KEYCHAIN, "payload")
-        assert "-a" in seen["args"]
-        assert seen["args"][seen["args"].index("-a") + 1] == "someone"
-    finally:
-        module.subprocess.run = original
-
-
 def test_a_background_read_cannot_park_a_worker_thread_for_half_a_minute(tmp_path):
     """A dialog the user must answer legitimately takes seconds. A
     BACKGROUND read must not wait on one at all -- 30s of a stalled
@@ -317,62 +277,4 @@ def test_a_background_read_cannot_park_a_worker_thread_for_half_a_minute(tmp_pat
     assert background <= 5.0, "no dialog is expected, so do not wait for one"
     assert foreground >= background, "a real prompt gets room to be answered"
     source = inspect.getsource(module)
-    assert "_SECURITY_ATTRIBUTES_TIMEOUT_SECONDS" in source
-
-
-def test_a_truncated_keychain_write_is_never_reported_as_success():
-    """`security`'s stdin reader truncates at 128 chars, and a real
-    Claude payload is ~500+. A partial write must fail loudly: the
-    caller uses this answer to decide whether Claude Code still has a
-    usable sign-in (2026-08-27)."""
-    import subprocess
-
-    from sidepulse import credentials as module
-    from sidepulse.credentials import write_keychain_secret
-
-    payload = "x" * 400
-    calls = {}
-
-    def fake_run(args, **kwargs):
-        if args[1] == "add-generic-password":
-            calls["wrote"] = True
-            return subprocess.CompletedProcess(args, 0, stdout="")
-        if args[1] == "find-generic-password" and "-w" in args:
-            # the item came back short, as a truncating writer would
-            return subprocess.CompletedProcess(args, 0, stdout=payload[:128] + "\n")
-        return subprocess.CompletedProcess(
-            args, 0, stdout='    "acct"<blob>="someone"\n'
-        )
-
-    original = module.subprocess.run
-    module.subprocess.run = fake_run
-    try:
-        assert write_keychain_secret(CLAUDE_CODE_KEYCHAIN, payload) is False
-    finally:
-        module.subprocess.run = original
-    assert calls.get("wrote"), "the write was attempted before verifying"
-
-
-def test_a_faithful_keychain_write_verifies_and_succeeds():
-    import subprocess
-
-    from sidepulse import credentials as module
-    from sidepulse.credentials import write_keychain_secret
-
-    payload = "y" * 400
-
-    def fake_run(args, **kwargs):
-        if args[1] == "add-generic-password":
-            return subprocess.CompletedProcess(args, 0, stdout="")
-        if args[1] == "find-generic-password" and "-w" in args:
-            return subprocess.CompletedProcess(args, 0, stdout=payload + "\n")
-        return subprocess.CompletedProcess(
-            args, 0, stdout='    "acct"<blob>="someone"\n'
-        )
-
-    original = module.subprocess.run
-    module.subprocess.run = fake_run
-    try:
-        assert write_keychain_secret(CLAUDE_CODE_KEYCHAIN, payload) is True
-    finally:
-        module.subprocess.run = original
+    assert "_SECURITY_BACKGROUND_TIMEOUT_SECONDS" in source

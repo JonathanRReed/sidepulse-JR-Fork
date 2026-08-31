@@ -19,6 +19,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 
+from .dnd_policy import OutboundAdmission
+
 PATTERN_BREATHE = "breathe"
 PATTERN_BLINK = "blink"
 PATTERN_DOUBLE_BLINK = "double-blink"
@@ -357,22 +359,26 @@ INTERRUPT_GRANTED = "granted"
 INTERRUPT_REFUSED_FOCUS = "focus"
 INTERRUPT_REFUSED_QUIET_HOUR = "quiet-hour"
 INTERRUPT_REFUSED_UNDECLARED = "undeclared-kind"
+INTERRUPT_REFUSED_DND = "dnd"
 
 
 @dataclass(frozen=True)
 class InterruptBudget:
     """What the owner's environment permits right now.
 
-    Exactly the three things the law needs: how loud a courtesy burst
-    may be, whether a Focus is on, and whether the owner has snoozed by
-    hand. focus_policy is the per-Focus refinement (see
-    FOCUS_SIGNAL_POLICIES) and only ever makes things stricter.
+    The legacy Focus, Quiet Hour, and burst inputs retain their existing
+    visual policy. DND independently limits outbound classes and the
+    banner, sound, and notification-webhook effect axes.
     """
 
     burst: int = DEFAULT_ALERT_BURST
     focus_active: bool = False
     focus_policy: str = FOCUS_POLICY_ALL
     quiet_hour: bool = False
+    outbound_admission: OutboundAdmission = OutboundAdmission.ALL
+    banner_allowed: bool = True
+    audible_allowed: bool = True
+    webhook_allowed: bool = True
 
     def normalized(self) -> InterruptBudget:
         return replace(
@@ -385,6 +391,14 @@ class InterruptBudget:
                 else FOCUS_POLICY_ALL
             ),
             quiet_hour=bool(self.quiet_hour),
+            outbound_admission=(
+                self.outbound_admission
+                if type(self.outbound_admission) is OutboundAdmission
+                else OutboundAdmission.ALL
+            ),
+            banner_allowed=bool(self.banner_allowed),
+            audible_allowed=bool(self.audible_allowed),
+            webhook_allowed=bool(self.webhook_allowed),
         )
 
 
@@ -399,8 +413,15 @@ class InterruptGrant:
     repetitions: int | None
     cycle_seconds: float
     hold_seconds: float | None
+    banner_allowed: bool
     audible: bool
+    webhook_allowed: bool
     reason: str
+    outbound_reason: str
+
+    @property
+    def outbound_allowed(self) -> bool:
+        return self.banner_allowed or self.audible or self.webhook_allowed
 
     @property
     def stands_until_dealt_with(self) -> bool:
@@ -433,6 +454,21 @@ def interrupt_class(kind: str) -> str | None:
     return INTERRUPT_CLASS_BY_KIND.get(kind)
 
 
+def _outbound_admits(
+    admission: OutboundAdmission,
+    *,
+    kind: str,
+    signal_class: str,
+) -> bool:
+    if admission is OutboundAdmission.ALL:
+        return True
+    if admission is OutboundAdmission.CRITICAL:
+        return signal_class == INTERRUPT_CRITICAL
+    if admission is OutboundAdmission.ASKS:
+        return kind in {INTERRUPT_ASK, INTERRUPT_ESCALATION}
+    return False
+
+
 def grant_interrupt(
     kind: str,
     *,
@@ -460,9 +496,35 @@ def grant_interrupt(
             repetitions=0,
             cycle_seconds=cycle,
             hold_seconds=0.0,
+            banner_allowed=False,
             audible=False,
+            webhook_allowed=False,
             reason=reason,
+            outbound_reason=reason,
         )
+
+    def outbound_effects() -> tuple[bool, bool, bool, str]:
+        admitted = _outbound_admits(
+            permitted.outbound_admission,
+            kind=kind,
+            signal_class=signal_class or INTERRUPT_COURTESY,
+        )
+        banner = admitted and permitted.banner_allowed
+        audible = (
+            admitted
+            and permitted.audible_allowed
+            and not (
+                signal_class == INTERRUPT_CRITICAL
+                and permitted.focus_policy == FOCUS_POLICY_SILENT
+            )
+        )
+        webhook = admitted and permitted.webhook_allowed
+        reason = (
+            INTERRUPT_GRANTED
+            if admitted and (banner or audible or webhook)
+            else INTERRUPT_REFUSED_DND
+        )
+        return banner, audible, webhook, reason
 
     if signal_class is None:
         return refuse(INTERRUPT_REFUSED_UNDECLARED)
@@ -474,6 +536,7 @@ def grant_interrupt(
         # stands until dealt with. Only an explicit per-Focus "Silent"
         # reaches a critical grant, and only to hush the SOUND -- never
         # to hide the light.
+        banner, audible, webhook, outbound_reason = outbound_effects()
         return InterruptGrant(
             kind=kind,
             interrupt_class=INTERRUPT_CRITICAL,
@@ -481,8 +544,11 @@ def grant_interrupt(
             repetitions=ATTENTION_ARRIVAL_TAPS,
             cycle_seconds=cycle,
             hold_seconds=None,
-            audible=permitted.focus_policy != FOCUS_POLICY_SILENT,
+            banner_allowed=banner,
+            audible=audible,
+            webhook_allowed=webhook,
             reason=INTERRUPT_GRANTED,
+            outbound_reason=outbound_reason,
         )
 
     if permitted.focus_active:
@@ -495,6 +561,7 @@ def grant_interrupt(
     # False that used to sit here meant the timebox chime -- a sound
     # the user explicitly enabled -- could never play under any
     # conditions (audit, 2026-08-26).
+    banner, audible, webhook, outbound_reason = outbound_effects()
     return InterruptGrant(
         kind=kind,
         interrupt_class=INTERRUPT_COURTESY,
@@ -502,6 +569,9 @@ def grant_interrupt(
         repetitions=permitted.burst,
         cycle_seconds=cycle,
         hold_seconds=permitted.burst * cycle + INTERRUPT_SETTLE_SECONDS,
-        audible=True,
+        banner_allowed=banner,
+        audible=audible,
+        webhook_allowed=webhook,
         reason=INTERRUPT_GRANTED,
+        outbound_reason=outbound_reason,
     )

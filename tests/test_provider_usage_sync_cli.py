@@ -5,7 +5,18 @@ import json
 from pathlib import Path
 
 from sidepulse import provider_usage_sync_cli
+from sidepulse.provider_instances import ProviderInstanceKey, ProviderInstanceProfile
+from sidepulse.provider_usage_platform import (
+    ProviderSourceState,
+    ProviderUsageSnapshot,
+    UsageLane,
+)
 from sidepulse.provider_usage_runtime import ProviderUsageState
+from sidepulse.provider_usage_settings import (
+    default_provider_usage_settings,
+    default_provider_usage_settings_path,
+    save_provider_usage_settings,
+)
 from sidepulse.provider_usage_sync_runtime import ProviderSyncRefresh
 from sidepulse.provider_usage_sync_service import ProviderSyncServiceState
 from sidepulse.provider_usage_sync_settings import load_provider_sync_settings
@@ -189,3 +200,79 @@ def test_refresh_uses_background_sync_service_result(tmp_path: Path):
     document = json.loads(output.getvalue())
     assert document["enabled"] is False
     assert document["health"] == []
+
+
+def test_refresh_projects_home_specific_instance_sharing_policy(tmp_path: Path):
+    output = io.StringIO()
+    provider_usage_sync_cli.main(
+        ["set-device", "mac-mini"],
+        stdout=output,
+        home=tmp_path,
+    )
+    provider_usage_sync_cli.main(["enable"], stdout=output, home=tmp_path)
+    usage_settings = default_provider_usage_settings().with_profile(
+        ProviderInstanceProfile(
+            ProviderInstanceKey("claude", "default"),
+            "Claude",
+            remote_sharing_choice="status_only",
+        )
+    )
+    save_provider_usage_settings(
+        usage_settings,
+        default_provider_usage_settings_path(tmp_path),
+    )
+    lane = UsageLane(
+        provider_id="claude",
+        lane_id="weekly",
+        label="Weekly",
+        remaining_percent=25,
+        reset_at=3000,
+        scope="all",
+        model=None,
+        feature=None,
+        bindable=True,
+        source_id="official",
+    )
+    snapshot = ProviderUsageSnapshot(
+        provider_id="claude",
+        account_label="account-fixture",
+        observed_at=1000,
+        state=ProviderSourceState.READY,
+        reason_code=None,
+        action_label=None,
+        lanes=(lane,),
+        input_tokens=100,
+        cached_input_tokens=25,
+        output_tokens=50,
+        model_count=2,
+        estimated_cost_usd=1.25,
+        cache_savings_usd=0.25,
+        credits_remaining=None,
+        incident=None,
+    )
+    state = ProviderUsageState((snapshot,), 1000, 1100, False)
+    captured = {}
+
+    class Service:
+        def __init__(self, runtime):
+            self.runtime = runtime
+
+        def refresh_now(self, current):
+            refresh = self.runtime.refresh(current)
+            captured["packet"] = refresh.local_packet
+            return ProviderSyncServiceState(refresh, False, False, None)
+
+        def close(self):
+            pass
+
+    code = provider_usage_sync_cli.main(
+        ["refresh", "--json"],
+        stdout=output,
+        home=tmp_path,
+        usage_state_loader=lambda: state,
+        service_factory=lambda **kwargs: Service(**kwargs),
+    )
+
+    assert code == 0
+    assert len(captured["packet"].quota_snapshots) == 1
+    assert captured["packet"].machine_usage == ()

@@ -1,28 +1,15 @@
-"""The Settings window's construction — every pane builder, the
-window assembly, and their private helpers — extracted from
-status_bar.py (backlog #14: ~2,300 lines of module-level functions
-with target/snapshot passed explicitly, so the cut is import-shuffling).
+"""Native Settings-window construction with explicit dependencies.
 
-Namespace contract: this module never imports status_bar (so no import
-cycle can exist in either direction). Instead status_bar, at the end
-of its own module body, calls _install() with its complete namespace
--- the moved code keeps referencing shared helpers, constants, AppKit
-symbols and sibling modules exactly as it did in place — and then
-re-imports every public name defined here, so controller methods,
-tests, and external callers keep addressing status_bar.<name>.
-Do not import this module without importing status_bar first.
+The legacy status-bar controller still re-exports these pane builders for
+compatibility, but this module is independently importable. Dependencies are
+declared here or imported at the narrow call site where a legacy type remains
+the compatibility boundary. No status-bar namespace is copied into globals.
 """
 
 from __future__ import annotations
 
-# The only import-time dependencies: module-level constants below use
-# these as dict keys, evaluated before _install() runs. They come from
-# settings.py, which never imports status_bar — still no cycle.
-# objc/Foundation are imported here rather than inherited from
-# status_bar's namespace because SidePulseStudioActions is defined at
-# module scope, i.e. before _install() has run.
 import time
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import objc
 from AppKit import (
@@ -54,28 +41,68 @@ from Foundation import NSObject
 # calendar_watch/reminders_watch import EventKit lazily, inside their own
 # helpers — importing the modules here costs nothing at start-up and is
 # what lets the Extras pane read a permission without owning EventKit.
-from . import calendar_watch, display_brightness, reminders_watch, remote_peers
+from . import (
+    calendar_watch,
+    display_brightness,
+    native_ui,
+    reminders_watch,
+    remote_peers,
+    usage_stats,
+)
 from . import colors as colors_module
+from . import signals as signals_module
 from .alcove_observation import (
-    ALCOVE_STATUS_MAX_AGE_SECONDS,
-    ALCOVE_STATUS_MESSAGES,
     AlcoveCaptureStatus,
+    AlcoveConfidenceProjection,
     alcove_follow_blocker,
     latest_alcove_status,
+    project_alcove_confidence,
     request_screen_recording_access,
     reset_alcove_status,
 )
-from .app_bundle import default_app_bundle_path, running_inside_bundle
+from .alcove_settings_pane import (
+    build_alcove_settings_controls,
+    refresh_alcove_settings_controls,
+)
+from .alcove_settings_pane import (
+    permission_alert_title as _alcove_permission_alert_title,
+)
+from .alcove_settings_pane import (
+    projection_compatibility_status as _alcove_projection_compatibility_status,
+)
 from .colors import (
     ANIMATION_MODE_KEYS,
-    BLEND_MODE_CHOICES,
     BLEND_MODE_CYCLE,
     BLEND_MODE_DESCRIPTIONS,
-    BLEND_MODE_LABELS,
     BLEND_MODE_ROUND_ROBIN,
     FADE_MODE_KEYS,
     MODE_ROW_LABELS,
     matching_preset,
+)
+from .dnd_settings_pane import (
+    FOCUS_DIM_CHOICES as _DND_FOCUS_DIM_CHOICES,
+)
+from .dnd_settings_pane import (
+    build_dnd_settings_pane,
+)
+from .dnd_settings_pane import (
+    make_focus_dim_popup as _make_focus_dim_popup,
+)
+from .dnd_settings_pane import (
+    refresh_dnd_settings_controls as _refresh_dnd_settings_controls,
+)
+from .dnd_settings_pane import (
+    select_focus_dim_choice as _select_focus_dim_choice,
+)
+from .effect_selection import (
+    BLEND_MODE_OPTIONS,
+    PROVIDER_ANIMATION_OPTIONS,
+    EffectSelectionDisposition,
+    plan_provider_animation_selection,
+)
+from .global_action_settings_pane import (
+    build_global_action_settings_pane,
+    refresh_global_action_settings_controls,
 )
 from .installed_agents import SurfaceSupportLevel, installed_surface_registrations
 from .led_status import (
@@ -85,9 +112,13 @@ from .led_status import (
     led_count_for_target,
     normalize_brightness,
     program_for_display_state,
-    style_to_program,
 )
 from .operator_accessibility import normalize_semantic_text_scale
+from .power_settings_pane import build_power_settings_pane
+from .power_settings_pane import (
+    refresh_power_settings_controls as _refresh_power_settings_controls,
+)
+from .product_identity import PRODUCT_DISPLAY_NAME
 from .provider_capacity import CapacityPolicyState, provider_capacity_policies
 from .providers import (
     HOOK_PROVIDERS,
@@ -95,9 +126,9 @@ from .providers import (
     negotiated_provider_sources,
     provider_spec,
 )
+from .screen_bar_design import WINDOW_WIDTH
 from .session_actions import provider_session_opener_providers
 from .settings import (
-    CALIBRATION_PROFILE_SLOTS,
     LED_DISPLAY_AGENT,
     LED_DISPLAY_BATTERY,
     LED_DISPLAY_QUOTA_RUNWAY,
@@ -109,19 +140,85 @@ from .settings import (
     LID_ANIMATION_OPEN_ACTIVE,
     save_settings,
 )
-
-# _install() only fills names this module does not already define, so an
-# explicit import here wins over status_bar's namespace injection — and
-# these three are new, which status_bar does not re-export.
+from .settings_preview_policy import (
+    apply_thumb_selection as _apply_thumb_selection,
+)
+from .settings_preview_policy import (
+    lid_preset_preview_program as _lid_preset_preview_program,
+)
+from .settings_preview_policy import (
+    mode_animation_thumb_program as _mode_animation_thumb_program,
+)
+from .settings_preview_policy import (
+    reduce_motion_active as _reduce_motion_active,
+)
+from .settings_preview_policy import (
+    signal_preview_program as _signal_preview_program,
+)
+from .settings_window_controls import (
+    add_preview_dot,
+    make_blend_mode_popup,
+    make_closed_lid_awake_policy_popup,
+    make_color_preset_popup,
+    make_preview_scenario_popup,
+    make_provider_opener_popup,
+    nscolor_from_hex,
+    open_url,
+    select_blend_mode,
+    select_color_preset,
+    select_effect_popup_item,
+    set_checkbox_state,
+    set_field_value,
+    set_preview_dot_color,
+    set_preview_dot_rgb,
+)
 from .virtual_device import (
     LED_COUNT,
     VIRTUAL_DEVICE_ID,
-    WINDOW_WIDTH,
+    WINDOW_HEIGHT,
     ScreenBarWingState,
     VirtualLedView,
     screen_bar_wing_state,
     slot_width_for_screen,
 )
+
+SCREEN_BAR_PREVIEW_HEIGHT = WINDOW_HEIGHT
+
+if TYPE_CHECKING:
+    from .status_bar_legacy import StatusBarController, StatusBarDevice
+
+
+def refresh_power_settings_controls(target: object) -> None:
+    """Refresh retained Settings-owned controls through the legacy facade hook."""
+    _refresh_power_settings_controls(target)
+    refresh_global_action_settings_controls(target)
+
+
+def refresh_dnd_settings_controls(target: object) -> None:
+    """Refresh retained DND and legacy Focus controls without rebuilding them."""
+    _refresh_dnd_settings_controls(target)
+
+
+# Compatibility re-exports for the retained status-bar facade and its tests.
+FOCUS_DIM_CHOICES = _DND_FOCUS_DIM_CHOICES
+
+
+def select_focus_dim_choice(popup, fraction: float | None) -> None:
+    _select_focus_dim_choice(popup, fraction)
+
+
+def make_focus_dim_popup(target, mode_identifier: str):
+    return _make_focus_dim_popup(target, mode_identifier)
+
+
+DEFAULT_SETTINGS_PANE = "profile"
+ANIMATION_STYLE_DISPLAY_LABELS: dict[str, str] = {
+    "pulse": "Breathe",
+    "roll": "Chase",
+    "solid": "Steady",
+    "blink": "Blink",
+}
+
 
 # What the Bar Size slider shows when the screen cannot be measured. Read
 # from the geometry module so it is the SAME number Automatic would use.
@@ -231,7 +328,7 @@ def _build_history_pane(target: StatusBarController):
 
     retention_outer, retention_inner = native_ui.make_card("Private History")
     disclosure = native_ui.make_wrapping_label(
-        "Before enabling, SidePulse stores derived metadata only for the "
+        f"Before enabling, {PRODUCT_DISPLAY_NAME} stores derived metadata only for the "
         "selected retention period. It does not store prompts, messages, "
         "responses, commands, titles, paths, raw errors, or navigation targets.",
         secondary=True,
@@ -348,7 +445,7 @@ def _build_history_pane(target: StatusBarController):
 
     clear_outer, clear_inner = native_ui.make_card("Clear History")
     clear_copy = native_ui.make_wrapping_label(
-        "Clear removes only SidePulse operator-history aggregates. It does "
+        f"Clear removes only {PRODUCT_DISPLAY_NAME} operator-history aggregates. It does "
         "not clear mailbox preferences, capacity observations, or settings.",
         secondary=True,
         size=11.0 * scale,
@@ -462,7 +559,7 @@ def _build_installed_agents_pane(target: StatusBarController):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
     overview_outer, overview_inner = native_ui.make_card("Installed Coding Agents")
     intro = native_ui.make_wrapping_label(
-        "SidePulse checks a bounded list of reviewed app, extension, and command "
+        f"{PRODUCT_DISPLAY_NAME} checks a bounded list of reviewed app, extension, and command "
         "markers only while this pane is visible. Detection never starts an agent, "
         "reads its conversations, or adds it to the live status menu.",
         secondary=True,
@@ -546,7 +643,7 @@ def _capacity_policy_copy(policy, active_sources: frozenset) -> tuple[str, str]:
             )
         return (
             "Available locally",
-            "SidePulse can refresh this exact source without an account API key.",
+            f"{PRODUCT_DISPLAY_NAME} can refresh this exact source without an account API key.",
         )
     if policy.state is CapacityPolicyState.DETAIL_ONLY:
         return (
@@ -556,7 +653,7 @@ def _capacity_policy_copy(policy, active_sources: frozenset) -> tuple[str, str]:
     if policy.state is CapacityPolicyState.LINK_ONLY:
         return (
             "Check provider",
-            "SidePulse does not read browser sessions or private provider endpoints.",
+            "This source is link-only. JR Bar does not read a browser or private endpoint for it.",
         )
     if policy.state is CapacityPolicyState.UPSTREAM_DELEGATED:
         return (
@@ -574,9 +671,10 @@ def _build_capacity_pane(target: StatusBarController):
 
     live_outer, live_inner = native_ui.make_card("Current Capacity")
     intro = native_ui.make_wrapping_label(
-        "Capacity is provider-specific. SidePulse shows only exact sources it can "
+        f"Capacity is provider-specific. {PRODUCT_DISPLAY_NAME} shows only exact sources it can "
         "bind safely, keeps API billing separate from subscription limits, and "
-        "never reads browser cookies or private provider endpoints.",
+        "never reads browser cookies during refresh. A browser-session import "
+        "requires one exact browser/profile grant and an explicit Import action.",
         secondary=True,
         size=11.0 * scale,
         max_width=560.0,
@@ -663,15 +761,10 @@ def _build_capacity_pane(target: StatusBarController):
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
-def _install(status_bar_namespace: dict) -> None:
-    """Bind status_bar's module namespace as ours — called exactly
-    once, from the bottom of status_bar.py."""
-    for key, value in status_bar_namespace.items():
-        if not key.startswith("__") and key not in globals():
-            globals()[key] = value
-
 def _build_profile_pane(target: StatusBarController):
     """Local usage over one explicit, user-selected period and metric."""
+    from .status_bar_legacy import UsageGraphView
+
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
     fields: dict[str, object] = {}
 
@@ -805,7 +898,7 @@ def _build_profile_pane(target: StatusBarController):
         "transcripts."
     )
     ledger_help = (
-        "Charts under Sessions (from SidePulse's own hook ledger) and "
+        f"Charts under Sessions (from {PRODUCT_DISPLAY_NAME}'s own hook ledger) and "
         "Percent left (remembered remaining-percent readings)."
     )
     from .providers import HOOK_PROVIDERS, provider_spec
@@ -847,7 +940,7 @@ def _build_profile_pane(target: StatusBarController):
     today_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "Tokens and cost exist only in Claude and Codex's local "
-            "transcripts. Sessions covers every provider SidePulse "
+            f"transcripts. Sessions covers every provider {PRODUCT_DISPLAY_NAME} "
             "watches (from its own hook ledgers), and Percent left "
             "charts remembered remaining-percent readings for everyone.",
             secondary=True,
@@ -871,8 +964,8 @@ def _build_profile_pane(target: StatusBarController):
             "Reads your Claude subscription's own usage endpoint using the "
             "credential Claude Code already stores, and shows every window it "
             "reports — the 5-hour and weekly ceilings and the weekly Opus and "
-            "Sonnet sub-caps. Off until you turn it on. SidePulse never reads "
-            "browser sessions or private provider endpoints."
+            "Sonnet sub-caps. Off until you turn it on. This Claude feature "
+            "never reads browser sessions or private provider endpoints."
         ),
     )
     plan_limits_switch.setState_(
@@ -902,6 +995,10 @@ def _build_profile_pane(target: StatusBarController):
     )
     stack.addArrangedSubview_(today_outer)
 
+    global_action_settings_pane = build_global_action_settings_pane(target)
+    fields["global_action_settings_pane"] = global_action_settings_pane
+    stack.addArrangedSubview_(global_action_settings_pane.view)
+
     about_outer, about_inner = native_ui.make_card("About")
     try:
         from importlib.metadata import version as _pkg_version
@@ -910,12 +1007,12 @@ def _build_profile_pane(target: StatusBarController):
     except Exception:
         app_version = "dev"
     about_inner.addArrangedSubview_(
-        native_ui.make_label(f"SidePulse {app_version}", size=13.0)
+        native_ui.make_label(f"{PRODUCT_DISPLAY_NAME} {app_version}", size=13.0)
     )
     about_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "Your agents, at a glance \u2014 as light. Watches Claude Code, "
-            "Codex, Devin and friends; shows their state on SidePulse LED "
+            "Codex, Devin and friends; shows their state on SidePulse Pro and SidePulse Dot "
             "devices and the Screen Bar.",
             secondary=True,
             size=11.0,
@@ -941,7 +1038,7 @@ def _build_devices_pane(target: StatusBarController):
         outer, inner = native_ui.make_card("Devices")
         inner.addArrangedSubview_(
             native_ui.make_wrapping_label(
-                "No devices yet. Plug a SidePulse into any USB port and it "
+                "No devices yet. Plug in a SidePulse Pro or SidePulse Dot and it "
                 "appears here by itself — or start with the on-screen bar:",
                 secondary=True,
                 size=12.0,
@@ -1119,11 +1216,11 @@ def _build_devices_pane(target: StatusBarController):
         blend_popup.lastItem().setRepresentedObject_("")
         if current_blend is None:
             blend_popup.selectItem_(blend_popup.lastItem())
-        for mode in BLEND_MODE_CHOICES:
-            blend_popup.addItemWithTitle_(BLEND_MODE_LABELS[mode])
+        for option in BLEND_MODE_OPTIONS:
+            blend_popup.addItemWithTitle_(option.label)
             item = blend_popup.lastItem()
-            item.setRepresentedObject_(mode)
-            if mode == current_blend:
+            item.setRepresentedObject_(option.value)
+            if option.value == current_blend:
                 blend_popup.selectItem_(item)
         inner.addArrangedSubview_(native_ui.make_row("When several run at once", blend_popup))
 
@@ -1349,7 +1446,7 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         "toggleLinkScreenBarToHardware:",
         help_text=(
             "One light language in two places: the Screen Bar renders "
-            "the same animation your SidePulse hardware is running, so "
+            "the same animation your SidePulse Pro or SidePulse Dot is running, so "
             "the notch and the LEDs are never two different opinions "
             "about the same moment. Turn this off to give the Screen "
             "Bar its own animation."
@@ -1383,32 +1480,19 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         "Extend glow along the menu bar", target, "toggleScreenBarWrapsMenuBar:"
     )
     inner.addArrangedSubview_(wraps_row)
-    # The same defect as the Alcove switch, on a different measurement:
-    # every display without a notch reports no area beside one, so the
-    # wings are zero points wide and this switch has never done anything
-    # on an external monitor. Nothing said so.
-    wing_status_label = native_ui.make_wrapping_label(
-        screen_bar_wing_status_text(target),
-        secondary=True,
-        size=11.0,
-        max_width=360.0,
-    )
-    inner.addArrangedSubview_(native_ui.make_row("Menu bar glow", wing_status_label))
-    follow_row, follow_switch = native_ui.make_switch_row(
-        "Match Alcove's width automatically",
+    alcove_actions = alcove_actions_for(target)
+    alcove_projection = alcove_follow_projection(target)
+    alcove_controls = build_alcove_settings_controls(
         target,
-        "toggleScreenBarFollowAlcove:",
-        help_text=(
-            "The bracket tracks Alcove's visible capsule — widening "
-            "for a timer or now-playing pill and easing back when it "
-            "collapses, hugging it within a couple of points. While a "
-            "capsule is visible this supersedes the Bar Size gap, so "
-            "Automatic stays automatic; a manual wing length still "
-            "wins. Needs Screen Recording permission; without it the "
-            "bar quietly keeps its classic size."
+        actions=alcove_actions,
+        projection=alcove_projection,
+        wing_status_text=screen_bar_wing_status_text(
+            target,
+            projection=alcove_projection,
         ),
     )
-    inner.addArrangedSubview_(follow_row)
+    inner.addArrangedSubview_(alcove_controls.wing_status_row)
+    inner.addArrangedSubview_(alcove_controls.follow_row)
     fullscreen_row, fullscreen_switch = native_ui.make_switch_row(
         "Show over full-screen apps",
         target,
@@ -1420,35 +1504,8 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         ),
     )
     inner.addArrangedSubview_(fullscreen_row)
-    # A switch that reads ON while the feature does nothing is the defect,
-    # not the cosmetics. This row says which of the four things is
-    # actually happening, and — when the answer is a permission — offers
-    # the one click that fixes it, exactly as the dropdown does for a
-    # stale hook.
-    alcove_actions = alcove_actions_for(target)
-    alcove_status_label = native_ui.make_wrapping_label(
-        alcove_follow_status_text(target),
-        secondary=True,
-        size=11.0,
-        max_width=360.0,
-    )
-    alcove_permission_button = native_ui.make_button(
-        "Open Screen Recording Settings…",
-        alcove_actions,
-        "grantScreenRecording:",
-    )
-    alcove_permission_button.setHidden_(not alcove_follow_needs_permission(target))
-    alcove_controls = native_ui.make_stack(
-        orientation="horizontal",
-        spacing=native_ui.SPACE_S,
-    )
-    alcove_controls.addArrangedSubview_(alcove_status_label)
-    alcove_controls.addArrangedSubview_(native_ui.make_hspacer())
-    alcove_controls.addArrangedSubview_(alcove_permission_button)
-    alcove_status_row = native_ui.make_row("Alcove following", alcove_controls)
-    inner.addArrangedSubview_(alcove_status_row)
-    alcove_actions.status_label = alcove_status_label
-    alcove_actions.permission_button = alcove_permission_button
+    inner.addArrangedSubview_(alcove_controls.status_row)
+    inner.addArrangedSubview_(alcove_controls.permission_row)
     native_ui.add_separator(inner)
     # Bracket coloring: Auto keeps the on-screen bracket in lockstep
     # with the physical LEDs' ripple whenever a crowd is lit.
@@ -1519,16 +1576,17 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
         "screen_bar_preview_container": preview_container,
         "screen_bar_gap_slider": gap_slider,
         "bracket_style_popup": bracket_popup,
-        "alcove_follow_status": alcove_status_label,
-        "screen_bar_wing_status": wing_status_label,
+        "alcove_follow_status": alcove_controls.status_label,
+        "screen_bar_wing_status": alcove_controls.wing_status_label,
+        "alcove_permission_row": alcove_controls.permission_row,
     }
     buttons = {
         "screen_bar_wraps_menu_bar": wraps_switch,
         "screen_bar_gauges": gauges_switch,
         "link_screen_bar_to_hardware": link_switch,
-        "screen_bar_follow_alcove": follow_switch,
+        "screen_bar_follow_alcove": alcove_controls.follow_switch,
         "screen_bar_show_in_full_screen": fullscreen_switch,
-        "alcove_screen_recording_permission": alcove_permission_button,
+        "alcove_screen_recording_permission": alcove_controls.permission_button,
     }
     return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
@@ -1561,7 +1619,11 @@ SCREEN_BAR_WING_MESSAGES: Final[dict[ScreenBarWingState, str]] = {
 }
 
 
-def screen_bar_wing_status_text(target) -> str:
+def screen_bar_wing_status_text(
+    target,
+    *,
+    projection: AlcoveConfidenceProjection | None = None,
+) -> str:
     """The sentence under "Extend glow along the menu bar".
 
     While Alcove following is live the wings are sized from the measured
@@ -1572,8 +1634,13 @@ def screen_bar_wing_status_text(target) -> str:
     """
     settings = target.settings
     wrap = bool(getattr(settings, "virtual_status_device_wraps_menu_bar", False))
-    if wrap and alcove_follow_state(target) is AlcoveCaptureStatus.CAPTURED:
-        return "Matching Alcove's capsule — see below."
+    if projection is None and wrap:
+        projection = alcove_follow_projection(target)
+    if wrap and projection is not None:
+        if projection.geometry_intent.value == "follow_live":
+            return "Matching Alcove's capsule — see below."
+        if projection.geometry_intent.value == "hold_last_good":
+            return "Holding Alcove's last trusted width. See below."
     try:
         screen = NSScreen.mainScreen()
     except Exception:
@@ -1597,23 +1664,24 @@ def screen_bar_wing_status_text(target) -> str:
     )
 
 
-def alcove_follow_state(target) -> AlcoveCaptureStatus | None:
-    """What Alcove following is doing right now, or None when unknown.
+def alcove_follow_projection(target) -> AlcoveConfidenceProjection:
+    """Resolve the Alcove row once from the shared confidence contract."""
+    following = bool(getattr(target.settings, "screen_bar_follow_alcove", True))
+    blocker = alcove_follow_blocker(following=following)
+    return project_alcove_confidence(
+        following=following,
+        snapshot=latest_alcove_status(),
+        blocker=blocker,
+        now=time.monotonic(),
+    )
 
-    Prefers the render path's own live reading, because only a real
-    capture may claim success. Falls back to a promptless preflight and
-    window probe, which can only ever report a BLOCKER — "nothing is in
-    the way" is not evidence that anything worked, and this function
-    returns None for it rather than implying otherwise.
-    """
-    if not bool(getattr(target.settings, "screen_bar_follow_alcove", True)):
-        return AlcoveCaptureStatus.NOT_FOLLOWING
-    snapshot = latest_alcove_status()
-    if snapshot is not None:
-        age = time.monotonic() - snapshot.updated_at
-        if 0.0 <= age <= ALCOVE_STATUS_MAX_AGE_SECONDS:
-            return snapshot.status
-    return alcove_follow_blocker(following=True)
+
+_projection_compatibility_status = _alcove_projection_compatibility_status
+
+
+def alcove_follow_state(target) -> AlcoveCaptureStatus | None:
+    """Compatibility adapter over the typed confidence projection."""
+    return _projection_compatibility_status(alcove_follow_projection(target))
 
 
 def alcove_follow_status_text(target) -> str:
@@ -1623,10 +1691,7 @@ def alcove_follow_status_text(target) -> str:
     four failure modes — including the one where macOS had never granted
     Screen Recording, which no surface anywhere mentioned.
     """
-    status = alcove_follow_state(target)
-    if status is None:
-        return "No measurement yet."
-    return ALCOVE_STATUS_MESSAGES.get(status, "No measurement yet.")
+    return alcove_follow_projection(target).message
 
 
 def alcove_follow_needs_permission(target) -> bool:
@@ -1636,7 +1701,7 @@ def alcove_follow_needs_permission(target) -> bool:
     already fine sends them to a settings pane to fix nothing, which is
     its own species of dishonesty.
     """
-    return alcove_follow_state(target) is AlcoveCaptureStatus.SCREEN_RECORDING_DENIED
+    return alcove_follow_projection(target).needs_permission_action
 
 
 def alcove_actions_for(target):
@@ -1661,11 +1726,8 @@ def alcove_menu_alert_title(target) -> str:
     an unmeasurable capsule — the one with no other symptom at all: the
     bar simply keeps its old size forever and nothing says why.
     """
-    if not alcove_follow_needs_permission(target):
-        return ""
-    return (
-        "⚠ Alcove following needs Screen Recording — grant it in "
-        "Settings…"
+    return _alcove_permission_alert_title(
+        needs_permission=alcove_follow_needs_permission(target),
     )
 
 
@@ -1676,20 +1738,12 @@ def refresh_alcove_follow_controls(target) -> None:
     freeze at whatever was true the first time the user visited it --
     including a stale "Screen Recording is off" after they granted it.
     """
-    fields = getattr(target, "settings_fields", None) or {}
-    buttons = getattr(target, "settings_buttons", None) or {}
-    label = fields.get("alcove_follow_status")
-    if label is not None:
-        label.setStringValue_(alcove_follow_status_text(target))
-    button = buttons.get("alcove_screen_recording_permission")
-    if button is not None:
-        button.setHidden_(not alcove_follow_needs_permission(target))
-    label = fields.get("screen_bar_wing_status")
-    if label is not None:
-        # Same pane, same freeze: a display change is exactly when this
-        # row stops describing anything, and a display change is exactly
-        # what the owner does when they dock the Mac.
-        label.setStringValue_(screen_bar_wing_status_text(target))
+    projection = alcove_follow_projection(target)
+    refresh_alcove_settings_controls(
+        target,
+        projection=projection,
+        wing_status_text=screen_bar_wing_status_text(target, projection=projection),
+    )
 
 
 class SidePulseAlcoveActions(NSObject):
@@ -1741,112 +1795,17 @@ class SidePulseAlcoveActions(NSObject):
                 alcove_follow_status_text(self.controller)
                 if granted is True
                 else (
-                    "Turn SidePulse on under Screen Recording, then "
-                    "reopen SidePulse."
+                    f"Turn {PRODUCT_DISPLAY_NAME} on under Screen Recording, then "
+                    f"reopen {PRODUCT_DISPLAY_NAME}."
                 )
             )
 
 
 def _build_power_pane(target: StatusBarController):
-    """Keep-awake policy and battery display together — both are "what
-    SidePulse does with the Mac's power state"."""
-    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
-
-    awake_outer, awake_inner = native_ui.make_card("Keep Awake With Lid Closed")
-    policy_popup = make_closed_lid_awake_policy_popup(target)
-    awake_inner.addArrangedSubview_(native_ui.make_row("Policy", policy_popup))
-
-    grace_field = native_ui.make_field(
-        f"{target.settings.closed_lid_grace_minutes:g}", target=target, action="applyClosedLidGraceMinutes:"
-    )
-    native_ui.constrain_width(grace_field, 56.0)
-    grace_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
-    grace_controls.addArrangedSubview_(grace_field)
-    grace_controls.addArrangedSubview_(native_ui.make_label("min", secondary=True))
-    awake_inner.addArrangedSubview_(
-        native_ui.make_row(
-            "Wait before releasing",
-            grace_controls,
-            help_text=(
-                "A buffer against a false “done” reading — e.g. a command still "
-                "running with no events for a stretch — closing the lid into sleep."
-            ),
-        )
-    )
-    battery_hold_row, battery_hold_switch = native_ui.make_switch_row(
-        "Hold awake on battery too",
+    return build_power_settings_pane(
         target,
-        "toggleKeepAwakeOnBattery:",
-        help_text=(
-            "On (the default), agents keep the Mac awake even unplugged — "
-            "but never once the battery crosses the low-battery line "
-            "below; a dying Mac always gets to sleep. Off, the hold "
-            "applies only on power."
-        ),
+        make_closed_lid_policy_popup=make_closed_lid_awake_policy_popup,
     )
-    battery_hold_switch.setState_(
-        1 if getattr(target.settings, "keep_awake_on_battery", True) else 0
-    )
-    awake_inner.addArrangedSubview_(battery_hold_row)
-    stack.addArrangedSubview_(awake_outer)
-
-    battery_outer, battery_inner = native_ui.make_card("Battery")
-    leds_row, battery_leds = native_ui.make_switch_row(
-        "Show battery on LEDs", target, "setBatteryLedDisplayFromCheckbox:"
-    )
-    battery_inner.addArrangedSubview_(leds_row)
-    preview_row, battery_power_preview = native_ui.make_switch_row(
-        "Show battery for 7s on plug/unplug", target, "setBatteryPowerPreviewFromCheckbox:"
-    )
-    battery_inner.addArrangedSubview_(preview_row)
-    trickle_row, battery_charging_idle = native_ui.make_switch_row(
-        "Charging trickle while idle",
-        target,
-        "setBatteryChargingIdleFromCheckbox:",
-        help_text=(
-            "When nothing is running and the Mac is plugged in, the bar "
-            "fills to the charge level with a slow trickle pulse that "
-            "paces itself to how fast you're charging. Agents running, "
-            "done, or needing you always take the bar back."
-        ),
-    )
-    battery_inner.addArrangedSubview_(trickle_row)
-    native_ui.add_separator(battery_inner)
-    low_power_row, low_battery_switch = native_ui.make_switch_row(
-        "Charge reminder when battery is low",
-        target,
-        "toggleLowBatteryAlert:",
-        help_text=(
-            "Below the threshold while unplugged, every display switches to "
-            "a calm, slow red breathe until you plug in."
-        ),
-    )
-    battery_inner.addArrangedSubview_(low_power_row)
-    threshold_field = native_ui.make_field(
-        f"{target.settings.low_battery_threshold_percent:g}",
-        target=target,
-        action="applyLowBatteryThreshold:",
-    )
-    native_ui.constrain_width(threshold_field, 48.0)
-    threshold_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
-    threshold_controls.addArrangedSubview_(threshold_field)
-    threshold_controls.addArrangedSubview_(native_ui.make_label("%", secondary=True))
-    battery_inner.addArrangedSubview_(native_ui.make_row("Below", threshold_controls))
-    stack.addArrangedSubview_(battery_outer)
-
-    fields = {
-        "closed_lid_awake_policy_popup": policy_popup,
-        "closed_lid_grace_field": grace_field,
-        "low_battery_threshold_field": threshold_field,
-    }
-    buttons = {
-        "battery_leds": battery_leds,
-        "battery_power_preview": battery_power_preview,
-        "battery_charging_idle": battery_charging_idle,
-        "low_battery_alert": low_battery_switch,
-        "keep_awake_on_battery": battery_hold_switch,
-    }
-    return native_ui.wrap_in_scroll_pane(stack), fields, buttons
 
 
 # Style cards: every signal is edited BY EYE — a color well, pattern
@@ -1885,14 +1844,6 @@ ESCALATION_TIER_LABELS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _reduce_motion_active(target) -> bool:
-    """The live pipeline pins to STATIC under Reduce Motion; preview
-    thumbs and hover try-outs must not be the one place that still
-    animates (adversarial review, story G)."""
-    preferences = getattr(target, "_accessibility_display_preferences", None)
-    return bool(getattr(preferences, "reduce_motion", False))
-
-
 def _mini_led_view(width: float, height: float):
     view = VirtualLedView.alloc().initWithFrame_(((0, 0), (width, height)))
     view.setHasNotch_(False)
@@ -1905,18 +1856,6 @@ def _mini_led_view(width: float, height: float):
         layer.setCornerRadius_(5.0)
         layer.setMasksToBounds_(True)
     return view
-
-
-def _apply_thumb_selection(thumbs: dict, selected_pattern: str) -> None:
-    for pattern, thumb in thumbs.items():
-        layer = thumb.layer()
-        if layer is None:
-            continue
-        if pattern == selected_pattern:
-            layer.setBorderWidth_(2.0)
-            layer.setBorderColor_(NSColor.controlAccentColor().CGColor())
-        else:
-            layer.setBorderWidth_(0.0)
 
 
 def _solid_swatch_image(hex_color: str, size: float = SWATCH_BUTTON_SIZE):
@@ -1932,38 +1871,6 @@ def _solid_swatch_image(hex_color: str, size: float = SWATCH_BUTTON_SIZE):
     ).stroke()
     image.unlockFocus()
     return image
-
-
-def _mode_animation_thumb_program(target: StatusBarController, mode_key: str, style: str) -> str:
-    """One mode-animation choice rendered live in that mode's own color
-    — the Colors window speaks the Signals pane's visual language."""
-    spec = {
-        "idle": (LedDisplayState.IDLE, "idle_color"),
-        "working": (LedDisplayState.WORKING, "working_color"),
-        "ask": (LedDisplayState.ASK, "ask_color"),
-        "done": (LedDisplayState.DONE, "done_color"),
-    }.get(mode_key)
-    if spec is None:
-        return "#FFFFFF"
-    state, color_kwarg = spec
-    mode_hex = target.settings.colors.mode_color(mode_key)
-    stripped = mode_hex.lstrip("#")
-    try:
-        luminance = sum(int(stripped[i : i + 2], 16) for i in (0, 2, 4)) / 3.0
-    except ValueError:
-        luminance = 255.0
-    if luminance < 24.0:
-        # A near-black mode color (Idle ships at #030302) makes an
-        # invisible thumbnail; preview the SHAPE in neutral gray.
-        mode_hex = "#9A9A9A"
-    kwargs = {color_kwarg: mode_hex}
-    style_kwarg = colors_module._MODE_KEY_TO_STYLE_KWARG.get(mode_key)
-    if style_kwarg:
-        kwargs[style_kwarg] = style
-    try:
-        return program_for_display_state(state, led_count=8, **kwargs)
-    except (TypeError, ValueError):
-        return target.settings.colors.mode_color(mode_key)
 
 
 def make_signal_color_row(target: StatusBarController, key: str, current_color: str):
@@ -2010,6 +1917,7 @@ def make_signal_style_card(target: StatusBarController, key: str, title: str, *,
     preview_color = None
     thumbs: dict[str, object] = {}
     thumb_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    choice_controls = []
     # Continuous signals don't offer one-shot patterns: three flashes
     # then hours of darkness isn't a style, it's a bug.
     offered_patterns = tuple(
@@ -2022,19 +1930,45 @@ def make_signal_style_card(target: StatusBarController, key: str, title: str, *,
     )
     for pattern in offered_patterns:
         thumb = _mini_led_view(*SIGNAL_THUMB_SIZE)
-        thumb.setToolTip_(pattern.replace("-", " ").title())
+        pattern_label = pattern.replace("-", " ").title()
+        caption_label = "2x Blink" if pattern == "double-blink" else pattern_label
+        help_text = (
+            f"Use {pattern_label} for {title}. Press Space to select it."
+        )
+        thumb.setToolTip_(pattern_label)
         preview_style = signals_module.SignalStyle(
             style.color, pattern, style.speed_seconds, style.intensity
         )
-        thumb.setProgram_(style_to_program(preview_style, 255, color=preview_color))
+        thumb.setProgram_(
+            _signal_preview_program(target, preview_style, color=preview_color)
+        )
         thumb.signal_card_key = key
         thumb.signal_card_pattern = pattern
         recognizer = NSClickGestureRecognizer.alloc().initWithTarget_action_(
             target, "selectSignalPattern:"
         )
         thumb.addGestureRecognizer_(recognizer)
+        choice = native_ui.make_preview_choice(
+            thumb,
+            target,
+            "selectSignalPattern:",
+            accessibility_label=f"{title}, {pattern_label}",
+            accessibility_help=help_text,
+            selected=pattern == style.pattern,
+        )
+        choice_controls.append(choice)
         thumbs[pattern] = thumb
-        thumb_row.addArrangedSubview_(thumb)
+        cell = native_ui.make_stack(orientation="vertical", spacing=1.0)
+        cell.setAlignment_(NSLayoutAttributeCenterX)
+        cell.addArrangedSubview_(choice)
+        cell.addArrangedSubview_(native_ui.make_caption(caption_label))
+        thumb_row.addArrangedSubview_(cell)
+    native_ui.configure_choice_group(
+        thumb_row,
+        choice_controls,
+        accessibility_label=f"{title} patterns",
+        accessibility_help="Use Tab to move between patterns and Space to select one.",
+    )
     _apply_thumb_selection(thumbs, style.pattern)
     inner.addArrangedSubview_(native_ui.make_row("Pattern", thumb_row))
     native_ui.add_separator(inner)
@@ -2065,7 +1999,13 @@ def make_signal_style_card(target: StatusBarController, key: str, title: str, *,
     native_ui.add_separator(inner)
 
     preview = _mini_led_view(*SIGNAL_PREVIEW_SIZE)
-    preview.setProgram_(style_to_program(style, 255, color=preview_color))
+    preview.setProgram_(_signal_preview_program(target, style, color=preview_color))
+    native_ui.set_accessibility_metadata(
+        preview,
+        label=f"Current {title} preview",
+        help_text="A visual preview of the selected color, pattern, speed, and intensity.",
+        role="AXImage",
+    )
     preview_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     preview_cluster.addArrangedSubview_(preview)
     test_button = native_ui.make_button("Test", target, "testSignal:")
@@ -2074,6 +2014,14 @@ def make_signal_style_card(target: StatusBarController, key: str, title: str, *,
         "Play this signal's current style on the Screen Bar and every "
         "connected device for a few seconds."
     )
+    native_ui.set_accessibility_metadata(
+        test_button,
+        label=f"Test {title}",
+        help_text=(
+            "Play this signal's current style on the Screen Bar and every "
+            "connected device for a few seconds."
+        ),
+    )
     preview_cluster.addArrangedSubview_(test_button)
     inner.addArrangedSubview_(native_ui.make_row("Preview", preview_cluster))
     fields[f"signal_preview:{key}"] = preview
@@ -2081,225 +2029,7 @@ def make_signal_style_card(target: StatusBarController, key: str, title: str, *,
 
 
 def _build_focus_pane(target: StatusBarController):
-    """What each macOS Focus does to the lights — its own pane because
-    this lived at the BOTTOM of Signals and the user who asked for
-    per-Focus control had never seen that it already existed."""
-    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
-    fields: dict[str, object] = {}
-    buttons: dict[str, object] = {}
-
-    now_outer, now_inner = native_ui.make_card("Right Now")
-    now_label = native_ui.make_label(
-        target.active_focus_summary(), secondary=False, size=13.0
-    )
-    now_inner.addArrangedSubview_(now_label)
-    fields["focus_now_label"] = now_label
-    stack.addArrangedSubview_(now_outer)
-
-    enable_outer, enable_inner = native_ui.make_card("Focus Dimming")
-    focus_row, focus_switch = native_ui.make_switch_row(
-        "React when a macOS Focus turns on",
-        target,
-        "toggleFocusSync:",
-        help_text=(
-            "Needs Full Disk Access for SidePulse (granted in the Setup "
-            "window) — otherwise this has no effect."
-        ),
-    )
-    enable_inner.addArrangedSubview_(focus_row)
-    buttons["focus_sync_enabled"] = focus_switch
-    stack.addArrangedSubview_(enable_outer)
-
-    warmth_outer, warmth_inner = native_ui.make_card("Night Warmth")
-    warmth_row, warmth_switch = native_ui.make_switch_row(
-        "Warm the lights from 7 PM to 7 AM",
-        target,
-        "toggleNightWarmth:",
-        help_text=(
-            "Eases green and blue down after dark — like Night Shift, "
-            "for your LEDs. Composes with each device's calibration."
-        ),
-    )
-    warmth_inner.addArrangedSubview_(warmth_row)
-    buttons["night_warmth_enabled"] = warmth_switch
-    native_ui.add_separator(warmth_inner)
-    night_dim_popup = native_ui.make_popup_button(target, "setNightDimFraction:")
-    for label, key in (
-        ("Don't dim at night", "1.0"),
-        ("Dim to 50%", "0.5"),
-        ("Dim to 30%", "0.3"),
-        ("Dim to 15%", "0.15"),
-    ):
-        night_dim_popup.addItemWithTitle_(label)
-        night_dim_popup.lastItem().setRepresentedObject_(key)
-        if f"{target.settings.night_dim_fraction:g}" == f"{float(key):g}":
-            night_dim_popup.selectItem_(night_dim_popup.lastItem())
-    warmth_inner.addArrangedSubview_(
-        native_ui.make_row("Night brightness (7 PM–7 AM)", night_dim_popup)
-    )
-    fields["night_dim_popup"] = night_dim_popup
-    stack.addArrangedSubview_(warmth_outer)
-
-    # Story #10: timebox presets can run a named Shortcut when they
-    # start and another when they end — Focus on with the drain, Focus
-    # off when it finishes.
-    handshake_outer, handshake_inner = native_ui.make_card("Timebox Focus Handshake")
-    handshake_inner.addArrangedSubview_(
-        native_ui.make_wrapping_label(
-            "Each Timer preset can run a Shortcut when it starts and "
-            "another when it ends or you press Stop — name a Shortcut "
-            "that turns a Focus on, and its partner that turns it off. "
-            "macOS asks permission once per Shortcut the first time it "
-            "runs.",
-            secondary=True,
-            size=12.0,
-            max_width=560.0,
-        )
-    )
-    for preset_index, preset_minutes in enumerate(TIMEBOX_PRESET_MINUTES):
-        pair = target.settings.timebox_shortcut_pair(str(preset_minutes))
-        on_field = native_ui.make_field(
-            pair[0], target=target, action="applyTimeboxShortcuts:"
-        )
-        on_field.setPlaceholderString_("Shortcut at start")
-        native_ui.constrain_width(on_field, 150.0)
-        off_field = native_ui.make_field(
-            pair[1], target=target, action="applyTimeboxShortcuts:"
-        )
-        off_field.setPlaceholderString_("Shortcut at end")
-        native_ui.constrain_width(off_field, 150.0)
-        pair_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_XS)
-        pair_cluster.addArrangedSubview_(on_field)
-        pair_cluster.addArrangedSubview_(off_field)
-        handshake_inner.addArrangedSubview_(
-            native_ui.make_row(f"{preset_minutes} minutes", pair_cluster)
-        )
-        if preset_index < len(TIMEBOX_PRESET_MINUTES) - 1:
-            native_ui.add_separator(handshake_inner)
-        fields[f"timebox_on_field:{preset_minutes}"] = on_field
-        fields[f"timebox_off_field:{preset_minutes}"] = off_field
-    stack.addArrangedSubview_(handshake_outer)
-
-    # Per-Focus rules: each configured Focus gets its own dim choice.
-    # When the Focus database can't be read (no Full Disk Access), say so
-    # plainly and offer the one-click path to fix it, instead of showing
-    # a feature that silently does nothing.
-    focus_outer, focus_inner = native_ui.make_card("Per-Focus Rules")
-    focus_inner.addArrangedSubview_(
-        native_ui.make_wrapping_label(
-            "Each Focus can dim, turn the lights off entirely, or apply a "
-            "calibration profile the moment it activates — e.g. School \u2192 "
-            "Turn off, Work \u2192 Dim to 50%.",
-            secondary=True,
-            size=12.0,
-            max_width=560.0,
-        )
-    )
-    try:
-        focus_modes = focus_sync.configured_focus_modes()
-        # Count only: custom Focus names are user content and stay out of
-        # logs, same as session titles and transcript text.
-        log_status_bar(f"focus roster: {len(focus_modes)} mode(s)")
-    except focus_sync.FocusSyncUnavailableError as exc:
-        log_status_bar(f"focus roster unavailable: {exc}")
-        focus_modes = None
-    if not focus_modes:
-        if running_inside_bundle():
-            grant_target = str(default_app_bundle_path())
-            grant_instructions = (
-                "In Privacy Settings, click +, and pick SidePulse from your "
-                "Applications folder. If SidePulse is already listed, remove "
-                "it with − first, then add it again — macOS only "
-                "re-checks the app when it's re-added. This pane fills with "
-                "your Focus modes once granted."
-            )
-        else:
-            # Not yet running inside the app bundle: macOS attributes file
-            # access to the RESOLVED binary, not the venv symlink.
-            grant_target = os.path.realpath(sys.executable or "python3")
-            grant_instructions = (
-                "In Privacy Settings, click +, press ⌘⇧G, and paste that "
-                "path. This pane fills with your Focus modes once granted."
-            )
-        focus_inner.addArrangedSubview_(
-            native_ui.make_wrapping_label(
-                "Per-Focus rules need Full Disk Access, granted to SidePulse "
-                "itself:",
-                secondary=True,
-                size=12.0,
-                max_width=500.0,
-            )
-        )
-        interpreter_label = native_ui.make_label(grant_target, secondary=True, size=11.0)
-        interpreter_label.setSelectable_(True)
-        focus_inner.addArrangedSubview_(interpreter_label)
-        focus_inner.addArrangedSubview_(
-            native_ui.make_wrapping_label(
-                grant_instructions,
-                secondary=True,
-                size=11.0,
-                max_width=500.0,
-            )
-        )
-        fda_controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
-        fda_controls.addArrangedSubview_(
-            native_ui.make_button("Open Privacy Settings…", target, "openFullDiskAccessSettings:")
-        )
-        fda_controls.addArrangedSubview_(
-            native_ui.make_button(
-                "Reveal SidePulse in Finder" if running_inside_bundle() else "Reveal Program in Finder",
-                target,
-                "revealFocusBinaryInFinder:",
-            )
-        )
-        fda_controls.addArrangedSubview_(native_ui.make_hspacer())
-        focus_inner.addArrangedSubview_(fda_controls)
-    else:
-        for index, (identifier, name) in enumerate(focus_modes):
-            popup = make_focus_dim_popup(target, identifier)
-            # Focus -> profile automation: this Focus can also apply a
-            # calibration/brightness profile the moment it activates.
-            profile_popup = native_ui.make_popup_button(target, "setFocusProfileRule:")
-            profile_popup.setIdentifier_(identifier)
-            current_rule = target.settings.focus_profile_rules.get(identifier)
-            profile_popup.addItemWithTitle_("No profile")
-            profile_popup.lastItem().setRepresentedObject_("")
-            if current_rule is None:
-                profile_popup.selectItem_(profile_popup.lastItem())
-            for slot in CALIBRATION_PROFILE_SLOTS:
-                profile_popup.addItemWithTitle_(f"Apply {slot}")
-                item = profile_popup.lastItem()
-                item.setRepresentedObject_(slot)
-                if slot == current_rule:
-                    profile_popup.selectItem_(item)
-            # Story #12: what this Focus does to SIGNALS (not just
-            # brightness) — hold the courtesy glows, or go fully silent.
-            signal_popup = native_ui.make_popup_button(target, "setFocusSignalPolicy:")
-            signal_popup.setIdentifier_(identifier)
-            current_policy = target.settings.focus_signal_policy.get(identifier, "all")
-            for title, policy_value in (
-                ("All signals", "all"),
-                ("Asks only", "asks_only"),
-                ("Silent", "silent"),
-            ):
-                signal_popup.addItemWithTitle_(title)
-                item = signal_popup.lastItem()
-                item.setRepresentedObject_(policy_value)
-                if policy_value == current_policy:
-                    signal_popup.selectItem_(item)
-            row_cluster = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
-            row_cluster.addArrangedSubview_(popup)
-            row_cluster.addArrangedSubview_(profile_popup)
-            row_cluster.addArrangedSubview_(signal_popup)
-            focus_inner.addArrangedSubview_(native_ui.make_row(name, row_cluster))
-            if index < len(focus_modes) - 1:
-                native_ui.add_separator(focus_inner)
-            fields[f"focus_rule_popup:{identifier}"] = popup
-            fields[f"focus_profile_popup:{identifier}"] = profile_popup
-            fields[f"focus_signal_popup:{identifier}"] = signal_popup
-    stack.addArrangedSubview_(focus_outer)
-
-    return native_ui.wrap_in_scroll_pane(stack), fields, buttons
+    return build_dnd_settings_pane(target)
 
 
 def _build_led_behavior_pane(target: StatusBarController):
@@ -2418,6 +2148,18 @@ def _build_led_behavior_pane(target: StatusBarController):
     stack.addArrangedSubview_(esc_outer)
 
     # Style cards: pick every signal's look by eye.
+    preview_help_outer, preview_help_inner = native_ui.make_card("Signal Previews")
+    preview_help_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Every pattern is a live choice. Use Tab to move between choices, "
+            "then press Space to select one. With Reduce Motion on, the same "
+            "choices remain available as steady color previews.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    stack.addArrangedSubview_(preview_help_outer)
     for signal_key, card_title, show_color in SIGNAL_STYLE_CARDS:
         stack.addArrangedSubview_(
             make_signal_style_card(
@@ -2837,7 +2579,7 @@ def _access_status_text(enabled: bool, status: str, *, subject: str, pane: str) 
     if status == "unavailable":
         return f"{pane} access is unavailable on this Mac, so nothing here can glow."
     return (
-        f"Denied — no {subject} will glow until you turn SidePulse on "
+        f"Denied — no {subject} will glow until you turn {PRODUCT_DISPLAY_NAME} on "
         f"under Privacy & Security → {pane}."
     )
 
@@ -2876,41 +2618,6 @@ def refresh_event_access_controls(target) -> None:
         label.setStringValue_(reminders_access_status_text(target))
 
 
-FOCUS_DIM_CHOICES: tuple[tuple[str, str], ...] = (
-    ("Shared dim (default)", "default"),
-    ("Don't dim", "1.0"),
-    ("Dim to 50%", "0.5"),
-    ("Dim to 25%", "0.25"),
-    ("Turn off", "0.0"),
-)
-
-
-def select_focus_dim_choice(popup, fraction: float | None) -> None:
-    """Selects the popup item matching a saved rule (None = shared
-    default) — refresh_settings_window's counterpart to
-    make_focus_dim_popup's construction-time selection."""
-    wanted = "default" if fraction is None else f"{float(fraction):g}"
-    for index in range(popup.numberOfItems()):
-        item = popup.itemAtIndex_(index)
-        if str(item.representedObject() or "") == wanted:
-            popup.selectItem_(item)
-            return
-
-
-def make_focus_dim_popup(target: StatusBarController, mode_identifier: str):
-    popup = native_ui.make_popup_button(target, "setFocusDimRule:")
-    popup.setIdentifier_(mode_identifier)
-    current = target.settings.focus_dim_rules.get(mode_identifier)
-    current_key = "default" if current is None else f"{current:g}"
-    for label, key in FOCUS_DIM_CHOICES:
-        popup.addItemWithTitle_(label)
-        item = popup.lastItem()
-        item.setRepresentedObject_(key)
-        if key == current_key:
-            popup.selectItem_(item)
-    return popup
-
-
 def _build_agents_pane(target: StatusBarController):
     """Everything about how SidePulse talks to coding agents: hook
     installs, the transcript-watching fallback, and which app opens a
@@ -2923,7 +2630,7 @@ def _build_agents_pane(target: StatusBarController):
         target,
         "toggleMenuBarLabel:",
         help_text=(
-            "Off keeps SidePulse icon-only like native menu extras; a "
+            f"Off keeps {PRODUCT_DISPLAY_NAME} icon-only like native menu extras; a "
             "count or check still appears when something needs you."
         ),
     )
@@ -3041,12 +2748,12 @@ def make_agent_animation_popup(row, target):
     """
     popup = native_ui.make_popup_button(target, "setAgentAnimation:")
     popup.setIdentifier_(row.provider)
-    for motion in colors_module.PROVIDER_ANIMATION_CHOICES:
-        popup.addItemWithTitle_(colors_module.PROVIDER_ANIMATION_LABELS[motion])
+    for option in PROVIDER_ANIMATION_OPTIONS:
+        popup.addItemWithTitle_(option.label)
         item = popup.lastItem()
-        item.setRepresentedObject_({"provider": row.provider, "motion": motion})
-        item.setToolTip_(colors_module.PROVIDER_ANIMATION_DESCRIPTIONS[motion])
-        if motion == row.animation:
+        item.setRepresentedObject_({"provider": row.provider, "motion": option.value})
+        item.setToolTip_(option.description)
+        if option.value == row.animation:
             popup.selectItem_(item)
     return popup
 
@@ -3155,7 +2862,7 @@ def remote_peer_status_text(target) -> str:
         # answer as one that came back empty.
         if not int(getattr(result, "attempted", 0) or 0):
             return "No peers checked yet."
-        return "No other Macs are running SidePulse right now."
+        return f"No other Macs are running {PRODUCT_DISPLAY_NAME} right now."
     reachable = [item.machine for item in health if item.reachable]
     failed = [
         f"{item.machine} ({item.failure or 'unreachable'})"
@@ -3239,45 +2946,68 @@ from .lid_presets import LID_ANIMATION_PRESETS  # noqa: E402 - data extraction
 
 
 def _build_lid_preset_row(target: StatusBarController, kind: str, current_program: str):
-    """A strip of live-playing preset thumbnails; clicking one applies
-    it. The raw editor below stays for hand-tuning — the picker is how
-    normal people choose."""
+    """Build one keyboard-accessible strip of live lid presets."""
     row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_M)
     thumbs = getattr(target, "lid_animation_thumbs", None)
     if thumbs is None:
         thumbs = {}
         target.lid_animation_thumbs = thumbs
     current_normalized = (current_program or "").strip()
+    choice_controls = []
     for name, duration, program in LID_ANIMATION_PRESETS[kind]:
         cell = native_ui.make_stack(orientation="vertical", spacing=2.0)
         view = _mini_led_view(96.0, 20.0)
-        view.setProgram_startedAt_(program + "\nrepeat", time.monotonic())
+        view.setProgram_startedAt_(
+            _lid_preset_preview_program(target, program), time.monotonic()
+        )
         view.lid_preset_kind = kind
         view.lid_preset_name = name
         recognizer = NSClickGestureRecognizer.alloc().initWithTarget_action_(
             target, "selectLidPresetThumb:"
         )
         view.addGestureRecognizer_(recognizer)
-        cell.addArrangedSubview_(view)
+        selected = program.strip() == current_normalized
+        choice = native_ui.make_preview_choice(
+            view,
+            target,
+            "selectLidPresetThumb:",
+            accessibility_label=f"{name}, {duration:g} seconds",
+            accessibility_help=(
+                f"Select the {name} lid animation. Press Space to apply and preview it."
+            ),
+            selected=selected,
+        )
+        choice_controls.append(choice)
+        cell.addArrangedSubview_(choice)
         label = native_ui.make_label(name, secondary=True, size=10.0)
         cell.addArrangedSubview_(label)
         row.addArrangedSubview_(cell)
         thumbs[(kind, name)] = view
         view.setToolTip_(f"{name} \u00b7 {duration:g}s")
-        if program.strip() == current_normalized:
+        if selected:
             layer = view.layer()
             if layer is not None:
                 layer.setBorderWidth_(2.0)
                 layer.setBorderColor_(NSColor.controlAccentColor().CGColor())
     row.addArrangedSubview_(native_ui.make_hspacer())
+    group_label = {
+        LID_ANIMATION_CLOSED: "Lid closed presets",
+        LID_ANIMATION_CLOSED_ACTIVE: "Lid closed while active presets",
+        LID_ANIMATION_OPEN: "Lid open presets",
+        LID_ANIMATION_OPEN_ACTIVE: "Lid open while active presets",
+    }.get(kind, "Lid animation presets")
+    native_ui.configure_choice_group(
+        row,
+        choice_controls,
+        accessibility_label=group_label,
+        accessibility_help="Use Tab to move between looks and Space to select one.",
+    )
     return row
 
 
 def _add_studio_card(target: StatusBarController, stack) -> None:
 
-    # The Studio: write any LED program by hand, preview it on every
-    # surface, and it's saved as yours. The DSL reference lives in
-    # LEDS_FORMAT.md; the lid animations below use the same language.
+    # Studio and lid editors share the LEDS_FORMAT.md language.
     studio_outer, studio_inner = native_ui.make_card("Studio")
     studio_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
@@ -3296,14 +3026,15 @@ def _add_studio_card(target: StatusBarController, stack) -> None:
     studio_scroll, studio_editor = native_ui.make_text_editor(
         target.settings.studio_program or "#00E5FF 800ms pulse\noff 300ms cosine\nrepeat",
         height=110.0,
+        accessibility_label="Studio LED program",
+        accessibility_help=(
+            "Edit the LED program. Each line is a color or off command with a duration "
+            "and easing. Use repeat to loop it."
+        ),
     )
     studio_inner.addArrangedSubview_(studio_scroll)
     target.studio_editor = studio_editor
-    # Live validation, in sentences. What this replaces was a single
-    # message that appeared only when you pressed a button and said
-    # "syntax at line 2, column 7" — the firmware parser's vocabulary,
-    # not a person's. These name the STEP and the fix, and they update
-    # as you type because the checker is pure and never touches hardware.
+    # Pure validation updates as the user types and never touches hardware.
     problem_label = native_ui.make_wrapping_label(
         "",
         secondary=True,
@@ -3317,6 +3048,15 @@ def _add_studio_card(target: StatusBarController, stack) -> None:
     except Exception:
         pass
     target.refresh_studio_problem_label()
+    studio_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Use Tab to move from the editor to Preview, Stop, and library controls. "
+            "Validation appears immediately below the editor.",
+            secondary=True,
+            size=11.0,
+            max_width=520.0,
+        )
+    )
     studio_buttons = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     studio_buttons.addArrangedSubview_(
         native_ui.make_button("Preview on Everything", target, "previewStudioProgram:")
@@ -3332,24 +3072,39 @@ def _add_studio_card(target: StatusBarController, stack) -> None:
     studio_inner.addArrangedSubview_(studio_buttons)
     library_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     save_name = native_ui.make_field("", target=target, action="saveStudioLook:")
+    native_ui.set_accessibility_metadata(
+        save_name,
+        label="Saved look name",
+        help_text="Enter a name for this LED program before choosing Save Look.",
+    )
     native_ui.constrain_width(save_name, 140.0)
     library_row.addArrangedSubview_(save_name)
     library_row.addArrangedSubview_(
         native_ui.make_button("Save Look", target, "saveStudioLook:")
     )
     library_popup = native_ui.make_popup_button(target, "loadStudioLook:")
+    native_ui.set_accessibility_metadata(
+        library_popup,
+        label="Saved looks",
+        help_text="Choose a saved LED program to load into the Studio editor.",
+    )
     library_row.addArrangedSubview_(library_popup)
-    library_row.addArrangedSubview_(
-        native_ui.make_button("Rename", target, "renameStudioLook:")
-    )
-    library_row.addArrangedSubview_(
-        native_ui.make_button("Delete", target, "deleteStudioLook:")
-    )
-    library_row.addArrangedSubview_(
-        native_ui.make_button("Burn as Power-Up", target, "burnStudioLookAsPowerUp:")
-    )
     library_row.addArrangedSubview_(native_ui.make_hspacer())
     studio_inner.addArrangedSubview_(library_row)
+    library_actions = native_ui.make_stack(
+        orientation="horizontal", spacing=native_ui.SPACE_S
+    )
+    library_actions.addArrangedSubview_(
+        native_ui.make_button("Rename", target, "renameStudioLook:")
+    )
+    library_actions.addArrangedSubview_(
+        native_ui.make_button("Delete", target, "deleteStudioLook:")
+    )
+    library_actions.addArrangedSubview_(
+        native_ui.make_button("Burn as Power-Up", target, "burnStudioLookAsPowerUp:")
+    )
+    library_actions.addArrangedSubview_(native_ui.make_hspacer())
+    studio_inner.addArrangedSubview_(library_actions)
     target.studio_save_name_field = save_name
     target.studio_library_popup = library_popup
     # Fill from the bounded private library, not from settings.json --
@@ -3370,7 +3125,8 @@ def _build_lid_animations_pane(target: StatusBarController):
     closed_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "What the lights do the moment you close the lid. Pick a "
-            "look, or edit the program below it.",
+            "look, or edit the program below it. Use Tab to move between "
+            "looks, then press Space to select one.",
             secondary=True,
             size=11.0,
             max_width=560.0,
@@ -3404,7 +3160,13 @@ def _build_lid_animations_pane(target: StatusBarController):
     closed_duration = native_ui.make_field("", target=target, action="saveLidAnimations:")
     native_ui.constrain_width(closed_duration, 60.0)
     closed_inner.addArrangedSubview_(native_ui.make_row("Duration (sec)", closed_duration))
-    closed_scroll, closed_program = native_ui.make_text_editor("")
+    closed_scroll, closed_program = native_ui.make_text_editor(
+        "",
+        accessibility_label="Closed lid animation program",
+        accessibility_help=(
+            "Edit the program played when the lid closes. Changes apply when editing ends."
+        ),
+    )
     # Programs commit when editing ends (see textDidEndEditing_), same
     # instant-apply contract as every field — no Save button.
     closed_program.setDelegate_(target)
@@ -3419,7 +3181,8 @@ def _build_lid_animations_pane(target: StatusBarController):
     open_outer, open_inner = native_ui.make_card("Lid Open")
     open_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
-            "The greeting when you open it back up.",
+            "The greeting when you open it back up. Use Tab to move between "
+            "looks, then press Space to select one.",
             secondary=True,
             size=11.0,
             max_width=560.0,
@@ -3452,7 +3215,13 @@ def _build_lid_animations_pane(target: StatusBarController):
     open_duration = native_ui.make_field("", target=target, action="saveLidAnimations:")
     native_ui.constrain_width(open_duration, 60.0)
     open_inner.addArrangedSubview_(native_ui.make_row("Duration (sec)", open_duration))
-    open_scroll, open_program = native_ui.make_text_editor("")
+    open_scroll, open_program = native_ui.make_text_editor(
+        "",
+        accessibility_label="Open lid animation program",
+        accessibility_help=(
+            "Edit the program played when the lid opens. Changes apply when editing ends."
+        ),
+    )
     open_program.setDelegate_(target)
     open_inner.addArrangedSubview_(open_scroll)
     open_buttons = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
@@ -3507,7 +3276,7 @@ def build_settings_window(target: StatusBarController) -> NSWindow:
     window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
         ((0, 0), (width, height)), style, NSBackingStoreBuffered, False,
     )
-    window.setTitle_("JR-BAR Settings: Profile")
+    window.setTitle_(f"{PRODUCT_DISPLAY_NAME} Settings: Profile")
     window.setDelegate_(target)
     window.setReleasedWhenClosed_(False)
     window.center()
@@ -3624,7 +3393,7 @@ def _build_settings_pane(target: StatusBarController, key: str):
     if key == "extras":
         return _build_extras_pane(target)
     if key == "focus":
-        return _build_focus_pane(target)
+        return build_dnd_settings_pane(target)
     if key == "power":
         return _build_power_pane(target)
     if key == "animations":
@@ -3816,16 +3585,20 @@ class SidePulseStudioActions(NSObject):
     def selectProviderAnimation_(self, sender):
         item = sender.selectedItem() if sender is not None else None
         payload = item.representedObject() if item is not None else None
-        if not payload:
-            return
-        self.apply_provider_animation(payload.get("provider"), payload.get("motion"))
+        self.apply_provider_animation(payload)
 
     @objc.python_method
-    def apply_provider_animation(self, provider: str, motion: str) -> bool:
-        if not provider or motion not in colors_module.PROVIDER_ANIMATION_CHOICES:
-            return False
+    def apply_provider_animation(self, provider: object, motion: object = None) -> bool:
+        payload = (
+            provider
+            if isinstance(provider, dict) and motion is None
+            else {"provider": provider, "motion": motion}
+        )
         controller = self.controller
-        colors = controller.settings.colors.with_agent_animation(provider, motion)
+        plan = plan_provider_animation_selection(controller.settings.colors, payload)
+        if plan.disposition is not EffectSelectionDisposition.APPLY:
+            return False
+        colors = plan.colors
         controller.settings = controller.settings.with_colors(colors)
         save_settings(controller.settings)
         self.preview_session.commit(colors)
@@ -3835,8 +3608,8 @@ class SidePulseStudioActions(NSObject):
             controller.push_colors_preview_to_device()
         controller.refresh_(None)
         controller.set_settings_message(
-            f"{colors_module.provider_color_row(provider, colors).label}: "
-            f"{colors_module.PROVIDER_ANIMATION_LABELS.get(motion, motion)}."
+            f"{colors_module.provider_color_row(plan.provider, colors).label}: "
+            f"{colors_module.PROVIDER_ANIMATION_LABELS.get(plan.value, plan.value)}."
         )
         return True
 
@@ -4086,7 +3859,7 @@ class _StudioRowSync:
             return
         popup = self.actions.animation_popups.get(provider)
         if popup is not None:
-            select_popup_item(popup, "motion", row.animation)
+            select_effect_popup_item(popup, PROVIDER_ANIMATION_OPTIONS, row.animation)
         thumb = self.actions.animation_thumbs.get(provider)
         if thumb is not None:
             thumb.setProgram_(_provider_animation_thumb_program(self.target, row))
@@ -4198,6 +3971,8 @@ def _identity_view(row):
     provider = getattr(row, "provider", "")
     if provider:
         try:
+            from .status_bar_legacy import provider_icon_for_provider
+
             icon_image = provider_icon_for_provider(provider)
         except Exception:
             icon_image = None
@@ -4362,12 +4137,12 @@ def _build_provider_animation_row(row, target, actions, hex_labels):
 
     controls = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
     popup = native_ui.make_popup_button(actions, "selectProviderAnimation:")
-    for motion in colors_module.PROVIDER_ANIMATION_CHOICES:
-        popup.addItemWithTitle_(colors_module.PROVIDER_ANIMATION_LABELS[motion])
+    for option in PROVIDER_ANIMATION_OPTIONS:
+        popup.addItemWithTitle_(option.label)
         item = popup.lastItem()
-        item.setRepresentedObject_({"provider": row.provider, "motion": motion})
-        item.setToolTip_(colors_module.PROVIDER_ANIMATION_DESCRIPTIONS[motion])
-    select_popup_item(popup, "motion", row.animation)
+        item.setRepresentedObject_({"provider": row.provider, "motion": option.value})
+        item.setToolTip_(option.description)
+    select_effect_popup_item(popup, PROVIDER_ANIMATION_OPTIONS, row.animation)
     actions.animation_popups[row.provider] = popup
     controls.addArrangedSubview_(popup)
 
@@ -4507,7 +4282,7 @@ def _build_studio_colors_section(target, actions, swatches, hex_labels):
     mode_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "What each state looks like, whoever is in it. Default is the "
-            "color SidePulse ships for that state.",
+            f"color {PRODUCT_DISPLAY_NAME} ships for that state.",
             secondary=True,
             size=11.0,
             max_width=560.0,
@@ -4592,7 +4367,9 @@ def _build_studio_animations_section(target, actions, hex_labels):
     anim_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
             "How each state moves, whoever is in it. Every choice is named "
-            "under its thumbnail; hover one to try it on the Screen Bar.",
+            "under its thumbnail. Use Tab and Space to choose, or hover one "
+            "to try it on the Screen Bar. Reduce Motion keeps these choices "
+            "steady without changing what is selected.",
             secondary=True,
             size=11.0,
             max_width=560.0,
@@ -4603,6 +4380,7 @@ def _build_studio_animations_section(target, actions, hex_labels):
         thumb_row = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
         thumb_row.setAlignment_(NSLayoutAttributeTop)
         thumbs: dict[str, object] = {}
+        choice_controls = []
         for style in ANIMATION_STYLE_CHOICES:
             style_name = ANIMATION_STYLE_DISPLAY_LABELS.get(style, style.title())
             thumb = _mini_led_view(*SIGNAL_THUMB_SIZE)
@@ -4614,14 +4392,24 @@ def _build_studio_animations_section(target, actions, hex_labels):
                 target, "selectModeAnimationThumb:"
             )
             thumb.addGestureRecognizer_(recognizer)
+            choice = native_ui.make_preview_choice(
+                thumb,
+                target,
+                "selectModeAnimationThumb:",
+                accessibility_label=(
+                    f"{MODE_COLOR_DISPLAY_LABELS[key]}, {style_name} animation"
+                ),
+                accessibility_help=(
+                    f"Select {style_name} for {MODE_COLOR_DISPLAY_LABELS[key]}. "
+                    "Press Space to apply it."
+                ),
+                selected=style == target.settings.colors.animation_style(key),
+            )
+            choice_controls.append(choice)
             thumbs[style] = thumb
-            # A NAME under every one, and a hover on every one. These four
-            # thumbnails were identified by setToolTip_ alone and told apart
-            # only by position — the exact failure ("a colour square with no
-            # word attached is a guess") that the Studio's own header comment
-            # claims to have ended, three cards above this one.
+            # Keep the visible caption and hover preview beside the native choice.
             hover_area = native_ui.make_hover_area(
-                thumb, {"key": key, "style": style}
+                choice, {"key": key, "style": style}
             )
             hover_area.hover_enter = actions.hover_mode_animation
             hover_area.hover_exit = actions.hover_end
@@ -4633,6 +4421,14 @@ def _build_studio_animations_section(target, actions, hex_labels):
             column.addArrangedSubview_(caption)
             thumb.studio_caption = caption
             thumb_row.addArrangedSubview_(column)
+        native_ui.configure_choice_group(
+            thumb_row,
+            choice_controls,
+            accessibility_label=f"{MODE_COLOR_DISPLAY_LABELS[key]} animations",
+            accessibility_help=(
+                "Use Tab to move between animations and Space to select one."
+            ),
+        )
         _apply_thumb_selection(thumbs, target.settings.colors.animation_style(key))
         animation_thumbs[key] = thumbs
         anim_inner.addArrangedSubview_(

@@ -16,6 +16,7 @@ class ResetEvent:
     lane_id: str
     label: str
     occurred_at: float
+    source_instance_id: str = "default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +26,7 @@ class ThresholdCrossing:
     label: str
     remaining_percent: float
     threshold_percent: float
+    source_instance_id: str = "default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,18 +42,30 @@ class UsageTotals:
 
 def _snapshot_map(
     snapshots: tuple[ProviderUsageSnapshot, ...],
-) -> dict[str, ProviderUsageSnapshot]:
-    return {snapshot.provider_id: snapshot for snapshot in snapshots}
+) -> dict[tuple[str, str], ProviderUsageSnapshot]:
+    return {snapshot.identity: snapshot for snapshot in snapshots}
 
 
 def _lane_map(snapshot: ProviderUsageSnapshot) -> dict[str, UsageLane]:
     return {lane.lane_id: lane for lane in snapshot.lanes}
 
 
-def _event_id(provider_id: str, lane_id: str, old_reset_at: float) -> str:
-    material = f"{provider_id}\0{lane_id}\0{old_reset_at:.6f}".encode()
+def _event_id(
+    provider_id: str,
+    source_instance_id: str,
+    lane_id: str,
+    old_reset_at: float,
+) -> str:
+    material = (
+        f"{provider_id}\0{source_instance_id}\0{lane_id}\0{old_reset_at:.6f}"
+    ).encode()
     digest = hashlib.sha256(material).hexdigest()[:24]
-    return f"{provider_id}:{lane_id}:{digest}"
+    prefix = (
+        f"{provider_id}:{lane_id}"
+        if source_instance_id == "default"
+        else f"{provider_id}:{source_instance_id}:{lane_id}"
+    )
+    return f"{prefix}:{digest}"
 
 
 def merged_edge_baseline(previous, current):
@@ -71,16 +85,16 @@ def merged_edge_baseline(previous, current):
     before = _snapshot_map(previous.snapshots)
     kept = []
     for snapshot in current.snapshots:
-        held = before.get(snapshot.provider_id)
+        held = before.get(snapshot.identity)
         if snapshot.state in comparable or held is None:
             kept.append(snapshot)
         else:
             kept.append(held)
-    current_ids = {snapshot.provider_id for snapshot in current.snapshots}
+    current_ids = {snapshot.identity for snapshot in current.snapshots}
     kept.extend(
         snapshot
-        for provider_id, snapshot in before.items()
-        if provider_id not in current_ids
+        for identity, snapshot in before.items()
+        if identity not in current_ids
     )
     return dataclass_replace(current, snapshots=tuple(kept))
 
@@ -96,7 +110,7 @@ def detect_reset_events(
     for after in current:
         if after.state is not ProviderSourceState.READY:
             continue
-        before = before_by_provider.get(after.provider_id)
+        before = before_by_provider.get(after.identity)
         if before is None or before.state not in {
             ProviderSourceState.READY,
             ProviderSourceState.STALE,
@@ -135,6 +149,7 @@ def detect_reset_events(
                 continue
             event_id = _event_id(
                 after.provider_id,
+                after.source_instance_id,
                 lane_after.lane_id,
                 lane_before.reset_at,
             )
@@ -147,6 +162,7 @@ def detect_reset_events(
                     lane_after.lane_id,
                     f"{lane_after.label} reset",
                     after.observed_at,
+                    after.source_instance_id,
                 )
             )
     return tuple(events)
@@ -155,14 +171,17 @@ def detect_reset_events(
 def threshold_crossings(
     previous: tuple[ProviderUsageSnapshot, ...],
     current: tuple[ProviderUsageSnapshot, ...],
-    thresholds: dict[str, float],
+    thresholds: dict[object, float],
 ) -> tuple[ThresholdCrossing, ...]:
     before_by_provider = _snapshot_map(previous)
     crossings: list[ThresholdCrossing] = []
     for after in current:
         if after.state is not ProviderSourceState.READY:
             continue
-        threshold = thresholds.get(after.provider_id)
+        threshold = thresholds.get(
+            after.identity,
+            thresholds.get(after.provider_id),
+        )
         if (
             isinstance(threshold, bool)
             or not isinstance(threshold, (int, float))
@@ -170,7 +189,7 @@ def threshold_crossings(
             or not 0.0 <= float(threshold) <= 100.0
         ):
             continue
-        before = before_by_provider.get(after.provider_id)
+        before = before_by_provider.get(after.identity)
         if before is None:
             continue
         before_lanes = _lane_map(before)
@@ -193,6 +212,7 @@ def threshold_crossings(
                     lane_after.label,
                     lane_after.remaining_percent,
                     float(threshold),
+                    after.source_instance_id,
                 )
             )
     return tuple(crossings)

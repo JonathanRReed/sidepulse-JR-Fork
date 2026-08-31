@@ -34,6 +34,14 @@ def package_version() -> str:
     raise RuntimeError("sidepulse.__version__ is missing or not a string literal")
 
 
+def changelog_has_release(text: str, version: str) -> bool:
+    heading = re.compile(
+        rf"^##[ \t]+{re.escape(version)}(?:(?:[ \t]*:[ \t]*|[ \t]+)[^\r\n]+)?[ \t]*$",
+        re.MULTILINE,
+    )
+    return heading.search(text) is not None
+
+
 def validate(tag: str | None = None) -> str:
     project = pyproject_version()
     package = package_version()
@@ -41,7 +49,9 @@ def validate(tag: str | None = None) -> str:
         raise RuntimeError(f"version mismatch: pyproject={project!r}, package={package!r}")
     if tag is not None and tag != f"v{project}":
         raise RuntimeError(f"tag {tag!r} must equal v{project}")
-    if not CHANGELOG.is_file() or f"## {project}\n" not in CHANGELOG.read_text(encoding="utf-8"):
+    if not CHANGELOG.is_file() or not changelog_has_release(
+        CHANGELOG.read_text(encoding="utf-8"), project
+    ):
         raise RuntimeError(f"CHANGELOG.md has no release section for {project}")
     return project
 

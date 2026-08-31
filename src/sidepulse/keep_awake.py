@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .device_writer import KNOWN_LED_FILE_NAMES
 from .models import AgentMode
+from .power_policy import configure_caffeinate_display_assertion
 
 AWAKE_GRACE_SECONDS = 300.0
 SD_STATUS_READ_SECONDS = 60.0
@@ -52,6 +53,7 @@ class KeepAwakeController:
         status_reader: Callable[[Path], None] | None = None,
         status_read_async: bool = True,
         watch_current_process: bool = True,
+        keep_display_awake: bool = False,
     ) -> None:
         self.enabled = enabled
         self.grace_seconds = grace_seconds
@@ -61,6 +63,7 @@ class KeepAwakeController:
         self.status_reader = status_reader or touch_keepalive_file
         self.status_read_async = status_read_async
         self.watch_current_process = watch_current_process
+        self.keep_display_awake = bool(keep_display_awake)
         self.process = None
         self.last_mode: AgentMode | None = None
         self.holding_requested = False
@@ -88,6 +91,17 @@ class KeepAwakeController:
         once at construction, so changing it in Settings takes effect on
         the very next tick instead of needing a restart."""
         self.grace_seconds = max(0.0, float(seconds))
+
+    def set_keep_display_awake(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if self.keep_display_awake == enabled:
+            return
+        self.keep_display_awake = enabled
+        was_running = self.process_running()
+        if was_running:
+            self._terminate_process()
+            if self.enabled and self.holding_requested:
+                self.ensure_awake()
 
     def update(
         self,
@@ -150,6 +164,9 @@ class KeepAwakeController:
             self.last_error = str(exc)
 
     def release(self) -> None:
+        self._terminate_process()
+
+    def _terminate_process(self) -> None:
         process = self.process
         self.process = None
         if process is None:
@@ -194,7 +211,12 @@ class KeepAwakeController:
         return self._run_status_reader(status_path)
 
     def caffeinate_command(self) -> list[str]:
-        command = list(self.command)
+        command = list(
+            configure_caffeinate_display_assertion(
+                self.command,
+                keep_display_awake=self.keep_display_awake,
+            )
+        )
         if self.watch_current_process:
             command.extend(["-w", str(os.getpid())])
         return command
@@ -220,7 +242,11 @@ class KeepAwakeController:
             remaining = int(self.grace_until_monotonic - current)
             return f"Keep awake grace: {format_duration(remaining)}"
         if self.process_running():
-            return "Keep awake active"
+            return (
+                "Keep awake active, display held awake"
+                if self.keep_display_awake
+                else "Keep awake active, display may sleep"
+            )
         return "Keep awake standby"
 
 

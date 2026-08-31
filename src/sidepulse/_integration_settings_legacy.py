@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .private_io import atomic_private_write, read_private_text
+from .product_identity import PRODUCT_DISPLAY_NAME
 
 INTEGRATION_SETTINGS_SCHEMA_VERSION = 2
 INTEGRATION_SETTINGS_MAX_BYTES = 64 * 1024
@@ -234,7 +235,7 @@ def save_integration_settings(
     target = (path or default_integration_settings_path()).expanduser().absolute()
     if loaded is not None and loaded.compatibility.read_only:
         raise IntegrationSettingsWriteRefusedError(
-            "integration settings were written by a newer SidePulse version"
+            f"integration settings were written by a newer {PRODUCT_DISPLAY_NAME} version"
         )
 
     current: dict[str, object] = {}
@@ -244,7 +245,7 @@ def save_integration_settings(
         current_digest = _digest(current)
         if _schema_version(current) > INTEGRATION_SETTINGS_SCHEMA_VERSION:
             raise IntegrationSettingsWriteRefusedError(
-                "integration settings were written by a newer SidePulse version"
+                f"integration settings were written by a newer {PRODUCT_DISPLAY_NAME} version"
             )
     except FileNotFoundError:
         pass

@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest a useful improvement to JR Bar.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, tokens, private prompts, transcripts, account identifiers, private paths, or personal data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What problem would this solve, and who would benefit?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the behavior you would like, including relevant states or surfaces.
+    validations:
+      required: true
+  - type: textarea
+    id: considerations
+    attributes:
+      label: Accessibility, privacy, or safety considerations
+      description: Note any reduced-motion, brightness, data-minimization, or other constraints that should guide the design.

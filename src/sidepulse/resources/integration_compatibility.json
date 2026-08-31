@@ -8,7 +8,8 @@
       "protocolFingerprint": "sha256:7bd830739f7f9c6bd84b5b909857f7de2cd79aac1ec512f96a5fc6564c0da010",
       "sourceCommit": "bab4b6f02b8bdaf15fd32636a97f69ff657cec50",
       "fixtureVersion": 1,
-      "connectionMode": "sqlite-readonly-v1"
+      "connectionMode": "sqlite-readonly-v1",
+      "reviewedOn": "2026-08-29"
     }
   ]
 }

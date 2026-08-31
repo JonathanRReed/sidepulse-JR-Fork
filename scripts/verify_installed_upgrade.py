@@ -10,9 +10,21 @@ import plistlib
 import subprocess
 from pathlib import Path
 
+try:
+    from scripts import release_evidence
+except ImportError:  # Direct execution adds scripts/, not the repository root.
+    import release_evidence  # type: ignore[no-redef]
+
 EXPECTED_BUNDLE_IDENTIFIER = "io.sidepulse.app"
 EXPECTED_LAUNCH_AGENT_LABEL = "io.sidepulse.agentstatus"
 COMMAND_TIMEOUT_SECONDS = 30
+
+
+def require_monotonic_upgrade(previous_version: str, candidate_version: str) -> None:
+    try:
+        release_evidence.require_strict_version_upgrade(previous_version, candidate_version)
+    except release_evidence.EvidenceError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _json_object(path: Path) -> dict[str, object]:
@@ -48,9 +60,7 @@ def _team_identifier(app: Path) -> str:
 
 def _preserved(before: dict[str, object], after: dict[str, object]) -> bool:
     return all(
-        key == "settings_schema_version"
-        or (key in after and after[key] == value)
-        for key, value in before.items()
+        key == "settings_schema_version" or (key in after and after[key] == value) for key, value in before.items()
     )
 
 
@@ -103,6 +113,11 @@ def main() -> int:
     parser.add_argument("--before-settings", type=Path, required=True)
     parser.add_argument("--settings", type=Path, required=True)
     parser.add_argument("--expected-team", required=True)
+    parser.add_argument("--root", type=Path)
+    parser.add_argument("--candidate", type=Path)
+    parser.add_argument("--pkg", type=Path)
+    parser.add_argument("--receipt-dir", type=Path)
+    parser.add_argument("--baseline", type=Path)
     args = parser.parse_args()
 
     try:
@@ -125,6 +140,94 @@ def main() -> int:
             check=True,
         )
         _run_installed_smoke(args.app)
+        evidence_values = (
+            args.root,
+            args.candidate,
+            args.pkg,
+            args.receipt_dir,
+            args.baseline,
+        )
+        if any(value is not None for value in evidence_values):
+            if any(value is None for value in evidence_values):
+                raise ValueError("root, candidate, pkg, receipt-dir, and baseline are required together")
+            candidate = release_evidence.load_json_object(
+                args.candidate.resolve(strict=True),
+                label="candidate",
+            )
+            candidate_app = candidate.get("app")
+            if not isinstance(candidate_app, dict):
+                raise ValueError("candidate app record is missing")
+            baseline = release_evidence.load_json_object(
+                args.baseline.resolve(strict=True),
+                label="pre-upgrade baseline",
+            )
+            if baseline.get("schema_version") != 1:
+                raise ValueError("pre-upgrade baseline schema is unsupported")
+            if baseline.get("package_identifier") != EXPECTED_BUNDLE_IDENTIFIER:
+                raise ValueError("pre-upgrade package receipt identity changed")
+            if baseline.get("bundle_identifier") != EXPECTED_BUNDLE_IDENTIFIER:
+                raise ValueError("pre-upgrade bundle identifier changed")
+            if baseline.get("team_identifier") != args.expected_team:
+                raise ValueError("pre-upgrade signing team changed")
+            previous_version = baseline.get("version")
+            if not isinstance(previous_version, str) or not previous_version:
+                raise ValueError("pre-upgrade application version is missing")
+            candidate_version = candidate.get("version")
+            if not isinstance(candidate_version, str) or not candidate_version:
+                raise ValueError("candidate application version is missing")
+            require_monotonic_upgrade(previous_version, candidate_version)
+            before_settings_sha256 = release_evidence.sha256_file(args.before_settings)
+            if baseline.get("settings_sha256") != before_settings_sha256:
+                raise ValueError("pre-upgrade settings do not match the captured baseline")
+            previous_app_sha256 = baseline.get("app_sha256")
+            previous_receipt_sha256 = baseline.get("package_receipt_sha256")
+            for value, label in (
+                (previous_app_sha256, "pre-upgrade app"),
+                (previous_receipt_sha256, "pre-upgrade package receipt"),
+            ):
+                if not (
+                    isinstance(value, str)
+                    and len(value) == 64
+                    and all(character in "0123456789abcdef" for character in value)
+                ):
+                    raise ValueError(f"{label} digest is invalid")
+            installed_sha256 = release_evidence.sha256_tree(args.app)
+            if installed_sha256 != candidate_app.get("sha256"):
+                raise ValueError("installed app does not match the exact candidate")
+            receipt_dir = args.receipt_dir.resolve()
+            release_evidence.write_json(
+                receipt_dir / "installed-upgrade.json",
+                release_evidence.create_receipt(
+                    root=args.root,
+                    candidate=candidate,
+                    kind="installed-upgrade",
+                    tool="verify_installed_upgrade.py",
+                    input_path=args.pkg,
+                    output_text="installed upgrade verification passed",
+                    details={
+                        "installed_app_sha256": installed_sha256,
+                        "previous_version": previous_version,
+                        "previous_app_sha256": previous_app_sha256,
+                        "previous_package_receipt_sha256": previous_receipt_sha256,
+                    },
+                ),
+            )
+            release_evidence.write_json(
+                receipt_dir / "settings-preservation.json",
+                release_evidence.create_receipt(
+                    root=args.root,
+                    candidate=candidate,
+                    kind="settings-preservation",
+                    tool="verify_installed_upgrade.py",
+                    input_path=args.pkg,
+                    output_text="upgrade preserved existing JR Bar settings",
+                    details={
+                        "settings_state": "preserved",
+                        "before_settings_sha256": before_settings_sha256,
+                        "after_settings_sha256": release_evidence.sha256_file(args.settings),
+                    },
+                ),
+            )
     except (
         OSError,
         ValueError,

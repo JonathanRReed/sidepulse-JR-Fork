@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from datetime import datetime, time, timedelta, tzinfo
 from enum import Enum
 from itertools import islice
 from pathlib import Path
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .local_time_boundary import resolve_local_epoch, system_local_timezone
 from .mailbox_preferences import (
     LegacyMailboxPreference,
     MailboxPreference,
@@ -196,7 +195,7 @@ def resolve_mailbox_snooze_preset(
     zone = (
         local_timezone
         if local_timezone is not None
-        else _system_local_timezone(current_epoch)
+        else system_local_timezone(current_epoch)
     )
     try:
         current_local = datetime.fromtimestamp(current_epoch, zone)
@@ -220,7 +219,7 @@ def resolve_mailbox_snooze_preset(
             return None
         target_time = time(9, 0)
 
-    resolved = _resolve_local_epoch(target_date, target_time, zone)
+    resolved = resolve_local_epoch(target_date, target_time, zone)
     if resolved is None or resolved <= current_epoch:
         return None
     return resolved
@@ -379,63 +378,3 @@ def _valid_epoch(value: object) -> float | None:
 def _finite_sum(epoch: float, seconds: float) -> float | None:
     result = epoch + seconds
     return result if math.isfinite(result) and result > epoch else None
-
-
-def _resolve_local_epoch(
-    target_date: date,
-    target_time: time,
-    zone: tzinfo,
-) -> float | None:
-    target = datetime.combine(target_date, target_time)
-    valid = _valid_local_epochs(target, zone)
-    if valid:
-        return min(valid)
-
-    probe = target
-    for _minute in range(3 * 24 * 60):
-        probe += timedelta(minutes=1)
-        valid = _valid_local_epochs(probe, zone)
-        if not valid:
-            continue
-        previous_minute = probe - timedelta(minutes=1)
-        for second in range(60):
-            second_probe = previous_minute + timedelta(seconds=second)
-            exact = _valid_local_epochs(second_probe, zone)
-            if exact:
-                return min(exact)
-        return min(valid)
-    return None
-
-
-def _valid_local_epochs(local: datetime, zone: tzinfo) -> tuple[float, ...]:
-    epochs: set[float] = set()
-    for fold in (0, 1):
-        try:
-            aware = local.replace(tzinfo=zone, fold=fold)
-            epoch = aware.timestamp()
-            if not math.isfinite(epoch):
-                continue
-            round_trip = datetime.fromtimestamp(epoch, zone).replace(tzinfo=None)
-        except (OSError, OverflowError, TypeError, ValueError):
-            continue
-        if round_trip == local:
-            epochs.add(epoch)
-    return tuple(sorted(epochs))
-
-
-def _system_local_timezone(now: float) -> tzinfo:
-    environment_zone = os.environ.get("TZ", "").lstrip(":")
-    if environment_zone:
-        try:
-            return ZoneInfo(environment_zone)
-        except (ValueError, ZoneInfoNotFoundError):
-            pass
-    try:
-        with Path("/etc/localtime").open("rb") as stream:
-            return ZoneInfo.from_file(stream)
-    except (OSError, ValueError):
-        pass
-    try:
-        return datetime.fromtimestamp(now).astimezone().tzinfo or timezone.utc
-    except (OSError, OverflowError, ValueError):
-        return timezone.utc

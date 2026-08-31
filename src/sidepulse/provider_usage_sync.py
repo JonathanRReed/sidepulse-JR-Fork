@@ -10,7 +10,9 @@ import re
 import time
 from dataclasses import dataclass
 
+from .provider_instances import ProviderInstanceError, ProviderInstanceKey
 from .provider_usage_platform import (
+    DEFAULT_SOURCE_INSTANCE_ID,
     ProviderSourceState,
     ProviderUsageSnapshot,
     UsageLane,
@@ -41,9 +43,17 @@ class MachineUsageObservation:
     model_count: int
     estimated_cost_usd: float | None
     cache_savings_usd: float | None
+    source_instance_id: str = DEFAULT_SOURCE_INSTANCE_ID
 
     def __post_init__(self) -> None:
         provider_descriptor(self.provider_id)
+        try:
+            instance_key = ProviderInstanceKey(
+                self.provider_id,
+                self.source_instance_id,
+            )
+        except ProviderInstanceError as exc:
+            raise ValueError("invalid machine usage instance") from exc
         if (
             not isinstance(self.device_id, str)
             or _DEVICE_ID.fullmatch(self.device_id) is None
@@ -70,6 +80,15 @@ class MachineUsageObservation:
             ):
                 raise ValueError("invalid machine usage estimate")
         object.__setattr__(self, "observed_at", float(self.observed_at))
+        object.__setattr__(
+            self,
+            "source_instance_id",
+            instance_key.source_instance_id.value,
+        )
+
+    @property
+    def identity(self) -> tuple[str, str, str]:
+        return self.device_id, self.provider_id, self.source_instance_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,14 +127,11 @@ class ProviderSyncPacket:
             raise ValueError("token usage packet category is disabled")
         if any(item.device_id != self.device_id for item in self.machine_usage):
             raise ValueError("machine usage device mismatch")
-        quota_keys = tuple(
-            (item.provider_id, item.account_label or "")
-            for item in self.quota_snapshots
-        )
+        quota_keys = tuple(item.identity for item in self.quota_snapshots)
         if len(quota_keys) != len(set(quota_keys)):
             raise ValueError("duplicate quota snapshot in sync packet")
         usage_keys = tuple(
-            (item.device_id, item.provider_id)
+            item.identity
             for item in self.machine_usage
         )
         if len(usage_keys) != len(set(usage_keys)):
@@ -170,6 +186,7 @@ def _snapshot_document(snapshot: ProviderUsageSnapshot) -> dict[str, object]:
         "cache_savings_usd": snapshot.cache_savings_usd,
         "credits_remaining": snapshot.credits_remaining,
         "incident": snapshot.incident,
+        "source_instance_id": snapshot.source_instance_id,
     }
 
 
@@ -184,6 +201,7 @@ def _machine_document(item: MachineUsageObservation) -> dict[str, object]:
         "model_count": item.model_count,
         "estimated_cost_usd": item.estimated_cost_usd,
         "cache_savings_usd": item.cache_savings_usd,
+        "source_instance_id": item.source_instance_id,
     }
 
 
@@ -263,6 +281,10 @@ def _snapshot(value: object) -> ProviderUsageSnapshot:
         cache_savings_usd=value.get("cache_savings_usd"),
         credits_remaining=value.get("credits_remaining"),
         incident=value.get("incident"),
+        source_instance_id=value.get(
+            "source_instance_id",
+            DEFAULT_SOURCE_INSTANCE_ID,
+        ),
     )
 
 
@@ -279,6 +301,10 @@ def _machine(value: object) -> MachineUsageObservation:
         model_count=value.get("model_count", 0),
         estimated_cost_usd=value.get("estimated_cost_usd"),
         cache_savings_usd=value.get("cache_savings_usd"),
+        source_instance_id=value.get(
+            "source_instance_id",
+            DEFAULT_SOURCE_INSTANCE_ID,
+        ),
     )
 
 
@@ -347,15 +373,15 @@ def merge_provider_sync(
 ) -> MergedProviderSync:
     packets = (local, *remotes)
     quotas: dict[tuple[str, str], ProviderUsageSnapshot] = {}
-    machine_usage: dict[tuple[str, str], MachineUsageObservation] = {}
+    machine_usage: dict[tuple[str, str, str], MachineUsageObservation] = {}
     for packet in packets:
         for snapshot in packet.quota_snapshots:
-            key = (snapshot.provider_id, snapshot.account_label or "")
+            key = snapshot.identity
             previous = quotas.get(key)
             if previous is None or snapshot.observed_at > previous.observed_at:
                 quotas[key] = snapshot
         for observation in packet.machine_usage:
-            key = (observation.device_id, observation.provider_id)
+            key = observation.identity
             previous = machine_usage.get(key)
             if previous is None or observation.observed_at > previous.observed_at:
                 machine_usage[key] = observation
@@ -364,7 +390,7 @@ def merge_provider_sync(
     )
     usage_rows = tuple(
         machine_usage[key]
-        for key in sorted(machine_usage, key=lambda item: (item[0], item[1]))
+        for key in sorted(machine_usage, key=lambda item: (item[0], item[1], item[2]))
     )
     cost_values = tuple(
         item.estimated_cost_usd

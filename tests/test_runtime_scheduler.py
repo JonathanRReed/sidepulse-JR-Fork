@@ -18,6 +18,7 @@ from sidepulse.runtime_scheduler import (
     RuntimeWorkerDomain,
     RuntimeWorkerRegistry,
     RuntimeWorkerSnapshot,
+    RuntimeWorkPriority,
     SubmissionDisposition,
 )
 
@@ -110,17 +111,19 @@ def _command(
     *,
     deadline: float | None = None,
     payload: object | None = None,
+    priority: RuntimeWorkPriority = RuntimeWorkPriority.COALESCIBLE,
+    coalesce_key: str | None = None,
 ) -> RuntimeWorkCommand:
     effective_deadline = time.monotonic() + 10_000.0 if deadline is None else deadline
-    return RuntimeWorkCommand(domain, key, generation, effective_deadline, payload)
-
-
-def _wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        if time.monotonic() >= deadline:
-            raise AssertionError("condition did not become true")
-        time.sleep(0.001)
+    return RuntimeWorkCommand(
+        domain,
+        key,
+        generation,
+        effective_deadline,
+        payload,
+        priority,
+        coalesce_key,
+    )
 
 
 def test_timer_intents_reject_invalid_or_ambiguous_schedules() -> None:
@@ -326,6 +329,399 @@ def test_runtime_work_command_rejects_private_or_unbounded_keys() -> None:
         _command(domain, "main", 1, deadline=math.inf)
     with pytest.raises(ValueError):
         RuntimeWorkerDomain("provider_source")
+    with pytest.raises(ValueError, match="priority"):
+        RuntimeWorkCommand(domain, "main", 1, time.monotonic() + 1.0, None, 10)
+    with pytest.raises(ValueError, match="coalescing"):
+        _command(domain, "main", 1, coalesce_key="private/path")
+
+
+def test_latest_wins_worker_preserves_priority_slot_and_final_trailing_state() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    executions: list[str] = []
+    dispatched: list[Callable[[], None]] = []
+    delivered: list[str] = []
+
+    def execute(command: RuntimeWorkCommand) -> object:
+        executions.append(str(command.payload))
+        if command.payload == "blocker":
+            started.set()
+            assert release.wait(2.0)
+        return command.payload
+
+    worker = LatestWinsWorker(
+        RuntimeWorkerDomain.HARDWARE_WRITE,
+        executor=execute,
+        result_handler=lambda _command, result: delivered.append(str(result)),
+        dispatch_main=dispatched.append,
+    )
+    assert (
+        worker.submit(
+            _command(
+                RuntimeWorkerDomain.HARDWARE_WRITE,
+                "device-a",
+                1,
+                payload="blocker",
+                coalesce_key="device-a:latest",
+            )
+        )
+        is SubmissionDisposition.STARTED
+    )
+    assert started.wait(1.0)
+    assert (
+        worker.submit(
+            _command(
+                RuntimeWorkerDomain.HARDWARE_WRITE,
+                "device-a",
+                1,
+                payload="ask",
+                priority=RuntimeWorkPriority.IMPORTANT,
+                coalesce_key="device-a:semantic-attention",
+            )
+        )
+        is SubmissionDisposition.QUEUED
+    )
+    assert (
+        worker.submit(
+            _command(
+                RuntimeWorkerDomain.HARDWARE_WRITE,
+                "device-a",
+                1,
+                payload="final",
+                coalesce_key="device-a:latest",
+            )
+        )
+        is SubmissionDisposition.QUEUED
+    )
+    assert worker.snapshot().pending_count == 2
+
+    release.set()
+    assert worker.wait_idle(timeout_seconds=2.0)
+    assert worker.snapshot().completed == 3
+    assert executions == ["blocker", "ask", "final"]
+    assert len(dispatched) == 1
+    dispatched.pop()()
+    assert delivered == ["ask", "final"]
+    assert worker.close(timeout_seconds=1.0)
+
+
+def test_latest_wins_worker_replaces_only_matching_priority_slot() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    executions: list[str] = []
+    worker = LatestWinsWorker(
+        RuntimeWorkerDomain.HARDWARE_WRITE,
+        executor=lambda command: (
+            executions.append(str(command.payload)),
+            started.set() if command.payload == "blocker" else None,
+            release.wait(2.0) if command.payload == "blocker" else None,
+        )[-1],
+        result_handler=lambda _command, _result: None,
+        dispatch_main=lambda _callback: None,
+    )
+    worker.submit(
+        _command(
+            RuntimeWorkerDomain.HARDWARE_WRITE,
+            "device-a",
+            1,
+            payload="blocker",
+            coalesce_key="device-a:latest",
+        )
+    )
+    assert started.wait(1.0)
+    worker.submit(
+        _command(
+            RuntimeWorkerDomain.HARDWARE_WRITE,
+            "device-a",
+            1,
+            payload="old-ask",
+            priority=RuntimeWorkPriority.IMPORTANT,
+            coalesce_key="device-a:ask",
+        )
+    )
+    assert (
+        worker.submit(
+            _command(
+                RuntimeWorkerDomain.HARDWARE_WRITE,
+                "device-a",
+                1,
+                payload="new-ask",
+                priority=RuntimeWorkPriority.IMPORTANT,
+                coalesce_key="device-a:ask",
+            )
+        )
+        is SubmissionDisposition.REPLACED_PENDING
+    )
+    worker.submit(
+        _command(
+            RuntimeWorkerDomain.HARDWARE_WRITE,
+            "device-a",
+            1,
+            payload="final",
+            coalesce_key="device-a:latest",
+        )
+    )
+    release.set()
+    assert worker.wait_idle(timeout_seconds=2.0)
+    assert worker.snapshot().completed == 3
+    assert executions == ["blocker", "new-ask", "final"]
+    assert worker.close(timeout_seconds=1.0)
+
+
+def test_latest_wins_worker_can_discard_one_resource_prefix_before_preview() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    executions: list[str] = []
+
+    def execute(command: RuntimeWorkCommand) -> object:
+        executions.append(str(command.payload))
+        if command.payload == "blocker":
+            started.set()
+            assert release.wait(2.0)
+        return None
+
+    worker = LatestWinsWorker(
+        RuntimeWorkerDomain.HARDWARE_WRITE,
+        executor=execute,
+        result_handler=lambda _command, _result: None,
+        dispatch_main=lambda _callback: None,
+    )
+    worker.submit(
+        _command(
+            RuntimeWorkerDomain.HARDWARE_WRITE,
+            "device-a",
+            1,
+            payload="blocker",
+            coalesce_key="device-a:latest",
+        )
+    )
+    assert started.wait(1.0)
+    for identity in ("device-a:ask", "device-a:cue-123", "device-b:latest"):
+        worker.submit(
+            _command(
+                RuntimeWorkerDomain.HARDWARE_WRITE,
+                identity.split(":", 1)[0],
+                1,
+                payload=identity,
+                coalesce_key=identity,
+            )
+        )
+    assert worker.discard_pending_prefix("device-a:") == 2
+    assert worker.snapshot().pending_count == 1
+    assert worker.wait_idle(timeout_seconds=0.0) is False
+    release.set()
+    assert worker.wait_idle(timeout_seconds=2.0)
+    assert worker.snapshot().completed == 2
+    assert worker.wait_idle(timeout_seconds=1.0) is True
+    assert executions == ["blocker", "device-b:latest"]
+    assert worker.close(timeout_seconds=1.0)
+
+
+def test_latest_wins_worker_admits_urgent_work_by_evicting_one_lower_priority_slot() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    executions: list[str] = []
+
+    def execute(command: RuntimeWorkCommand) -> object:
+        executions.append(str(command.payload))
+        if command.payload == "blocker":
+            started.set()
+            assert release.wait(2.0)
+        return None
+
+    worker = LatestWinsWorker(
+        RuntimeWorkerDomain.HARDWARE_WRITE,
+        executor=execute,
+        result_handler=lambda _command, _result: None,
+        dispatch_main=lambda _callback: None,
+    )
+    worker.submit(
+        _command(
+            RuntimeWorkerDomain.HARDWARE_WRITE,
+            "running",
+            1,
+            payload="blocker",
+        )
+    )
+    assert started.wait(1.0)
+    for index in range(32):
+        assert (
+            worker.submit(
+                _command(
+                    RuntimeWorkerDomain.HARDWARE_WRITE,
+                    f"ordinary-{index}",
+                    1,
+                    payload=f"ordinary-{index}",
+                )
+            )
+            is SubmissionDisposition.QUEUED
+        )
+    assert (
+        worker.submit(
+            _command(
+                RuntimeWorkerDomain.HARDWARE_WRITE,
+                "protected",
+                1,
+                payload="protected",
+                priority=RuntimeWorkPriority.URGENT,
+            )
+        )
+        is SubmissionDisposition.QUEUED
+    )
+    assert worker.snapshot().pending_count == 32
+    assert worker.snapshot().cancelled == 1
+
+    release.set()
+    assert worker.wait_idle(timeout_seconds=2.0)
+    assert worker.snapshot().completed == 33
+    assert executions[1] == "protected"
+    assert len([value for value in executions if value.startswith("ordinary-")]) == 31
+    assert worker.close(timeout_seconds=1.0)
+
+
+def test_latest_wins_worker_refuses_lower_priority_replacement_of_protected_slot() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    executions: list[str] = []
+
+    def execute(command: RuntimeWorkCommand) -> object:
+        executions.append(str(command.payload))
+        if command.payload == "blocker":
+            started.set()
+            assert release.wait(2.0)
+        return None
+
+    worker = LatestWinsWorker(
+        RuntimeWorkerDomain.HARDWARE_WRITE,
+        executor=execute,
+        result_handler=lambda _command, _result: None,
+        dispatch_main=lambda _callback: None,
+    )
+    worker.submit(
+        _command(
+            RuntimeWorkerDomain.HARDWARE_WRITE,
+            "running",
+            1,
+            payload="blocker",
+        )
+    )
+    assert started.wait(1.0)
+    worker.submit(
+        _command(
+            RuntimeWorkerDomain.HARDWARE_WRITE,
+            "device-a",
+            1,
+            payload="protected",
+            priority=RuntimeWorkPriority.URGENT,
+            coalesce_key="device-a:signal-failure",
+        )
+    )
+    assert (
+        worker.submit(
+            _command(
+                RuntimeWorkerDomain.HARDWARE_WRITE,
+                "device-a",
+                1,
+                payload="downgrade",
+                coalesce_key="device-a:signal-failure",
+            )
+        )
+        is SubmissionDisposition.REFUSED
+    )
+    release.set()
+    assert worker.wait_idle(timeout_seconds=2.0)
+    assert worker.snapshot().completed == 2
+    assert executions == ["blocker", "protected"]
+    assert worker.close(timeout_seconds=1.0)
+
+
+def test_hardware_result_mailbox_keeps_protected_and_trailing_receipts_under_stall() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    callbacks: list[Callable[[], None]] = []
+    delivered: list[str] = []
+
+    def execute(command: RuntimeWorkCommand) -> object:
+        if command.payload == "blocker":
+            started.set()
+            assert release.wait(2.0)
+        return command.payload
+
+    worker = LatestWinsWorker(
+        RuntimeWorkerDomain.HARDWARE_WRITE,
+        executor=execute,
+        result_handler=lambda _command, result: delivered.append(str(result)),
+        dispatch_main=callbacks.append,
+    )
+    worker.submit(
+        _command(
+            RuntimeWorkerDomain.HARDWARE_WRITE,
+            "blocker",
+            1,
+            payload="blocker",
+        )
+    )
+    assert started.wait(1.0)
+    for index in range(31):
+        worker.submit(
+            _command(
+                RuntimeWorkerDomain.HARDWARE_WRITE,
+                f"important-{index}",
+                1,
+                payload=f"important-{index}",
+                priority=RuntimeWorkPriority.IMPORTANT,
+            )
+        )
+    worker.submit(
+        _command(
+            RuntimeWorkerDomain.HARDWARE_WRITE,
+            "device-a",
+            1,
+            payload="protected",
+            priority=RuntimeWorkPriority.URGENT,
+            coalesce_key="device-a:semantic-attention",
+        )
+    )
+    release.set()
+    assert worker.wait_idle(timeout_seconds=2.0)
+    assert worker.snapshot().completed == 33
+    worker.submit(
+        _command(
+            RuntimeWorkerDomain.HARDWARE_WRITE,
+            "device-a",
+            1,
+            payload="final",
+            coalesce_key="device-a:latest",
+        )
+    )
+    assert worker.wait_idle(timeout_seconds=2.0)
+    assert worker.snapshot().completed == 34
+
+    assert len(callbacks) == 1
+    callbacks.pop()()
+    assert "protected" in delivered
+    assert "final" in delivered
+    assert delivered.index("protected") < delivered.index("final")
+    assert worker.close(timeout_seconds=1.0)
+
+
+def test_latest_wins_worker_idle_wait_uses_injected_clock(monkeypatch) -> None:
+    clock = _Clock()
+    worker = LatestWinsWorker(
+        RuntimeWorkerDomain.HARDWARE_WRITE,
+        executor=lambda _command: None,
+        result_handler=lambda _command, _result: None,
+        dispatch_main=lambda _callback: None,
+        monotonic=clock,
+    )
+    monkeypatch.setattr(
+        runtime_scheduler.time,
+        "monotonic",
+        lambda: (_ for _ in ()).throw(AssertionError("global clock used")),
+    )
+
+    assert worker.wait_idle(timeout_seconds=0.0)
+    assert worker.close(timeout_seconds=0.0)
 
 
 def test_latest_wins_worker_bounds_pending_and_cancels_stale_generation() -> None:
@@ -376,7 +772,8 @@ def test_latest_wins_worker_bounds_pending_and_cancels_stale_generation() -> Non
     )
     release_one.set()
     assert started_two.wait(1.0)
-    _wait_until(lambda: worker.snapshot().completed >= 2)
+    assert worker.wait_idle(timeout_seconds=2.0)
+    assert worker.snapshot().completed >= 2
 
     assert len(dispatched) == 1
     dispatched.pop()()
@@ -435,7 +832,8 @@ def test_lid_observation_burst_has_one_os_poll_execution_and_one_latest_pending(
     ) == 1
 
     release.set()
-    _wait_until(lambda: worker.snapshot().completed == 2)
+    assert worker.wait_idle(timeout_seconds=2.0)
+    assert worker.snapshot().completed == 2
     assert executions == [1, 100]
     assert worker.close(timeout_seconds=1.0)
 
@@ -471,14 +869,16 @@ def test_latest_wins_worker_refuses_expired_and_replaces_result_mailbox() -> Non
     )
     with completed:
         assert completed.wait_for(lambda: executions == 1, timeout=1.0)
-    _wait_until(lambda: worker.snapshot().completed == 1)
+    assert worker.wait_idle(timeout_seconds=2.0)
+    assert worker.snapshot().completed == 1
     assert (
         worker.submit(_command(RuntimeWorkerDomain.WEATHER_FETCH, "weather", 2, deadline=101.0, payload="second"))
         is SubmissionDisposition.QUEUED
     )
     with completed:
         assert completed.wait_for(lambda: executions == 2, timeout=1.0)
-    _wait_until(lambda: worker.snapshot().completed == 2)
+    assert worker.wait_idle(timeout_seconds=2.0)
+    assert worker.snapshot().completed == 2
 
     snapshot = worker.snapshot()
     assert snapshot.result_count == 1
@@ -507,7 +907,8 @@ def test_latest_wins_worker_result_keys_remain_bounded_when_main_drain_is_delaye
                 payload=generation,
             )
         ) in {SubmissionDisposition.STARTED, SubmissionDisposition.QUEUED}
-        _wait_until(lambda: worker.snapshot().completed >= generation)
+        assert worker.wait_idle(timeout_seconds=2.0)
+        assert worker.snapshot().completed >= generation
 
     snapshot = worker.snapshot()
     assert len(dispatched) == 1

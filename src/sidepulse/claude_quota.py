@@ -10,10 +10,11 @@ drops anything it cannot name. Together they mean a schema change can add a
 window without inventing a lane, and can never widen what reaches a consumer.
 
 `fetch_windows` performs the actual read against the same OAuth usage endpoint
-Claude Code itself uses, presenting Claude Code's own credential. It does not
-discover that credential: obtaining one requires user consent and belongs to
-`credentials`, which never raises a Keychain dialog on a background timer.
-Called without a token this still fails closed, exactly as before.
+Claude Code itself uses, presenting a current access token. It does not
+discover, renew, or mutate that externally owned credential: obtaining one
+requires user consent and belongs to `credentials`, which never raises a
+Keychain dialog on a background timer. Called without a token this still fails
+closed, exactly as before.
 
 Errors here carry reason *codes*, never response bodies. The body can contain
 account identifiers, and these strings surface in the UI and in doctor output.
@@ -49,15 +50,7 @@ CLAUDE_REMOTE_QUOTA_NO_WINDOWS = "claude_remote_quota_no_windows"
 CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN = "claude_remote_quota_needs_sign_in"
 #: A 400/401 that is NOT invalid_grant: the request or the client was
 #: refused, which says nothing about whether the sign-in still works.
-CLAUDE_REMOTE_QUOTA_REFRESH_REJECTED = "claude_remote_quota_refresh_rejected"
-
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-#: Verified against the installed CodexBar binary (2026-08-27): the
-#: token host is platform.claude.com, NOT console.anthropic.com.
-CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-#: Claude Code's own public OAuth client (PKCE, no secret) -- the same
-#: id CodexBar uses to renew the shared sign-in.
-CLAUDE_CODE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CLAUDE_OAUTH_BETA_HEADER = "oauth-2025-04-20"
 CLAUDE_CODE_VERSION_FALLBACK = "2.1.0"
 # 10, not 30: this endpoint answers in well under a second when it
@@ -163,10 +156,9 @@ def credential_needs_sign_in(raw: object) -> bool:
     valid `refreshToken` present. Claude Code mints access tokens on demand
     rather than caching them.
 
-    Renewal is possible from here -- see `refresh_claude_payload`, which
-    does what CodexBar does: refresh with Claude Code's own public client
-    and WRITE THE ROTATED TOKENS BACK so `claude` keeps working. This
-    predicate only answers "is the stored access token usable as-is".
+    JR Bar treats this as an action for Claude Code itself. It never
+    consumes the refresh token or changes Claude Code's Keychain item.
+    This predicate only answers "is the stored access token usable as-is".
     """
     if not isinstance(raw, str) or not raw.strip():
         return False
@@ -184,63 +176,6 @@ def credential_needs_sign_in(raw: object) -> bool:
     refresh = oauth.get("refreshToken")
     has_refresh = isinstance(refresh, str) and bool(refresh.strip())
     return has_refresh and not has_access
-
-
-def refreshable_credential(raw: object) -> bool:
-    """True when the Keychain payload holds a refresh token at all."""
-    if not isinstance(raw, str) or not raw.strip():
-        return False
-    try:
-        payload = json.loads(raw)
-    except ValueError:
-        return False
-    oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
-    refresh = oauth.get("refreshToken") if isinstance(oauth, dict) else None
-    return isinstance(refresh, str) and bool(refresh.strip())
-
-
-def _oauth_error_code(body: bytes) -> str | None:
-    """The OAuth 2.0 `error` field, lowercased, or None.
-
-    Never returns the description: the body can name the account, and
-    this module's contract is reason codes only, never server prose.
-    """
-    try:
-        document = json.loads(bytes(body).decode("utf-8"))
-    except (AttributeError, UnicodeError, ValueError):
-        return None
-    if not isinstance(document, dict):
-        return None
-    code = document.get("error")
-    if isinstance(code, dict):  # {"error": {"type": ...}} shape
-        code = code.get("type")
-    return code.strip().lower() if isinstance(code, str) else None
-
-
-def refresh_token_expired(raw: object, now: float) -> bool:
-    """True when the REFRESH token itself is spent.
-
-    Claude Code stores `refreshTokenExpiresAt` (ms) beside the access
-    token. Only when that has passed is a human sign-in genuinely
-    required -- an expired ACCESS token is just renewal work
-    (2026-08-27: a live credential had 20 days of refresh validity left
-    while the app was telling the owner to sign in again).
-    """
-    if not isinstance(raw, str) or not raw.strip():
-        return True
-    try:
-        payload = json.loads(raw)
-    except ValueError:
-        return True
-    oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
-    if not isinstance(oauth, dict):
-        return True
-    value = oauth.get("refreshTokenExpiresAt")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        # Absent is not evidence of expiry -- let the server decide.
-        return False
-    seconds = float(value) / 1000.0 if float(value) > 1e11 else float(value)
-    return math.isfinite(seconds) and now >= seconds
 
 
 _REDIRECT_GUARD_CLASS = None
@@ -368,145 +303,6 @@ def request_via_apple_stack(
             pass
 
 
-def post_form_via_apple_stack(
-    url: str,
-    fields: dict[str, str],
-    *,
-    timeout: float,
-) -> tuple[int, bytes]:
-    """POST a form through NSURLSession, not urllib.
-
-    The token endpoint sits behind Cloudflare, which fingerprints the
-    client: urllib is answered with 429s and finally a 1010 ban, while
-    the same request through Apple's networking stack succeeds
-    (verified live 2026-08-27, and it is why CodexBar -- a URLSession
-    app -- never hit this wall). The app is already PyObjC, so the
-    honest fix is to use the platform's own client.
-    """
-    from urllib.parse import urlencode
-
-    return request_via_apple_stack(
-        url,
-        method="POST",
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-            "Accept": "application/json",
-        },
-        body=urlencode(fields).encode("utf-8"),
-        timeout=timeout,
-    )
-
-
-def refresh_claude_payload(
-    raw: str,
-    *,
-    now: float,
-    poster=None,
-    timeout: float = CLAUDE_USAGE_TIMEOUT_SECONDS,
-) -> tuple[str, ClaudeOAuthCredential]:
-    """Renew Claude Code's own rotating sign-in.
-
-    POSTs the stored refresh token to Anthropic's token endpoint under
-    Claude Code's own public client id and returns the REBUILT Keychain
-    payload (every unrelated field preserved) plus the new credential.
-
-    THE CONTRACT THAT KEEPS `claude` ALIVE: the refresh token rotates on
-    use. The caller MUST write the returned payload back to the Keychain
-    item -- holding the new tokens privately would strand Claude Code on
-    a dead refresh token and sign the user out of their actual tooling.
-
-    NOTE ON PRECEDENT (corrected 2026-08-27): CodexBar does NOT do this.
-    For Claude-CLI-owned credentials it DELEGATES refresh back to the
-    CLI (running `claude /status` in a PTY and watching the Keychain
-    item's stamp change), and direct-refreshes only its own credentials
-    into its own cache -- so it never writes that item. We diverge
-    deliberately: no PTY subprocess and no hard dependency on `claude`
-    being installed, at the cost of owning the write-back above. Their
-    delegated path is reported unreliable in steipete/CodexBar#1287.
-    Failures raise ClaudeQuotaUnavailableError with a reason code only.
-    """
-    try:
-        payload = json.loads(raw)
-    except ValueError:
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN) from None
-    oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
-    refresh_token = oauth.get("refreshToken") if isinstance(oauth, dict) else None
-    if not isinstance(refresh_token, str) or not refresh_token.strip():
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN)
-
-    transport = poster or post_form_via_apple_stack
-    try:
-        status, body = transport(
-            CLAUDE_OAUTH_TOKEN_URL,
-            {
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token.strip(),
-                "client_id": CLAUDE_CODE_OAUTH_CLIENT_ID,
-            },
-            timeout=timeout,
-        )
-    except ClaudeQuotaUnavailableError:
-        raise
-    except Exception:
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NETWORK) from None
-    if status in {400, 401}:
-        # ONLY invalid_grant is terminal. The same statuses also carry
-        # invalid_request / unsupported_grant_type / invalid_client --
-        # transient or client-side faults that say nothing about the
-        # sign-in. Treating every 400 as "go re-login" is what wedges a
-        # provider behind a terminal gate for an hour (CodexBar makes
-        # exactly this distinction in refreshFailureDisposition).
-        # 403 is not here either: that is Cloudflare refusing the
-        # CLIENT, not the credential.
-        if _oauth_error_code(body) == "invalid_grant":
-            raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_NEEDS_SIGN_IN)
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_REFRESH_REJECTED)
-    if status == 429:
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_RATE_LIMITED)
-    if status != 200:
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR)
-    try:
-        answer = json.loads(body.decode("utf-8"))
-    except (UnicodeError, ValueError):
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR) from None
-    access = answer.get("access_token") if isinstance(answer, dict) else None
-    if not isinstance(access, str) or not access.strip():
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR)
-    rotated = answer.get("refresh_token")
-    expires_in = answer.get("expires_in")
-    expires_at_ms = None
-    if (
-        not isinstance(expires_in, bool)
-        and isinstance(expires_in, (int, float))
-        and math.isfinite(float(expires_in))
-        and expires_in > 0
-    ):
-        expires_at_ms = int((now + float(expires_in)) * 1000.0)
-    if expires_at_ms is None:
-        # Without a lifetime we would write back the OLD expiresAt, read
-        # it as already expired next cycle, and refresh again forever --
-        # burning a refresh-token rotation every pass. Refuse instead.
-        raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_SERVER_ERROR)
-    rebuilt = dict(payload)
-    rebuilt_oauth = dict(oauth)
-    rebuilt_oauth["accessToken"] = access.strip()
-    if isinstance(rotated, str) and rotated.strip():
-        rebuilt_oauth["refreshToken"] = rotated.strip()
-    if expires_at_ms is not None:
-        rebuilt_oauth["expiresAt"] = expires_at_ms
-    rebuilt["claudeAiOauth"] = rebuilt_oauth
-    credential = ClaudeOAuthCredential(
-        access_token=access.strip(),
-        expires_at=expires_at_ms / 1000.0 if expires_at_ms is not None else None,
-        subscription_type=(
-            rebuilt_oauth.get("subscriptionType")
-            if isinstance(rebuilt_oauth.get("subscriptionType"), str)
-            else None
-        ),
-    )
-    return json.dumps(rebuilt, separators=(",", ":")), credential
-
-
 def _claude_code_user_agent() -> str:
     """Identify honestly as the client whose credential we are presenting."""
     return f"claude-code/{CLAUDE_CODE_VERSION_FALLBACK}"
@@ -536,9 +332,8 @@ def fetch_windows(
     if not isinstance(access_token, str) or not access_token.strip():
         raise ClaudeQuotaUnavailableError(CLAUDE_REMOTE_QUOTA_UNSUPPORTED)
 
-    # Same guarded transport as the token request: this call carries a
-    # bearer token, so it must not follow a redirect to another host,
-    # and it must not ride the client Cloudflare fingerprints.
+    # This call carries a bearer token, so it must not follow a redirect
+    # to another host, and it must use the platform network stack.
     transport = requester or request_via_apple_stack
     try:
         status, body = transport(

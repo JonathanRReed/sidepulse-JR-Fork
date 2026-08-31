@@ -146,7 +146,9 @@ class _PrimarySeed:
     timing_uncertain: bool
     _mailbox_order: int
     _shelf: MailboxSectionKind | None
+    _approved_search_texts: tuple[str, ...]
     _worker_seeds: tuple[_WorkerSeed, ...]
+    _worker_rows: tuple[AgentBrowserDocument, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +178,12 @@ class _AgentBrowserDocuments(tuple):
     ):
         instance = super().__new__(cls, documents)
         instance._primary_catalog = primary_catalog
+        instance._active_count = sum(
+            seed._shelf in {MailboxSectionKind.NEEDS_YOU, MailboxSectionKind.IN_PROGRESS}
+            for seed in primary_catalog
+        )
+        instance._family_by_key = {seed.work_key: seed for seed in primary_catalog}
+        instance._query_cache = {}
         return instance
 
 
@@ -331,7 +339,7 @@ def build_agent_browser_documents(
                 age_stale=_age_stale(work, now),
             )
         )
-    catalog = tuple(primary_seeds)
+    catalog = tuple(_with_worker_rows(seed) for seed in primary_seeds)
     return _AgentBrowserDocuments(
         tuple(_document_from_primary_seed(seed) for seed in catalog[:MAX_AGENT_BROWSER_DOCUMENTS]),
         catalog,
@@ -358,19 +366,27 @@ def project_agent_browser(
     if query.family_key is not None and type(query.family_key) is not WorkKey:
         raise ValueError("invalid agent browser family")
 
-    primary_catalog = _canonical_primary_catalog(documents)
-    total_count = len(primary_catalog)
-    active_count = sum(
-        seed._shelf in {MailboxSectionKind.NEEDS_YOU, MailboxSectionKind.IN_PROGRESS}
-        for seed in primary_catalog
-    )
+    if type(documents) is _AgentBrowserDocuments:
+        primary_catalog = documents._primary_catalog
+        total_count = len(primary_catalog)
+        active_count = documents._active_count
+    else:
+        primary_catalog = _canonical_primary_catalog(documents)
+        total_count = len(primary_catalog)
+        active_count = sum(
+            seed._shelf in {MailboxSectionKind.NEEDS_YOU, MailboxSectionKind.IN_PROGRESS}
+            for seed in primary_catalog
+        )
     scoped: tuple[AgentBrowserDocument | _PrimarySeed, ...]
     if query.family_key is not None:
-        family = next(
-            (seed for seed in primary_catalog if seed.work_key == query.family_key),
-            None,
-        )
-        scoped = () if family is None else tuple(_primary_seed_for_worker(seed) for seed in family._worker_seeds)
+        if type(documents) is _AgentBrowserDocuments:
+            family = documents._family_by_key.get(query.family_key)
+        else:
+            family = next(
+                (seed for seed in primary_catalog if seed.work_key == query.family_key),
+                None,
+            )
+        scoped = () if family is None else family._worker_rows
     elif query.shelf is not None:
         scoped = tuple(seed for seed in primary_catalog if seed._shelf is query.shelf)
     else:
@@ -378,32 +394,44 @@ def project_agent_browser(
 
     rejected_query = type(query.text) is not str or _has_control_character(query.text)
     normalized_query = normalize_agent_query(query.text)
+    cache_key = None
+    if (
+        type(documents) is _AgentBrowserDocuments
+        and not rejected_query
+        and type(max_results) is int
+    ):
+        cache_key = (query.family_key, query.shelf, normalized_query)
+        cached = documents._query_cache.get(cache_key)
+        if type(cached) is tuple:
+            ranked = cached
+        else:
+            ranked = None
+    else:
+        ranked = None
     if rejected_query:
         ranked: tuple[AgentBrowserDocument | _PrimarySeed, ...] = ()
+    elif ranked is not None:
+        pass
     elif not normalized_query:
-        ranked = tuple(
-            sorted(
-                scoped,
-                key=lambda document: (
-                    document._mailbox_order,
-                    _work_key_sort_key(document.work_key),
-                ),
-            )
-        )
+        ranked = scoped
     else:
-        matches = []
+        buckets: tuple[
+            list[AgentBrowserDocument | _PrimarySeed],
+            list[AgentBrowserDocument | _PrimarySeed],
+            list[AgentBrowserDocument | _PrimarySeed],
+            list[AgentBrowserDocument | _PrimarySeed],
+            list[AgentBrowserDocument | _PrimarySeed],
+        ] = ([], [], [], [], [])
         for document in scoped:
             tier = _document_match_tier(document, normalized_query)
             if tier is not None:
-                matches.append(
-                    (
-                        tier,
-                        document._mailbox_order,
-                        _work_key_sort_key(document.work_key),
-                        document,
-                    )
-                )
-        ranked = tuple(item[-1] for item in sorted(matches, key=lambda item: item[:-1]))
+                buckets[tier].append(document)
+        ranked = tuple(document for bucket in buckets for document in bucket)
+    if cache_key is not None and ranked is not None:
+        ranked = tuple(_materialize_primary_row(row) for row in ranked)
+        if len(documents._query_cache) >= 16:
+            documents._query_cache.clear()
+        documents._query_cache[cache_key] = ranked
 
     selected = (
         selected_work_key
@@ -596,6 +624,9 @@ def _primary_seed_for_work(
         provider_label,
         *(ApprovedSearchLabel(value, SearchLabelSource.PRODUCT_STATE) for value in state_values),
     )
+    approved_search_texts = tuple(
+        text for label in search_labels if (text := _approved_label_text(label)) is not None
+    )
     return _PrimarySeed(
         work_key=work.key,
         provider_label=provider_label,
@@ -614,7 +645,9 @@ def _primary_seed_for_work(
         timing_uncertain=timing_uncertain,
         _mailbox_order=mailbox_order,
         _shelf=shelf,
+        _approved_search_texts=approved_search_texts,
         _worker_seeds=worker_seeds,
+        _worker_rows=(),
     )
 
 
@@ -678,7 +711,11 @@ def _primary_seed_from_document(
         timing_uncertain=document.timing_uncertain,
         _mailbox_order=mailbox_order,
         _shelf=None,
+        _approved_search_texts=tuple(
+            text for label in document.search_labels if (text := _approved_label_text(label)) is not None
+        ),
         _worker_seeds=(),
+        _worker_rows=(),
     )
 
 
@@ -727,6 +764,36 @@ def _canonical_primary_catalog(
                 _work_key_sort_key(seed.work_key),
             ),
         )
+    )
+
+
+def _with_worker_rows(seed: _PrimarySeed) -> _PrimarySeed:
+    if seed._worker_rows or not seed._worker_seeds:
+        return seed
+    return _PrimarySeed(
+        work_key=seed.work_key,
+        provider_label=seed.provider_label,
+        safe_family_label=seed.safe_family_label,
+        search_labels=seed.search_labels,
+        lifecycle_label=seed.lifecycle_label,
+        actionable=seed.actionable,
+        request_phase=seed.request_phase,
+        source_freshness=seed.source_freshness,
+        worker_count=seed.worker_count,
+        pinned=seed.pinned,
+        watched=seed.watched,
+        snoozed=seed.snoozed,
+        woke=seed.woke,
+        acknowledged=seed.acknowledged,
+        timing_uncertain=seed.timing_uncertain,
+        _mailbox_order=seed._mailbox_order,
+        _shelf=seed._shelf,
+        _approved_search_texts=seed._approved_search_texts,
+        _worker_seeds=seed._worker_seeds,
+        _worker_rows=tuple(
+            _document_from_primary_seed(_primary_seed_for_worker(worker_seed))
+            for worker_seed in seed._worker_seeds
+        ),
     )
 
 
@@ -780,12 +847,16 @@ def _document_match_tier(
     document: AgentBrowserDocument | _PrimarySeed,
     query: str,
 ) -> int | None:
-    labels = (document.provider_label, *document.search_labels)
+    if type(document) is _PrimarySeed:
+        labels = document._approved_search_texts
+    else:
+        labels = tuple(
+            text for label in document.search_labels if (text := _approved_label_text(label)) is not None
+        )
     return min(
         (
             tier
-            for label in labels
-            if (text := _approved_label_text(label)) is not None
+            for text in labels
             if (tier := _match_tier(text, query)) is not None
         ),
         default=None,

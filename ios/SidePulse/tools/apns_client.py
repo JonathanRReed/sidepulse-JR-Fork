@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
-
+from product_identity import PRODUCT_DISPLAY_NAME
 
 MAX_LEDS_BYTES = 512
 MAX_LEDS_LINES = 20
@@ -254,7 +254,7 @@ async def send_leds_push(
     priority = "10" if alert else "5"
     aps: dict[str, Any] = {"content-available": 1}
     if alert:
-        aps["alert"] = {"title": "SidePulse", "body": alert}
+        aps["alert"] = {"title": PRODUCT_DISPLAY_NAME, "body": alert}
         aps["sound"] = "default"
 
     payload = {

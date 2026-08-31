@@ -50,15 +50,22 @@ per handler.
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 import objc
 
 try:
     from AppKit import (
+        NSAccessibilityRadioButtonRole,
+        NSAccessibilityRadioGroupRole,
         NSBezelStyleRounded,
         NSButton,
         NSButtonTypeSwitch,
+        NSButtonTypeToggle,
         NSClipView,
         NSColor,
+        NSControl,
+        NSFocusRingTypeExterior,
         NSFont,
         NSFontWeightSemibold,
         NSImage,
@@ -88,6 +95,7 @@ try:
         NSUserInterfaceLayoutOrientationHorizontal,
         NSUserInterfaceLayoutOrientationVertical,
         NSView,
+        NSViewWidthSizable,
         NSVisualEffectBlendingModeBehindWindow,
         NSVisualEffectMaterialContentBackground,
         NSVisualEffectMaterialSidebar,
@@ -343,6 +351,30 @@ def make_section_title(text: str) -> NSTextField:
     return label
 
 
+def set_accessibility_metadata(
+    view,
+    *,
+    label: str | None = None,
+    help_text: str | None = None,
+    role: str | None = None,
+):
+    """Attach semantic metadata to the actual AppKit element.
+
+    Visual row labels and tooltips are useful to sighted pointer users, but
+    neither gives VoiceOver a name for the control. Keeping this small helper
+    in the factory layer prevents every settings pane from inventing its own
+    partial version of the same contract.
+    """
+    if role:
+        view.setAccessibilityRole_(role)
+    if label:
+        view.setAccessibilityLabel_(label)
+    if help_text:
+        view.setAccessibilityHelp_(help_text)
+        view.setToolTip_(help_text)
+    return view
+
+
 def make_row(label_text: str, control, *, help_text: str | None = None, fill_control: bool = False) -> NSStackView:
     """A full-width "label ......... control" row in System Settings' own
     geometry: label at the leading edge (primary color -- it's the row's
@@ -374,6 +406,12 @@ def make_row(label_text: str, control, *, help_text: str | None = None, fill_con
     if help_text:
         row.setToolTip_(help_text)
         label.setToolTip_(help_text)
+    if isinstance(control, NSControl):
+        set_accessibility_metadata(
+            control,
+            label=label_text,
+            help_text=help_text,
+        )
     return row
 
 
@@ -577,7 +615,13 @@ def make_slider(
     return slider
 
 
-def make_text_editor(text: str, *, height: float = 90.0):
+def make_text_editor(
+    text: str,
+    *,
+    height: float = 90.0,
+    accessibility_label: str | None = None,
+    accessibility_help: str | None = None,
+):
     """A monospaced multi-line text editor (for LED DSL program editing)
     with a fixed height -- unlike buttons/fields/popups, NSTextView has no
     useful intrinsic height for a stack view to size it by, so this is
@@ -591,10 +635,17 @@ def make_text_editor(text: str, *, height: float = 90.0):
     text_view.setString_(text)
     text_view.setVerticallyResizable_(True)
     text_view.setHorizontallyResizable_(False)
+    text_view.setAutoresizingMask_(NSViewWidthSizable)
+    text_view.textContainer().setWidthTracksTextView_(True)
     try:
         text_view.setFont_(_NSFont.monospacedSystemFontOfSize_weight_(11.0, 0.0))
     except Exception:
         pass
+    set_accessibility_metadata(
+        text_view,
+        label=accessibility_label,
+        help_text=accessibility_help,
+    )
 
     scroll = NSScrollView.alloc().init()
     scroll.setDocumentView_(text_view)
@@ -603,6 +654,62 @@ def make_text_editor(text: str, *, height: float = 90.0):
     scroll.setTranslatesAutoresizingMaskIntoConstraints_(False)
     constrain_height(scroll, height)
     return scroll, text_view
+
+
+def make_preview_choice(
+    preview,
+    target,
+    selector: str,
+    *,
+    accessibility_label: str,
+    accessibility_help: str,
+    selected: bool = False,
+) -> NSButton:
+    """Wrap a live preview in a native keyboard and accessibility control."""
+    button = NSButton.alloc().init()
+    button.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    button.setButtonType_(NSButtonTypeToggle)
+    button.setTitle_("")
+    button.setBordered_(False)
+    button.setRefusesFirstResponder_(False)
+    button.setFocusRingType_(NSFocusRingTypeExterior)
+    button.setTarget_(target)
+    button.setAction_(selector)
+    button.setState_(1 if selected else 0)
+    set_accessibility_metadata(
+        button,
+        label=accessibility_label,
+        help_text=accessibility_help,
+        role=NSAccessibilityRadioButtonRole,
+    )
+    preview.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    preview.setAccessibilityElement_(False)
+    button.addSubview_(preview)
+    _pin_edges(preview, button)
+    button.setRepresentedObject_(preview)
+    preview.accessibility_choice_control = button
+    return button
+
+
+def configure_choice_group(
+    group,
+    choices,
+    *,
+    accessibility_label: str,
+    accessibility_help: str,
+):
+    """Name one radio-style row and give it a deterministic Tab order."""
+    ordered = tuple(choices)
+    set_accessibility_metadata(
+        group,
+        label=accessibility_label,
+        help_text=accessibility_help,
+        role=NSAccessibilityRadioGroupRole,
+    )
+    group.setAccessibilityElement_(True)
+    for current, following in pairwise(ordered):
+        current.setNextKeyView_(following)
+    return group
 
 
 class _FlippedClipView(NSClipView):

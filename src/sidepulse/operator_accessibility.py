@@ -38,6 +38,7 @@ from .presentation_policy import (
     GlanceSemantic,
     ResolvedGlance,
 )
+from .product_identity import PRODUCT_DISPLAY_NAME
 from .provider_facts import SourceFreshness, WorkKey, WorkLifecycle
 
 
@@ -321,9 +322,9 @@ def status_item_accessibility(
         details.append("Additional updates waiting")
 
     return AccessibilityText(
-        "SidePulse",
+        PRODUCT_DISPLAY_NAME,
         _bounded_join((headline, *details)),
-        "Open SidePulse status",
+        f"Open {PRODUCT_DISPLAY_NAME} status",
     )
 
 
@@ -517,9 +518,9 @@ def normalize_semantic_text_scale(value: object) -> float:
 
 def _status_fallback() -> AccessibilityText:
     return AccessibilityText(
-        "SidePulse",
+        PRODUCT_DISPLAY_NAME,
         "Status unavailable",
-        "Open SidePulse status",
+        f"Open {PRODUCT_DISPLAY_NAME} status",
     )
 
 

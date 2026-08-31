@@ -158,3 +158,23 @@ def test_declared_package_data_exists() -> None:
         assert package_dir.is_dir(), f"missing package-data package: {package}"
         for name in names:
             assert (package_dir / name).is_file(), f"missing package data: {package}/{name}"
+
+
+def test_package_builder_declares_the_reviewed_focus_status_usage() -> None:
+    source = (REPO_ROOT / "packaging" / "build_macos_pkg.sh").read_text(
+        encoding="utf-8"
+    )
+
+    description = (
+        "JR Bar uses Focus Status only when you choose Allow Focus Status, "
+        "so Do Not Disturb can follow whether a macOS Focus is active."
+    )
+    assert f'FOCUS_STATUS_USAGE_DESCRIPTION="{description}"' in source
+    assert (
+        'Add :NSFocusStatusUsageDescription string $FOCUS_STATUS_USAGE_DESCRIPTION'
+        in source
+    )
+    assert (
+        'Set :NSFocusStatusUsageDescription $FOCUS_STATUS_USAGE_DESCRIPTION'
+        in source
+    )

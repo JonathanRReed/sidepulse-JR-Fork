@@ -40,6 +40,7 @@ from .presentation_policy import (
     GlanceSemantic,
     ResolvedGlance,
 )
+from .product_identity import PRODUCT_DISPLAY_NAME
 
 PANEL_TITLE: Final = "Why Is It Doing That?"
 MENU_ITEM_TITLE: Final = "Why Is It Doing That?"
@@ -201,7 +202,7 @@ def _dotted(label: str, value: str) -> str:
 
 def _changed_line(trace: DecisionTrace) -> str:
     if trace.changed_age_seconds is None:
-        return "  Unchanged since SidePulse started."
+        return f"  Unchanged since {PRODUCT_DISPLAY_NAME} started."
     held = format_duration(trace.changed_age_seconds)
     if trace.changed_at_epoch is None:
         return f"  Unchanged for {held}."

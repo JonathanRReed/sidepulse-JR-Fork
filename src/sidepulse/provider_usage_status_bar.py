@@ -1,60 +1,101 @@
-"""Final native-provider wrapper around SidePulse's retained AppKit host."""
+"""Native-provider layer for the retained AppKit host."""
 
 from __future__ import annotations
 
-import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
-from . import settings_navigation as _settings_navigation
-from . import settings_window as _settings_window
-from . import status_bar as _host
-from .provider_browser_access import run_provider_usage_action
-from .provider_credential_store import ProviderCredentialStore
-from .provider_usage_event_store import (
-    load_seen_reset_events,
-    save_seen_reset_events,
+from .product_identity import PRODUCT_DISPLAY_NAME
+from .provider_usage_status_bar_probe import (
+    PROBE_IMPORT_MODE as _PROBE_IMPORT_MODE,
 )
-from .provider_usage_menu import menu_bar_quota_glance, project_usage_menu
-from .provider_usage_qol import (
-    detect_reset_events,
-    merged_edge_baseline,
-    threshold_crossings,
+from .provider_usage_status_bar_probe import (
+    ProbeHost as _ProbeHost,
 )
-from .provider_usage_runtime import ProviderUsageService, ProviderUsageState
-from .provider_usage_settings import load_provider_usage_settings
-from .provider_usage_store import load_provider_usage_state, save_provider_usage_state
-from .screen_bar_runtime import install_screen_bar_runtime
-from .settings_category_runtime import (
-    ensure_category,
-    install_settings_navigation,
-    refresh_native_usage_summary,
-    requested_page_for_category,
-    select_page,
-    show_category,
+from .provider_usage_status_bar_probe import (
+    ProbeLegacyShim as _ProbeLegacyShim,
 )
-from .usage_event_hooks import (
-    detect_usage_hook_events,
-    hook_path_message,
-    run_usage_hooks,
+from .provider_usage_status_bar_probe import (
+    probe_build_menu,
 )
-from .usage_menu_injection import (
-    menu_index,
-    native_usage_menu_item,
-    remove_legacy_usage_item,
-    remove_redundant_separators,
-)
-from .usage_percent_history import record_state_observations
 
-_legacy = getattr(_host, "_legacy", _host)
-install_settings_navigation(_legacy, _settings_window)
-install_screen_bar_runtime()
+if _PROBE_IMPORT_MODE:
+    _settings_navigation = None
+    _host = _ProbeHost(product_display_name=PRODUCT_DISPLAY_NAME)
+    _legacy = _ProbeLegacyShim()
+    _BaseStatusBarController = object
+    _original_build_menu = None
+else:
+    from . import settings_navigation as _settings_navigation
+    from . import status_bar as _host
+    from .provider_credential_store import ProviderCredentialStore
+    from .provider_feature_settings import (
+        ProviderPresentationSettings,
+        project_presentation_settings,
+    )
+    from .provider_usage_controller_actions import (
+        apply_provider_usage_settings_snapshot,
+        perform_provider_usage_action,
+        profile_session_action,
+        toggle_provider_menu_visibility,
+    )
+    from .provider_usage_event_store import (
+        load_seen_reset_events,
+        save_seen_reset_events,
+    )
+    from .provider_usage_menu import menu_bar_quota_glance, project_usage_menu
+    from .provider_usage_qol import (
+        detect_reset_events,
+        merged_edge_baseline,
+        threshold_crossings,
+    )
+    from .provider_usage_runtime import (
+        ProviderUsageApply,
+        ProviderUsageService,
+        ProviderUsageState,
+    )
+    from .provider_usage_settings import (
+        ProviderUsageSettings,
+        load_provider_usage_settings,
+    )
+    from .provider_usage_store import load_provider_usage_state, save_provider_usage_state
+    from .provider_usage_sync_cache import refresh_cached_merged_sync
+    from .settings_category_runtime import (
+        ensure_category,
+        refresh_native_usage_summary,
+        requested_page_for_category,
+        save_provider_instance_profile_setting,
+        select_page,
+        show_category,
+    )
+    from .sparkle_updater import (
+        BETA_CHANNEL,
+        STABLE_CHANNEL,
+        inject_software_update_submenu,
+        start_sparkle_updater,
+    )
+    from .usage_event_hooks import (
+        detect_usage_hook_events,
+        hook_path_message,
+        run_usage_hooks,
+    )
+    from .usage_menu_injection import (
+        menu_index,
+        native_usage_menu_item,
+        remove_legacy_usage_item,
+        remove_redundant_separators,
+    )
+    from .usage_percent_history import record_state_observations
 
-_BaseStatusBarController = _legacy.StatusBarController
-_original_build_menu = _legacy.build_menu
+    _legacy = getattr(_host, "_legacy", _host)
+    _BaseStatusBarController = _host.JRStatusBarController
+    _original_build_menu = _host.build_menu
 
 
 def build_menu(snapshot, state, target):
+    if _PROBE_IMPORT_MODE:
+        return probe_build_menu(snapshot, state, target)
     menu = _original_build_menu(snapshot, state, target)
     remove_legacy_usage_item(menu, target)
     native_item = native_usage_menu_item(target)
@@ -68,18 +109,29 @@ def build_menu(snapshot, state, target):
         next_item = menu.itemAtIndex_(index + 1)
         if not next_item.isSeparatorItem():
             menu.insertItem_atIndex_(_legacy.NSMenuItem.separatorItem(), index + 1)
+    inject_software_update_submenu(
+        menu,
+        target,
+        getattr(target, "_sidepulse_sparkle_updater", None),
+    )
     remove_redundant_separators(menu)
     return menu
 
 
 def _settings_category_at_row(row: int):
+    if _PROBE_IMPORT_MODE or _settings_navigation is None:
+        return None
     if 0 <= row < len(_settings_navigation.SETTINGS_CATEGORIES):
         return _settings_navigation.SETTINGS_CATEGORIES[row]
     return None
 
 
-if _BaseStatusBarController.__name__ == "JRProviderUsageStatusBarController":
-    JRProviderUsageStatusBarController = _BaseStatusBarController
+_existing_controller = globals().get("JRProviderUsageStatusBarController")
+if (
+    isinstance(_existing_controller, type)
+    and _existing_controller.__name__ == "JRProviderUsageStatusBarController"
+):
+    JRProviderUsageStatusBarController = _existing_controller
 else:
 
     class JRProviderUsageStatusBarController(_BaseStatusBarController):
@@ -141,7 +193,9 @@ else:
             self._settings_active_category = category.key
             show_category(self, category.key, requested)
             if self.settings_window is not None:
-                self.settings_window.setTitle_(f"JR-BAR Settings: {category.label}")
+                self.settings_window.setTitle_(
+                    f"{PRODUCT_DISPLAY_NAME} Settings: {category.label}"
+                )
             self.reconcile_device_runtime()
             self.reconcile_installed_agent_inventory()
             if self.current_settings_pane == "color_studio":
@@ -158,7 +212,9 @@ else:
             show_category(self, category.key, page.key)
             self._settings_active_category = category.key
             if self.settings_window is not None:
-                self.settings_window.setTitle_(f"JR-BAR Settings: {category.label}")
+                self.settings_window.setTitle_(
+                    f"{PRODUCT_DISPLAY_NAME} Settings: {category.label}"
+                )
             self.reconcile_device_runtime()
             self.reconcile_installed_agent_inventory()
             if page.key == "color_studio":
@@ -185,7 +241,9 @@ else:
                 show_category(self, category.key, requested)
                 self._settings_active_category = category.key
                 if self.settings_window is not None:
-                    self.settings_window.setTitle_(f"JR-BAR Settings: {category.label}")
+                    self.settings_window.setTitle_(
+                        f"{PRODUCT_DISPLAY_NAME} Settings: {category.label}"
+                    )
                 self.refresh_settings_window()
 
         def show_settings_window(self) -> None:
@@ -230,7 +288,7 @@ else:
             self,
             *,
             force: bool = False,
-            providers: tuple[str, ...] | None = None,
+            providers: tuple[str | tuple[str, str], ...] | None = None,
         ) -> None:
             service = self._provider_usage_service()
             current = service.request(
@@ -250,10 +308,20 @@ else:
             show_provider_usage_feedback(self, message)
 
         def _provider_usage_ready(self, state: ProviderUsageState) -> None:
+            service = self._provider_usage_service()
+            settings = service.settings_snapshot()
+            if settings is None:
+                return
+            refresh_cached_merged_sync(state)
+            payload = ProviderUsageApply(
+                state,
+                project_presentation_settings(settings),
+                settings,
+            )
             try:
                 self.performSelectorOnMainThread_withObject_waitUntilDone_(
                     "applyProviderUsageState:",
-                    state,
+                    payload,
                     False,
                 )
             except Exception:
@@ -284,9 +352,18 @@ else:
             )
 
         @_legacy.objc.IBAction
-        def applyProviderUsageState_(self, state) -> None:
-            if type(state) is not ProviderUsageState:
+        def applyProviderUsageState_(self, payload) -> None:
+            if type(payload) is not ProviderUsageApply:
                 return
+            state = payload.state
+            presentation = payload.settings
+            if type(payload.usage_settings) is ProviderUsageSettings:
+                apply_provider_usage_settings_snapshot(
+                    self,
+                    payload.usage_settings,
+                )
+            self._sidepulse_provider_presentation_settings = presentation
+            settings = presentation
             # The edge BASELINE is owned by this method alone. It used
             # to read _sidepulse_provider_usage_state, which every 15s
             # tick overwrites with the service's current state -- so a
@@ -307,38 +384,46 @@ else:
             self._sidepulse_provider_usage_state = state
             # Percent history: every provider's "how much is left", so the
             # settings chart can show ALL of them.
-            record_state_observations(self, state.snapshots)
+            if record_state_observations(
+                self,
+                state.snapshots,
+                writer=self._persistence_writer,
+            ) is False:
+                self._provider_usage_log("usage percent history write not queued")
             seen = set(getattr(self, "_sidepulse_seen_reset_events", ()))
             reset_events = detect_reset_events(
                 previous_state.snapshots,
                 state.snapshots,
                 seen_event_ids=frozenset(seen),
             )
-            settings = load_provider_usage_settings().settings
             enabled_resets = {
-                preference.provider_id
+                preference.identity
                 for preference in settings.providers
                 if preference.reset_celebrations
             }
             reset_events = tuple(
-                event for event in reset_events if event.provider_id in enabled_resets
+                event
+                for event in reset_events
+                if (event.provider_id, event.source_instance_id) in enabled_resets
             )
             if reset_events:
                 seen.update(event.event_id for event in reset_events)
                 self._sidepulse_seen_reset_events = tuple(sorted(seen))[-512:]
                 persisted = self._sidepulse_seen_reset_events
-                threading.Thread(
-                    target=lambda: save_seen_reset_events(persisted),
-                    name="SidePulseResetEventStore",
-                    daemon=True,
-                ).start()
+                disposition = self._persistence_writer.submit(
+                    "provider-reset-events",
+                    lambda: save_seen_reset_events(persisted),
+                    replace_pending=True,
+                )
+                if disposition.value.startswith("refused"):
+                    self._provider_usage_log("reset event state write not queued")
                 self.quota_blink_until = max(
                     float(getattr(self, "quota_blink_until", 0.0) or 0.0),
                     time.monotonic() + 4.0,
                 )
                 self._celebrate_quota_resets(reset_events)
             thresholds = {
-                preference.provider_id: preference.threshold_remaining
+                preference.identity: preference.threshold_remaining
                 for preference in settings.providers
             }
             self._sidepulse_provider_threshold_crossings = threshold_crossings(
@@ -417,42 +502,46 @@ else:
                 sender.setState_(0 if bool(sender.state()) else 1)
                 return
             self._menu_signature = None
-            self._sidepulse_usage_menu_settings_cache = None
+            apply_provider_usage_settings_snapshot(
+                self,
+                updated,
+                notify_service=True,
+            )
 
         @_legacy.objc.IBAction
         def toggleUsageMenuProvider_(self, sender) -> None:
-            from .provider_usage_settings import save_provider_usage_settings
-
-            provider_id = str(sender.identifier() or "")
-            loaded = load_provider_usage_settings()
             try:
-                updated = loaded.settings.with_menu_visible(
-                    provider_id, bool(sender.state())
-                )
-                save_provider_usage_settings(updated, loaded=loaded)
+                toggle_provider_menu_visibility(self, sender)
             except Exception as exc:
                 _legacy.log_status_bar(f"usage menu providers: {exc}")
                 sender.setState_(0 if bool(sender.state()) else 1)
-                return
-            self._menu_signature = None
-            self._sidepulse_usage_menu_settings_cache = None
+
+        @_legacy.objc.IBAction
+        def updateProviderInstanceProfile_(self, sender) -> None:
+            save_provider_instance_profile_setting(
+                self,
+                sender,
+                log=_legacy.log_status_bar,
+            )
 
         # --- Tightest limit beside the menu-bar icon (Codex Bar parity)
 
         def _usage_menu_settings(self):
-            """Loaded usage settings with a short TTL -- set_status runs
-            on every presentation tick and must not hit the disk each
-            time. The toggles above clear the cache on change."""
-            cached = getattr(self, "_sidepulse_usage_menu_settings_cache", None)
-            now = time.monotonic()
-            if cached is not None and now - cached[0] < 15.0:
-                return cached[1]
-            try:
-                settings = load_provider_usage_settings().settings
-            except Exception:
-                settings = None
-            self._sidepulse_usage_menu_settings_cache = (now, settings)
-            return settings
+            """Immutable worker or explicit-action snapshot; never UI-path I/O."""
+            settings = getattr(self, "_sidepulse_provider_presentation_settings", None)
+            if type(settings) is not ProviderPresentationSettings:
+                durable = getattr(
+                    self,
+                    "_sidepulse_provider_usage_settings_snapshot",
+                    None,
+                )
+                if type(durable) is ProviderUsageSettings:
+                    settings = project_presentation_settings(durable)
+            return (
+                settings
+                if type(settings) is ProviderPresentationSettings
+                else None
+            )
 
         def set_status(
             self, state, *, ask_count: int = 0, done_badge: bool = False
@@ -473,9 +562,11 @@ else:
             )
             self._append_quota_guarded()
 
-        def _append_quota_guarded(self) -> None:
+        def _append_quota_guarded(
+            self, *, wall_clock: Callable[[], float] = time.time
+        ) -> None:
             try:
-                self._append_quota_to_status_title()
+                self._append_quota_to_status_title(wall_clock=wall_clock)
             except Exception as exc:
                 # The status title is agent truth first; a quota suffix
                 # failure must never take the tick down with it -- but a
@@ -501,13 +592,17 @@ else:
                 if settings is None:
                     return 0.0
                 hidden = settings.hidden_menu_providers()
+                hidden_instances = settings.hidden_menu_instances()
                 thresholds = {
-                    preference.provider_id: preference.threshold_remaining
+                    preference.identity: preference.threshold_remaining
                     for preference in settings.providers
                 }
                 worst = 0.0
                 for snapshot in self.provider_usage_state.snapshots:
-                    if snapshot.provider_id in hidden:
+                    if (
+                        snapshot.provider_id in hidden
+                        or snapshot.identity in hidden_instances
+                    ):
                         continue
                     if snapshot.state not in {
                         ProviderSourceState.READY,
@@ -517,7 +612,7 @@ else:
                     lane = most_constrained_lane(snapshot)
                     if lane is None or lane.remaining_percent is None:
                         continue
-                    threshold = thresholds.get(snapshot.provider_id, 20.0)
+                    threshold = thresholds.get(snapshot.identity, 20.0)
                     if threshold <= 0.0:
                         continue
                     if lane.remaining_percent <= threshold:
@@ -549,18 +644,26 @@ else:
                 ),
             )
 
-        def request_jr_usage_refresh(self, providers, *, force=False):
-            # The 429 lesson stands: never let a settings tick turn into
-            # a poll storm. Manual refresh forces; opportunistic requests
-            # pass through at most every 2 minutes.
-            now = time.monotonic()
+        def request_jr_usage_refresh(
+            self,
+            providers: tuple[str | tuple[str, str], ...],
+            *,
+            force=False,
+            monotonic: Callable[[], float] = time.monotonic,
+        ):
+            now = float(monotonic())
             last = getattr(self, "_jr_usage_refresh_at", 0.0)
             if not force and now - last < 120.0:
                 return
             self._jr_usage_refresh_at = now
             self._request_provider_usage(force=force, providers=tuple(providers))
 
-        def jr_capacity_settings_text(self, provider_id):
+        def jr_capacity_settings_text(
+            self,
+            provider_id,
+            *,
+            wall_clock: Callable[[], float] = time.time,
+        ):
             state = getattr(self, "_sidepulse_provider_usage_state", None)
             snapshot = next(
                 (
@@ -574,7 +677,7 @@ else:
                 return None
             from .provider_usage_qol import format_reset_countdown
 
-            now = time.time()
+            now = float(wall_clock())
             # None-safe: lanes without a readable percent are legal and
             # real (grok's credits lane; claude windows missing a percent
             # key) -- an f-string TypeError here killed the whole
@@ -598,19 +701,10 @@ else:
             return " · ".join(parts) + f" · {checked}{state_note}"
 
         def jr_plane_owns_usage_menu_item(self) -> bool:
-            # The legacy build constructs its usage card only to have the
-            # wrapper above remove it -- measured dead weight in every
-            # full rebuild. This facade owns the usage row.
             return True
 
         def jr_plane_owns_capacity(self, provider_id: str) -> bool:
-            """The JR usage plane polls the Claude usage ENDPOINT
-            itself (ProviderUsageService), so the legacy capacity
-            scheduler must not hit the same remote with the same token
-            on a second cadence -- the double-poll was the documented
-            429 mechanism. Claude only for now: codex's legacy source
-            is a LOCAL read (no rate-limit hazard) that still feeds the
-            Overview labels until coalescence step 3 migrates them."""
+            """Claude usage polling is owned here, not by the legacy scheduler."""
             return provider_id == "claude"
 
         def _report_reconnect_outcome(self, state) -> None:
@@ -660,7 +754,9 @@ else:
                 if not status.is_subagent and status.mode in busy
             )
 
-        def _append_quota_to_status_title(self) -> None:
+        def _append_quota_to_status_title(
+            self, *, wall_clock: Callable[[], float] = time.time
+        ) -> None:
             settings = self._usage_menu_settings()
             if settings is None or not settings.menu_display.show_menu_bar_percent:
                 return
@@ -671,8 +767,9 @@ else:
             glance = menu_bar_quota_glance(
                 self.provider_usage_state,
                 hidden_providers=settings.hidden_menu_providers(),
+                hidden_instances=settings.hidden_menu_instances(),
                 active_providers=self._active_usage_providers(),
-                now=time.time(),
+                now=float(wall_clock()),
             )
             if glance is None:
                 return
@@ -716,6 +813,14 @@ else:
             except Exception:
                 pass
 
+        def open_session(self, status, action: str | None, *, remember: bool) -> None:
+            _BaseStatusBarController.open_session(
+                self,
+                status,
+                profile_session_action(self, status, action),
+                remember=remember,
+            )
+
         @_legacy.objc.IBAction
         def openProviderUsageCenter_(self, _sender) -> None:
             from .provider_usage_window import ProviderUsageWindowController
@@ -726,68 +831,50 @@ else:
                 self._sidepulse_provider_usage_window = controller
             controller.show(self.provider_usage_state)
 
-        def _provider_action_label(self, provider_id: str) -> str:
-            state = getattr(self, "provider_usage_state", None)
-            snapshot = next(
-                (
-                    item
-                    for item in getattr(state, "snapshots", ())
-                    if item.provider_id == provider_id
-                ),
-                None,
-            )
-            return str(getattr(snapshot, "action_label", "") or "")
-
-        def _claude_action_wants_connect(self) -> bool:
-            """Only a Connect/Reconnect click earns the Keychain flow.
-
-            The short-circuit used to fire for EVERY Claude action, so
-            clicking "Retry later" on a rate-limited card ran a
-            synchronous `security` read (30s ceiling) on the main
-            thread -- a beachball nobody asked for."""
-            label = self._provider_action_label("claude").lower()
-            return "connect" in label or not label
-
         @_legacy.objc.IBAction
         def usageCenterAction_(self, sender) -> None:
-            """A card's action button: identifier carries the provider."""
-            provider_id = str(sender.identifier() or "")
-            if provider_id == "claude" and self._claude_action_wants_connect():
-                self._connect_claude_usage()
-                return
-            # Staged browser-access flow (enable -> import -> organization);
-            # a plain refresh remains the fallback for other actions.
-            if provider_id and run_provider_usage_action(self, provider_id):
-                return
-            # Scoped to this provider: a full-fleet force here let one
-            # "Retry" click march every provider through its backoff
-            # gate at once.
-            self._request_provider_usage(
-                force=True,
-                providers=(provider_id,) if provider_id else None,
+            perform_provider_usage_action(
+                self,
+                sender,
+                open_center=False,
+                log=_legacy.log_status_bar,
             )
 
         @_legacy.objc.IBAction
         def performProviderUsageAction_(self, sender) -> None:
-            payload = sender.representedObject()
-            provider_id = payload.get("provider_id") if isinstance(payload, dict) else None
-            if provider_id == "claude" and self._claude_action_wants_connect():
-                self._connect_claude_usage()
-                return
-            if provider_id and run_provider_usage_action(self, provider_id):
-                return
-            # The fallthrough used to open a window and change nothing --
-            # the definition of a dead button. At minimum, look again.
-            if provider_id:
-                self._request_provider_usage(force=True, providers=(provider_id,))
-            self.openProviderUsageCenter_(sender)
+            perform_provider_usage_action(
+                self,
+                sender,
+                open_center=True,
+                log=_legacy.log_status_bar,
+            )
 
-        def _connect_claude_usage(self) -> None:
-            from .provider_usage_feedback import connect_claude_usage
+        @_legacy.objc.IBAction
+        def checkForSoftwareUpdates_(self, sender) -> None:
+            runtime = getattr(self, "_sidepulse_sparkle_updater", None)
+            if runtime is not None:
+                runtime.check_for_updates(sender)
 
-            connect_claude_usage(self, log=_legacy.log_status_bar)
+        def _select_update_channel(self, channel: str) -> None:
+            runtime = getattr(self, "_sidepulse_sparkle_updater", None)
+            if runtime is not None and runtime.select_channel(channel):
+                self._menu_signature = None
+
+        @_legacy.objc.IBAction
+        def selectStableUpdates_(self, _sender) -> None:
+            self._select_update_channel(STABLE_CHANNEL)
+
+        @_legacy.objc.IBAction
+        def selectBetaUpdates_(self, _sender) -> None:
+            self._select_update_channel(BETA_CHANNEL)
 
         def applicationDidFinishLaunching_(self, notification):
+            if (
+                getattr(self, "_runtime_started", False)
+                or getattr(self, "_runtime_termination_started", False)
+            ):
+                return None
+            self._sidepulse_sparkle_updater = start_sparkle_updater()
             result = _BaseStatusBarController.applicationDidFinishLaunching_(
                 self,
                 notification,
@@ -810,10 +897,21 @@ else:
             self._request_provider_usage(force=False)
             return _BaseStatusBarController.refresh_(self, sender)
 
-        def why_panel_body(self) -> str:
-            body = _BaseStatusBarController.why_panel_body(self)
+        def why_panel_body(
+            self,
+            *,
+            why_context=None,
+            wall_clock: Callable[[], float] = time.time,
+        ) -> str:
+            body = _BaseStatusBarController.why_panel_body(
+                self,
+                why_context=why_context,
+            )
             lines = ["Native provider usage"]
-            projection = project_usage_menu(self.provider_usage_state, now=time.time())
+            projection = project_usage_menu(
+                self.provider_usage_state,
+                now=float(wall_clock()),
+            )
             lines.append(projection.title)
             for row in projection.rows:
                 lines.append(f"  {row.title}")
@@ -822,6 +920,8 @@ else:
             return f"{body}\n\n" + "\n".join(lines)
 
         def applicationWillTerminate_(self, notification):
+            if getattr(self, "_runtime_termination_started", False):
+                return None
             service = getattr(self, "_sidepulse_provider_usage_service", None)
             if service is not None:
                 service.close()
@@ -830,14 +930,31 @@ else:
                 notification,
             )
 
+def install_provider_usage_status_bar():
+    """Install the final provider controller and root-menu wrapper once."""
+    if _PROBE_IMPORT_MODE:
+        from . import status_bar_legacy as legacy
+
+        legacy.StatusBarController = JRProviderUsageStatusBarController
+        legacy.build_menu = build_menu
+        return JRProviderUsageStatusBarController, build_menu
+    _host.install_status_bar_facade()
     _legacy.StatusBarController = JRProviderUsageStatusBarController
-
-
-_legacy.build_menu = build_menu
+    _legacy.build_menu = build_menu
+    return JRProviderUsageStatusBarController, build_menu
 
 
 def main() -> int:
+    """Delegate to the one retained foreground main and composition boundary."""
     return _host.main()
 
 
-__all__ = ["JRProviderUsageStatusBarController", "main"]
+__all__ = [
+    "JRProviderUsageStatusBarController",
+    "install_provider_usage_status_bar",
+    "main",
+]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -34,10 +34,16 @@ from sidepulse.provider_contracts import (
     ContractStatus,
     ContractValidationError,
     DiagnosticIdentifier,
+    LocalRuntimeSurfaceIdentifier,
+    ProductCapability,
+    ProductCapabilityBinding,
+    ProductCapabilityDeclaration,
+    ProductCapabilityInvocation,
     ProviderIdentifier,
     SchemaVersion,
     SourceInstanceIdentifier,
     negotiate_provider_contract,
+    product_capability_document,
     provider_contract_document,
 )
 from sidepulse.provider_facts import ObservationAuthority
@@ -160,10 +166,349 @@ def test_static_registration_builds_the_exact_v1_contract_document() -> None:
                 "versions": [{"major": 1, "minor": 0}],
             },
         ],
+        "product_capabilities": [
+            {"id": "lifecycle", "supported": False, "binding": None},
+            {"id": "questions", "supported": False, "binding": None},
+            {"id": "answering", "supported": False, "binding": None},
+            {"id": "usage", "supported": False, "binding": None},
+            {"id": "costs", "supported": False, "binding": None},
+            {"id": "reset_forecasts", "supported": False, "binding": None},
+            {"id": "remote_observation", "supported": False, "binding": None},
+            {"id": "transcript_fallback", "supported": False, "binding": None},
+            {
+                "id": "invocation_scoped_monitoring",
+                "supported": False,
+                "binding": None,
+            },
+        ],
     }
     assert type(document["schema_version"]) is dict
     assert type(document["capabilities"]) is list
     assert all(type(row) is dict for row in document["capabilities"])
+
+
+def test_product_capabilities_require_explicit_yes_no_and_exact_binding() -> None:
+    declarations = (
+        ProductCapabilityDeclaration(
+            ProductCapability.LIFECYCLE,
+            supported=True,
+            binding=ProductCapabilityBinding.low_level(
+                "live_agent_events", SchemaVersion(1, 1)
+            ),
+        ),
+        ProductCapabilityDeclaration(
+            ProductCapability.ANSWERING,
+            supported=False,
+        ),
+    )
+
+    assert product_capability_document(declarations) == [
+        {
+            "id": "lifecycle",
+            "supported": True,
+            "binding": {
+                "kind": "low_level",
+                "id": "live_agent_events",
+                "version": {"major": 1, "minor": 1},
+            },
+        },
+        {"id": "answering", "supported": False, "binding": None},
+    ]
+
+
+def test_product_capability_support_is_not_inferred_from_questions() -> None:
+    result = negotiate_provider_contract(
+        _document(
+            capabilities=[_capability("actionable_requests", (1, 0))],
+            product_capabilities=[
+                {"id": "questions", "supported": True, "binding": {
+                    "kind": "low_level", "id": "actionable_requests",
+                    "version": _version(1, 0),
+                }},
+            ],
+        )
+    )
+
+    assert result.product_capability(ProductCapability.QUESTIONS).supported is True
+    assert result.product_capability(ProductCapability.ANSWERING).supported is False
+    assert result.product_capability(ProductCapability.ANSWERING).binding is None
+
+
+def test_absent_product_capabilities_are_visible_and_inert() -> None:
+    result = negotiate_provider_contract(_document())
+
+    assert tuple(declaration.capability for declaration in result.product_capabilities) == (
+        ProductCapability.LIFECYCLE,
+        ProductCapability.QUESTIONS,
+        ProductCapability.ANSWERING,
+        ProductCapability.USAGE,
+        ProductCapability.COSTS,
+        ProductCapability.RESET_FORECASTS,
+        ProductCapability.REMOTE_OBSERVATION,
+        ProductCapability.TRANSCRIPT_FALLBACK,
+        ProductCapability.INVOCATION_SCOPED_MONITORING,
+    )
+    assert all(not declaration.supported for declaration in result.product_capabilities)
+    assert all(declaration.binding is None for declaration in result.product_capabilities)
+
+
+def test_product_capability_binding_must_be_negotiated_or_named_local_surface() -> None:
+    result = negotiate_provider_contract(
+        _document(
+            product_capabilities=[
+                {"id": "usage", "supported": True, "binding": {
+                    "kind": "low_level", "id": "transcript_usage",
+                    "version": _version(1, 0),
+                }},
+                {"id": "remote_observation", "supported": True, "binding": {
+                    "kind": "local", "id": "local.remote_observation",
+                }},
+            ]
+        )
+    )
+
+    assert result.product_capability(ProductCapability.USAGE).supported is False
+    assert result.product_capability(ProductCapability.USAGE).binding is None
+    assert result.product_capability(ProductCapability.REMOTE_OBSERVATION).supported is True
+
+
+def test_product_invocation_preserves_exact_source_and_version_identity() -> None:
+    result = negotiate_provider_contract(
+        _document(
+            source_instance_id="opaque:a-b",
+            capabilities=[_capability("live_agent_events", (1, 1))],
+            product_capabilities=[
+                {"id": "lifecycle", "supported": True, "binding": {
+                    "kind": "low_level", "id": "live_agent_events",
+                    "version": _version(1, 1),
+                }},
+            ],
+        )
+    )
+
+    invocation = result.product_invocation_for(ProductCapability.LIFECYCLE)
+    assert invocation.provider_id == ProviderIdentifier("codex")
+    assert invocation.adapter_id == AdapterIdentifier("hooks")
+    assert invocation.source_instance_id == SourceInstanceIdentifier("opaque:a-b")
+    assert invocation.capability_id == CapabilityIdentifier("live_agent_events")
+    assert invocation.capability_version == SchemaVersion(1, 1)
+
+
+def test_product_declaration_rejects_implicit_or_ambiguous_support() -> None:
+    with pytest.raises(ContractValidationError, match="product support must be a boolean"):
+        ProductCapabilityDeclaration(ProductCapability.USAGE, 1)  # type: ignore[arg-type]
+    with pytest.raises(ContractValidationError, match="requires a binding"):
+        ProductCapabilityDeclaration(ProductCapability.USAGE, True)
+    with pytest.raises(ContractValidationError, match="cannot have a binding"):
+        ProductCapabilityDeclaration(
+            ProductCapability.USAGE,
+            False,
+            ProductCapabilityBinding.local("local.usage"),
+        )
+    with pytest.raises(ContractValidationError, match="exactly one surface"):
+        ProductCapabilityBinding()
+
+
+def test_answering_cannot_bind_account_switching_mutation() -> None:
+    result = negotiate_provider_contract(
+        _document(
+            capabilities=[_capability("account_switching", (1, 0))],
+            product_capabilities=[
+                {"id": "answering", "supported": True, "binding": {
+                    "kind": "low_level", "id": "account_switching",
+                    "version": _version(1, 0),
+                }},
+            ],
+        )
+    )
+
+    assert result.observation_capabilities == ()
+    assert result.product_capability(ProductCapability.ANSWERING).supported is False
+    assert result.product_capability(ProductCapability.ANSWERING).binding is None
+    with pytest.raises(ContractValidationError, match="not supported"):
+        result.product_invocation_for("answering")
+
+
+def test_answering_supports_only_exact_local_answer_surface_and_preserves_identity() -> None:
+    result = negotiate_provider_contract(
+        _document(
+            provider_id="claude",
+            source_instance_id="opaque:answerable",
+            product_capabilities=[
+                {
+                    "id": "answering",
+                    "supported": True,
+                    "binding": {
+                        "kind": "local",
+                        "id": "local.answer_in_place",
+                    },
+                }
+            ],
+        )
+    )
+
+    declaration = result.product_capability(ProductCapability.ANSWERING)
+    invocation = result.product_invocation_for(ProductCapability.ANSWERING)
+
+    assert declaration.supported is True
+    assert declaration.binding is not None
+    assert declaration.binding.local_runtime_surface == LocalRuntimeSurfaceIdentifier(
+        "local.answer_in_place"
+    )
+    assert invocation.provider_id == ProviderIdentifier("claude")
+    assert invocation.adapter_id == AdapterIdentifier("hooks")
+    assert invocation.source_instance_id == SourceInstanceIdentifier("opaque:answerable")
+    assert invocation.local_runtime_surface == LocalRuntimeSurfaceIdentifier(
+        "local.answer_in_place"
+    )
+    assert invocation.capability_id is None
+    assert invocation.capability_version is None
+
+
+def test_answering_rejects_non_exact_local_surface_name() -> None:
+    result = negotiate_provider_contract(
+        _document(
+            product_capabilities=[
+                {
+                    "id": "answering",
+                    "supported": True,
+                    "binding": {
+                        "kind": "local",
+                        "id": "local.answer_elsewhere",
+                    },
+                }
+            ],
+        )
+    )
+
+    assert result.product_capability(ProductCapability.ANSWERING).supported is False
+    assert result.product_capability(ProductCapability.ANSWERING).binding is None
+
+
+@pytest.mark.parametrize(
+    ("product_id", "low_level_id"),
+    [
+        ("lifecycle", "actionable_requests"),
+        ("questions", "live_agent_events"),
+        ("usage", "account_switching"),
+    ],
+)
+def test_product_capability_bindings_must_use_exact_semantic_low_level_id(
+    product_id: str,
+    low_level_id: str,
+) -> None:
+    result = negotiate_provider_contract(
+        _document(
+            capabilities=[_capability(low_level_id, (1, 0))],
+            product_capabilities=[
+                {
+                    "id": product_id,
+                    "supported": True,
+                    "binding": {
+                        "kind": "low_level",
+                        "id": low_level_id,
+                        "version": _version(1, 0),
+                    },
+                }
+            ],
+        )
+    )
+
+    assert result.product_capability(product_id).supported is False
+    assert result.product_capability(product_id).binding is None
+
+
+def test_transcript_fallback_requires_transcript_adapter_and_usage_capability() -> None:
+    unsupported_adapter = negotiate_provider_contract(
+        _document(
+            adapter_id="hooks",
+            capabilities=[_capability("transcript_usage", (1, 0))],
+            product_capabilities=[
+                {
+                    "id": "transcript_fallback",
+                    "supported": True,
+                    "binding": {
+                        "kind": "low_level",
+                        "id": "transcript_usage",
+                        "version": _version(1, 0),
+                    },
+                }
+            ],
+        )
+    )
+    supported_adapter = negotiate_provider_contract(
+        _document(
+            adapter_id="transcripts",
+            capabilities=[_capability("transcript_usage", (1, 0))],
+            product_capabilities=[
+                {
+                    "id": "transcript_fallback",
+                    "supported": True,
+                    "binding": {
+                        "kind": "low_level",
+                        "id": "transcript_usage",
+                        "version": _version(1, 0),
+                    },
+                }
+            ],
+        )
+    )
+
+    assert unsupported_adapter.product_capability("transcript_fallback").supported is False
+    assert supported_adapter.product_capability("transcript_fallback").supported is True
+
+
+def test_transcript_fallback_cannot_bypass_usage_source_with_local_binding() -> None:
+    result = negotiate_provider_contract(
+        _document(
+            adapter_id="transcripts",
+            product_capabilities=[
+                {
+                    "id": "transcript_fallback",
+                    "supported": True,
+                    "binding": {"kind": "local", "id": "local.transcript_fallback"},
+                }
+            ],
+        )
+    )
+
+    assert result.product_capability("transcript_fallback").supported is False
+
+
+def test_invocation_monitoring_requires_an_explicit_local_surface() -> None:
+    result = negotiate_provider_contract(
+        _document(
+            capabilities=[_capability("live_agent_events", (1, 0))],
+            product_capabilities=[
+                {
+                    "id": "invocation_scoped_monitoring",
+                    "supported": True,
+                    "binding": {
+                        "kind": "local",
+                        "id": "local.invocation_scoped_monitoring",
+                    },
+                }
+            ],
+        )
+    )
+
+    declaration = result.product_capability("invocation_scoped_monitoring")
+    assert declaration.supported is True
+    invocation = result.product_invocation_for("invocation_scoped_monitoring")
+    assert invocation.capability_id is None
+    assert invocation.local_runtime_surface is not None
+
+
+def test_product_invocation_cannot_represent_mutation_authority() -> None:
+    with pytest.raises(ContractValidationError, match="not allowed"):
+        ProductCapabilityInvocation(
+            product_capability=ProductCapability.ANSWERING,
+            provider_id=ProviderIdentifier("codex"),
+            adapter_id=AdapterIdentifier("hooks"),
+            source_instance_id=SourceInstanceIdentifier("source:local-01"),
+            capability_id=CapabilityIdentifier("account_switching"),
+            capability_version=SchemaVersion(1, 0),
+        )
 
 
 def test_each_capability_negotiates_its_highest_exact_version() -> None:

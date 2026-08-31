@@ -16,12 +16,12 @@ def apply_merged_sync_to_state(
         raise ValueError("invalid local provider usage state")
     if merged is None:
         return local
-    remote_by_provider = {
-        snapshot.provider_id: snapshot for snapshot in merged.quota_snapshots
+    remote_by_identity = {
+        snapshot.identity: snapshot for snapshot in merged.quota_snapshots
     }
     snapshots = []
     for current in local.snapshots:
-        remote = remote_by_provider.get(current.provider_id)
+        remote = remote_by_identity.get(current.identity)
         if remote is None or remote.observed_at <= current.observed_at:
             snapshots.append(current)
             continue
