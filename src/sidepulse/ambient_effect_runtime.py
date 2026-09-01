@@ -1259,7 +1259,10 @@ def _observe_turn_starts(
     }
     starts = {key: started for key, started in starts.items() if key in active}
     setattr(controller, "_ambient_turn_starts", starts)
-    if not starts:
+    # The ember communicates the age of one current turn. Applying that
+    # singular signal to a fleet collapses every active provider into one
+    # full-surface work colour, hiding the richer multi-agent projection.
+    if len(active) != 1 or len(starts) != 1:
         setattr(controller, "_turn_length_ember_plan", None)
         return
     _work_key, started = min(starts.items(), key=lambda item: item[1])

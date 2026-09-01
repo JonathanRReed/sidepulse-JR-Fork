@@ -18409,7 +18409,7 @@ class GlowDialTests(unittest.TestCase):
             1.0,
         )
 
-    def test_pitch_black_floor_lets_bar_go_fully_dark(self) -> None:
+    def test_screen_bar_brightness_keeps_the_ambient_visibility_floor(self) -> None:
         self.controller.settings = self.controller.settings.with_screen_bar_min_glow(0.0)
         device = self.status_bar.StatusBarDevice(
             device_id=self.status_bar.VIRTUAL_DEVICE_ID,
@@ -18421,10 +18421,10 @@ class GlowDialTests(unittest.TestCase):
             brightness=10,
             auto_brightness_enabled=False,
         )
-        # With the dial at zero no floor applies -- tiny stays tiny.
-        self.assertLessEqual(
-            self.controller.effective_brightness_for_device(device), 10
-        )
+        # The global ambient visibility floor still applies to any nonzero
+        # surface. Pitch-black classic-bar rendering comes from pixel alpha,
+        # not from driving the Screen Bar brightness scalar below visibility.
+        self.assertEqual(self.controller.effective_brightness_for_device(device), 61)
         self.controller.settings = self.controller.settings.with_screen_bar_min_glow(0.25)
         self.assertGreaterEqual(
             self.controller.effective_brightness_for_device(device), 63
@@ -18438,6 +18438,29 @@ class GlowDialTests(unittest.TestCase):
         dim = [(0.02, 0.01, 0.01, 0.01)] * 8
         rendered = view._bracket_colors(dim)
         self.assertTrue(all(c[3] <= 0.011 for c in rendered))
+
+    def test_classic_bar_applies_minimum_glow_to_lit_pixels(self) -> None:
+        from sidepulse import virtual_device
+
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (400.0, 37.0)))
+        view.setMinGlow_(0.25)
+        dim = [(0.02, 0.01, 0.01, 0.01)] * 8
+
+        rendered = view._classic_status_colors(dim)
+
+        self.assertTrue(all(c[3] >= 0.18 for c in rendered))
+
+    def test_classic_bar_minimum_glow_respects_dark_and_off(self) -> None:
+        from sidepulse import virtual_device
+
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (400.0, 37.0)))
+        dim = [(0.02, 0.01, 0.01, 0.01)] * 8
+        view.setMinGlow_(0.0)
+        self.assertEqual(view._classic_status_colors(dim), dim)
+
+        view.setMinGlow_(0.25)
+        view.setProgram_("off")
+        self.assertEqual(view._classic_status_colors(dim), dim)
 
     def test_screen_bar_resting_glow_reaches_the_program(self) -> None:
         from sidepulse.led_status import apply_resting_glow_to_program

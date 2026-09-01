@@ -436,6 +436,29 @@ def test_runtime_projects_canonical_events_through_the_shared_ambient_seam(
     assert callable(controller._plan_finite_ambient_effect)
 
 
+def test_turn_length_ember_does_not_mask_multiple_active_works(monkeypatch) -> None:
+    controller_type = _controller_type()
+    install_ambient_effect_runtime(controller_type)
+    controller = controller_type()
+    state, work_key, _request_key, watermark = _canonical_state(
+        lifecycle=WorkLifecycle.ACTIVE,
+    )
+    second_key = WorkKey(work_key.source_key, WorkIdentifier("work:02"))
+    second_work = replace(state.works[0], key=second_key)
+    state = replace(state, works=(*state.works, second_work))
+    events = (_operator_event(work_key, TransitionKind.BECAME_ACTIVE, watermark),)
+    monkeypatch.setattr(
+        "sidepulse.ambient_effect_runtime.time.time",
+        lambda: 1_800_000_010.0,
+    )
+
+    controller.observe_operator_history_events(events, state)
+
+    assert controller._ambient_turn_starts.keys() == {work_key}
+    assert controller._turn_length_ember_plan is None
+    assert controller._ambient_fleet_plan.accepted is True
+
+
 def test_completion_event_projects_the_finite_completion_effect_family(
     monkeypatch,
 ) -> None:

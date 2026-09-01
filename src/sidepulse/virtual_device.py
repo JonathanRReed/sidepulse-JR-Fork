@@ -1757,7 +1757,7 @@ class VirtualLedView(NSView):
             self._draw_compact_accent()
             return
 
-        colors = self._colors_for_draw_cached()
+        colors = self._classic_status_colors(self._colors_for_draw_cached())
         height = self.bounds().size.height
         notch_width, wing_offset = self._notch_geometry()
         insets = getattr(self, "notch_insets", None)
@@ -1859,6 +1859,13 @@ class VirtualLedView(NSView):
         if self.has_notch and self.alcove_silhouette is None:
             self._draw_standing_gauges(cg_context, height, edge_inset=wing_offset + 6.0)
         NSGraphicsContext.restoreGraphicsState()
+
+    def _classic_status_colors(self, colors):
+        """Keep lit classic-bar pixels readable at the configured floor."""
+        if str(getattr(self, "current_program", "")).strip().lower() == "off":
+            return colors
+        floor = max(0.0, min(1.0, getattr(self, "min_glow", 0.25))) * 0.72
+        return [_legibility_boost(color, floor) for color in colors]
 
     def _bracket_colors(self, colors):
         """The colors the Alcove bracket paints. "spatial" mirrors the
