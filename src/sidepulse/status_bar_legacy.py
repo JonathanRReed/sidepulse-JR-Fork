@@ -149,6 +149,7 @@ from .agent_browser_window import (
     AgentBrowserAnswerPayload,
     AgentBrowserOpenPayload,
     AgentBrowserWindowController,
+    SNOOZE_PRESETS,
     build_agent_root_items,
 )
 from .animation import (
@@ -480,6 +481,7 @@ from .snooze_scope import filter_snoozed_statuses, status_snoozed
 from .menu_tracking import (
     ExactBoundarySchedule,
     MenuItemState,
+    MenuPublicationKind,
     StableNativeMenuRegistry,
 )
 from .models import MODE_LABELS, AgentMode, AgentStatus, provider_label
@@ -1829,7 +1831,12 @@ def replay_recent_debug_logs(
     providers: tuple[str, ...] = HOOK_PROVIDERS,
     max_lines: int = STATUS_BAR_STARTUP_REPLAY_LINES,
 ) -> int:
-    replayed = 0
+    # Restoring the persisted canonical state already covers old events. The
+    # startup tail exists to recover sessions that changed while JR Bar was
+    # stopped, so replay only the newest observation for each session/agent.
+    # Replaying every Pre/PostToolUse pair made startup cost grow with log
+    # volume and reduced the same large state hundreds of times.
+    latest_by_status_key = {}
     for provider in providers:
         try:
             path = detect_log_path(provider)
@@ -1842,9 +1849,21 @@ def replay_recent_debug_logs(
             record = parse_log_line(provider, line)
             if record is None:
                 continue
-            monitor.ingest_record(record)
-            replayed += 1
-    return replayed
+            previous = latest_by_status_key.get(record.status_key)
+            if previous is None or record.logged_at >= previous.logged_at:
+                latest_by_status_key[record.status_key] = record
+
+    selected = sorted(
+        latest_by_status_key.values(),
+        key=lambda record: (
+            record.logged_at,
+            record.provider,
+            record.status_key,
+        ),
+    )
+    for record in selected:
+        monitor.ingest_record(record)
+    return len(selected)
 
 
 class StatusBarController(NSObject):
@@ -3488,7 +3507,16 @@ class StatusBarController(NSObject):
         _t0 = time.monotonic()
         signature = menu_content_signature(snapshot, state, self)
         _t1 = time.monotonic()
-        if signature == getattr(self, "_menu_signature", None):
+        previous_signature = getattr(self, "_menu_signature", None)
+        if signature == previous_signature:
+            if getattr(self, "_runtime_started", False):
+                native = _canonical_agent_root_snapshot(snapshot, self)
+                if native is not None:
+                    states, _items = native
+                    self.native_agent_menu_registry.publish(
+                        states,
+                        tracking=False,
+                    )
             if _t1 - _t0 > 0.3:
                 log_status_bar(
                     f"menu timing: signature={int((_t1 - _t0) * 1000)}ms (unchanged)"
@@ -3503,12 +3531,22 @@ class StatusBarController(NSObject):
         # tick after the window passes. Live app only (_runtime_started);
         # tests keep deterministic rebuild-per-change behavior.
         if getattr(self, "_runtime_started", False):
+            native = _canonical_agent_root_snapshot(snapshot, self)
+            publication = None
+            if native is not None:
+                states, _items = native
+                publication = self.native_agent_menu_registry.publish(
+                    states,
+                    tracking=False,
+                )
+            if (
+                publication is not None
+                and publication.kind is not MenuPublicationKind.DEFER_REBUILD
+            ):
+                self._menu_signature = signature
+                return
             since_last = _t1 - getattr(self, "_menu_last_rebuild_at", 0.0)
             if since_last < MENU_REBUILD_MIN_INTERVAL_SECONDS:
-                native = _canonical_agent_root_snapshot(snapshot, self)
-                if native is not None:
-                    states, _items = native
-                    self.native_agent_menu_registry.publish(states, tracking=False)
                 return
         self._menu_signature = signature
         self._menu_last_rebuild_at = _t1
@@ -3520,6 +3558,10 @@ class StatusBarController(NSObject):
         if native is not None:
             states, items = native
             self.native_agent_menu_registry.install(states, items)
+        # Menu construction updates a few generation-bearing projections.
+        # Capture the post-build document so the next timer tick does not
+        # rebuild solely because it is comparing against pre-build state.
+        self._menu_signature = menu_content_signature(snapshot, state, self)
         _t3 = time.monotonic()
         if _t3 - _t0 > 0.5:
             log_status_bar(
@@ -17625,12 +17667,38 @@ def _canonical_operator_actions(state, target):
         ).acknowledgements
     }
     candidates_by_work = getattr(target, "navigation_candidates_by_work_key", {})
+    # Build shared indexes once. The former helpers rebuilt/scanned the whole
+    # canonical catalog for every row, turning a busy 795-work state into an
+    # O(n^2) half-second menu operation on each refresh.
+    works_by_key = {work.key: work for work in state.works}
+    requests_by_key = {request.key: request for request in state.requests}
+
+    def family_key_for(work):
+        current = work
+        seen = set()
+        while current is not None and current.parent_key is not None:
+            if current.key in seen:
+                return None
+            seen.add(current.key)
+            current = works_by_key.get(current.parent_key)
+        return None if current is None else current.key
+
+    def request_for(work):
+        return next(
+            (
+                requests_by_key[key]
+                for key in work.request_keys
+                if key in requests_by_key
+            ),
+            None,
+        )
+
     result = {}
     for work in state.works:
-        family_key = _family_work_key(state, work.key)
+        family_key = family_key_for(work)
         if family_key is None:
             continue
-        request = _request_for_work(state, work.key)
+        request = request_for(work)
         preference = preferences.get(family_key)
         navigation = resolve_navigation(
             work.key,
@@ -17692,6 +17760,31 @@ def _native_item_state(
     action_kind: OperatorActionKind | None,
 ) -> MenuItemState:
     title = str(item.title())
+    return _menu_item_state(
+        title=title,
+        item_key=item_key,
+        parent_key=parent_key,
+        order=order,
+        submenu_key=submenu_key,
+        action_kind=action_kind,
+        key_equivalent=str(item.keyEquivalent() or ""),
+        enabled=bool(item.isEnabled()),
+        state=int(item.state()),
+    )
+
+
+def _menu_item_state(
+    *,
+    title: str,
+    item_key: str,
+    parent_key: str | None,
+    order: int,
+    submenu_key: str | None,
+    action_kind: OperatorActionKind | None,
+    key_equivalent: str,
+    enabled: bool,
+    state: int = 0,
+) -> MenuItemState:
     width, height = _menu_copy_size(title)
 
     if ":action:" in item_key:
@@ -17711,10 +17804,10 @@ def _native_item_state(
         order=order,
         submenu_key=submenu_key,
         action_kind=action_kind,
-        key_equivalent=str(item.keyEquivalent() or ""),
+        key_equivalent=key_equivalent,
         title=title,
-        enabled=bool(item.isEnabled()),
-        state=int(item.state()),
+        enabled=enabled,
+        state=state,
         measured_width=width,
         measured_height=height,
         # DESIRED state, computed. Never read back off the NSMenuItem.
@@ -17749,73 +17842,141 @@ def _native_item_state(
     )
 
 
+def _canonical_agent_root_states(projection, actions) -> tuple[MenuItemState, ...]:
+    states: list[MenuItemState] = []
+    actionable = tuple(row for row in projection.rows if row.actionable)
+    urgent = actionable[:3]
+    states.append(
+        _menu_item_state(
+            title=(
+                f"Agent Mailbox · {projection.active_count} active · "
+                f"{len(actionable)} need you"
+            ),
+            item_key="agent-mailbox:summary",
+            parent_key=None,
+            order=0,
+            submenu_key=None,
+            action_kind=None,
+            key_equivalent="",
+            enabled=False,
+        )
+    )
+    for root_order, row in enumerate(urgent, start=1):
+        identity = _work_key_menu_identity(row.work_key)
+        item_key = f"agent-mailbox:urgent:{identity}"
+        submenu_key = f"{item_key}:actions:g{projection.generation}"
+        states.append(
+            _menu_item_state(
+                title=f"{row.safe_family_label} · {row.lifecycle_label}",
+                item_key=item_key,
+                parent_key=None,
+                order=root_order,
+                submenu_key=submenu_key,
+                action_kind=None,
+                key_equivalent="",
+                enabled=True,
+            )
+        )
+        action_order = 0
+        for descriptor in actions.get(row.work_key, ()):
+            variants = (
+                tuple((preset, title) for preset, title in SNOOZE_PRESETS)
+                if descriptor.kind is OperatorActionKind.SNOOZE and descriptor.enabled
+                else ((None, descriptor.title),)
+            )
+            for preset, title in variants:
+                suffix = f":{preset}" if preset else ""
+                states.append(
+                    _menu_item_state(
+                        title=title,
+                        item_key=(
+                            f"{item_key}:action:{descriptor.kind.value}{suffix}"
+                        ),
+                        parent_key=item_key,
+                        order=action_order,
+                        submenu_key=None,
+                        action_kind=descriptor.kind,
+                        key_equivalent=descriptor.key_equivalent,
+                        enabled=descriptor.enabled,
+                    )
+                )
+                action_order += 1
+    root_order = 1 + len(urgent)
+    overflow_count = len(actionable) - len(urgent)
+    if overflow_count > 0:
+        states.append(
+            _menu_item_state(
+                title=f"{overflow_count} more…",
+                item_key=f"agent-mailbox:overflow:g{projection.generation}",
+                parent_key=None,
+                order=root_order,
+                submenu_key=None,
+                action_kind=None,
+                key_equivalent="",
+                enabled=True,
+            )
+        )
+        root_order += 1
+    states.append(
+        _menu_item_state(
+            title="Open Agent Browser…",
+            item_key=f"agent-mailbox:browser:g{projection.generation}",
+            parent_key=None,
+            order=root_order,
+            submenu_key=None,
+            action_kind=None,
+            key_equivalent="",
+            enabled=True,
+        )
+    )
+    return tuple(states)
+
+
 def _canonical_agent_root_snapshot(snapshot, target, *, menu=None):
     projection = _canonical_agent_browser_projection(snapshot, target)
     if projection is None:
         return None
     actions = _canonical_operator_actions(target.current_operator_state, target)
-    prepared = build_agent_root_items(
-        projection,
-        actions_by_work_key=actions,
-        target=target,
-    )
-    root_items = tuple(
-        menu.itemAtIndex_(index) if menu is not None else prepared[index]
-        for index in range(len(prepared))
-    )
-    states = []
+    desired = _canonical_agent_root_states(projection, actions)
+    if menu is None:
+        return desired, {}
     items = {}
-    urgent_index = 0
-    for order, item in enumerate(root_items):
-        title = str(item.title())
-        if order == 0:
-            item_key = "agent-mailbox:summary"
-            submenu_key = None
-        elif item.submenu() is not None:
-            row = projection.rows[urgent_index]
-            urgent_index += 1
-            identity = _work_key_menu_identity(row.work_key)
-            item_key = f"agent-mailbox:urgent:{identity}"
-            submenu_key = f"{item_key}:actions:g{projection.generation}"
-        elif title.endswith(("more...", "more…")):
-            item_key = f"agent-mailbox:overflow:g{projection.generation}"
-            submenu_key = None
-        else:
-            item_key = f"agent-mailbox:browser:g{projection.generation}"
-            submenu_key = None
-        items[item_key] = item
-        states.append(
+    installed = []
+    roots = tuple(state for state in desired if state.parent_key is None)
+    children_by_parent = {
+        root.item_key: tuple(
+            state for state in desired if state.parent_key == root.item_key
+        )
+        for root in roots
+    }
+    for root in roots:
+        item = menu.itemAtIndex_(root.order)
+        items[root.item_key] = item
+        installed.append(
             _native_item_state(
                 item,
-                item_key=item_key,
+                item_key=root.item_key,
                 parent_key=None,
-                order=order,
-                submenu_key=submenu_key,
+                order=root.order,
+                submenu_key=root.submenu_key,
                 action_kind=None,
             )
         )
         submenu = item.submenu()
-        if submenu is None:
-            continue
-        for action_order in range(submenu.numberOfItems()):
-            action = submenu.itemAtIndex_(action_order)
-            payload = action.representedObject()
-            if type(payload) is not AgentBrowserActionPayload:
-                continue
-            preset = f":{payload.snooze_preset}" if payload.snooze_preset else ""
-            action_key = f"{item_key}:action:{payload.kind.value}{preset}"
-            items[action_key] = action
-            states.append(
+        for child in children_by_parent[root.item_key]:
+            action = submenu.itemAtIndex_(child.order)
+            items[child.item_key] = action
+            installed.append(
                 _native_item_state(
                     action,
-                    item_key=action_key,
-                    parent_key=item_key,
-                    order=action_order,
+                    item_key=child.item_key,
+                    parent_key=root.item_key,
+                    order=child.order,
                     submenu_key=None,
-                    action_kind=payload.kind,
+                    action_kind=child.action_kind,
                 )
             )
-    return tuple(states), items
+    return tuple(installed), items
 
 
 #: How many peer rows the dropdown will list before saying "and N more".

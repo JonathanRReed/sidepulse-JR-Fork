@@ -101,6 +101,7 @@ def parse_codex_usage(
     estimated_cost_usd: float | None = None,
     cache_savings_usd: float | None = None,
     account_label: str | None = None,
+    source_id: str = "codex-rollouts",
 ) -> ProviderUsageSnapshot:
     lanes: list[UsageLane] = []
     credits_remaining: float | None = None
@@ -150,7 +151,7 @@ def parse_codex_usage(
                 label=label,
                 remaining_percent=remaining,
                 reset_at=_reset_epoch(entry.get("resets_at", entry.get("reset_at"))),
-                source_id="codex-rollouts",
+                source_id=source_id,
                 known_lane_ids={"five-hour", "weekly"},
             )
         )

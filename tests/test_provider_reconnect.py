@@ -207,10 +207,81 @@ def test_codex_app_server_probe_parses_replies():
         "authenticated": True,
         "used_percent": 4.0,
         "resets_at": 1788286790.0,
+        "window_minutes": None,
         "version": "0.149.1",
     }
     assert codex_app_server_probe(runner=lambda: None) is None
     assert codex_app_server_probe(runner=lambda: "not json") is None
+
+
+def test_codex_app_server_probe_keeps_transport_open_until_rate_limits_arrive(
+    monkeypatch,
+):
+    import io
+    import subprocess
+
+    lines = [
+        json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "result": {"userAgent": "codex/0.149.1 mac"}}
+        ),
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "result": {"account": {"email": "fixture@example.invalid"}},
+            }
+        ),
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "rateLimits": {
+                        "primary": {
+                            "usedPercent": 95.0,
+                            "resetsAt": 1788286790,
+                            "windowDurationMins": 10080,
+                        }
+                    }
+                },
+            }
+        ),
+    ]
+
+    class RecordingInput(io.StringIO):
+        def close(self):
+            self.was_closed = True
+
+    class FixtureProcess:
+        def __init__(self):
+            self.stdin = RecordingInput()
+            self.stdout = io.StringIO("\n".join(lines) + "\n")
+            self.terminated = False
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            del timeout
+            return 0
+
+        def kill(self):
+            self.terminated = True
+
+    process = FixtureProcess()
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    probe = codex_app_server_probe(timeout_seconds=1.0)
+
+    assert probe == {
+        "authenticated": True,
+        "used_percent": 95.0,
+        "resets_at": 1788286790.0,
+        "window_minutes": 10080,
+        "version": "0.149.1",
+    }
+    assert '"method": "account/rateLimits/read"' in process.stdin.getvalue()
+    assert process.terminated is True
 
 
 # --- gates -----------------------------------------------------------------

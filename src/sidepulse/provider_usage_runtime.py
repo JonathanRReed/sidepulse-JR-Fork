@@ -21,6 +21,7 @@ from .provider_feature_settings import (
 from .provider_instances import ProviderInstanceKey
 from .provider_reconnect import (
     FailureGate,
+    codex_app_server_probe,
     credential_fingerprint,
     note_failure,
     repair_grok_credential,
@@ -220,6 +221,7 @@ def _default_collectors() -> dict[str, Collector]:
             preference,
             home=home,
             observed_at=observed,
+            live_probe=codex_app_server_probe,
         ),
         "claude": lambda preference, home, observed, credentials: collect_claude(
             preference,

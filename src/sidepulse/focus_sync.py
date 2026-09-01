@@ -62,12 +62,7 @@ def _load_focus_json(path: Path) -> object:
 
 
 def _collect_string_values(node: object, key: str, found: set[str]) -> None:
-    """Depth-first search for every string value stored under ``key``,
-    anywhere in the parsed structure -- the same schema-drift-tolerant
-    stance _has_active_assertion takes, for the same reason: focusd's
-    JSON layout is undocumented and has moved keys between macOS
-    releases, but the key NAMES themselves have stayed stable in
-    everything community tooling has published."""
+    """Depth-first search for string values stored under ``key``."""
     if isinstance(node, dict):
         value = node.get(key)
         if isinstance(value, str) and value:
@@ -79,6 +74,31 @@ def _collect_string_values(node: object, key: str, found: set[str]) -> None:
             _collect_string_values(item, key, found)
 
 
+def _collect_active_assertion_identifiers(node: object, found: set[str]) -> None:
+    """Collect identifiers only from live ``storeAssertionRecords`` rows.
+
+    Assertions.json also carries configured-mode metadata. Searching the
+    whole document after finding one active assertion therefore reported
+    every configured Focus as active at once. Keep the schema-tolerant tree
+    walk, but restrict identifier extraction to the records focusd marks as
+    currently asserted.
+    """
+    if isinstance(node, dict):
+        records = node.get("storeAssertionRecords")
+        if isinstance(records, list):
+            for record in records:
+                _collect_string_values(
+                    record,
+                    "assertionDetailsModeIdentifier",
+                    found,
+                )
+        for child in node.values():
+            _collect_active_assertion_identifiers(child, found)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_active_assertion_identifiers(item, found)
+
+
 def active_focus_mode_identifiers() -> list[str]:
     """Mode identifiers (e.g. "com.apple.donotdisturb.mode.default") for
     every currently-active Focus assertion, sorted. Empty when no Focus is
@@ -88,7 +108,7 @@ def active_focus_mode_identifiers() -> list[str]:
     if not _has_active_assertion(data):
         return []
     identifiers: set[str] = set()
-    _collect_string_values(data, "assertionDetailsModeIdentifier", identifiers)
+    _collect_active_assertion_identifiers(data, identifiers)
     return sorted(identifiers)
 
 

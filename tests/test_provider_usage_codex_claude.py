@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from sidepulse.provider_usage_codex_claude import collect_claude, collect_codex
 from sidepulse.provider_usage_settings import default_provider_usage_settings
@@ -64,6 +65,74 @@ def test_codex_combines_local_quota_tokens_models_and_cost(tmp_path: Path):
     assert result.input_tokens == 100
     assert result.model_count == 2
     assert result.estimated_cost_usd == 1.5
+
+
+def test_codex_live_rate_limit_replaces_a_newer_but_stale_local_percentage(
+    tmp_path: Path,
+):
+    result = collect_codex(
+        preference("codex"),
+        home=tmp_path,
+        observed_at=1000,
+        live_probe=lambda: {
+            "used_percent": 95.0,
+            "resets_at": 3000.0,
+            "window_minutes": 10080,
+        },
+        local_scanner=lambda _home, _observed: {
+            "windows": [
+                {
+                    "label": "primary",
+                    "used_percent": 89.0,
+                    "window_minutes": 10080,
+                    "resets_at": 3000.0,
+                }
+            ],
+            "windows_observed_at": 999.0,
+            "input_tokens": 100,
+            "cached_input_tokens": 25,
+            "output_tokens": 50,
+            "model_count": 2,
+        },
+    )
+
+    assert result.state.value == "ready"
+    assert result.lanes[0].remaining_percent == 5.0
+    assert result.lanes[0].source_id == "codex-app-server"
+    assert result.input_tokens == 100
+    assert result.cached_input_tokens == 25
+    assert result.output_tokens == 50
+
+
+def test_codex_live_rate_limit_skips_the_default_cold_transcript_scan(
+    tmp_path: Path,
+):
+    import sidepulse.provider_usage_codex_claude as subject
+
+    with (
+        patch.object(subject, "_cached_codex_local_scan", return_value=None) as cached,
+        patch.object(
+            subject,
+            "_default_provider_local_scan",
+            side_effect=AssertionError("cold scan should not run on the live path"),
+        ),
+    ):
+        result = collect_codex(
+            preference("codex"),
+            home=tmp_path,
+            observed_at=1000,
+            live_probe=lambda: {
+                "used_percent": 95.0,
+                "resets_at": 3000.0,
+                "window_minutes": 10080,
+            },
+            local_scanner=subject._default_codex_local_scan,
+        )
+
+    cached.assert_called_once_with(tmp_path, 1000)
+    assert result.state.value == "ready"
+    assert result.lanes[0].remaining_percent == 5.0
+    assert result.lanes[0].source_id == "codex-app-server"
 
 
 def test_codex_without_rollout_evidence_is_actionable(tmp_path: Path):

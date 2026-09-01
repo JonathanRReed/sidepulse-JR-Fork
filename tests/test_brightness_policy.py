@@ -6,6 +6,7 @@ import sys
 import pytest
 
 from sidepulse.brightness_policy import (
+    MIN_AMBIENT_VISIBLE_BRIGHTNESS,
     MIN_ESCALATION_VISIBLE_BRIGHTNESS,
     BrightnessPolicyResult,
     BrightnessTraceStep,
@@ -127,6 +128,39 @@ def test_ambient_brightness_owns_the_escalation_visibility_floor() -> None:
 
     assert MIN_ESCALATION_VISIBLE_BRIGHTNESS == 12
     assert result.brightness == MIN_ESCALATION_VISIBLE_BRIGHTNESS
+
+
+def test_compounded_ambient_dims_do_not_turn_an_on_surface_effectively_black() -> None:
+    """Auto, idle, night, and Focus dimming may compose without disappearing."""
+    result = plan_ambient_brightness(
+        base_brightness=95,
+        idle_factor=0.3,
+        focus_factor=1.0,
+        night_factor=0.15,
+        global_factor=1.0,
+        escalation_boost=1.0,
+        is_screen_bar=False,
+        screen_bar_min_glow=0.0,
+        dnd_factor=0.15,
+    )
+
+    assert result.brightness == MIN_AMBIENT_VISIBLE_BRIGHTNESS == 12
+    assert "ambient_visibility_floor" in _names(result.trace)
+
+
+def test_ambient_visibility_floor_never_exceeds_the_owner_base_brightness() -> None:
+    result = plan_ambient_brightness(
+        base_brightness=4,
+        idle_factor=0.1,
+        focus_factor=1.0,
+        night_factor=0.1,
+        global_factor=1.0,
+        escalation_boost=1.0,
+        is_screen_bar=False,
+        screen_bar_min_glow=0.0,
+    )
+
+    assert result.brightness == 4
 
 
 def test_screen_bar_floor_does_not_revive_an_explicit_zero() -> None:

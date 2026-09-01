@@ -127,11 +127,133 @@ def _default_provider_local_scan(
 
 
 def _default_codex_local_scan(home: Path, observed_at: float) -> dict[str, object] | None:
+    cached = _cached_codex_local_scan(home, observed_at)
+    if isinstance(cached, dict):
+        return cached
     return _default_provider_local_scan("codex", home, observed_at)
 
 
 def _default_claude_local_scan(home: Path, observed_at: float) -> dict[str, object] | None:
     return _default_provider_local_scan("claude", home, observed_at)
+
+
+def _cached_codex_local_scan(home: Path, observed_at: float) -> dict[str, object] | None:
+    """Read the bounded Codex usage cache before falling back to a cold scan.
+
+    The current quota UI needs the newest percentage quickly. Walking the full
+    transcript tree on every refresh can take tens of seconds on large local
+    histories, which stalls publication of a newer live rate-limit reading.
+    """
+    del observed_at
+    try:
+        from . import usage_stats
+        from .credentials import read_codex_tokens
+        from .providers import negotiated_provider_sources
+        from .state_paths import default_state_dir
+    except ImportError:
+        return None
+    source = next(
+        (
+            item
+            for item in negotiated_provider_sources()
+            if item.source_key.provider_id == "codex"
+            and item.source_key.capability_id == "transcript_usage"
+            and item.observation_invocation_allowed
+        ),
+        None,
+    )
+    if source is None:
+        return None
+    cache_candidates = (
+        usage_stats._secondary_provider_cache_path(
+            default_state_dir(home) / "usage-scan-cache.json",
+            source.source_key,
+        ),
+        Path(home) / ".local" / "state" / "sidepulse" / "provider-usage-cache.json",
+    )
+    for cache_path in cache_candidates:
+        if not isinstance(cache_path, Path):
+            continue
+        cache = usage_stats._load_cache(cache_path, source.source_key)
+        files = cache.get("files")
+        sessions = cache.get("sessions")
+        models = cache.get("models")
+        dedupes = cache.get("dedupes")
+        if not (
+            isinstance(files, dict)
+            and isinstance(sessions, list)
+            and isinstance(models, list)
+            and isinstance(dedupes, list)
+        ):
+            continue
+        input_tokens = 0
+        cached_input_tokens = 0
+        output_tokens = 0
+        model_ids: set[str] = set()
+        windows: tuple[dict[str, object], ...] = ()
+        newest_window_marker: tuple[float, str] | None = None
+        for key, entry in tuple(files.items())[: usage_stats.USAGE_CACHE_MAX_FILES]:
+            if not isinstance(key, str) or not isinstance(entry, dict):
+                continue
+            records = usage_stats._decode_records(
+                entry,
+                sessions,
+                models,
+                dedupes,
+                expected_provider="codex",
+            )
+            if records is not None:
+                input_tokens += sum(record[4] for record in records)
+                cached_input_tokens += sum(record[5] for record in records)
+                output_tokens += sum(record[7] for record in records)
+                model_ids.update(
+                    record[2] for record in records if isinstance(record[2], str)
+                )
+            raw_mtime = entry.get("mtime")
+            raw_windows = entry.get("rate_limit_windows")
+            if (
+                isinstance(raw_mtime, (int, float))
+                and not isinstance(raw_mtime, bool)
+                and isinstance(raw_windows, list)
+            ):
+                admitted = tuple(
+                    dict(window)
+                    for window in raw_windows[:64]
+                    if isinstance(window, dict)
+                )
+                marker = (float(raw_mtime), key)
+                if admitted and (
+                    newest_window_marker is None or marker > newest_window_marker
+                ):
+                    windows = admitted
+                    newest_window_marker = marker
+        if (
+            not windows
+            and input_tokens == 0
+            and cached_input_tokens == 0
+            and output_tokens == 0
+            and not model_ids
+        ):
+            continue
+        document: dict[str, object] = {
+            "windows": [dict(window) for window in windows],
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "output_tokens": output_tokens,
+            "model_count": len(model_ids),
+            "estimated_cost_usd": None,
+            "cache_savings_usd": None,
+        }
+        if newest_window_marker is not None:
+            document["windows_observed_at"] = newest_window_marker[0]
+        try:
+            tokens = read_codex_tokens(Path(home) / ".codex" / "auth.json")
+        except Exception:
+            tokens = None
+        if tokens is not None and getattr(tokens, "account_id", None):
+            document["account_label"] = str(tokens.account_id)
+        return document
+    return None
 
 
 def _default_claude_quota_fetch(access_token: str) -> list[dict]:
@@ -184,10 +306,15 @@ def collect_codex(
     home: Path,
     observed_at: float,
     local_scanner: Callable[[Path, float], dict[str, object] | None] = _default_codex_local_scan,
+    live_probe: Callable[[], dict | None] | None = None,
 ) -> ProviderUsageSnapshot:
     del preference
-    facts = local_scanner(Path(home), observed_at)
-    if not isinstance(facts, dict):
+    live = live_probe() if callable(live_probe) else None
+    if isinstance(live, dict) and local_scanner is _default_codex_local_scan:
+        facts = _cached_codex_local_scan(Path(home), observed_at)
+    else:
+        facts = local_scanner(Path(home), observed_at)
+    if not isinstance(facts, dict) and not isinstance(live, dict):
         return _failure(
             "codex",
             observed_at=observed_at,
@@ -195,25 +322,56 @@ def collect_codex(
             reason="local_usage_not_found",
             action="Use Codex once or sign in",
         )
-    windows = facts.get("windows")
+    local_facts = facts if isinstance(facts, dict) else {}
+    windows = local_facts.get("windows")
     if not isinstance(windows, (list, tuple)):
         windows = ()
-    observed_evidence_at = facts.get("windows_observed_at")
+    source_id = "codex-rollouts"
+    observed_evidence_at = local_facts.get("windows_observed_at")
+    if isinstance(live, dict):
+        used = live.get("used_percent")
+        if isinstance(used, (int, float)) and not isinstance(used, bool):
+            live_minutes = live.get("window_minutes")
+            if not isinstance(live_minutes, (int, float)) or isinstance(
+                live_minutes, bool
+            ):
+                live_minutes = None
+            live_window = {
+                "label": "primary",
+                "used_percent": float(used),
+                "resets_at": live.get("resets_at"),
+                "window_minutes": live_minutes,
+            }
+            windows = (
+                live_window,
+                *(
+                    window
+                    for window in windows
+                    if not (
+                        isinstance(window, dict)
+                        and live_minutes is not None
+                        and window.get("window_minutes") == live_minutes
+                    )
+                ),
+            )
+            observed_evidence_at = observed_at
+            source_id = "codex-app-server"
     try:
         snapshot = parse_codex_usage(
             windows=windows,
             observed_at=observed_at,
-            input_tokens=max(0, int(facts.get("input_tokens", 0))),
-            cached_input_tokens=max(0, int(facts.get("cached_input_tokens", 0))),
-            output_tokens=max(0, int(facts.get("output_tokens", 0))),
-            model_count=max(0, int(facts.get("model_count", 0))),
-            estimated_cost_usd=facts.get("estimated_cost_usd"),
-            cache_savings_usd=facts.get("cache_savings_usd"),
+            input_tokens=max(0, int(local_facts.get("input_tokens", 0))),
+            cached_input_tokens=max(0, int(local_facts.get("cached_input_tokens", 0))),
+            output_tokens=max(0, int(local_facts.get("output_tokens", 0))),
+            model_count=max(0, int(local_facts.get("model_count", 0))),
+            estimated_cost_usd=local_facts.get("estimated_cost_usd"),
+            cache_savings_usd=local_facts.get("cache_savings_usd"),
             account_label=(
-                str(facts["account_label"])
-                if facts.get("account_label") is not None
+                str(local_facts["account_label"])
+                if local_facts.get("account_label") is not None
                 else None
             ),
+            source_id=source_id,
         )
         return _codex_reading_freshness(
             snapshot, observed_evidence_at, observed_at=observed_at

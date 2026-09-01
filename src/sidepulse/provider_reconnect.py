@@ -663,11 +663,13 @@ def codex_app_server_probe(
 
     Returns {"authenticated": bool | None, "used_percent": float | None,
     "resets_at": float | None, "version": str | None} or None when the
-    CLI is missing or the handshake fails. Deliberately user-initiated
-    only: spawning a subprocess per background refresh is CodexBar's
-    job, not a menu bar light's.
+    CLI is missing or the handshake fails. The caller owns cadence. The
+    provider usage service runs this on its bounded background worker.
     """
+    import queue
     import subprocess
+    import threading
+    import time
 
     requests = (
         json.dumps(
@@ -692,18 +694,72 @@ def codex_app_server_probe(
     )
 
     def _default_runner() -> str | None:
+        process = None
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 [codex_binary, "-s", "read-only", "-a", "never", "app-server"],
-                input=requests,
-                capture_output=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
-                timeout=timeout_seconds,
-                check=False,
+                bufsize=1,
             )
-        except (OSError, subprocess.SubprocessError):
+            if process.stdin is None or process.stdout is None:
+                return None
+            process.stdin.write(requests)
+            process.stdin.flush()
+
+            lines: queue.Queue[str | None] = queue.Queue()
+
+            def _read_stdout() -> None:
+                try:
+                    for line in process.stdout:
+                        lines.put(line)
+                finally:
+                    lines.put(None)
+
+            threading.Thread(
+                target=_read_stdout,
+                name="SidePulseCodexProbeRead",
+                daemon=True,
+            ).start()
+            deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+            captured: list[str] = []
+            reply_ids: set[int] = set()
+            while time.monotonic() < deadline and not {2, 3}.issubset(reply_ids):
+                remaining = max(0.01, deadline - time.monotonic())
+                try:
+                    line = lines.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if line is None:
+                    break
+                captured.append(line)
+                try:
+                    payload = json.loads(line)
+                except ValueError:
+                    continue
+                identifier = payload.get("id") if isinstance(payload, dict) else None
+                if isinstance(identifier, int):
+                    reply_ids.add(identifier)
+            return "".join(captured)
+        except (OSError, subprocess.SubprocessError, ValueError):
             return None
-        return completed.stdout or ""
+        finally:
+            if process is not None:
+                try:
+                    if process.stdin is not None:
+                        process.stdin.close()
+                except Exception:
+                    pass
+                try:
+                    process.terminate()
+                    process.wait(timeout=2.0)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
 
     stdout = (runner or _default_runner)()
     if stdout is None:
@@ -731,6 +787,7 @@ def codex_app_server_probe(
         version = agent.split("/", 1)[1].split(" ", 1)[0] or None
     used_percent: float | None = None
     resets_at: float | None = None
+    window_minutes: int | None = None
     limits = replies.get(2, {}).get("rateLimits")
     if isinstance(limits, dict):
         primary = limits.get("primary")
@@ -741,6 +798,12 @@ def codex_app_server_probe(
             reset = primary.get("resets_at", primary.get("resetsAt"))
             if isinstance(reset, (int, float)) and not isinstance(reset, bool):
                 resets_at = float(reset)
+            duration = primary.get(
+                "window_minutes",
+                primary.get("windowDurationMins"),
+            )
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                window_minutes = max(1, int(duration))
     authenticated: bool | None = None
     account = replies.get(3)
     if account is not None:
@@ -754,6 +817,7 @@ def codex_app_server_probe(
         "authenticated": authenticated,
         "used_percent": used_percent,
         "resets_at": resets_at,
+        "window_minutes": window_minutes,
         "version": version,
     }
 

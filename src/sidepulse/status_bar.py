@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -588,7 +589,10 @@ def _compact_canonical_root_snapshot(snapshot, target, *, menu=None):
     if native is None or menu is not None:
         return native
     states, items = native
-    summary = items.get("agent-mailbox:summary")
+    summary = next(
+        (state for state in states if state.item_key == "agent-mailbox:summary"),
+        None,
+    )
     if summary is None:
         return native
     active, needs_you, ready = _mailbox_counts(target)
@@ -599,15 +603,13 @@ def _compact_canonical_root_snapshot(snapshot, target, *, menu=None):
             ready_count=ready,
         )
     )
-    summary.setTitle_(glance)
+    width, height = _legacy._menu_copy_size(glance)
     updated = tuple(
-        _legacy._native_item_state(
-            summary,
-            item_key=state.item_key,
-            parent_key=state.parent_key,
-            order=state.order,
-            submenu_key=state.submenu_key,
-            action_kind=state.action_kind,
+        dataclass_replace(
+            state,
+            title=glance,
+            measured_width=width,
+            measured_height=height,
         )
         if state.item_key == "agent-mailbox:summary"
         else state

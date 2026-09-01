@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 MIN_ESCALATION_VISIBLE_BRIGHTNESS = 12
+MIN_AMBIENT_VISIBLE_BRIGHTNESS = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +95,22 @@ def plan_ambient_brightness(
             "escalation_floor",
             scaled,
             float(MIN_ESCALATION_VISIBLE_BRIGHTNESS),
+        )
+        trace.append(step)
+    ambient_floor = min(
+        float(MIN_AMBIENT_VISIBLE_BRIGHTNESS),
+        float(base_brightness),
+    )
+    if 0.0 < scaled < ambient_floor:
+        # Idle, night, and Focus/DND are all useful independent controls, but
+        # multiplying them can collapse a healthy 0-255 source to brightness
+        # 1. Keep an ambient surface that is meant to be on visibly on, while
+        # never making it brighter than the owner's base setting. Explicit
+        # zero factors returned above remain authoritative.
+        scaled, step = _floor_step(
+            "ambient_visibility_floor",
+            scaled,
+            ambient_floor,
         )
         trace.append(step)
     if is_screen_bar and scaled > 0.0:

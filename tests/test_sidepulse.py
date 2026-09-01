@@ -1282,6 +1282,75 @@ for (const event of [
             self.assertIsNone(status.cwd)
             self.assertNotIn("startup replay", status.display_name)
 
+    def test_status_bar_startup_replay_keeps_only_latest_record_per_session(self) -> None:
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            log = base / "codex.jsonl"
+            lines = []
+            base_epoch = datetime.now(timezone.utc).timestamp() - 100.0
+            for index, event_name in enumerate(
+                ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
+            ):
+                lines.append(
+                    json.dumps(
+                        {
+                            "logged_at": datetime.fromtimestamp(
+                                base_epoch + index,
+                                timezone.utc,
+                            ).isoformat(),
+                            "event": {
+                                "hook_event_name": event_name,
+                                "session_id": "session-a",
+                                "tool_name": "Bash",
+                            },
+                        }
+                    )
+                )
+            lines.append(
+                json.dumps(
+                    {
+                        "logged_at": datetime.fromtimestamp(
+                            base_epoch + 10.0,
+                            timezone.utc,
+                        ).isoformat(),
+                        "event": {
+                            "hook_event_name": "UserPromptSubmit",
+                            "session_id": "session-b",
+                        },
+                    }
+                )
+            )
+            log.write_text("\n".join(lines) + "\n")
+            monitor = LiveAgentMonitor()
+
+            with patch(
+                "sidepulse.status_bar.detect_log_path",
+                return_value=log,
+            ):
+                replayed = status_bar.replay_recent_debug_logs(
+                    monitor,
+                    providers=("codex",),
+                    max_lines=20,
+                )
+
+            self.assertEqual(replayed, 2)
+            lifecycle_by_id = {
+                work.key.work_id.value: work.lifecycle
+                for work in monitor.operator_state.works
+            }
+            self.assertEqual(
+                lifecycle_by_id,
+                {
+                    "session-a": WorkLifecycle.COMPLETED,
+                    "session-b": WorkLifecycle.ACTIVE,
+                },
+            )
+
     def test_status_bar_grok_provider_uses_badge_icon(self) -> None:
         try:
             from sidepulse import status_bar
@@ -8905,6 +8974,41 @@ class FocusModeParsingTests(unittest.TestCase):
                 self.assertEqual(
                     focus_sync.active_focus_mode_identifiers(),
                     ["com.apple.focus.work", "com.apple.sleep"],
+                )
+
+    def test_configured_identifier_metadata_is_not_reported_as_active(self) -> None:
+        from sidepulse import focus_sync
+
+        data = {
+            "data": [
+                {
+                    "storeAssertionRecords": [
+                        {
+                            "assertionDetails": {
+                                "assertionDetailsModeIdentifier": "com.apple.focus.work"
+                            }
+                        }
+                    ],
+                    "configuredModes": [
+                        {
+                            "assertionDetailsModeIdentifier": "com.apple.sleep"
+                        },
+                        {
+                            "assertionDetailsModeIdentifier": (
+                                "com.apple.donotdisturb.mode.default"
+                            )
+                        },
+                    ],
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Assertions.json"
+            path.write_text(json.dumps(data))
+            with patch.object(focus_sync, "ASSERTIONS_PATH", path):
+                self.assertEqual(
+                    focus_sync.active_focus_mode_identifiers(),
+                    ["com.apple.focus.work"],
                 )
 
     def test_no_active_assertions_means_no_identifiers(self) -> None:
@@ -24441,14 +24545,82 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
             )
         }
         self.controller.status_menu_open = True
-        self.controller.update_status_menu(
-            snapshot,
-            self.status_bar.STATE_ASK,
-        )
+        with patch.object(
+            self.status_bar,
+            "build_agent_root_items",
+            side_effect=AssertionError("tracking refresh allocated native menu items"),
+        ):
+            self.controller.update_status_menu(
+                snapshot,
+                self.status_bar.STATE_ASK,
+            )
 
         self.assertIs(menu.itemAtIndex_(1), urgent)
         self.assertIs(urgent.submenu().itemAtIndex_(0), open_item)
         self.assertTrue(open_item.isEnabled())
+        self.assertEqual(self.controller.status_item.setMenu_.call_count, 1)
+
+    def test_patchable_mailbox_change_does_not_trigger_periodic_full_menu_rebuild(
+        self,
+    ) -> None:
+        snapshot = self._canonical_snapshot(1)
+        self.controller.last_snapshot = snapshot
+        self.controller.status_bar_devices = MagicMock(return_value=[])
+        self.controller.status_item = MagicMock()
+        self.controller._runtime_started = True
+
+        with patch.object(self.status_bar.time, "monotonic", return_value=100.0):
+            self.controller.update_status_menu(snapshot, self.status_bar.STATE_ASK)
+        menu = self.controller.status_item.setMenu_.call_args.args[0]
+        urgent = menu.itemAtIndex_(1)
+        open_item = urgent.submenu().itemAtIndex_(0)
+        self.assertFalse(open_item.isEnabled())
+
+        work = snapshot.operator_state.works[0]
+        self.controller.navigation_candidates_by_work_key = {
+            work.key: (
+                NavigationCandidate(
+                    work.key,
+                    work.watermark.sequence,
+                    "open:primary",
+                    "url",
+                    "codex://threads/work%3A0",
+                    SourceFreshness.FRESH,
+                    True,
+                ),
+            )
+        }
+        with patch.object(self.status_bar.time, "monotonic", return_value=120.0):
+            self.controller.update_status_menu(snapshot, self.status_bar.STATE_ASK)
+
+        self.assertIs(menu.itemAtIndex_(1), urgent)
+        self.assertIs(urgent.submenu().itemAtIndex_(0), open_item)
+        self.assertTrue(open_item.isEnabled())
+        self.assertEqual(self.controller.status_item.setMenu_.call_count, 1)
+
+    def test_patchable_runtime_signature_drift_does_not_trigger_periodic_full_menu_rebuild(
+        self,
+    ) -> None:
+        snapshot = self._canonical_snapshot(1)
+        self.controller.last_snapshot = snapshot
+        self.controller.status_bar_devices = MagicMock(return_value=[])
+        self.controller.status_item = MagicMock()
+        self.controller._runtime_started = True
+
+        with patch.object(self.status_bar.time, "monotonic", return_value=100.0):
+            self.controller.update_status_menu(snapshot, self.status_bar.STATE_ASK)
+
+        first_signature = self.controller._menu_signature
+        with (
+            patch.object(self.status_bar.time, "monotonic", return_value=120.0),
+            patch.object(
+                self.status_bar,
+                "menu_content_signature",
+                return_value=(*first_signature, "volatile-only-drift"),
+            ),
+        ):
+            self.controller.update_status_menu(snapshot, self.status_bar.STATE_ASK)
+
         self.assertEqual(self.controller.status_item.setMenu_.call_count, 1)
 
     def test_mailbox_boundary_uses_exact_deadline_in_common_modes(self) -> None:
