@@ -1003,6 +1003,8 @@ class LiveAgentMonitor:
     def ingest_record(self, record: HookEvent) -> None:
         clock = self._clock_sampler()
         batch = _batch_for_hook_record(record, clock=clock)
+        # A fresh process can reread thousands of rows that latest.json already
+        # reduced. Filter them before the reducer rebuilds and hashes full state.
         with self.lock:
             metadata = metadata_for_record(
                 record,
@@ -1173,8 +1175,28 @@ class LiveAgentMonitor:
                 observed_at_epoch=clock.wall_epoch,
             )
             batches.append(batch)
+        with self.lock:
+            retained_watermark = dict(self.operator_state.source_watermarks).get(
+                hint.source_key
+            )
+        equal_watermark_confirmed = False
         for batch in sorted(batches, key=_batch_sort_key):
+            if retained_watermark is not None:
+                order = compare_watermarks(batch.watermark, retained_watermark)
+                if order is WatermarkOrder.OLDER:
+                    continue
+                if order is WatermarkOrder.EQUAL:
+                    if equal_watermark_confirmed:
+                        continue
+                    equal_watermark_confirmed = True
             self.ingest_batch(batch, clock=clock)
+            if (
+                retained_watermark is None
+                or compare_watermarks(batch.watermark, retained_watermark)
+                is WatermarkOrder.NEWER
+            ):
+                retained_watermark = batch.watermark
+                equal_watermark_confirmed = True
 
     def snapshot(self) -> MonitorSnapshot:
         now = _canonical_datetime(self._clock_sampler().wall_epoch)

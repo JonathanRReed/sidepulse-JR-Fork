@@ -75,6 +75,52 @@ def test_hint_before_publication_cannot_create_state_then_log_reconciles_once(
     assert repeated.operator_events == ()
 
 
+def test_first_hint_after_restore_skips_already_reduced_log_history(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "latest.json"
+    log = tmp_path / "codex.jsonl"
+    log.write_text(_legacy_codex_line(sequence=1) + "\n")
+    seed = LiveAgentMonitor(latest_state_path=state_path)
+    seed.reconcile_refresh_hint(_hint("event:1"), log_path=log)
+    seed.write_latest_state()
+
+    log.write_text(
+        _legacy_codex_line(sequence=1)
+        + "\n"
+        + _legacy_codex_line(sequence=2)
+        + "\n"
+    )
+    restored = LiveAgentMonitor(latest_state_path=state_path)
+    with patch.object(restored, "ingest_batch", wraps=restored.ingest_batch) as ingest:
+        restored.reconcile_refresh_hint(_hint("event:2"), log_path=log)
+
+    # One equal-watermark replay confirms restored truth, then only the newer
+    # row reaches the reducer. Older history is filtered before reduction.
+    assert ingest.call_count == 2
+    watermark = dict(restored.operator_state.source_watermarks)[SOURCE]
+    assert watermark.sequence == 2
+
+
+def test_equal_watermark_after_restore_confirms_live_source_freshness(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "latest.json"
+    log = tmp_path / "codex.jsonl"
+    log.write_text(_legacy_codex_line(sequence=1) + "\n")
+    seed = LiveAgentMonitor(latest_state_path=state_path)
+    seed.reconcile_refresh_hint(_hint("event:1"), log_path=log)
+    seed.write_latest_state()
+
+    restored = LiveAgentMonitor(latest_state_path=state_path)
+    restored_before = restored.operator_state.works[0]
+    restored.reconcile_refresh_hint(_hint("event:1"), log_path=log)
+    confirmed = restored.operator_state.works[0]
+
+    assert restored_before.source_freshness.value == "restored"
+    assert confirmed.source_freshness.value == "fresh"
+
+
 def test_duplicate_out_of_order_and_forged_hints_never_author_truth(
     tmp_path: Path,
 ) -> None:
