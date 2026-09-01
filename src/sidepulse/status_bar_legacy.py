@@ -3586,7 +3586,11 @@ class StatusBarController(NSObject):
             transcript_states[source_key] = dataclass_replace(
                 state,
                 enabled=True,
-                visible=True,
+                # Local activity has a dedicated on-demand graph worker. It
+                # used to be admitted here as well, so opening the menu or
+                # Settings launched a second 35 GB transcript inventory walk
+                # beside the graph scan and made the whole app beachball.
+                visible=False,
             )
         self._usage_provider_states = states
         self._usage_transcript_states = transcript_states
@@ -4027,9 +4031,47 @@ class StatusBarController(NSObject):
                 error_text=None,
                 generation=refresh_state.generation,
             )
-            models.pop(provider_id, None)
+            old_model = models.get(provider_id)
+            if old_model is not None and not self._capacity_row_enabled(provider_id):
+                # Turning a capacity source off invalidates its windows, not
+                # the independent local-activity aggregate already on the
+                # model. Keeping that bounded snapshot avoids a transcript
+                # rescan merely to redraw the disabled state.
+                models[provider_id] = dataclass_replace(
+                    old_model,
+                    windows=(),
+                    refreshing=False,
+                    error_text=None,
+                )
+            else:
+                models.pop(provider_id, None)
         self._usage_provider_states = states
         self._usage_provider_models = models
+        self.update_usage_menu_fields(
+            monotonic_now=now,
+            epoch_now=time.time(),
+        )
+        fields = getattr(self, "settings_fields", None) or {}
+        if "codex" in provider_ids:
+            codex = models.get("codex")
+            self.codex_summary_text = (
+                codex.settings_text if codex is not None else None
+            )
+            label = fields.get("profile_codex_label")
+            if label is not None:
+                label.setStringValue_(self.codex_summary_text or "")
+        if "claude" in provider_ids:
+            claude = models.get("claude")
+            self.claude_plan_text = (
+                claude.settings_text if claude is not None else None
+            )
+            label = fields.get("profile_plan_label")
+            if label is not None:
+                label.setStringValue_(
+                    self.jr_capacity_settings_text("claude")
+                    or self.claude_plan_text
+                    or ""
+                )
 
     def clear_capacity_timers(self, *, clear_attempts: bool) -> None:
         for name in ("_capacity_reset_timer", "_capacity_countdown_timer"):

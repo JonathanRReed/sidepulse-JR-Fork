@@ -173,6 +173,65 @@ def test_claude_combines_oauth_windows_and_local_tokens(tmp_path: Path):
     assert result.cache_savings_usd == 0.75
 
 
+def test_claude_default_quota_refresh_never_falls_back_to_a_cold_scan(
+    tmp_path: Path,
+):
+    import sidepulse.provider_usage_codex_claude as subject
+
+    with (
+        patch.object(subject, "_cached_claude_local_scan", return_value=None) as cached,
+        patch.object(
+            subject,
+            "_default_provider_local_scan",
+            side_effect=AssertionError("cold scan should not run on the quota path"),
+        ),
+    ):
+        result = collect_claude(
+            preference("claude"),
+            home=tmp_path,
+            observed_at=1000,
+            credentials=FixtureCredentials(
+                {("claude", "oauth-token"): "fixture-claude-session"}
+            ),
+            quota_fetcher=lambda _token: [
+                {"label": "5-hour", "used_percent": 95, "resets_at": 2000}
+            ],
+            local_scanner=subject._default_claude_local_scan,
+        )
+
+    cached.assert_called_once_with(tmp_path, 1000)
+    assert result.state.value == "ready"
+    assert result.lanes[0].remaining_percent == 5
+
+
+def test_claude_cached_local_scan_reuses_bounded_aggregate(tmp_path: Path):
+    import sidepulse.provider_usage_codex_claude as subject
+
+    cache = {
+        "files": {
+            "transcript.jsonl": {
+                "records": [[0, 0, 1, 900.0, 100, 25, 0, 50, 0]],
+                "mtime": 900.0,
+            }
+        },
+        "sessions": ["session-1"],
+        "models": ["claude", "claude-sonnet"],
+        "dedupes": ["event-1"],
+    }
+    with patch("sidepulse.usage_stats._load_cache", return_value=cache) as load:
+        result = subject._cached_claude_local_scan(tmp_path, 1000)
+
+    assert load.called
+    assert result == {
+        "input_tokens": 100,
+        "cached_input_tokens": 25,
+        "output_tokens": 50,
+        "model_count": 1,
+        "estimated_cost_usd": None,
+        "cache_savings_usd": None,
+    }
+
+
 def test_claude_without_explicit_usage_connection_is_actionable(tmp_path: Path):
     result = collect_claude(
         preference("claude"),

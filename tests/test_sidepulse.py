@@ -13065,8 +13065,6 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
 
         request.assert_called_once_with(
             (
-                self._transcript_source("codex"),
-                self._transcript_source("claude"),
                 # Claude plan limits are on in this fixture, so its capacity
                 # source is stale-and-due like any other. Enqueued only --
                 # opening the menu must never run the fetch inline.
@@ -13460,8 +13458,6 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
 
         request.assert_called_once_with(
             (
-                self._transcript_source("codex"),
-                self._transcript_source("claude"),
                 self._source("claude"),
             )
         )
@@ -13478,8 +13474,6 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
 
         request.assert_called_once_with(
             (
-                self._transcript_source("codex"),
-                self._transcript_source("claude"),
                 self._source("claude"),
             ),
             reason="menu-open",
@@ -13499,12 +13493,12 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         thread_type.return_value.start.assert_called_once_with()
         self.assertTrue(self.controller._usage_provider_states["codex"].in_flight)
         self.assertTrue(self.controller._usage_provider_states["claude"].in_flight)
-        self.assertTrue(
+        self.assertFalse(
             self.controller._usage_transcript_states[
                 self._transcript_source("codex")
             ].in_flight
         )
-        self.assertTrue(
+        self.assertFalse(
             self.controller._usage_transcript_states[
                 self._transcript_source("claude")
             ].in_flight
@@ -13524,8 +13518,6 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
 
         request.assert_called_once_with(
             (
-                self._transcript_source("codex"),
-                self._transcript_source("claude"),
                 self._source("codex"),
             ),
             reason="menu-open",
@@ -13542,7 +13534,10 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         totals.input_tokens = 123
         published = []
         with (
-            patch("sidepulse.status_bar.usage_stats.scan_usage", return_value=totals),
+            patch(
+                "sidepulse.status_bar.usage_stats.scan_usage",
+                return_value=totals,
+            ),
             patch("sidepulse.status_bar.claude_quota.fetch_windows") as fetch,
             patch.object(
                 self.controller,
@@ -13564,7 +13559,6 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         )
 
     def test_disabling_codex_percent_clears_old_windows_after_successful_refresh(self) -> None:
-        from sidepulse import usage_stats
         from sidepulse.usage_view import build_provider_usage_view
 
         now = time.monotonic()
@@ -13579,17 +13573,13 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                 ({"used_percent": 81, "window_minutes": 300},),
                 last_success_at=now,
                 now=now,
-                summary_text="Codex today: old local summary",
+                summary_text="Today: old local summary",
             )
         }
         menu_item = self.status_bar.build_usage_menu_item(self.controller)
         menu_label = self.controller._usage_menu_labels["codex"]
         settings_label = MagicMock()
         self.controller.settings_fields = {"profile_codex_label": settings_label}
-        totals = usage_stats.UsageTotals()
-        totals.codex_sessions.add("codex-session")
-        totals.sessions.add("codex-session")
-        totals.codex_tokens = 2_000_000
         sender = MagicMock()
         sender.state.return_value = 0
 
@@ -13603,7 +13593,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             return InlineThread()
 
         with (
-            patch("sidepulse.status_bar.usage_stats.scan_usage", return_value=totals),
+            patch("sidepulse.status_bar.usage_stats.scan_usage") as scan,
             patch(
                 "sidepulse.status_bar.usage_stats.cached_codex_rate_limits",
                 return_value={
@@ -13626,11 +13616,9 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
 
         model = self.controller._usage_provider_models["codex"]
         self.assertFalse(self.controller.settings.codex_percent_enabled)
+        scan.assert_not_called()
         self.assertEqual(model.windows, ())
-        self.assertIn(
-            "Codex · Last 7 days: 1 session · 2M processed tokens",
-            model.menu_line,
-        )
+        self.assertIn("Codex · Today: old local summary", model.menu_line)
         self.assertEqual(model.menu_line.count("Codex"), 1)
         self.assertNotIn("81%", model.menu_line)
         self.assertNotIn("82%", model.settings_text)
@@ -13642,11 +13630,10 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         self.assertEqual(menu_label.stringValue(), "Codex · no reading")
         self.assertNotIn("session", menu_label.stringValue())
         settings_label.setStringValue_.assert_called_with(model.settings_text)
-        self.assertIn("1 session", model.settings_text)
+        self.assertIn("old local summary", model.settings_text)
         self.assertIs(self.controller._usage_menu_item, menu_item)
 
     def test_disabling_claude_plan_limits_clears_old_windows_after_successful_refresh(self) -> None:
-        from sidepulse import usage_stats
         from sidepulse.usage_view import build_provider_usage_view
 
         now = time.monotonic()
@@ -13661,17 +13648,13 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                 ({"utilization": 71, "window_minutes": 300},),
                 last_success_at=now,
                 now=now,
-                summary_text="Claude today: old local summary",
+                summary_text="Today: old local summary",
             )
         }
         menu_item = self.status_bar.build_usage_menu_item(self.controller)
         menu_label = self.controller._usage_menu_labels["claude"]
         settings_label = MagicMock()
         self.controller.settings_fields = {"profile_plan_label": settings_label}
-        totals = usage_stats.UsageTotals()
-        totals.sessions.add("claude-session")
-        totals.input_tokens = 123
-        totals.output_tokens = 7
         sender = MagicMock()
         sender.state.return_value = 0
 
@@ -13685,7 +13668,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             return InlineThread()
 
         with (
-            patch("sidepulse.status_bar.usage_stats.scan_usage", return_value=totals),
+            patch("sidepulse.status_bar.usage_stats.scan_usage") as scan,
             patch("sidepulse.status_bar.claude_quota.fetch_windows") as fetch,
             patch(
                 "sidepulse.status_bar.threading.Thread",
@@ -13705,8 +13688,9 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         model = self.controller._usage_provider_models["claude"]
         self.assertFalse(self.controller.settings.claude_plan_limits_enabled)
         fetch.assert_not_called()
+        scan.assert_not_called()
         self.assertEqual(model.windows, ())
-        self.assertIn("Claude · Last 7 days: 1 session · 130 tokens", model.menu_line)
+        self.assertIn("Claude · Today: old local summary", model.menu_line)
         self.assertEqual(model.menu_line.count("Claude"), 1)
         self.assertNotIn("71%", model.menu_line)
         self.assertNotIn("71%", model.settings_text)
@@ -13715,7 +13699,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         self.assertEqual(menu_label.stringValue(), "Claude · no reading")
         self.assertNotIn("session", menu_label.stringValue())
         settings_label.setStringValue_.assert_called_with(model.settings_text)
-        self.assertIn("1 session", model.settings_text)
+        self.assertIn("old local summary", model.settings_text)
         self.assertIs(self.controller._usage_menu_item, menu_item)
 
     def test_claude_plan_setting_uses_exact_source_invalidation(self) -> None:

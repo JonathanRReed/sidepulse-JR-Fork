@@ -134,11 +134,27 @@ def _default_codex_local_scan(home: Path, observed_at: float) -> dict[str, objec
 
 
 def _default_claude_local_scan(home: Path, observed_at: float) -> dict[str, object] | None:
-    return _default_provider_local_scan("claude", home, observed_at)
+    # Quota is the time-sensitive value on this plane. The Profile graph owns
+    # cold transcript scans on demand, so an automatic quota refresh may use
+    # the last bounded local aggregate but must never walk the full Claude
+    # history before asking the live endpoint.
+    return _cached_claude_local_scan(home, observed_at)
 
 
 def _cached_codex_local_scan(home: Path, observed_at: float) -> dict[str, object] | None:
-    """Read the bounded Codex usage cache before falling back to a cold scan.
+    return _cached_provider_local_scan("codex", home, observed_at)
+
+
+def _cached_claude_local_scan(home: Path, observed_at: float) -> dict[str, object] | None:
+    return _cached_provider_local_scan("claude", home, observed_at)
+
+
+def _cached_provider_local_scan(
+    provider_id: str,
+    home: Path,
+    observed_at: float,
+) -> dict[str, object] | None:
+    """Read one provider's bounded usage cache without a transcript walk.
 
     The current quota UI needs the newest percentage quickly. Walking the full
     transcript tree on every refresh can take tens of seconds on large local
@@ -147,7 +163,6 @@ def _cached_codex_local_scan(home: Path, observed_at: float) -> dict[str, object
     del observed_at
     try:
         from . import usage_stats
-        from .credentials import read_codex_tokens
         from .providers import negotiated_provider_sources
         from .state_paths import default_state_dir
     except ImportError:
@@ -156,7 +171,7 @@ def _cached_codex_local_scan(home: Path, observed_at: float) -> dict[str, object
         (
             item
             for item in negotiated_provider_sources()
-            if item.source_key.provider_id == "codex"
+            if item.source_key.provider_id == provider_id
             and item.source_key.capability_id == "transcript_usage"
             and item.observation_invocation_allowed
         ),
@@ -200,7 +215,7 @@ def _cached_codex_local_scan(home: Path, observed_at: float) -> dict[str, object
                 sessions,
                 models,
                 dedupes,
-                expected_provider="codex",
+                expected_provider=provider_id,
             )
             if records is not None:
                 input_tokens += sum(record[4] for record in records)
@@ -228,7 +243,7 @@ def _cached_codex_local_scan(home: Path, observed_at: float) -> dict[str, object
                     windows = admitted
                     newest_window_marker = marker
         if (
-            not windows
+            (provider_id != "codex" or not windows)
             and input_tokens == 0
             and cached_input_tokens == 0
             and output_tokens == 0
@@ -236,7 +251,6 @@ def _cached_codex_local_scan(home: Path, observed_at: float) -> dict[str, object
         ):
             continue
         document: dict[str, object] = {
-            "windows": [dict(window) for window in windows],
             "input_tokens": input_tokens,
             "cached_input_tokens": cached_input_tokens,
             "output_tokens": output_tokens,
@@ -244,14 +258,18 @@ def _cached_codex_local_scan(home: Path, observed_at: float) -> dict[str, object
             "estimated_cost_usd": None,
             "cache_savings_usd": None,
         }
-        if newest_window_marker is not None:
-            document["windows_observed_at"] = newest_window_marker[0]
-        try:
-            tokens = read_codex_tokens(Path(home) / ".codex" / "auth.json")
-        except Exception:
-            tokens = None
-        if tokens is not None and getattr(tokens, "account_id", None):
-            document["account_label"] = str(tokens.account_id)
+        if provider_id == "codex":
+            document["windows"] = [dict(window) for window in windows]
+            if newest_window_marker is not None:
+                document["windows_observed_at"] = newest_window_marker[0]
+            try:
+                from .credentials import read_codex_tokens
+
+                tokens = read_codex_tokens(Path(home) / ".codex" / "auth.json")
+            except Exception:
+                tokens = None
+            if tokens is not None and getattr(tokens, "account_id", None):
+                document["account_label"] = str(tokens.account_id)
         return document
     return None
 
