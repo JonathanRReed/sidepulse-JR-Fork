@@ -148,7 +148,7 @@ def test_compounded_ambient_dims_do_not_turn_an_on_surface_effectively_black() -
     assert "ambient_visibility_floor" in _names(result.trace)
 
 
-def test_ambient_visibility_floor_never_exceeds_the_owner_base_brightness() -> None:
+def test_ambient_visibility_floor_recovers_from_tiny_automatic_base() -> None:
     result = plan_ambient_brightness(
         base_brightness=4,
         idle_factor=0.1,
@@ -160,7 +160,7 @@ def test_ambient_visibility_floor_never_exceeds_the_owner_base_brightness() -> N
         screen_bar_min_glow=0.0,
     )
 
-    assert result.brightness == 4
+    assert result.brightness == MIN_AMBIENT_VISIBLE_BRIGHTNESS
 
 
 def test_screen_bar_floor_does_not_revive_an_explicit_zero() -> None:

@@ -97,16 +97,13 @@ def plan_ambient_brightness(
             float(MIN_ESCALATION_VISIBLE_BRIGHTNESS),
         )
         trace.append(step)
-    ambient_floor = min(
-        float(MIN_AMBIENT_VISIBLE_BRIGHTNESS),
-        float(base_brightness),
-    )
+    ambient_floor = float(MIN_AMBIENT_VISIBLE_BRIGHTNESS)
     if 0.0 < scaled < ambient_floor:
         # Idle, night, and Focus/DND are all useful independent controls, but
         # multiplying them can collapse a healthy 0-255 source to brightness
-        # 1. Keep an ambient surface that is meant to be on visibly on, while
-        # never making it brighter than the owner's base setting. Explicit
-        # zero factors returned above remain authoritative.
+        # 1. Keep an ambient surface that is meant to be on visibly on, and
+        # keep the smallest automatic-brightness reading from defeating that
+        # visibility guarantee. Explicit zero factors remain authoritative.
         scaled, step = _floor_step(
             "ambient_visibility_floor",
             scaled,
