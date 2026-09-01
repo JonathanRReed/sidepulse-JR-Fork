@@ -43,8 +43,12 @@ from .webhook_delivery import (
 from .why_light_context import OutputTimingSource
 from .why_light_runtime import project_current_why_light_context
 
-EVENT_COALESCE_SECONDS = 0.05
-FULL_REFRESH_HEARTBEAT_SECONDS = 1.0
+# Keep production admission aligned with the retained controller's normal
+# cadence. A shorter override made chatty agent events rebuild the AppKit menu
+# and output state on the main thread far more often than the UI can usefully
+# display them.
+EVENT_COALESCE_SECONDS = _legacy.EVENT_REFRESH_FLOOR_SECONDS
+FULL_REFRESH_HEARTBEAT_SECONDS = _legacy.STATUS_BAR_REFRESH_SECONDS
 
 _LegacyStatusBarController = _legacy._AppKitStatusBarController
 

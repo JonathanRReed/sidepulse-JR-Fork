@@ -111,7 +111,7 @@ def test_escalation_urgency_calls_the_stage_reader() -> None:
     assert "stage_reader" in calls
 
 
-def test_hook_bursts_are_coalesced_for_at_most_fifty_milliseconds() -> None:
+def test_hook_bursts_use_the_legacy_refresh_floor() -> None:
     # The dispatch site lives in the retained legacy controller; the
     # coalescing override lives in the production layer. The contract spans
     # all three files.
@@ -123,9 +123,21 @@ def test_hook_bursts_are_coalesced_for_at_most_fifty_milliseconds() -> None:
         )
     )
 
-    assert "EVENT_COALESCE_SECONDS = 0.05" in text
+    assert (
+        "EVENT_COALESCE_SECONDS = _legacy.EVENT_REFRESH_FLOOR_SECONDS"
+        in text
+    )
     assert '"refreshFromEvent:"' in text
     assert '"trailingRefreshFire:"' in text
+
+
+def test_full_refresh_heartbeat_uses_the_normal_status_interval() -> None:
+    text = PRODUCTION_STATUS_BAR.read_text(encoding="utf-8")
+
+    assert (
+        "FULL_REFRESH_HEARTBEAT_SECONDS = _legacy.STATUS_BAR_REFRESH_SECONDS"
+        in text
+    )
 
 
 def test_background_runtime_modules_cannot_import_appkit_or_objc() -> None:
