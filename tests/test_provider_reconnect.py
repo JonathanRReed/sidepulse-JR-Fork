@@ -284,6 +284,67 @@ def test_codex_app_server_probe_keeps_transport_open_until_rate_limits_arrive(
     assert process.terminated is True
 
 
+def test_codex_app_server_probe_finds_homebrew_under_launchd_path(monkeypatch):
+    import io
+    import shutil
+    import subprocess
+
+    searched: dict[str, str] = {}
+
+    def find(executable, *, path):
+        searched["executable"] = executable
+        searched["path"] = path
+        return "/opt/homebrew/bin/codex"
+
+    lines = [
+        json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "result": {"userAgent": "codex/1.0"}}
+        ),
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {"rateLimits": {"primary": {"usedPercent": 5.0}}},
+            }
+        ),
+        json.dumps(
+            {"jsonrpc": "2.0", "id": 3, "result": {"account": {"email": "x"}}}
+        ),
+    ]
+
+    class FixtureProcess:
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO("\n".join(lines) + "\n")
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            del timeout
+            return 0
+
+        def kill(self):
+            pass
+
+    command: list[str] = []
+
+    def popen(arguments, **_kwargs):
+        command.extend(arguments)
+        return FixtureProcess()
+
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    monkeypatch.setattr(shutil, "which", find)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+    probe = codex_app_server_probe(timeout_seconds=1.0)
+
+    assert probe is not None and probe["used_percent"] == 5.0
+    assert searched["executable"] == "codex"
+    assert "/opt/homebrew/bin" in searched["path"].split(":")
+    assert command[0] == "/opt/homebrew/bin/codex"
+
+
 # --- gates -----------------------------------------------------------------
 
 

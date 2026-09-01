@@ -279,6 +279,32 @@ def test_the_transform_rewrites_hexes_and_brightness_and_nothing_else() -> None:
     assert result.count("#") == 1
 
 
+def test_ambient_visibility_floor_survives_the_strip_transfer() -> None:
+    """The shared sRGB floor must remain visibly on after linear-PWM output."""
+    from sidepulse.brightness_policy import (
+        MIN_AMBIENT_VISIBLE_BRIGHTNESS,
+        plan_ambient_brightness,
+    )
+
+    planned = plan_ambient_brightness(
+        base_brightness=255,
+        idle_factor=1.0,
+        focus_factor=1.0,
+        night_factor=1.0,
+        global_factor=1.0,
+        escalation_boost=1.0,
+        is_screen_bar=False,
+        screen_bar_min_glow=0.0,
+        dnd_factor=0.15,
+    )
+
+    assert planned.brightness == MIN_AMBIENT_VISIBLE_BRIGHTNESS == 61
+    transferred = apply_strip_transfer_to_program(
+        f"brightness {planned.brightness}\n#FFFFFF"
+    )
+    assert transferred.startswith("brightness 12\n")
+
+
 def test_neutral_gains_still_change_the_program_because_the_surface_differs() -> None:
     """The transfer is not a no-op at neutral gains, and that is the point:
     an uncalibrated strip was just as mismatched as a calibrated one."""

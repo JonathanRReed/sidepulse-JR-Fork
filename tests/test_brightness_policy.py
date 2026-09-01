@@ -42,34 +42,34 @@ def test_ambient_brightness_preserves_the_current_factor_order() -> None:
     result = plan_ambient_brightness(
         base_brightness=200,
         idle_factor=0.5,
-        focus_factor=0.5,
-        night_factor=0.8,
-        global_factor=0.5,
+        focus_factor=1.0,
+        night_factor=1.0,
+        global_factor=1.0,
         escalation_boost=1.0,
         is_screen_bar=False,
         screen_bar_min_glow=0.25,
     )
 
     assert result == BrightnessPolicyResult(
-        brightness=20,
+        brightness=100,
         trace=(
             BrightnessTraceStep("base", before=200.0, after=200.0),
             BrightnessTraceStep(
                 "idle_dim", before=200.0, factor=0.5, after=100.0
             ),
             BrightnessTraceStep(
-                "focus_sync", before=100.0, factor=0.5, after=50.0
+                "focus_sync", before=100.0, factor=1.0, after=100.0
             ),
             BrightnessTraceStep(
-                "night_dim", before=50.0, factor=0.8, after=40.0
+                "night_dim", before=100.0, factor=1.0, after=100.0
             ),
             BrightnessTraceStep(
-                "global_brightness", before=40.0, factor=0.5, after=20.0
+                "global_brightness", before=100.0, factor=1.0, after=100.0
             ),
             BrightnessTraceStep(
-                "escalation_boost", before=20.0, factor=1.0, after=20.0
+                "escalation_boost", before=100.0, factor=1.0, after=100.0
             ),
-            BrightnessTraceStep("normalize", before=20.0, after=20.0),
+            BrightnessTraceStep("normalize", before=100.0, after=100.0),
         ),
     )
 
@@ -95,17 +95,24 @@ def test_ambient_brightness_applies_escalation_floor_before_screen_bar_floor() -
         "global_brightness",
         "escalation_boost",
         "escalation_floor",
+        "ambient_visibility_floor",
         "screen_bar_min_glow",
         "normalize",
     )
-    escalation_step = result.trace[-3]
+    escalation_step = result.trace[-4]
     assert escalation_step.name == "escalation_floor"
     assert escalation_step.before == pytest.approx(0.002)
     assert escalation_step.floor == 12.0
     assert escalation_step.after == 12.0
+    assert result.trace[-3] == BrightnessTraceStep(
+        "ambient_visibility_floor",
+        before=12.0,
+        floor=61.0,
+        after=61.0,
+    )
     assert result.trace[-2] == BrightnessTraceStep(
         "screen_bar_min_glow",
-        before=12.0,
+        before=61.0,
         floor=63.75,
         after=63.75,
     )
@@ -114,7 +121,7 @@ def test_ambient_brightness_applies_escalation_floor_before_screen_bar_floor() -
     )
 
 
-def test_ambient_brightness_owns_the_escalation_visibility_floor() -> None:
+def test_ambient_brightness_applies_its_surface_floor_after_escalation() -> None:
     result = plan_ambient_brightness(
         base_brightness=1,
         idle_factor=0.1,
@@ -127,7 +134,17 @@ def test_ambient_brightness_owns_the_escalation_visibility_floor() -> None:
     )
 
     assert MIN_ESCALATION_VISIBLE_BRIGHTNESS == 12
-    assert result.brightness == MIN_ESCALATION_VISIBLE_BRIGHTNESS
+    assert result.brightness == MIN_AMBIENT_VISIBLE_BRIGHTNESS
+    assert result.trace[-3].name == "escalation_floor"
+    assert result.trace[-3].before == pytest.approx(0.0002)
+    assert result.trace[-3].floor == 12.0
+    assert result.trace[-3].after == 12.0
+    assert result.trace[-2] == BrightnessTraceStep(
+        "ambient_visibility_floor",
+        before=12.0,
+        floor=61.0,
+        after=61.0,
+    )
 
 
 def test_compounded_ambient_dims_do_not_turn_an_on_surface_effectively_black() -> None:
@@ -144,7 +161,7 @@ def test_compounded_ambient_dims_do_not_turn_an_on_surface_effectively_black() -
         dnd_factor=0.15,
     )
 
-    assert result.brightness == MIN_AMBIENT_VISIBLE_BRIGHTNESS == 12
+    assert result.brightness == MIN_AMBIENT_VISIBLE_BRIGHTNESS == 61
     assert "ambient_visibility_floor" in _names(result.trace)
 
 
@@ -286,6 +303,7 @@ def test_dnd_dim_scales_ambient_before_escalation_and_visibility_floors() -> Non
         "dnd_dim",
         "escalation_boost",
         "escalation_floor",
+        "ambient_visibility_floor",
         "screen_bar_min_glow",
         "normalize",
     )
@@ -359,7 +377,7 @@ def test_dnd_dark_zero_is_authoritative_over_signal_visibility_floor() -> None:
 
 @pytest.mark.parametrize(
     ("base_brightness", "expected"),
-    [(12.6, 13), (300.0, 255), (-4.0, 0)],
+    [(61.6, 62), (300.0, 255), (-4.0, 0)],
 )
 def test_ambient_brightness_trace_exposes_final_rounding_and_clamping(
     base_brightness: float,

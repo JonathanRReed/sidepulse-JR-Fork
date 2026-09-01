@@ -26,6 +26,8 @@ without a host app.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -653,6 +655,28 @@ def connection_loss_transitions(
 # Codex live probe: `codex app-server` JSON-RPC, user-initiated only.
 
 
+def _resolved_codex_binary(codex_binary: str) -> str | None:
+    """Resolve Codex without depending on launchd's intentionally small PATH."""
+
+    candidate = str(codex_binary).strip()
+    if not candidate:
+        return None
+    if os.path.sep in candidate:
+        return candidate if os.access(candidate, os.X_OK) else None
+    search_dirs = [
+        os.environ.get("PATH", ""),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        str(Path.home() / ".local" / "bin"),
+        "/Applications/Codex.app/Contents/Resources",
+        "/Applications/ChatGPT.app/Contents/Resources",
+    ]
+    return shutil.which(
+        candidate,
+        path=os.pathsep.join(part for part in search_dirs if part),
+    )
+
+
 def codex_app_server_probe(
     *,
     codex_binary: str = "codex",
@@ -696,8 +720,11 @@ def codex_app_server_probe(
     def _default_runner() -> str | None:
         process = None
         try:
+            resolved_binary = _resolved_codex_binary(codex_binary)
+            if resolved_binary is None:
+                return None
             process = subprocess.Popen(
-                [codex_binary, "-s", "read-only", "-a", "never", "app-server"],
+                [resolved_binary, "-s", "read-only", "-a", "never", "app-server"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,

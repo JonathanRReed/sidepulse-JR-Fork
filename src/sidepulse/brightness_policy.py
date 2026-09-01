@@ -5,7 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 MIN_ESCALATION_VISIBLE_BRIGHTNESS = 12
-MIN_AMBIENT_VISIBLE_BRIGHTNESS = 12
+# Ambient brightness is authored in nominal sRGB, then the physical strip
+# decodes that scalar to linear PWM at its write boundary. A nominal value of
+# 12 therefore reaches the device as drive code 1, which is effectively black
+# once it scales an already-dim ambient color. Nominal 61 decodes to the
+# intended drive-12 visibility target. Keeping the floor here also gives
+# Screen Bar the matching perceived-light floor. Explicit zero factors still
+# bypass it below.
+MIN_AMBIENT_VISIBLE_BRIGHTNESS = 61
 
 
 @dataclass(frozen=True, slots=True)
