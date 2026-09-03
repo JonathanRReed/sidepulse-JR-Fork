@@ -639,6 +639,7 @@ PROVIDER_BRAND_COLORS: dict[str, str] = {
     # (#601800, dE 40.2) was another unlit LED (luminance 0.031); this is
     # the same rust luminance-matched to 0.12 (worst-case dE 24.0).
     "openclaw": "#B23400",
+    "t3code": "#028090",
 }
 
 

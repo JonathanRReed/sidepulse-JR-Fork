@@ -79,6 +79,7 @@ def test_registry_has_all_native_providers_and_no_codexbar() -> None:
         "devin",
         "grok",
         "antigravity",
+        "opencode",
         "openai-api",
     )
     assert "codexbar" not in ids

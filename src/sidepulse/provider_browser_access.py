@@ -151,18 +151,24 @@ def _import_browser_session(
             source_instance_id=source_instance_id,
         )
         if session is None:
+            from .browser_session_import import import_devin_session
+            session = import_devin_session(Path.home())
+        if session is None:
             return None
         credential_store = ProviderCredentialStore()
-        if source_instance_id == "default":
-            credential_store.set(provider_id, "token", session.token)
-        else:
-            from .provider_instances import ProviderInstanceKey
+        try:
+            if source_instance_id == "default":
+                credential_store.set(provider_id, "token", session.token)
+            else:
+                from .provider_instances import ProviderInstanceKey
 
-            credential_store.set_for_instance(
-                ProviderInstanceKey(provider_id, source_instance_id),
-                "token",
-                session.token,
-            )
+                credential_store.set_for_instance(
+                    ProviderInstanceKey(provider_id, source_instance_id),
+                    "token",
+                    session.token,
+                )
+        except Exception:
+            pass
         loaded = load_provider_usage_settings()
         settings = loaded.settings
         if session.organization:

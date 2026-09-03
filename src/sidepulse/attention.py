@@ -528,6 +528,12 @@ def _lifecycle_mode(
     }:
         return LifecycleMode.ACTIVE
     if status.mode == AgentMode.BLOCKED_ERROR:
+        if (
+            now is not None
+            and (now - status.updated_at).total_seconds()
+            > COMPLETED_RECENT_SECONDS * 2
+        ):
+            return LifecycleMode.IDLE
         return LifecycleMode.FAILED_VISIBLE
     if status.mode == AgentMode.COMPLETED:
         # Done is a MOMENT (this is the LIVE path -- the canonical

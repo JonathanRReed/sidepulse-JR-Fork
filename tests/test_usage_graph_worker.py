@@ -299,3 +299,61 @@ def test_build_failure_clears_the_flag_and_keeps_the_view_scanning(
     assert target.usage_graph_model is None
     view = target.settings_fields["profile_usage_graph"]
     assert view.models[-1]["empty_text"] == "Scanning local activity…"
+
+def test_scan_opencode_records_parses_messages(tmp_path):
+    import sqlite3, json
+    db_file = tmp_path / "opencode.db"
+    con = sqlite3.connect(db_file)
+    con.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INT, data TEXT)")
+    msg_data = {
+        "tokens": {"input": 1000, "output": 200, "cache": {"read": 50, "write": 10}},
+        "model": "gemini-flash"
+    }
+    con.execute("INSERT INTO message VALUES ('msg1', 'ses1', 1700000000000, ?)", (json.dumps(msg_data),))
+    con.commit()
+    con.close()
+
+    records = usage_graph_worker._scan_opencode_records(db_file, 1690000000.0)
+    assert len(records) == 1
+    assert records[0][0] == "opencode"
+    assert records[0][1] == "ses1"
+    assert records[0][4] == 1000
+    assert records[0][7] == 200
+
+
+def test_scan_t3code_records_parses_activities(tmp_path):
+    import sqlite3, json
+    db_file = tmp_path / "state.sqlite"
+    con = sqlite3.connect(db_file)
+    con.execute("CREATE TABLE projection_thread_activities (activity_id TEXT, thread_id TEXT, created_at TEXT, payload_json TEXT)")
+    act_data = {
+        "usage": {"total_tokens": 3500, "input_tokens": 3000, "output_tokens": 500}
+    }
+    con.execute("INSERT INTO projection_thread_activities VALUES ('act1', 'th1', '2026-03-20T10:00:00Z', ?)", (json.dumps(act_data),))
+    con.commit()
+    con.close()
+
+    records = usage_graph_worker._scan_t3code_records(db_file, 1700000000.0)
+    assert len(records) == 1
+    assert records[0][0] == "t3code"
+    assert records[0][1] == "th1"
+    assert records[0][4] == 3000
+    assert records[0][7] == 500
+
+
+def test_scan_antigravity_records_parses_summaries(tmp_path):
+    import sqlite3
+    agy_dir = tmp_path / "antigravity-cli"
+    agy_dir.mkdir()
+    db_file = agy_dir / "conversation_summaries.db"
+    con = sqlite3.connect(db_file)
+    con.execute("CREATE TABLE conversation_summaries (conversation_id TEXT, step_count INT, last_modified_time TEXT)")
+    con.execute("INSERT INTO conversation_summaries VALUES ('conv1', 10, '2026-09-01T12:00:00')")
+    con.commit()
+    con.close()
+
+    records = usage_graph_worker._scan_antigravity_records(tmp_path, 1700000000.0)
+    assert len(records) == 1
+    assert records[0][0] == "antigravity"
+    assert records[0][1] == "conv1"
+    assert records[0][4] == 3500

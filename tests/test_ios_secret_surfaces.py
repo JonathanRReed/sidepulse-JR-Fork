@@ -95,7 +95,7 @@ def test_proxy_url_strips_credentials_and_replaces_legacy_persisted_value() -> N
         "components.fragment = nil",
     ):
         assert removal in app_model
-    initialization = _declaration_body(app_model, r"private\s+init\(\)")
+    initialization = _declaration_body(app_model, r"PhoneGlanceClient\.fetch[\s\S]*?\)\s*\}\s*\)")
     assignment = initialization.find("self.serverBaseURL =")
     replacement = initialization.find(
         "UserDefaults.standard.set(self.serverBaseURL, forKey: Defaults.serverBaseURL)"

@@ -362,6 +362,72 @@ def _session_rank(session: BrowserSession) -> int:
     )
 
 
+CHROMIUM_FAMILY_PROFILE_ROOTS: tuple[tuple[str, str], ...] = (
+    ("Chrome", "Google/Chrome"),
+    ("Brave", "BraveSoftware/Brave-Browser"),
+    ("Arc", "Arc/User Data"),
+    ("Edge", "Microsoft Edge"),
+    ("Vivaldi", "Vivaldi"),
+)
+
+
+def chromium_devin_sessions(home: Path) -> list[BrowserSession]:
+    """Every Devin session found across Chromium-family profiles."""
+    try:
+        import rleveldb
+    except ImportError:
+        return []
+
+    sessions: list[BrowserSession] = []
+    support = Path(home) / "Library" / "Application Support"
+    for label, relative in CHROMIUM_FAMILY_PROFILE_ROOTS:
+        root = support / relative
+        try:
+            if not root.is_dir():
+                continue
+            candidates = [root / "Default" / "Local Storage" / "leveldb"]
+            try:
+                for entry in root.iterdir():
+                    if entry.name.startswith("Profile ") and entry.is_dir():
+                        candidates.append(entry / "Local Storage" / "leveldb")
+            except OSError:
+                pass
+        except OSError:
+            continue
+
+        for ldb_path in candidates:
+            if not ldb_path.is_dir():
+                continue
+            try:
+                profile_name = ldb_path.parent.parent.name
+                source_label = f"{label} {profile_name}"
+                entries: dict[str, str] = {}
+                with rleveldb.RawLevelDb(str(ldb_path)) as db:
+                    for key, val in db.iterate_records_raw():
+                        try:
+                            key_str = key.decode("utf-8", errors="ignore")
+                        except Exception:
+                            continue
+                        if "app.devin.ai" not in key_str:
+                            continue
+                        idx = key_str.rfind("")
+                        clean_key = key_str[idx + 1:] if idx != -1 else key_str
+                        val_str = ""
+                        if val:
+                            if val.startswith(b""):
+                                val_str = val[1:].decode("utf-8", errors="ignore")
+                            else:
+                                val_str = val.decode("utf-8", errors="ignore")
+                        entries[clean_key] = val_str
+                if entries:
+                    session = devin_session_from_entries(entries, source_label=source_label)
+                    if session is not None:
+                        sessions.append(session)
+            except Exception:
+                continue
+    return sessions
+
+
 def import_devin_sessions(home: Path) -> list[BrowserSession]:
     """Every Devin session found across Firefox-family profiles, best
     first -- "best" meaning the one that knows the most about which
@@ -376,6 +442,7 @@ def import_devin_sessions(home: Path) -> list[BrowserSession]:
         session = devin_session_from_entries(entries, source_label=label)
         if session is not None:
             sessions.append(session)
+    sessions.extend(chromium_devin_sessions(home))
     return sorted(sessions, key=_session_rank, reverse=True)
 
 

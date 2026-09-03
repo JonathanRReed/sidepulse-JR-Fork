@@ -66,8 +66,32 @@ def remove_redundant_separators(menu) -> None:
         index -= 1
 
 
+def _apply_meter_attributed_title(item, title: str, *, color=None):
+    try:
+        from AppKit import (
+            NSMutableAttributedString,
+            NSFont,
+            NSFontAttributeName,
+            NSForegroundColorAttributeName,
+        )
+        base_font = NSFont.menuFontOfSize_(13.0)
+        symbols_font = NSFont.fontWithName_size_("Apple Symbols", 13.0) or NSFont.fontWithName_size_("Menlo", 12.0)
+        attr_str = NSMutableAttributedString.alloc().initWithString_(title)
+        if base_font is not None:
+            attr_str.addAttribute_value_range_(NSFontAttributeName, base_font, (0, len(title)))
+        if color is not None:
+            attr_str.addAttribute_value_range_(NSForegroundColorAttributeName, color, (0, len(title)))
+        if symbols_font is not None and ("▰" in title or "▱" in title):
+            for idx, ch in enumerate(title):
+                if ch in ("▰", "▱"):
+                    attr_str.addAttribute_value_range_(NSFontAttributeName, symbols_font, (idx, 1))
+        item.setAttributedTitle_(attr_str)
+    except Exception:
+        pass
+
+
 def disabled_usage_item(title: str, *, alert: bool = False):
-    from AppKit import NSMenuItem
+    from AppKit import NSColor, NSMenuItem
 
     item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         title,
@@ -75,29 +99,9 @@ def disabled_usage_item(title: str, *, alert: bool = False):
         "",
     )
     item.setEnabled_(False)
-    if alert:
-        # A lane past its low-remaining threshold gets amber, not just a
-        # shorter meter -- peripheral vision again.
-        try:
-            from AppKit import (
-                NSAttributedString,
-                NSColor,
-                NSFont,
-                NSFontAttributeName,
-                NSForegroundColorAttributeName,
-            )
-
-            item.setAttributedTitle_(
-                NSAttributedString.alloc().initWithString_attributes_(
-                    title,
-                    {
-                        NSForegroundColorAttributeName: NSColor.systemOrangeColor(),
-                        NSFontAttributeName: NSFont.menuFontOfSize_(13.0),
-                    },
-                )
-            )
-        except Exception:
-            pass
+    color = NSColor.systemOrangeColor() if alert else None
+    if alert or "▰" in title or "▱" in title:
+        _apply_meter_attributed_title(item, title, color=color)
     return item
 
 
@@ -160,6 +164,8 @@ def native_usage_menu_item(target):
         None,
         "",
     )
+    if "▰" in projection.title or "▱" in projection.title:
+        _apply_meter_attributed_title(item, projection.title)
     submenu = _legacy.NSMenu.alloc().init()
     submenu.setAutoenablesItems_(False)
     # Vendor incidents outrank everything below: "the provider is down"

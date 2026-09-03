@@ -729,6 +729,7 @@ def test_doctor_reports_the_permission_as_its_own_code(monkeypatch) -> None:
 
     note_alcove_status(AlcoveCaptureStatus.SCREEN_RECORDING_DENIED)
     monkeypatch.setattr(doctor, "_alcove_following_enabled", lambda: True)
+    monkeypatch.setattr(doctor, "alcove_follow_blocker", lambda **_kwargs: None)
 
     finding = doctor._alcove_follow_state_probe()
 
@@ -797,6 +798,7 @@ def test_the_alcove_finding_is_in_the_manifest_and_encodes(monkeypatch) -> None:
 
     note_alcove_status(AlcoveCaptureStatus.SCREEN_RECORDING_DENIED)
     monkeypatch.setattr(doctor, "_alcove_following_enabled", lambda: True)
+    monkeypatch.setattr(doctor, "alcove_follow_blocker", lambda **_kwargs: None)
     result = doctor.collect_diagnostics()
     encoded = doctor.encode_diagnostic_result(result).decode("ascii")
 
@@ -897,6 +899,9 @@ class AlcoveSettingsSurfaceTests(unittest.TestCase):
         from sidepulse import settings_window
 
         self.settings_window = settings_window
+        blocker_patch = patch.object(settings_window, "alcove_follow_blocker", lambda **_k: None)
+        blocker_patch.start()
+        self.addCleanup(blocker_patch.stop)
 
     def _pane(self):
         self.controller.show_settings_window()

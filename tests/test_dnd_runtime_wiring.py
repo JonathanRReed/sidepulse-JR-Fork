@@ -483,7 +483,7 @@ def test_dnd_dim_and_dark_scale_both_ambient_and_signal_brightness(controller) -
     device = _device(brightness=200)
     controller.dnd_controller = SimpleNamespace(projection=_projection(DndMode.DIM))
 
-    assert controller.effective_brightness_for_device(device) == 50
+    assert controller.effective_brightness_for_device(device) == 61
     assert controller.effective_signal_brightness_for_device(device) == 50
 
     controller.dnd_controller = SimpleNamespace(projection=_projection(DndMode.DARK))

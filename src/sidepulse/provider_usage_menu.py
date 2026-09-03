@@ -292,16 +292,23 @@ def project_usage_menu(
         # four the labels drop to compact form so the row still fits.
         shown = constrained if len(constrained) <= 6 else constrained[:6]
         compact = len(shown) > 4
-        labels = [
-            (
-                f"{display_label if custom_label else display_label[:2]}"
-                f"{f' {identity}' if identity else ''} {remaining:.0f}"
-                if compact
-                else f"{display_label}"
-                f"{f' · {identity}' if identity else ''} {remaining:.0f}%"
-            )
-            for remaining, _provider_id, display_label, identity, custom_label in shown
-        ]
+        labels = []
+        for remaining, _provider_id, display_label, identity, custom_label in shown:
+            id_text = identity
+            if id_text and len(id_text) > 16:
+                if "@" in id_text:
+                    user = id_text.split("@")[0]
+                    id_text = f"{user[:8]}…" if len(user) > 8 else user
+                else:
+                    id_text = f"{id_text[:6]}…"
+            if compact:
+                part = f" {id_text}" if id_text else ""
+                labels.append(
+                    f"{display_label if custom_label else display_label[:2]}{part} {remaining:.0f}"
+                )
+            else:
+                part = f" · {id_text}" if id_text else ""
+                labels.append(f"{display_label}{part} {remaining:.0f}%")
         # The tightest lane's meter rides in the row itself: the
         # at-a-glance answer with zero hovering. Curated off with the
         # same switch as the per-lane meters.

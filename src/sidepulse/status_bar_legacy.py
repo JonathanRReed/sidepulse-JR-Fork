@@ -3188,6 +3188,18 @@ class StatusBarController(NSObject):
         self._refresh_dnd_environment("handle_environment_refresh")
         try:
             self.ingest_transcript_fallback()
+            try:
+                t3_service = getattr(self, "_t3_snapshot_service", None)
+                if t3_service is None:
+                    from .t3_compat import T3SnapshotService
+                    t3_service = T3SnapshotService()
+                    self._t3_snapshot_service = t3_service
+                obs = t3_service.observation()
+                if obs.snapshot is not None and obs.snapshot.compatible:
+                    self.monitor.replace_external_statuses("t3code", obs.snapshot.agent_statuses())
+                t3_service.request()
+            except Exception as _t3_exc:
+                log_status_bar(f"t3 snapshot error: {_t3_exc}")
             _t_ingest = time.monotonic()
             snapshot = self.monitor.snapshot()
             _t_snapshot = time.monotonic()
@@ -7702,6 +7714,9 @@ class StatusBarController(NSObject):
         self._runtime_started = False
         self._remove_dnd_environment_observers()
         self.dnd_controller.close()
+        t3_service = getattr(self, "_t3_snapshot_service", None)
+        if t3_service is not None:
+            t3_service.close()
         try:
             self.global_action_lifecycle.close()
         except HotkeyCleanupError as exc:

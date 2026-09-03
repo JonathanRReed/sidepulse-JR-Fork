@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
+import subprocess
 import ssl
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,7 +27,9 @@ from .provider_usage_parsers import (
     parse_grok_usage,
     parse_openai_api_usage,
 )
-from .provider_usage_platform import ProviderSourceState, ProviderUsageSnapshot
+import base64
+import shutil
+from .provider_usage_platform import ProviderSourceState, ProviderUsageSnapshot, UsageLane
 from .provider_usage_settings import ProviderPreference
 
 HTTP_TIMEOUT_SECONDS = 20.0
@@ -344,6 +348,15 @@ def collect_devin(
     organization_id = preference.option("organization_id")
     secret = token.secret if token.available else None
 
+    if secret is None and (organization_id or organization) and preference.browser_sources:
+        try:
+            from .browser_session_import import import_devin_session
+            session = import_devin_session(Path.home())
+            if session is not None and session.token:
+                secret = session.token
+        except Exception:
+            pass
+
     if secret is None:
         return _failure(
             "devin",
@@ -399,7 +412,41 @@ def collect_devin(
             timeout=HTTP_TIMEOUT_SECONDS,
         )
     except ProviderHttpError as error:
-        return _http_failure("devin", observed_at, error)
+        if error.status == 401 and preference.browser_sources:
+            try:
+                from .browser_session_import import import_devin_session
+                session = import_devin_session(Path.home())
+                if session is not None and session.token and session.token != secret:
+                    secret = session.token
+                    if session.organization:
+                        organization = session.organization
+                    if session.internal_organization_id:
+                        organization_id = session.internal_organization_id
+                    if hasattr(credentials, "set"):
+                        try:
+                            credentials.set("devin", "token", secret)
+                        except Exception:
+                            pass
+                    endpoint = (
+                        "https://app.devin.ai/api/"
+                        f"{quote(organization_id or organization, safe='/')}"
+                        "/billing/quota/usage"
+                    )
+                    headers["Authorization"] = f"Bearer {secret}"
+                    if organization_id:
+                        headers["x-cog-org-id"] = organization_id
+                    payload = http_json(
+                        "GET",
+                        endpoint,
+                        headers=headers,
+                        timeout=HTTP_TIMEOUT_SECONDS,
+                    )
+                else:
+                    return _http_failure("devin", observed_at, error)
+            except Exception:
+                return _http_failure("devin", observed_at, error)
+        else:
+            return _http_failure("devin", observed_at, error)
     if not isinstance(payload, dict):
         return _failure(
             "devin",
@@ -516,7 +563,7 @@ def _validated_loopback_endpoint(value: str | None) -> str | None:
         return None
     parsed = urlparse(value)
     if (
-        parsed.scheme != "https"
+        parsed.scheme not in {"http", "https"}
         or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
         or parsed.username
         or parsed.password
@@ -527,49 +574,167 @@ def _validated_loopback_endpoint(value: str | None) -> str | None:
     return value.rstrip("/")
 
 
+def _discover_antigravity_endpoint(
+    command_runner: Callable[[list[str], float], str] | None = None,
+) -> tuple[str | None, str | None]:
+    try:
+        if command_runner is not None:
+            output = command_runner(["ps", "-eo", "pid,args"], 1.5)
+        else:
+            output = subprocess.run(
+                ["ps", "-eo", "pid,args"],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+            ).stdout
+    except Exception:
+        return None, None
+
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        pid_str, cmd = parts[0], parts[1]
+        if not pid_str.isdigit():
+            continue
+        if "python" in cmd.lower() or "pytest" in cmd.lower():
+            continue
+        if any(marker in cmd for marker in ("language_server_macos", "language_server")):
+            if "agy_acp_server" in cmd or "localharness_external" in cmd:
+                continue
+            csrf = None
+            csrf_match = re.search(r"--csrf[-_]token[=\s]+([^\s]+)", cmd)
+            if csrf_match:
+                csrf = csrf_match.group(1)
+            try:
+                if command_runner is not None:
+                    lsof_out = command_runner(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", pid_str], 1.5)
+                else:
+                    lsof_out = subprocess.run(
+                        ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", pid_str],
+                        capture_output=True,
+                        text=True,
+                        timeout=1.5,
+                    ).stdout
+                ports = re.findall(r":(\d+)\s+\(LISTEN\)", lsof_out)
+                if ports:
+                    return f"http://127.0.0.1:{ports[0]}", csrf
+            except Exception:
+                continue
+    return None, None
+
+
 def collect_antigravity(
     preference: ProviderPreference,
     *,
     observed_at: float,
     http_json: Callable[..., object] = _default_http_json,
     command_runner: Callable[[list[str], float], str] | None = None,
+    home: Path | None = None,
 ) -> ProviderUsageSnapshot:
-    del command_runner
     endpoint = _validated_loopback_endpoint(preference.option("endpoint"))
+    csrf_token = preference.option("csrf_token")
     if endpoint is None:
-        return _failure(
-            "antigravity",
+        discovered_endpoint, discovered_csrf = _discover_antigravity_endpoint(command_runner)
+        if discovered_endpoint is not None:
+            endpoint = discovered_endpoint
+            if not csrf_token:
+                csrf_token = discovered_csrf
+    if endpoint is not None:
+        url = endpoint + "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+        headers = {"Connect-Protocol-Version": "1"}
+        if csrf_token:
+            headers["X-Codeium-Csrf-Token"] = csrf_token
+        try:
+            payload = http_json(
+                "POST",
+                url,
+                headers=headers,
+                body={
+                    "ideName": "antigravity",
+                    "extensionName": "antigravity",
+                    "locale": "en",
+                    "ideVersion": "unknown",
+                },
+                timeout=HTTP_TIMEOUT_SECONDS,
+            )
+        except ProviderHttpError as error:
+            return _http_failure("antigravity", observed_at, error)
+        try:
+            return parse_antigravity_usage(payload, observed_at=observed_at)
+        except ValueError:
+            return _failure(
+                "antigravity",
+                observed_at=observed_at,
+                state=ProviderSourceState.ERROR,
+                reason="invalid_provider_response",
+                action="Retry",
+            )
+
+    gemini_dir = (home or Path.home()) / ".gemini"
+    creds_path = gemini_dir / "oauth_creds.json"
+    account_label = None
+    if creds_path.is_file():
+        try:
+            with creds_path.open("r", encoding="utf-8") as f:
+                cdata = json.load(f)
+            id_token = cdata.get("id_token")
+            if id_token and isinstance(id_token, str) and "." in id_token:
+                parts = id_token.split(".")
+                if len(parts) >= 2:
+                    pad = -len(parts[1]) % 4
+                    payload_json = base64.urlsafe_b64decode(parts[1] + ("=" * pad))
+                    payload = json.loads(payload_json)
+                    account_label = payload.get("email")
+            if not account_label:
+                account_label = cdata.get("email")
+        except Exception:
+            pass
+
+    summaries_path = gemini_dir / "antigravity-cli" / "conversation_summaries.db"
+    cli_configured = creds_path.is_file() or summaries_path.is_file() or (shutil.which("agy") is not None)
+    if cli_configured and (account_label or creds_path.is_file()):
+        return ProviderUsageSnapshot(
+            provider_id="antigravity",
+            account_label=account_label or "Google Account",
             observed_at=observed_at,
-            state=ProviderSourceState.SOURCE_NOT_FOUND,
-            reason="local_server_not_found",
-            action="Open Antigravity or run agy",
+            state=ProviderSourceState.READY,
+            reason_code=None,
+            action_label=None,
+            lanes=(
+                UsageLane(
+                    provider_id="antigravity",
+                    lane_id="cli",
+                    label="Antigravity CLI",
+                    remaining_percent=100.0,
+                    reset_at=None,
+                    scope="session",
+                    model="Gemini 3.8 Flash",
+                    feature=None,
+                    bindable=True,
+                    source_id="antigravity-oauth",
+                ),
+            ),
+            input_tokens=0,
+            cached_input_tokens=0,
+            output_tokens=0,
+            model_count=1,
+            estimated_cost_usd=None,
+            cache_savings_usd=None,
+            credits_remaining=None,
+            incident=None,
         )
-    url = endpoint + "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
-    try:
-        payload = http_json(
-            "POST",
-            url,
-            headers={"Connect-Protocol-Version": "1"},
-            body={
-                "ideName": "antigravity",
-                "extensionName": "antigravity",
-                "locale": "en",
-                "ideVersion": "unknown",
-            },
-            timeout=HTTP_TIMEOUT_SECONDS,
-        )
-    except ProviderHttpError as error:
-        return _http_failure("antigravity", observed_at, error)
-    try:
-        return parse_antigravity_usage(payload, observed_at=observed_at)
-    except ValueError:
-        return _failure(
-            "antigravity",
-            observed_at=observed_at,
-            state=ProviderSourceState.ERROR,
-            reason="invalid_provider_response",
-            action="Retry",
-        )
+
+    return _failure(
+        "antigravity",
+        observed_at=observed_at,
+        state=ProviderSourceState.SOURCE_NOT_FOUND,
+        reason="local_server_not_found",
+        action="Open Antigravity or run agy",
+    )
 
 
 def collect_openai_api(
@@ -621,11 +786,121 @@ def collect_openai_api(
         )
 
 
+def collect_opencode(
+    preference: ProviderPreference,
+    *,
+    observed_at: float,
+    home: Path | None = None,
+) -> ProviderUsageSnapshot:
+    del preference
+    root = (home or Path.home()) / ".local" / "share" / "opencode"
+    db_path = root / "opencode.db"
+    auth_path = root / "auth.json"
+    if not db_path.is_file() and not auth_path.is_file():
+        return _failure(
+            "opencode",
+            observed_at=observed_at,
+            state=ProviderSourceState.SOURCE_NOT_FOUND,
+            reason="opencode_data_not_found",
+            action="Open OpenCode",
+        )
+
+    account_label = None
+    if auth_path.is_file():
+        try:
+            with auth_path.open("r", encoding="utf-8") as f:
+                auth_data = json.load(f)
+                if isinstance(auth_data, dict):
+                    for p_key in ("github-copilot", "google", "opencode"):
+                        if p_key in auth_data:
+                            account_label = p_key
+                            break
+                    if not account_label and auth_data:
+                        account_label = next(iter(auth_data.keys()))
+        except Exception:
+            pass
+
+    is_rate_limited = False
+    rate_limit_reset_at = None
+    remaining_percent = 100.0
+    state = ProviderSourceState.READY
+    reason_code = None
+    action_label = None
+    input_tokens = 0
+    output_tokens = 0
+    model_count = 0
+
+    if db_path.is_file():
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            cursor = con.execute(
+                "SELECT time_created, data FROM message WHERE data LIKE '%FreeUsageLimitError%' OR data LIKE '%Rate limit exceeded%' ORDER BY time_created DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+            if row:
+                err_time_ms, _err_data = row
+                err_epoch = err_time_ms / 1000.0 if err_time_ms > 1e10 else float(err_time_ms)
+                cooldown_window = 3600.0
+                elapsed = observed_at - err_epoch
+                if 0 <= elapsed < cooldown_window:
+                    is_rate_limited = True
+                    rate_limit_reset_at = err_epoch + cooldown_window
+                    remaining_percent = max(0.0, min(100.0, (elapsed / cooldown_window) * 100.0))
+                    state = ProviderSourceState.RATE_LIMITED
+                    reason_code = "rate_limit_exceeded"
+                    action_label = "Open OpenCode"
+
+            session_cursor = con.execute(
+                "SELECT SUM(tokens_input), SUM(tokens_output), COUNT(DISTINCT model) FROM session"
+            )
+            s_row = session_cursor.fetchone()
+            if s_row:
+                input_tokens = int(s_row[0] or 0)
+                output_tokens = int(s_row[1] or 0)
+                model_count = int(s_row[2] or 0)
+            con.close()
+        except Exception:
+            pass
+
+    lane_label = "Free Tier" if (is_rate_limited or not account_label or "free" in account_label.lower()) else f"{account_label.title()} Quota"
+    lane = UsageLane(
+        provider_id="opencode",
+        lane_id="free-tier",
+        label=lane_label,
+        remaining_percent=remaining_percent,
+        reset_at=rate_limit_reset_at,
+        scope="session",
+        model=None,
+        feature=None,
+        bindable=True,
+        source_id="opencode-db",
+    )
+
+    return ProviderUsageSnapshot(
+        provider_id="opencode",
+        account_label=account_label or "Free Tier",
+        observed_at=observed_at,
+        state=state,
+        reason_code=reason_code,
+        action_label=action_label,
+        lanes=(lane,),
+        input_tokens=input_tokens,
+        cached_input_tokens=0,
+        output_tokens=output_tokens,
+        model_count=max(1, model_count),
+        estimated_cost_usd=None,
+        cache_savings_usd=None,
+        credits_remaining=None,
+        incident=None,
+    )
+
+
 __all__ = [
     "ProviderHttpError",
     "collect_antigravity",
     "collect_cursor",
     "collect_devin",
     "collect_grok",
+    "collect_opencode",
     "collect_openai_api",
 ]

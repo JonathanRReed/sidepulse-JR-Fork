@@ -12,6 +12,8 @@ project, land on the main thread, done.
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import threading
 import time
 from collections.abc import Callable
@@ -64,6 +66,105 @@ def _period_start(days: int, *, now: datetime | None = None) -> datetime:
     )
 
 
+
+def _scan_opencode_records(db_path: Path, since_epoch: float) -> list[tuple]:
+    if not db_path.is_file():
+        return []
+    records = []
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cursor = con.execute(
+            "SELECT id, session_id, time_created, data FROM message WHERE data LIKE ? AND time_created >= ?",
+            ('%"tokens"%', int(since_epoch * 1000.0) if since_epoch < 1e11 else int(since_epoch)),
+        )
+        for row in cursor:
+            mid, sid, tc, data_str = row
+            try:
+                data = json.loads(data_str)
+                tokens = data.get("tokens") or {}
+                inp = int(tokens.get("input", 0) or 0)
+                out = int(tokens.get("output", 0) or 0)
+                cache_data = tokens.get("cache") or {}
+                c_read = int(cache_data.get("read", 0) or 0)
+                c_write = int(cache_data.get("write", 0) or 0)
+                if (inp + out + c_read + c_write) <= 0:
+                    continue
+                model = data.get("modelID") or data.get("model") or "opencode"
+                epoch = tc / 1000.0 if tc > 1e11 else float(tc)
+                records.append(("opencode", sid, model, epoch, inp, c_read, c_write, out, f"opencode:{mid}"))
+            except Exception:
+                pass
+        con.close()
+    except Exception:
+        pass
+    return records
+
+
+def _scan_t3code_records(db_path: Path, since_epoch: float) -> list[tuple]:
+    if not db_path.is_file():
+        return []
+    records = []
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cursor = con.execute(
+            "SELECT activity_id, thread_id, created_at, payload_json FROM projection_thread_activities WHERE payload_json LIKE ?",
+            ('%"usage"%',),
+        )
+        for row in cursor:
+            aid, tid, cat, payload_str = row
+            try:
+                data = json.loads(payload_str)
+                usage = data.get("usage")
+                if not usage or not isinstance(usage, dict):
+                    continue
+                total = int(usage.get("total_tokens", 0) or 0)
+                inp = int(usage.get("input_tokens", 0) or 0)
+                out = int(usage.get("output_tokens", 0) or 0)
+                if total <= 0 and inp <= 0 and out <= 0:
+                    continue
+                if inp == 0 and out == 0 and total > 0:
+                    inp = total
+                dt = datetime.fromisoformat(cat.replace("Z", "+00:00"))
+                epoch = dt.timestamp()
+                if epoch < since_epoch:
+                    continue
+                records.append(("t3code", tid, "t3code", epoch, inp, 0, 0, out, f"t3code:{aid}"))
+            except Exception:
+                pass
+        con.close()
+    except Exception:
+        pass
+    return records
+
+
+def _scan_antigravity_records(gemini_dir: Path, since_epoch: float) -> list[tuple]:
+    summaries_db = gemini_dir / "antigravity-cli" / "conversation_summaries.db"
+    if not summaries_db.is_file():
+        return []
+    records = []
+    try:
+        con = sqlite3.connect(f"file:{summaries_db}?mode=ro", uri=True)
+        cursor = con.execute(
+            "SELECT conversation_id, step_count, last_modified_time FROM conversation_summaries"
+        )
+        for row in cursor:
+            cid, steps, lmt = row
+            try:
+                if not steps or steps <= 0:
+                    continue
+                dt = datetime.fromisoformat(lmt)
+                epoch = dt.timestamp()
+                if epoch < since_epoch:
+                    continue
+                est_tokens = steps * 350
+                records.append(("antigravity", cid, "gemini", epoch, est_tokens, 0, 0, 0, f"antigravity:{cid}"))
+            except Exception:
+                pass
+        con.close()
+    except Exception:
+        pass
+    return records
+
 def _build_payload(settings) -> tuple[dict, str | None]:
     """(chart model, scan summary line) for the CURRENT metric."""
     settings = _settings_snapshot(settings)
@@ -84,7 +185,28 @@ def _build_payload(settings) -> tuple[dict, str | None]:
         since_epoch=period_start.timestamp(),
         codex_root=Path.home() / ".codex" / "sessions",
     )
+    opencode_records = _scan_opencode_records(
+        Path.home() / ".local" / "share" / "opencode" / "opencode.db",
+        period_start.timestamp(),
+    )
+    t3code_records = _scan_t3code_records(
+        Path.home() / ".t3" / "userdata" / "state.sqlite",
+        period_start.timestamp(),
+    )
+    antigravity_records = _scan_antigravity_records(
+        Path.home() / ".gemini",
+        period_start.timestamp(),
+    )
+    totals.records.extend(opencode_records)
+    totals.records.extend(t3code_records)
+    totals.records.extend(antigravity_records)
+
     provider_ids = tuple(settings.usage_graph_providers)
+    for rec in totals.records:
+        rec_provider = rec[0]
+        if rec_provider not in provider_ids:
+            provider_ids = provider_ids + (rec_provider,)
+
     extra_sessions: dict[str, dict[str, int]] | None = None
     if mode == "sessions":
         # Sessions is the one metric EVERY watched provider can answer:
@@ -126,11 +248,26 @@ def _build_payload(settings) -> tuple[dict, str | None]:
     claude_tokens = (
         totals.input_tokens + totals.cached_input_tokens + totals.output_tokens
     )
+    active_providers = []
+    if claude_tokens > 0:
+        active_providers.append(f"Claude {usage_stats.compact_token_count(claude_tokens)}")
+    if totals.codex_tokens > 0:
+        active_providers.append(f"Codex {usage_stats.compact_token_count(totals.codex_tokens)}")
+    opencode_tokens = sum(r[4] + r[5] + r[6] + r[7] for r in opencode_records)
+    if opencode_tokens > 0:
+        active_providers.append(f"OpenCode {usage_stats.compact_token_count(opencode_tokens)}")
+    t3_tokens = sum(r[4] + r[5] + r[6] + r[7] for r in t3code_records)
+    if t3_tokens > 0:
+        active_providers.append(f"T3 {usage_stats.compact_token_count(t3_tokens)}")
+    agy_tokens = sum(r[4] + r[5] + r[6] + r[7] for r in antigravity_records)
+    if agy_tokens > 0:
+        active_providers.append(f"Antigravity {usage_stats.compact_token_count(agy_tokens)}")
+
+    distinct_sessions = len(totals.sessions) + len({r[1] for r in opencode_records}) + len({r[1] for r in t3code_records}) + len({r[1] for r in antigravity_records})
+    prov_str = " · ".join(active_providers) if active_providers else "No tokens"
     summary = (
-        f"{usage_stats.usage_period_label(days)}: Claude "
-        f"{usage_stats.compact_token_count(claude_tokens)} tokens · Codex "
-        f"{usage_stats.compact_token_count(totals.codex_tokens)} tokens · "
-        f"{len(totals.sessions)} sessions"
+        f"{usage_stats.usage_period_label(days)}: {prov_str} · "
+        f"{distinct_sessions} sessions"
     )
     return model, summary
 

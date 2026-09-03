@@ -10,6 +10,7 @@ from sidepulse.provider_usage_collectors import (
     collect_cursor,
     collect_devin,
     collect_grok,
+    collect_opencode,
     collect_openai_api,
 )
 from sidepulse.provider_usage_settings import default_provider_usage_settings
@@ -195,6 +196,52 @@ def test_antigravity_uses_configured_loopback_endpoint():
     assert "RetrieveUserQuotaSummary" in http.calls[0][1]
 
 
+def test_antigravity_allows_http_loopback_and_discovers_dynamically():
+    payload = {
+        "response": {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {
+                            "bucketId": "weekly",
+                            "remaining": {"remainingFraction": 0.9},
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    http = FixtureHttp([payload])
+    # http:// scheme allowed
+    result = collect_antigravity(
+        preference("antigravity", options={"endpoint": "http://127.0.0.1:54321"}),
+        observed_at=1000,
+        http_json=http,
+    )
+    assert result.state.value == "ready"
+    assert "http://127.0.0.1:54321" in http.calls[0][1]
+
+    # Dynamic discovery via command_runner
+    def runner(args, _timeout):
+        if args[0] == "ps":
+            return "12345 /opt/antigravity/bin/language_server --csrf_token testcsrf123\n"
+        if args[0] == "lsof":
+            return "language 12345 user 12u IPv4 0x1234 0t0 TCP 127.0.0.1:44556 (LISTEN)\n"
+        return ""
+
+    http2 = FixtureHttp([payload])
+    res2 = collect_antigravity(
+        preference("antigravity"),
+        observed_at=1000,
+        http_json=http2,
+        command_runner=runner,
+    )
+    assert res2.state.value == "ready"
+    assert "http://127.0.0.1:44556" in http2.calls[0][1]
+    assert http2.calls[0][2]["X-Codeium-Csrf-Token"] == "testcsrf123"
+
+
 def test_openai_admin_usage_uses_official_organization_endpoints():
     http = FixtureHttp(
         [
@@ -364,3 +411,50 @@ def test_a_fresh_codex_reading_is_not_flagged():
     )
     assert result.state.value == "ready"
     assert result.action_label is None
+
+
+def test_antigravity_cli_fallback_when_server_not_running(tmp_path: Path):
+    gemini_dir = tmp_path / ".gemini"
+    gemini_dir.mkdir(parents=True)
+    creds_file = gemini_dir / "oauth_creds.json"
+    creds_file.write_text(json.dumps({"email": "testuser@example.com"}), encoding="utf-8")
+
+    result = collect_antigravity(
+        preference("antigravity"),
+        observed_at=1000,
+        command_runner=lambda _args, _timeout: "",
+        home=tmp_path,
+    )
+    assert result.state.value == "ready"
+    assert result.account_label == "testuser@example.com"
+    assert len(result.lanes) == 1
+    assert result.lanes[0].label == "Antigravity CLI"
+
+
+def test_opencode_collector_detects_free_tier_and_tokens(tmp_path: Path):
+    root = tmp_path / ".local" / "share" / "opencode"
+    root.mkdir(parents=True)
+    auth_file = root / "auth.json"
+    auth_file.write_text(json.dumps({"github-copilot": {"token": "test"}}), encoding="utf-8")
+    db_file = root / "opencode.db"
+    con = sqlite3.connect(db_file)
+    con.execute("CREATE TABLE session (tokens_input INT, tokens_output INT, model TEXT)")
+    con.execute("INSERT INTO session VALUES (500, 100, 'muse-spark')")
+    con.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INT, data TEXT)")
+    err_json = json.dumps({"error": {"type": "FreeUsageLimitError"}})
+    observed = 1_700_000_000.0
+    err_time_ms = int((observed - 600.0) * 1000.0)
+    con.execute("INSERT INTO message VALUES ('m1', 's1', ?, ?)", (err_time_ms, err_json))
+    con.commit()
+    con.close()
+
+    result = collect_opencode(
+        preference("opencode"),
+        observed_at=observed,
+        home=tmp_path,
+    )
+    assert result.state.value == "rate_limited"
+    assert result.account_label == "github-copilot"
+    assert result.input_tokens == 500
+    assert result.output_tokens == 100
+    assert result.lanes[0].remaining_percent < 100.0

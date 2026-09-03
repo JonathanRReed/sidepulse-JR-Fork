@@ -118,7 +118,15 @@ _PROVIDER_DESCRIPTORS: Final = (
         "Antigravity",
         ("antigravity-app", "agy-server", "antigravity-oauth"),
         False,
+        True,
+        True,
+    ),
+    ProviderDescriptor(
+        "opencode",
+        "OpenCode",
+        ("opencode-db", "opencode-auth"),
         False,
+        True,
         True,
     ),
     ProviderDescriptor(

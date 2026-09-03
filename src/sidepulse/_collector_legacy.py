@@ -2275,7 +2275,7 @@ def codex_usage_limit_terminal(payload: Mapping[str, Any]) -> bool:
         return False
     return any(
         _string_or_none(error.get(field)) in CODEX_USAGE_LIMIT_TERMINAL_CLASSIFICATIONS
-        for field in ("code", "message")
+        for field in ("code", "message", "codex_error_info")
     )
 
 

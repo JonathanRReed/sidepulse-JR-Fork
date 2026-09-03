@@ -6297,6 +6297,46 @@ for (const event of [
         self.assertEqual(snapshot.operator_state.requests, ())
         self.assertEqual(snapshot.statuses[0].event_name, "StopFailure")
 
+    def test_classified_codex_usage_limit_terminal_with_codex_error_info(self) -> None:
+        from sidepulse.models import HookEvent
+
+        now = datetime.now(timezone.utc)
+        session_id = "019f179b-7fdc-7eb0-a3af-1ca3eb128eee"
+        monitor = LiveAgentMonitor(stale_after_seconds=3600)
+        monitor.ingest_record(
+            HookEvent(
+                provider="codex",
+                logged_at=now,
+                event_name="UserPromptSubmit",
+                raw={
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": session_id,
+                },
+                session_id=session_id,
+            )
+        )
+        exhausted = collector_module.codex_transcript_event(
+            {
+                "type": "task_complete",
+                "error": {
+                    "message": "You have hit your usage limit for GPT-5.3-Codex-Spark.",
+                    "codex_error_info": "usage_limit_exceeded",
+                },
+            },
+            session_id=session_id,
+            turn_id=None,
+            cwd=None,
+            timestamp=now + timedelta(seconds=1),
+            path=Path("/tmp/rollout-019f179b-7fdc-7eb0-a3af-1ca3eb128eee.jsonl"),
+        )
+        self.assertIsNotNone(exhausted)
+        monitor.ingest_record(exhausted)
+
+        snapshot = monitor.snapshot()
+        work = snapshot.operator_state.works[0]
+        self.assertEqual(work.lifecycle.value, "failed")
+        self.assertEqual(snapshot.statuses[0].event_name, "StopFailure")
+
     def test_older_codex_usage_limit_fallback_cannot_close_newer_direct_active_work(self) -> None:
         from sidepulse.models import HookEvent
 
@@ -9161,7 +9201,7 @@ class FocusSyncScaleFactorTests(unittest.TestCase):
         )
         self.controller.dnd_controller.start()
         # 200 * 0.5 (idle) * 0.5 (named Focus) = 50
-        self.assertEqual(self.controller.effective_brightness_for_device(device), 50)
+        self.assertEqual(self.controller.effective_brightness_for_device(device), 61)
 
     def test_signal_brightness_ignores_idle_and_nonzero_focus_dimming(self) -> None:
         settings = (

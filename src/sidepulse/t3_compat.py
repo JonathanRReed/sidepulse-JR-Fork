@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
+from .provider_facts import SourceKey, WorkIdentifier, WorkKey
 from .models import AgentMode, AgentStatus, parse_datetime
 
 T3_DATABASE_RELATIVE_PATH = Path("userdata") / "state.sqlite"
@@ -99,6 +100,9 @@ _PROVIDER_ALIASES = {
     "xai": "grok",
     "opencode": "opencode",
     "open-code": "opencode",
+    "antigravity": "antigravity",
+    "gemini": "antigravity",
+    "devin": "devin",
 }
 _SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~:-]{0,255}\Z")
 
@@ -147,6 +151,10 @@ class T3ThreadView:
             + (f" · {self.branch}" if self.branch else ""),
             T3_MAX_TITLE_LENGTH,
         )
+        work_key = WorkKey(
+            SourceKey(self.provider, "t3code", "default", "threads"),
+            WorkIdentifier(session_id),
+        )
         return AgentStatus(
             provider=self.provider,
             agent_id=f"{self.provider}:session:{session_id}",
@@ -160,6 +168,7 @@ class T3ThreadView:
             message=message,
             origin=origin,
             stale=stale,
+            work_key=work_key,
         )
 
 
@@ -321,7 +330,16 @@ def _agent_state_for_thread(
             "Plan ready in T3 Code",
         )
     status = (thread.session_status or "").casefold()
-    if status == "error" or thread.last_error_present:
+    if status == "error":
+        if thread.updated_at is not None:
+            now_dt = datetime.now(timezone.utc)
+            th_dt = (
+                thread.updated_at
+                if thread.updated_at.tzinfo is not None
+                else thread.updated_at.replace(tzinfo=timezone.utc)
+            )
+            if (now_dt - th_dt).total_seconds() > 300:
+                return AgentMode.IDLE_READY, "SessionStart", None
         return AgentMode.BLOCKED_ERROR, "StopFailure", "T3 Code session failed"
     if status in {"starting", "running"}:
         return AgentMode.WORKING, "UserPromptSubmit", None

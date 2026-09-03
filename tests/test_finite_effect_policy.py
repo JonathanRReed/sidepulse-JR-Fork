@@ -272,7 +272,7 @@ def test_plans_and_nested_phases_are_immutable() -> None:
     ("kwargs", "message"),
     (
         ({}, "an introduction or loop animation is required"),
-        ({"requested_repetitions": 2}, "require a loop animation"),
+        ({"intro_animation": _animation(100), "requested_repetitions": 2}, "require a loop animation"),
         ({"reduce_motion": 1}, "reduce motion must be a boolean"),
         ({"max_repetitions": 0}, "maximum repetitions must be a positive"),
         (
