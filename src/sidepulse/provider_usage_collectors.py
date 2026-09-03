@@ -578,6 +578,8 @@ def _validated_loopback_endpoint(value: str | None) -> str | None:
 _cached_antigravity_connection: dict[str, Any] = {}
 _cached_antigravity_creds: tuple[float, str | None] | None = None
 _cached_antigravity_tokens: tuple[float, int] | None = None
+_cached_opencode_mtime: float | None = None
+_cached_opencode_totals: tuple[int, int, int] | None = None
 
 
 def _is_pid_alive(pid: int | None) -> bool:
@@ -928,9 +930,12 @@ def collect_opencode(
 
     if db_path.is_file():
         try:
+            db_mtime = db_path.stat().st_mtime
             con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            one_hour_ago = int((observed_at - 3600.0) * 1000)
             cursor = con.execute(
-                "SELECT time_created, data FROM message WHERE data LIKE '%FreeUsageLimitError%' OR data LIKE '%Rate limit exceeded%' ORDER BY time_created DESC LIMIT 1"
+                "SELECT time_created, data FROM message WHERE time_created >= ? AND (data LIKE '%FreeUsageLimitError%' OR data LIKE '%Rate limit exceeded%') ORDER BY time_created DESC LIMIT 1",
+                (one_hour_ago,),
             )
             row = cursor.fetchone()
             if row:
@@ -946,14 +951,24 @@ def collect_opencode(
                     reason_code = "rate_limit_exceeded"
                     action_label = "Open OpenCode"
 
-            session_cursor = con.execute(
-                "SELECT SUM(tokens_input), SUM(tokens_output), COUNT(DISTINCT model) FROM session"
-            )
-            s_row = session_cursor.fetchone()
-            if s_row:
-                input_tokens = int(s_row[0] or 0)
-                output_tokens = int(s_row[1] or 0)
-                model_count = int(s_row[2] or 0)
+            global _cached_opencode_mtime, _cached_opencode_totals
+            if (
+                _cached_opencode_mtime is not None
+                and _cached_opencode_mtime == db_mtime
+                and _cached_opencode_totals is not None
+            ):
+                input_tokens, output_tokens, model_count = _cached_opencode_totals
+            else:
+                session_cursor = con.execute(
+                    "SELECT SUM(tokens_input), SUM(tokens_output), COUNT(DISTINCT model) FROM session"
+                )
+                s_row = session_cursor.fetchone()
+                if s_row:
+                    input_tokens = int(s_row[0] or 0)
+                    output_tokens = int(s_row[1] or 0)
+                    model_count = int(s_row[2] or 0)
+                _cached_opencode_mtime = db_mtime
+                _cached_opencode_totals = (input_tokens, output_tokens, model_count)
             con.close()
         except Exception:
             pass
