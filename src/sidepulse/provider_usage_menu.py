@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 
 from .provider_feature_settings import ProviderInstanceVisualProjection
@@ -292,6 +293,7 @@ def project_usage_menu(
         # four the labels drop to compact form so the row still fits.
         shown = constrained if len(constrained) <= 6 else constrained[:6]
         compact = len(shown) > 4
+        provider_counts = Counter(item[1] for item in shown)
         labels = []
         for remaining, _provider_id, display_label, identity, custom_label in shown:
             id_text = identity
@@ -302,9 +304,10 @@ def project_usage_menu(
                 else:
                     id_text = f"{id_text[:6]}…"
             if compact:
-                part = f" {id_text}" if id_text else ""
+                needs_disambiguation = provider_counts[_provider_id] > 1 or custom_label
+                part = f" {id_text}" if (id_text and needs_disambiguation) else ""
                 labels.append(
-                    f"{display_label if custom_label else display_label[:2]}{part} {remaining:.0f}"
+                    f"{display_label if custom_label else display_label[:2]}{part} {remaining:.0f}%"
                 )
             else:
                 part = f" · {id_text}" if id_text else ""
