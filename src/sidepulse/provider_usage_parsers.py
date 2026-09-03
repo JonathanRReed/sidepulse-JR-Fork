@@ -395,6 +395,9 @@ def parse_antigravity_usage(
     payload: object,
     *,
     observed_at: float,
+    account_label: str | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
 ) -> ProviderUsageSnapshot:
     if not isinstance(payload, dict):
         raise ValueError("invalid Antigravity usage payload")
@@ -421,7 +424,15 @@ def parse_antigravity_usage(
                 continue
             bucket_id = str(bucket.get("bucketId") or bucket.get("displayName") or "")
             bucket_text = f"{bucket_id} {bucket.get('displayName') or ''}".lower()
-            window = "weekly" if "week" in bucket_text else "session"
+            if "week" in bucket_text:
+                window = "weekly"
+                window_label = "Weekly"
+            elif "session" in str(bucket.get("displayName") or "").lower():
+                window = "session"
+                window_label = "Session"
+            else:
+                window = "five-hour"
+                window_label = "5-Hour"
             remaining_container = bucket.get("remaining")
             fraction = (
                 _number(remaining_container.get("remainingFraction"))
@@ -432,7 +443,7 @@ def parse_antigravity_usage(
                 UsageLane(
                     provider_id="antigravity",
                     lane_id=f"{scope}-{window}",
-                    label=f"{prefix} {'Weekly' if window == 'weekly' else 'Session'}",
+                    label=f"{prefix} {window_label}",
                     remaining_percent=(
                         None
                         if fraction is None
@@ -455,8 +466,10 @@ def parse_antigravity_usage(
         account_label=(
             str(response.get("accountEmail")).strip()
             if isinstance(response, dict) and response.get("accountEmail")
-            else None
+            else account_label
         ),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
 
 

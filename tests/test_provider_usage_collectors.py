@@ -242,6 +242,68 @@ def test_antigravity_allows_http_loopback_and_discovers_dynamically():
     assert http2.calls[0][2]["X-Codeium-Csrf-Token"] == "testcsrf123"
 
 
+def test_antigravity_multi_port_discovery_tries_candidate_ports():
+    payload = {
+        "response": {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {
+                            "bucketId": "weekly",
+                            "remaining": {"remainingFraction": 0.93},
+                        },
+                        {
+                            "bucketId": "5h",
+                            "remaining": {"remainingFraction": 0.58},
+                        },
+                    ],
+                },
+                {
+                    "displayName": "Claude and GPT models",
+                    "buckets": [
+                        {
+                            "bucketId": "weekly",
+                            "remaining": {"remainingFraction": 0.83},
+                        },
+                        {
+                            "bucketId": "5h",
+                            "remaining": {"remainingFraction": 1.0},
+                        },
+                    ],
+                },
+            ]
+        }
+    }
+
+    # Simulate port 1 failing (e.g. 400 HTTPS error) and port 2 succeeding
+    def http_fail_then_succeed(method, url, **kwargs):
+        if "59237" in url:
+            raise ProviderHttpError(400, "Bad Request: Client sent an HTTP request to an HTTPS server")
+        return payload
+
+    def runner(args, _timeout):
+        if args[0] == "ps":
+            return "31583 /Applications/Antigravity.app/Contents/Resources/bin/language_server --csrf_token csrfABC\n"
+        if args[0] == "lsof":
+            return "ls 31583 user 12u IPv4 0x1 0t0 TCP 127.0.0.1:59237 (LISTEN)\nls 31583 user 13u IPv4 0x2 0t0 TCP 127.0.0.1:59238 (LISTEN)\n"
+        return ""
+
+    result = collect_antigravity(
+        preference("antigravity"),
+        observed_at=1000,
+        http_json=http_fail_then_succeed,
+        command_runner=runner,
+    )
+    assert result.state.value == "ready"
+    assert len(result.lanes) == 4
+    labels = [l.label for l in result.lanes]
+    assert "Gemini Weekly" in labels
+    assert "Gemini 5-Hour" in labels
+    assert "Claude + GPT Weekly" in labels
+    assert "Claude + GPT 5-Hour" in labels
+
+
 def test_openai_admin_usage_uses_official_organization_endpoints():
     http = FixtureHttp(
         [

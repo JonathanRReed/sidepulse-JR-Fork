@@ -574,9 +574,9 @@ def _validated_loopback_endpoint(value: str | None) -> str | None:
     return value.rstrip("/")
 
 
-def _discover_antigravity_endpoint(
+def _discover_antigravity_endpoints(
     command_runner: Callable[[list[str], float], str] | None = None,
-) -> tuple[str | None, str | None]:
+) -> list[tuple[str, str | None]]:
     try:
         if command_runner is not None:
             output = command_runner(["ps", "-eo", "pid,args"], 1.5)
@@ -588,8 +588,9 @@ def _discover_antigravity_endpoint(
                 timeout=1.5,
             ).stdout
     except Exception:
-        return None, None
+        return []
 
+    endpoints: list[tuple[str, str | None]] = []
     for line in output.splitlines():
         line = line.strip()
         if not line:
@@ -620,10 +621,19 @@ def _discover_antigravity_endpoint(
                         timeout=1.5,
                     ).stdout
                 ports = re.findall(r":(\d+)\s+\(LISTEN\)", lsof_out)
-                if ports:
-                    return f"http://127.0.0.1:{ports[0]}", csrf
+                for port in ports:
+                    endpoints.append((f"http://127.0.0.1:{port}", csrf))
             except Exception:
                 continue
+    return endpoints
+
+
+def _discover_antigravity_endpoint(
+    command_runner: Callable[[list[str], float], str] | None = None,
+) -> tuple[str | None, str | None]:
+    endpoints = _discover_antigravity_endpoints(command_runner)
+    if endpoints:
+        return endpoints[0]
     return None, None
 
 
@@ -637,42 +647,11 @@ def collect_antigravity(
 ) -> ProviderUsageSnapshot:
     endpoint = _validated_loopback_endpoint(preference.option("endpoint"))
     csrf_token = preference.option("csrf_token")
-    if endpoint is None:
-        discovered_endpoint, discovered_csrf = _discover_antigravity_endpoint(command_runner)
-        if discovered_endpoint is not None:
-            endpoint = discovered_endpoint
-            if not csrf_token:
-                csrf_token = discovered_csrf
+    candidates: list[tuple[str, str | None]] = []
     if endpoint is not None:
-        url = endpoint + "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
-        headers = {"Connect-Protocol-Version": "1"}
-        if csrf_token:
-            headers["X-Codeium-Csrf-Token"] = csrf_token
-        try:
-            payload = http_json(
-                "POST",
-                url,
-                headers=headers,
-                body={
-                    "ideName": "antigravity",
-                    "extensionName": "antigravity",
-                    "locale": "en",
-                    "ideVersion": "unknown",
-                },
-                timeout=HTTP_TIMEOUT_SECONDS,
-            )
-        except ProviderHttpError as error:
-            return _http_failure("antigravity", observed_at, error)
-        try:
-            return parse_antigravity_usage(payload, observed_at=observed_at)
-        except ValueError:
-            return _failure(
-                "antigravity",
-                observed_at=observed_at,
-                state=ProviderSourceState.ERROR,
-                reason="invalid_provider_response",
-                action="Retry",
-            )
+        candidates.append((endpoint, csrf_token))
+    else:
+        candidates.extend(_discover_antigravity_endpoints(command_runner))
 
     gemini_dir = (home or Path.home()) / ".gemini"
     creds_path = gemini_dir / "oauth_creds.json"
@@ -695,8 +674,51 @@ def collect_antigravity(
             pass
 
     summaries_path = gemini_dir / "antigravity-cli" / "conversation_summaries.db"
+    input_tokens = 0
+    if summaries_path.is_file():
+        try:
+            con = sqlite3.connect(f"file:{summaries_path}?mode=ro", uri=True)
+            row = con.execute("SELECT SUM(step_count) FROM conversation_summaries").fetchone()
+            if row and row[0]:
+                input_tokens = int(row[0]) * 350
+            con.close()
+        except Exception:
+            pass
+
+    last_error: ProviderHttpError | None = None
+    for cand_endpoint, cand_csrf in candidates:
+        url = cand_endpoint + "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+        headers = {"Connect-Protocol-Version": "1"}
+        token_to_use = csrf_token or cand_csrf
+        if token_to_use:
+            headers["X-Codeium-Csrf-Token"] = token_to_use
+        try:
+            payload = http_json(
+                "POST",
+                url,
+                headers=headers,
+                body={
+                    "ideName": "antigravity",
+                    "extensionName": "antigravity",
+                    "locale": "en",
+                    "ideVersion": "unknown",
+                },
+                timeout=HTTP_TIMEOUT_SECONDS,
+            )
+            return parse_antigravity_usage(
+                payload,
+                observed_at=observed_at,
+                account_label=account_label,
+                input_tokens=input_tokens,
+            )
+        except ProviderHttpError as error:
+            last_error = error
+            continue
+        except (ValueError, KeyError):
+            continue
+
     cli_configured = creds_path.is_file() or summaries_path.is_file() or (shutil.which("agy") is not None)
-    if cli_configured and (account_label or creds_path.is_file()):
+    if cli_configured and (account_label or creds_path.is_file() or input_tokens > 0):
         return ProviderUsageSnapshot(
             provider_id="antigravity",
             account_label=account_label or "Google Account",
@@ -718,7 +740,7 @@ def collect_antigravity(
                     source_id="antigravity-oauth",
                 ),
             ),
-            input_tokens=0,
+            input_tokens=input_tokens,
             cached_input_tokens=0,
             output_tokens=0,
             model_count=1,
@@ -728,14 +750,16 @@ def collect_antigravity(
             incident=None,
         )
 
+    if last_error is not None:
+        return _http_failure("antigravity", observed_at, last_error)
+
     return _failure(
         "antigravity",
         observed_at=observed_at,
         state=ProviderSourceState.SOURCE_NOT_FOUND,
-        reason="local_server_not_found",
-        action="Open Antigravity or run agy",
+        reason="antigravity_not_detected",
+        action="Open Antigravity",
     )
-
 
 def collect_openai_api(
     preference: ProviderPreference,
