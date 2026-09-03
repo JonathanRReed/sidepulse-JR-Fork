@@ -8,6 +8,7 @@ permission, or transport failure to a generic "no reading" row.
 from __future__ import annotations
 
 import json
+import os
 import math
 import re
 import sqlite3
@@ -574,9 +575,24 @@ def _validated_loopback_endpoint(value: str | None) -> str | None:
     return value.rstrip("/")
 
 
+_cached_antigravity_connection: dict[str, Any] = {}
+_cached_antigravity_creds: tuple[float, str | None] | None = None
+_cached_antigravity_tokens: tuple[float, int] | None = None
+
+
+def _is_pid_alive(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
 def _discover_antigravity_endpoints(
     command_runner: Callable[[list[str], float], str] | None = None,
-) -> list[tuple[str, str | None]]:
+) -> list[tuple[str, str | None, int]]:
     try:
         if command_runner is not None:
             output = command_runner(["ps", "-eo", "pid,args"], 1.5)
@@ -590,7 +606,7 @@ def _discover_antigravity_endpoints(
     except Exception:
         return []
 
-    endpoints: list[tuple[str, str | None]] = []
+    endpoints: list[tuple[str, str | None, int]] = []
     for line in output.splitlines():
         line = line.strip()
         if not line:
@@ -622,7 +638,7 @@ def _discover_antigravity_endpoints(
                     ).stdout
                 ports = re.findall(r":(\d+)\s+\(LISTEN\)", lsof_out)
                 for port in ports:
-                    endpoints.append((f"http://127.0.0.1:{port}", csrf))
+                    endpoints.append((f"http://127.0.0.1:{port}", csrf, int(pid_str)))
             except Exception:
                 continue
     return endpoints
@@ -633,7 +649,7 @@ def _discover_antigravity_endpoint(
 ) -> tuple[str | None, str | None]:
     endpoints = _discover_antigravity_endpoints(command_runner)
     if endpoints:
-        return endpoints[0]
+        return endpoints[0][0], endpoints[0][1]
     return None, None
 
 
@@ -645,31 +661,30 @@ def collect_antigravity(
     command_runner: Callable[[list[str], float], str] | None = None,
     home: Path | None = None,
 ) -> ProviderUsageSnapshot:
-    endpoint = _validated_loopback_endpoint(preference.option("endpoint"))
-    csrf_token = preference.option("csrf_token")
-    candidates: list[tuple[str, str | None]] = []
-    if endpoint is not None:
-        candidates.append((endpoint, csrf_token))
-    else:
-        candidates.extend(_discover_antigravity_endpoints(command_runner))
+    global _cached_antigravity_creds, _cached_antigravity_tokens
 
     gemini_dir = (home or Path.home()) / ".gemini"
     creds_path = gemini_dir / "oauth_creds.json"
     account_label = None
     if creds_path.is_file():
         try:
-            with creds_path.open("r", encoding="utf-8") as f:
-                cdata = json.load(f)
-            id_token = cdata.get("id_token")
-            if id_token and isinstance(id_token, str) and "." in id_token:
-                parts = id_token.split(".")
-                if len(parts) >= 2:
-                    pad = -len(parts[1]) % 4
-                    payload_json = base64.urlsafe_b64decode(parts[1] + ("=" * pad))
-                    payload = json.loads(payload_json)
-                    account_label = payload.get("email")
-            if not account_label:
-                account_label = cdata.get("email")
+            mtime = creds_path.stat().st_mtime
+            if _cached_antigravity_creds is not None and _cached_antigravity_creds[0] == mtime:
+                account_label = _cached_antigravity_creds[1]
+            else:
+                with creds_path.open("r", encoding="utf-8") as f:
+                    cdata = json.load(f)
+                id_token = cdata.get("id_token")
+                if id_token and isinstance(id_token, str) and "." in id_token:
+                    parts = id_token.split(".")
+                    if len(parts) >= 2:
+                        pad = -len(parts[1]) % 4
+                        payload_json = base64.urlsafe_b64decode(parts[1] + ("=" * pad))
+                        payload = json.loads(payload_json)
+                        account_label = payload.get("email")
+                if not account_label:
+                    account_label = cdata.get("email")
+                _cached_antigravity_creds = (mtime, account_label)
         except Exception:
             pass
 
@@ -677,45 +692,102 @@ def collect_antigravity(
     input_tokens = 0
     if summaries_path.is_file():
         try:
-            con = sqlite3.connect(f"file:{summaries_path}?mode=ro", uri=True)
-            row = con.execute("SELECT SUM(step_count) FROM conversation_summaries").fetchone()
-            if row and row[0]:
-                input_tokens = int(row[0]) * 350
-            con.close()
+            mtime = summaries_path.stat().st_mtime
+            if _cached_antigravity_tokens is not None and _cached_antigravity_tokens[0] == mtime:
+                input_tokens = _cached_antigravity_tokens[1]
+            else:
+                con = sqlite3.connect(f"file:{summaries_path}?mode=ro", uri=True)
+                row = con.execute("SELECT SUM(step_count) FROM conversation_summaries").fetchone()
+                if row and row[0]:
+                    input_tokens = int(row[0]) * 350
+                con.close()
+                _cached_antigravity_tokens = (mtime, input_tokens)
         except Exception:
             pass
 
-    last_error: ProviderHttpError | None = None
-    for cand_endpoint, cand_csrf in candidates:
-        url = cand_endpoint + "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
-        headers = {"Connect-Protocol-Version": "1"}
-        token_to_use = csrf_token or cand_csrf
-        if token_to_use:
-            headers["X-Codeium-Csrf-Token"] = token_to_use
-        try:
-            payload = http_json(
-                "POST",
-                url,
-                headers=headers,
-                body={
-                    "ideName": "antigravity",
-                    "extensionName": "antigravity",
-                    "locale": "en",
-                    "ideVersion": "unknown",
-                },
-                timeout=HTTP_TIMEOUT_SECONDS,
-            )
-            return parse_antigravity_usage(
-                payload,
-                observed_at=observed_at,
-                account_label=account_label,
-                input_tokens=input_tokens,
-            )
-        except ProviderHttpError as error:
-            last_error = error
-            continue
-        except (ValueError, KeyError):
-            continue
+    endpoint = _validated_loopback_endpoint(preference.option("endpoint"))
+    csrf_token = preference.option("csrf_token")
+    candidates: list[tuple[str, str | None, int | None]] = []
+
+    used_cached_endpoint = False
+    if endpoint is not None:
+        candidates.append((endpoint, csrf_token, None))
+    elif (
+        command_runner is None
+        and _cached_antigravity_connection.get("endpoint")
+        and _is_pid_alive(_cached_antigravity_connection.get("pid"))
+    ):
+        candidates.append((
+            _cached_antigravity_connection["endpoint"],
+            _cached_antigravity_connection.get("csrf"),
+            _cached_antigravity_connection.get("pid"),
+        ))
+        used_cached_endpoint = True
+    else:
+        discovered = _discover_antigravity_endpoints(command_runner)
+        for ep in discovered:
+            cand_url = ep[0]
+            cand_csrf = ep[1]
+            cand_pid = ep[2] if len(ep) > 2 else None
+            candidates.append((cand_url, cand_csrf, cand_pid))
+
+    def _query_candidates(
+        cands: list[tuple[str, str | None, int | None]],
+    ) -> tuple[ProviderUsageSnapshot | None, ProviderHttpError | None]:
+        last_err: ProviderHttpError | None = None
+        for cand_endpoint, cand_csrf, cand_pid in cands:
+            url = cand_endpoint + "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+            headers = {"Connect-Protocol-Version": "1"}
+            token_to_use = csrf_token or cand_csrf
+            if token_to_use:
+                headers["X-Codeium-Csrf-Token"] = token_to_use
+            try:
+                payload = http_json(
+                    "POST",
+                    url,
+                    headers=headers,
+                    body={
+                        "ideName": "antigravity",
+                        "extensionName": "antigravity",
+                        "locale": "en",
+                        "ideVersion": "unknown",
+                    },
+                    timeout=HTTP_TIMEOUT_SECONDS,
+                )
+                if command_runner is None and cand_pid:
+                    _cached_antigravity_connection["endpoint"] = cand_endpoint
+                    _cached_antigravity_connection["csrf"] = token_to_use
+                    _cached_antigravity_connection["pid"] = cand_pid
+                snap = parse_antigravity_usage(
+                    payload,
+                    observed_at=observed_at,
+                    account_label=account_label,
+                    input_tokens=input_tokens,
+                )
+                return snap, None
+            except ProviderHttpError as error:
+                last_err = error
+                continue
+            except (ValueError, KeyError):
+                continue
+        return None, last_err
+
+    snapshot, last_error = _query_candidates(candidates)
+    if snapshot is not None:
+        return snapshot
+
+    if used_cached_endpoint:
+        _cached_antigravity_connection.clear()
+        discovered = _discover_antigravity_endpoints(command_runner)
+        fresh_candidates: list[tuple[str, str | None, int | None]] = []
+        for ep in discovered:
+            cand_url = ep[0]
+            cand_csrf = ep[1]
+            cand_pid = ep[2] if len(ep) > 2 else None
+            fresh_candidates.append((cand_url, cand_csrf, cand_pid))
+        snapshot, last_error = _query_candidates(fresh_candidates)
+        if snapshot is not None:
+            return snapshot
 
     cli_configured = creds_path.is_file() or summaries_path.is_file() or (shutil.which("agy") is not None)
     if cli_configured and (account_label or creds_path.is_file() or input_tokens > 0):

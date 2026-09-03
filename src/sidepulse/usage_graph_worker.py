@@ -18,7 +18,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import usage_percent_history, usage_stats
@@ -106,10 +106,17 @@ def _scan_t3code_records(db_path: Path, since_epoch: float) -> list[tuple]:
     records = []
     try:
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        cursor = con.execute(
-            "SELECT activity_id, thread_id, created_at, payload_json FROM projection_thread_activities WHERE payload_json LIKE ?",
-            ('%"usage"%',),
-        )
+        if since_epoch > 0:
+            iso_since = datetime.fromtimestamp(since_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+            cursor = con.execute(
+                "SELECT activity_id, thread_id, created_at, payload_json FROM projection_thread_activities WHERE created_at >= ? AND payload_json LIKE ?",
+                (iso_since, '%"usage"%'),
+            )
+        else:
+            cursor = con.execute(
+                "SELECT activity_id, thread_id, created_at, payload_json FROM projection_thread_activities WHERE payload_json LIKE ?",
+                ('%"usage"%',),
+            )
         for row in cursor:
             aid, tid, cat, payload_str = row
             try:
@@ -144,9 +151,16 @@ def _scan_antigravity_records(gemini_dir: Path, since_epoch: float) -> list[tupl
     records = []
     try:
         con = sqlite3.connect(f"file:{summaries_db}?mode=ro", uri=True)
-        cursor = con.execute(
-            "SELECT conversation_id, step_count, last_modified_time FROM conversation_summaries"
-        )
+        if since_epoch > 0:
+            iso_since = datetime.fromtimestamp(since_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+            cursor = con.execute(
+                "SELECT conversation_id, step_count, last_modified_time FROM conversation_summaries WHERE last_modified_time >= ?",
+                (iso_since,),
+            )
+        else:
+            cursor = con.execute(
+                "SELECT conversation_id, step_count, last_modified_time FROM conversation_summaries"
+            )
         for row in cursor:
             cid, steps, lmt = row
             try:

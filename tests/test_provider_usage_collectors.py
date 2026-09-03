@@ -304,6 +304,44 @@ def test_antigravity_multi_port_discovery_tries_candidate_ports():
     assert "Claude + GPT 5-Hour" in labels
 
 
+def test_antigravity_endpoint_cache_reuses_live_process():
+    import os
+    import sidepulse.provider_usage_collectors as puc
+
+    puc._cached_antigravity_connection.clear()
+    puc._cached_antigravity_connection["endpoint"] = "http://127.0.0.1:9999"
+    puc._cached_antigravity_connection["csrf"] = "token-123"
+    puc._cached_antigravity_connection["pid"] = os.getpid()
+
+    called_urls = []
+    def mock_http(method, url, **kwargs):
+        called_urls.append(url)
+        return {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {
+                            "displayName": "Weekly",
+                            "bucketId": "weekly",
+                            "remaining": {"remainingFraction": 0.9},
+                        }
+                    ],
+                }
+            ]
+        }
+
+    res = puc.collect_antigravity(
+        preference("antigravity"),
+        observed_at=1000,
+        http_json=mock_http,
+    )
+    assert res.state.value == "ready"
+    assert len(called_urls) == 1
+    assert "http://127.0.0.1:9999" in called_urls[0]
+    puc._cached_antigravity_connection.clear()
+
+
 def test_openai_admin_usage_uses_official_organization_endpoints():
     http = FixtureHttp(
         [
