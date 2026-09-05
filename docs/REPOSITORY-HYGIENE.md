@@ -1,6 +1,6 @@
 # Repository Hygiene
 
-JR Bar source control contains source, tests, durable documentation, and build definitions. It does not contain local build trees, virtual environments, logs, install receipts, generated packages, or agent scratch contracts.
+JR-Bar source control contains source, tests, durable documentation, and build definitions. It does not contain local build trees, virtual environments, logs, install receipts, generated packages, or agent scratch contracts.
 
 ## Local output
 

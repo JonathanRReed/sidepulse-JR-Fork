@@ -1,4 +1,4 @@
-# JR Bar Architecture
+# JR-Bar Architecture
 
 Screen Bar profiling reuses the bounded `PresentationMetrics` registry in
 `screen_bar_pipeline.py`. An explicit environment-gated export writes one
@@ -39,7 +39,7 @@ This document records the boundaries, state owners, and invariants that are expe
 
 ## Product
 
-JR Bar is a macOS menu-bar application and command-line tool that turns AI-agent activity into ambient light. It targets physical SidePulse LED devices mounted as USB volumes and an on-screen Screen Bar around the MacBook notch. Agent state shares the signal pipeline with notifications, calendar events, reminders, severe weather, battery state, timers, quota information, and user-authored LED programs.
+JR-Bar is a macOS menu-bar application and command-line tool that turns AI-agent activity into ambient light. It targets physical SidePulse LED devices mounted as USB volumes and an on-screen Screen Bar around the MacBook notch. Agent state shares the signal pipeline with notifications, calendar events, reminders, severe weather, battery state, timers, quota information, and user-authored LED programs.
 
 ## Controller boundary
 
@@ -334,7 +334,7 @@ Admission returns one exact outcome. Accepted work is not retried by the
 client. Full, closed, and invalid refusals are recorded without event content
 at `hook-ingress-rejections.jsonl`; retrying them synchronously would let a
 newer event pass older accepted work. If no ingress socket is available, the
-client loads the canonical processor and writes synchronously so JR Bar being
+client loads the canonical processor and writes synchronously so JR-Bar being
 closed does not disable provider logs. Normal app termination closes admission,
 drains accepted hook work through monitor reconciliation, persists latest state,
 and only then stops the refresh-hint server. A drain timeout records every

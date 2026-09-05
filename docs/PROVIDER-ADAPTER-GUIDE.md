@@ -1,6 +1,6 @@
 # Provider adapter authoring guide
 
-This guide describes how to add or extend a first-party provider source in JR Bar. It is intentionally aligned with the current Python contracts, rather than with a hypothetical plugin API. A provider adapter is a bounded translation layer from a provider's native observation surface into content-free SidePulse facts. It is not a plugin loader, credential owner, network client, or mutation API.
+This guide describes how to add or extend a first-party provider source in JR-Bar. It is intentionally aligned with the current Python contracts, rather than with a hypothetical plugin API. A provider adapter is a bounded translation layer from a provider's native observation surface into content-free SidePulse facts. It is not a plugin loader, credential owner, network client, or mutation API.
 
 ## The contract boundary
 

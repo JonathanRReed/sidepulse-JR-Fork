@@ -1,0 +1,2741 @@
+{
+  "integrity": {
+    "image_hash_mismatches": 0,
+    "image_set_sha256": "d1716f72ceffd15934d5963212ddd358ae8f2606d86ffaddf5273ce005d0e462",
+    "per_png_hash_list_sha256": "c12381454e6d5a5a11fed397dc05fbaef37b6717525d6ee0a36e8b2430bf75d3",
+    "render_count": 16,
+    "source_file_count": 5,
+    "source_hash_mismatches": 0,
+    "unexpected_png_count": 0
+  },
+  "pinned_sha256": {
+    "production_clear_agents": "2eb339a3dc0f6998641740dc5c7739ad33633f9b66c1fa49045726272e5b3c21",
+    "production_clear_agents_popover": "ed35dde452f3aa06a1b5f09e7ae9fe51ae246079105fabf6cf3c6e1356110c4b",
+    "production_clear_agents_store": "002b04b31dba6e455fb009ad1f851efabc661213158b86436c7ab289c1616927",
+    "production_status_bar_legacy": "868761bd7a6b0f4051c4f6b7f893cc80ef5bdb8edcf949707e151887d5899875",
+    "receipt_harness": "4b7904f338bb6e0eae651f0942b852ccb4832ee568efc5e9e7bbe18dd206e2ba"
+  },
+  "renders": [
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Close this preview without changing presentation receipts.",
+            "label": "Cancel Clear Agents",
+            "role": "AXButton",
+            "value": null
+          },
+          {
+            "help": "Save exact local completion receipts for the agents in this preview.",
+            "label": "Clear Presented Agents",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": "Codex build agent\nClaude review agent"
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Clear Agents preview",
+          "role": "AXGroup",
+          "value": "2 completed agents will leave the current presentation. Codex build agent\nClaude review agent Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "2 completed agents will leave the current presentation."
+        }
+      },
+      "appearance": "aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Cancel Clear Agents",
+          "title": "Cancel"
+        },
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Clear Presented Agents",
+          "title": "Clear Presented Agents"
+        }
+      ],
+      "image_sha256": "2057088c2b6dfd7bfb3bfb8fcedb1d365954ec4275273707655a265fa52a4724",
+      "keyboard": {
+        "closed": true,
+        "count": 2,
+        "first_responder": "Cancel Clear Agents",
+        "order": [
+          "Cancel Clear Agents",
+          "Clear Presented Agents"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 125.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 107,
+            "visible": true
+          },
+          "button:1": {
+            "frame": {
+              "height": 30.0,
+              "width": 179.0,
+              "x": 221.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 155,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 118,
+            "visible": true
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 125,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 121,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 118,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 78,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameAqua",
+      "png": "aqua-preview.png",
+      "shown": true,
+      "state": "preview",
+      "visible_copy": {
+        "items": "Codex build agent\nClaude review agent",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible.",
+        "summary": "2 completed agents will leave the current presentation.",
+        "title": "Clear Agents?"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Close this preview without changing presentation receipts.",
+            "label": "Cancel Clear Agents",
+            "role": "AXButton",
+            "value": null
+          },
+          {
+            "help": "Save exact local completion receipts for the agents in this preview.",
+            "label": "Clear Presented Agents",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": "Codex deploy agent"
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Protected now: 1 active, 1 waiting, 1 failed, and 2 other current. 2 remote or unkeyed completions stay visible."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Clear Agents preview",
+          "role": "AXGroup",
+          "value": "1 completed agent will leave the current presentation. Codex deploy agent Protected now: 1 active, 1 waiting, 1 failed, and 2 other current. 2 remote or unkeyed completions stay visible."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "1 completed agent will leave the current presentation."
+        }
+      },
+      "appearance": "aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Cancel Clear Agents",
+          "title": "Cancel"
+        },
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Clear Presented Agents",
+          "title": "Clear Presented Agents"
+        }
+      ],
+      "image_sha256": "15c6165dc146070a953774a387ee8d3390787518fca63d333c9f7f2e9b5ac52c",
+      "keyboard": {
+        "closed": true,
+        "count": 2,
+        "first_responder": "Cancel Clear Agents",
+        "order": [
+          "Cancel Clear Agents",
+          "Clear Presented Agents"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 125.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 107,
+            "visible": true
+          },
+          "button:1": {
+            "frame": {
+              "height": 30.0,
+              "width": 179.0,
+              "x": 221.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 155,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 98,
+            "visible": true
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 125,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 122,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 131,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 78,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameAqua",
+      "png": "aqua-protected_live_work.png",
+      "shown": true,
+      "state": "protected_live_work",
+      "visible_copy": {
+        "items": "Codex deploy agent",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Protected now: 1 active, 1 waiting, 1 failed, and 2 other current. 2 remote or unkeyed completions stay visible.",
+        "summary": "1 completed agent will leave the current presentation.",
+        "title": "Clear Agents?"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Close the changed preview without clearing anything.",
+            "label": "Cancel Clear Agents",
+            "role": "AXButton",
+            "value": null
+          },
+          {
+            "help": "Refresh the preview before deciding whether to clear presentation receipts.",
+            "label": "Review Changed Agents",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": "Codex deploy agent"
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Protected now: 1 active, 1 waiting, 1 failed, and 2 other current. 2 remote or unkeyed completions stay visible."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Agents Changed",
+          "role": "AXGroup",
+          "value": "Agents changed while this preview was open. Review the refreshed list before clearing. Codex deploy agent Protected now: 1 active, 1 waiting, 1 failed, and 2 other current. 2 remote or unkeyed completions stay visible."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "Agents changed while this preview was open. Review the refreshed list before clearing."
+        }
+      },
+      "appearance": "aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Cancel Clear Agents",
+          "title": "Cancel"
+        },
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Review Changed Agents",
+          "title": "Review Changes"
+        }
+      ],
+      "image_sha256": "43c4727013d5137b0b8623be82e86e218e477675bb8f01a219015b037f8c39e6",
+      "keyboard": {
+        "closed": true,
+        "count": 2,
+        "first_responder": "Cancel Clear Agents",
+        "order": [
+          "Cancel Clear Agents",
+          "Review Changed Agents"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 168.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 107,
+            "visible": true
+          },
+          "button:1": {
+            "frame": {
+              "height": 30.0,
+              "width": 136.0,
+              "x": 264.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 148,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 98,
+            "visible": true
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 125,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 122,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 146,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 86,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameAqua",
+      "png": "aqua-stale.png",
+      "shown": true,
+      "state": "stale",
+      "visible_copy": {
+        "items": "Codex deploy agent",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Protected now: 1 active, 1 waiting, 1 failed, and 2 other current. 2 remote or unkeyed completions stay visible.",
+        "summary": "Agents changed while this preview was open. Review the refreshed list before clearing.",
+        "title": "Agents Changed"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": "Codex build agent\nClaude review agent"
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Clearing Presented Agents",
+          "role": "AXGroup",
+          "value": "Saving exact local completion receipts. Current work is unchanged. Codex build agent\nClaude review agent Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "Saving exact local completion receipts. Current work is unchanged."
+        }
+      },
+      "appearance": "aqua",
+      "buttons": [
+        {
+          "enabled": false,
+          "hidden": true,
+          "label": "Button",
+          "title": "Button"
+        },
+        {
+          "enabled": false,
+          "hidden": true,
+          "label": "Button",
+          "title": "Button"
+        }
+      ],
+      "image_sha256": "c6c64d7edbf0cc289ac83b3db821e5e5dce779bb5eaf32c2f542f97129e23e33",
+      "keyboard": {
+        "closed": false,
+        "count": 0,
+        "first_responder": "root",
+        "order": []
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 118,
+            "visible": true
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 125,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 121,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 133,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 110,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameAqua",
+      "png": "aqua-saving.png",
+      "shown": true,
+      "state": "saving",
+      "visible_copy": {
+        "items": "Codex build agent\nClaude review agent",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible.",
+        "summary": "Saving exact local completion receipts. Current work is unchanged.",
+        "title": "Clearing Presented Agents"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Close this failure receipt. Nothing was cleared.",
+            "label": "Cancel Clear Agents",
+            "role": "AXButton",
+            "value": null
+          },
+          {
+            "help": "Revalidate the preview and try the private local save again.",
+            "label": "Try Clear Agents Again",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": "Codex build agent\nClaude review agent"
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Could Not Clear Agents",
+          "role": "AXGroup",
+          "value": "JR-Bar could not save the local presentation receipts. Nothing was cleared. Codex build agent\nClaude review agent Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "JR-Bar could not save the local presentation receipts. Nothing was cleared."
+        }
+      },
+      "appearance": "aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Cancel Clear Agents",
+          "title": "Cancel"
+        },
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Try Clear Agents Again",
+          "title": "Try Again"
+        }
+      ],
+      "image_sha256": "5399c247786f432995d6e4457efc7d8d59d527a76293e7584d5e4a8d7125ad09",
+      "keyboard": {
+        "closed": true,
+        "count": 2,
+        "first_responder": "Cancel Clear Agents",
+        "order": [
+          "Cancel Clear Agents",
+          "Try Clear Agents Again"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 211.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 107,
+            "visible": true
+          },
+          "button:1": {
+            "frame": {
+              "height": 30.0,
+              "width": 93.0,
+              "x": 307.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 105,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 118,
+            "visible": true
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 125,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 121,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 142,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 114,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameAqua",
+      "png": "aqua-failure.png",
+      "shown": true,
+      "state": "failure",
+      "visible_copy": {
+        "items": "Codex build agent\nClaude review agent",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible.",
+        "summary": "JR-Bar could not save the local presentation receipts. Nothing was cleared.",
+        "title": "Could Not Clear Agents"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Remove only the exact receipts added by the latest Clear Agents batch.",
+            "label": "Undo Clear Agents",
+            "role": "AXButton",
+            "value": null
+          },
+          {
+            "help": "Close this local presentation receipt.",
+            "label": "Finish Clear Agents",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": ""
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Current canonical agent work and history are unchanged."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Agents Cleared",
+          "role": "AXGroup",
+          "value": "2 completed agents left the current presentation. Current canonical agent work and history are unchanged."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "2 completed agents left the current presentation."
+        }
+      },
+      "appearance": "aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Undo Clear Agents",
+          "title": "Undo"
+        },
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Finish Clear Agents",
+          "title": "Done"
+        }
+      ],
+      "image_sha256": "63b1581e67f182b34d15787d7cf4029771c5f577a49db9d7640f693975435df2",
+      "keyboard": {
+        "closed": true,
+        "count": 2,
+        "first_responder": "Undo Clear Agents",
+        "order": [
+          "Undo Clear Agents",
+          "Finish Clear Agents"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 216.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 89,
+            "visible": true
+          },
+          "button:1": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 312.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 96,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 1,
+            "visible": false
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 125,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 108,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 125,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 89,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameAqua",
+      "png": "aqua-successful_receipt.png",
+      "shown": true,
+      "state": "successful_receipt",
+      "visible_copy": {
+        "items": "",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Current canonical agent work and history are unchanged.",
+        "summary": "2 completed agents left the current presentation.",
+        "title": "Agents Cleared"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Close this expired Undo receipt.",
+            "label": "Finish Clear Agents",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": ""
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Current canonical agent work and history are unchanged."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Undo Expired",
+          "role": "AXGroup",
+          "value": "2 completed-agent receipts remain acknowledged. The five-minute Undo window has ended. Current canonical agent work and history are unchanged."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "2 completed-agent receipts remain acknowledged. The five-minute Undo window has ended."
+        }
+      },
+      "appearance": "aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Finish Clear Agents",
+          "title": "Done"
+        },
+        {
+          "enabled": false,
+          "hidden": true,
+          "label": "Button",
+          "title": "Button"
+        }
+      ],
+      "image_sha256": "86479e7cba6ed2dd0a5c3d8f7d4ad22589aac6570fdde37a1b68372f4783da28",
+      "keyboard": {
+        "closed": true,
+        "count": 1,
+        "first_responder": "Finish Clear Agents",
+        "order": [
+          "Finish Clear Agents"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 312.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 96,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 1,
+            "visible": false
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 125,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 108,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 145,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 77,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameAqua",
+      "png": "aqua-expired_undo.png",
+      "shown": true,
+      "state": "expired_undo",
+      "visible_copy": {
+        "items": "",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Current canonical agent work and history are unchanged.",
+        "summary": "2 completed-agent receipts remain acknowledged. The five-minute Undo window has ended.",
+        "title": "Undo Expired"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Close this successful Undo receipt.",
+            "label": "Finish Clear Agents",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": ""
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Current canonical agent work and history are unchanged."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Clear Agents Undone",
+          "role": "AXGroup",
+          "value": "2 completion receipts were removed. Current canonical work decides what appears. Current canonical agent work and history are unchanged."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "2 completion receipts were removed. Current canonical work decides what appears."
+        }
+      },
+      "appearance": "aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Finish Clear Agents",
+          "title": "Done"
+        },
+        {
+          "enabled": false,
+          "hidden": true,
+          "label": "Button",
+          "title": "Button"
+        }
+      ],
+      "image_sha256": "ded46a69fadfc3aecebf794e80c3d8951a11fe392e94424cf3ed62f5519f9f25",
+      "keyboard": {
+        "closed": true,
+        "count": 1,
+        "first_responder": "Finish Clear Agents",
+        "order": [
+          "Finish Clear Agents"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 312.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 96,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 1,
+            "visible": false
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 125,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 108,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 138,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 100,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameAqua",
+      "png": "aqua-undone.png",
+      "shown": true,
+      "state": "undone",
+      "visible_copy": {
+        "items": "",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Current canonical agent work and history are unchanged.",
+        "summary": "2 completion receipts were removed. Current canonical work decides what appears.",
+        "title": "Clear Agents Undone"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Close this preview without changing presentation receipts.",
+            "label": "Cancel Clear Agents",
+            "role": "AXButton",
+            "value": null
+          },
+          {
+            "help": "Save exact local completion receipts for the agents in this preview.",
+            "label": "Clear Presented Agents",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": "Codex build agent\nClaude review agent"
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Clear Agents preview",
+          "role": "AXGroup",
+          "value": "2 completed agents will leave the current presentation. Codex build agent\nClaude review agent Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "2 completed agents will leave the current presentation."
+        }
+      },
+      "appearance": "dark_aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Cancel Clear Agents",
+          "title": "Cancel"
+        },
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Clear Presented Agents",
+          "title": "Clear Presented Agents"
+        }
+      ],
+      "image_sha256": "4828646558120ee37ec2e2ed029e58361c0a2a01e379dd288d1add83df3369a2",
+      "keyboard": {
+        "closed": true,
+        "count": 2,
+        "first_responder": "Cancel Clear Agents",
+        "order": [
+          "Cancel Clear Agents",
+          "Clear Presented Agents"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 125.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 103,
+            "visible": true
+          },
+          "button:1": {
+            "frame": {
+              "height": 30.0,
+              "width": 179.0,
+              "x": 221.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 142,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 112,
+            "visible": true
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 128,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 131,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 118,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 78,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameDarkAqua",
+      "png": "dark_aqua-preview.png",
+      "shown": true,
+      "state": "preview",
+      "visible_copy": {
+        "items": "Codex build agent\nClaude review agent",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible.",
+        "summary": "2 completed agents will leave the current presentation.",
+        "title": "Clear Agents?"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Close this preview without changing presentation receipts.",
+            "label": "Cancel Clear Agents",
+            "role": "AXButton",
+            "value": null
+          },
+          {
+            "help": "Save exact local completion receipts for the agents in this preview.",
+            "label": "Clear Presented Agents",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": "Codex deploy agent"
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Protected now: 1 active, 1 waiting, 1 failed, and 2 other current. 2 remote or unkeyed completions stay visible."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Clear Agents preview",
+          "role": "AXGroup",
+          "value": "1 completed agent will leave the current presentation. Codex deploy agent Protected now: 1 active, 1 waiting, 1 failed, and 2 other current. 2 remote or unkeyed completions stay visible."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "1 completed agent will leave the current presentation."
+        }
+      },
+      "appearance": "dark_aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Cancel Clear Agents",
+          "title": "Cancel"
+        },
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Clear Presented Agents",
+          "title": "Clear Presented Agents"
+        }
+      ],
+      "image_sha256": "6a1daa140ced690885a4087813c83efe731f92b2454b20c8fc96141e2986ca80",
+      "keyboard": {
+        "closed": true,
+        "count": 2,
+        "first_responder": "Cancel Clear Agents",
+        "order": [
+          "Cancel Clear Agents",
+          "Clear Presented Agents"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 125.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 103,
+            "visible": true
+          },
+          "button:1": {
+            "frame": {
+              "height": 30.0,
+              "width": 179.0,
+              "x": 221.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 142,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 95,
+            "visible": true
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 128,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 124,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 131,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 78,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameDarkAqua",
+      "png": "dark_aqua-protected_live_work.png",
+      "shown": true,
+      "state": "protected_live_work",
+      "visible_copy": {
+        "items": "Codex deploy agent",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Protected now: 1 active, 1 waiting, 1 failed, and 2 other current. 2 remote or unkeyed completions stay visible.",
+        "summary": "1 completed agent will leave the current presentation.",
+        "title": "Clear Agents?"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Close the changed preview without clearing anything.",
+            "label": "Cancel Clear Agents",
+            "role": "AXButton",
+            "value": null
+          },
+          {
+            "help": "Refresh the preview before deciding whether to clear presentation receipts.",
+            "label": "Review Changed Agents",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": "Codex deploy agent"
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Protected now: 1 active, 1 waiting, 1 failed, and 2 other current. 2 remote or unkeyed completions stay visible."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Agents Changed",
+          "role": "AXGroup",
+          "value": "Agents changed while this preview was open. Review the refreshed list before clearing. Codex deploy agent Protected now: 1 active, 1 waiting, 1 failed, and 2 other current. 2 remote or unkeyed completions stay visible."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "Agents changed while this preview was open. Review the refreshed list before clearing."
+        }
+      },
+      "appearance": "dark_aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Cancel Clear Agents",
+          "title": "Cancel"
+        },
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Review Changed Agents",
+          "title": "Review Changes"
+        }
+      ],
+      "image_sha256": "474491f600f60c8327e4aad037c8e71247a4c4cdf19742cff36ef3f0d264314e",
+      "keyboard": {
+        "closed": true,
+        "count": 2,
+        "first_responder": "Cancel Clear Agents",
+        "order": [
+          "Cancel Clear Agents",
+          "Review Changed Agents"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 168.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 103,
+            "visible": true
+          },
+          "button:1": {
+            "frame": {
+              "height": 30.0,
+              "width": 136.0,
+              "x": 264.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 141,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 95,
+            "visible": true
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 128,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 124,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 146,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 86,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameDarkAqua",
+      "png": "dark_aqua-stale.png",
+      "shown": true,
+      "state": "stale",
+      "visible_copy": {
+        "items": "Codex deploy agent",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Protected now: 1 active, 1 waiting, 1 failed, and 2 other current. 2 remote or unkeyed completions stay visible.",
+        "summary": "Agents changed while this preview was open. Review the refreshed list before clearing.",
+        "title": "Agents Changed"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": "Codex build agent\nClaude review agent"
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Clearing Presented Agents",
+          "role": "AXGroup",
+          "value": "Saving exact local completion receipts. Current work is unchanged. Codex build agent\nClaude review agent Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "Saving exact local completion receipts. Current work is unchanged."
+        }
+      },
+      "appearance": "dark_aqua",
+      "buttons": [
+        {
+          "enabled": false,
+          "hidden": true,
+          "label": "Button",
+          "title": "Button"
+        },
+        {
+          "enabled": false,
+          "hidden": true,
+          "label": "Button",
+          "title": "Button"
+        }
+      ],
+      "image_sha256": "9fe92263bfd623845fe3a09f477ea62608b9023880b74b47ca3f8ff8ef6788a2",
+      "keyboard": {
+        "closed": false,
+        "count": 0,
+        "first_responder": "root",
+        "order": []
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 112,
+            "visible": true
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 128,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 131,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 133,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 110,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameDarkAqua",
+      "png": "dark_aqua-saving.png",
+      "shown": true,
+      "state": "saving",
+      "visible_copy": {
+        "items": "Codex build agent\nClaude review agent",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible.",
+        "summary": "Saving exact local completion receipts. Current work is unchanged.",
+        "title": "Clearing Presented Agents"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Close this failure receipt. Nothing was cleared.",
+            "label": "Cancel Clear Agents",
+            "role": "AXButton",
+            "value": null
+          },
+          {
+            "help": "Revalidate the preview and try the private local save again.",
+            "label": "Try Clear Agents Again",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": "Codex build agent\nClaude review agent"
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Could Not Clear Agents",
+          "role": "AXGroup",
+          "value": "JR-Bar could not save the local presentation receipts. Nothing was cleared. Codex build agent\nClaude review agent Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "JR-Bar could not save the local presentation receipts. Nothing was cleared."
+        }
+      },
+      "appearance": "dark_aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Cancel Clear Agents",
+          "title": "Cancel"
+        },
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Try Clear Agents Again",
+          "title": "Try Again"
+        }
+      ],
+      "image_sha256": "1e468f39cd54635412ebcc1948d2ca02dbcf61195d8246b9de92042c1eb6cd26",
+      "keyboard": {
+        "closed": true,
+        "count": 2,
+        "first_responder": "Cancel Clear Agents",
+        "order": [
+          "Cancel Clear Agents",
+          "Try Clear Agents Again"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 211.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 103,
+            "visible": true
+          },
+          "button:1": {
+            "frame": {
+              "height": 30.0,
+              "width": 93.0,
+              "x": 307.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 101,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 112,
+            "visible": true
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 128,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 131,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 142,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 114,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameDarkAqua",
+      "png": "dark_aqua-failure.png",
+      "shown": true,
+      "state": "failure",
+      "visible_copy": {
+        "items": "Codex build agent\nClaude review agent",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Protected now: 0 active, 0 waiting, 0 failed, and 0 other current. 0 remote or unkeyed completions stay visible.",
+        "summary": "JR-Bar could not save the local presentation receipts. Nothing was cleared.",
+        "title": "Could Not Clear Agents"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Remove only the exact receipts added by the latest Clear Agents batch.",
+            "label": "Undo Clear Agents",
+            "role": "AXButton",
+            "value": null
+          },
+          {
+            "help": "Close this local presentation receipt.",
+            "label": "Finish Clear Agents",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": ""
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Current canonical agent work and history are unchanged."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Agents Cleared",
+          "role": "AXGroup",
+          "value": "2 completed agents left the current presentation. Current canonical agent work and history are unchanged."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "2 completed agents left the current presentation."
+        }
+      },
+      "appearance": "dark_aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Undo Clear Agents",
+          "title": "Undo"
+        },
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Finish Clear Agents",
+          "title": "Done"
+        }
+      ],
+      "image_sha256": "0a52b474a8e5ba12fd3e13cb0ce07e6646f1c4628a3c6e93917cd7914aa2efa0",
+      "keyboard": {
+        "closed": true,
+        "count": 2,
+        "first_responder": "Undo Clear Agents",
+        "order": [
+          "Undo Clear Agents",
+          "Finish Clear Agents"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 216.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 86,
+            "visible": true
+          },
+          "button:1": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 312.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 94,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 1,
+            "visible": false
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 128,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 104,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 125,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 89,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameDarkAqua",
+      "png": "dark_aqua-successful_receipt.png",
+      "shown": true,
+      "state": "successful_receipt",
+      "visible_copy": {
+        "items": "",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Current canonical agent work and history are unchanged.",
+        "summary": "2 completed agents left the current presentation.",
+        "title": "Agents Cleared"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Close this expired Undo receipt.",
+            "label": "Finish Clear Agents",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": ""
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Current canonical agent work and history are unchanged."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Undo Expired",
+          "role": "AXGroup",
+          "value": "2 completed-agent receipts remain acknowledged. The five-minute Undo window has ended. Current canonical agent work and history are unchanged."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "2 completed-agent receipts remain acknowledged. The five-minute Undo window has ended."
+        }
+      },
+      "appearance": "dark_aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Finish Clear Agents",
+          "title": "Done"
+        },
+        {
+          "enabled": false,
+          "hidden": true,
+          "label": "Button",
+          "title": "Button"
+        }
+      ],
+      "image_sha256": "54884c7a7961f33eb5b70c1e802b0e692442805620c3e1cf62f3ff54f1a821ca",
+      "keyboard": {
+        "closed": true,
+        "count": 1,
+        "first_responder": "Finish Clear Agents",
+        "order": [
+          "Finish Clear Agents"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 312.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 94,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 1,
+            "visible": false
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 128,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 104,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 145,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 77,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameDarkAqua",
+      "png": "dark_aqua-expired_undo.png",
+      "shown": true,
+      "state": "expired_undo",
+      "visible_copy": {
+        "items": "",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Current canonical agent work and history are unchanged.",
+        "summary": "2 completed-agent receipts remain acknowledged. The five-minute Undo window has ended.",
+        "title": "Undo Expired"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    },
+    {
+      "accessibility": {
+        "buttons": [
+          {
+            "help": "Close this successful Undo receipt.",
+            "label": "Finish Clear Agents",
+            "role": "AXButton",
+            "value": null
+          }
+        ],
+        "items": {
+          "help": null,
+          "label": "Agents to clear from presentation",
+          "role": "AXUnknown",
+          "value": ""
+        },
+        "preservation": {
+          "help": null,
+          "label": "Preserved data",
+          "role": "AXUnknown",
+          "value": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay."
+        },
+        "protected": {
+          "help": null,
+          "label": "Protected agent work",
+          "role": "AXUnknown",
+          "value": "Current canonical agent work and history are unchanged."
+        },
+        "root": {
+          "help": "Reviews a local presentation acknowledgement. Clear Agents does not stop or delete agent work. Use Tab to move, Return for the primary action, and Escape to close.",
+          "label": "Clear Agents Undone",
+          "role": "AXGroup",
+          "value": "2 completion receipts were removed. Current canonical work decides what appears. Current canonical agent work and history are unchanged."
+        },
+        "summary": {
+          "help": null,
+          "label": "Clear Agents status",
+          "role": "AXUnknown",
+          "value": "2 completion receipts were removed. Current canonical work decides what appears."
+        }
+      },
+      "appearance": "dark_aqua",
+      "buttons": [
+        {
+          "enabled": true,
+          "hidden": false,
+          "label": "Finish Clear Agents",
+          "title": "Done"
+        },
+        {
+          "enabled": false,
+          "hidden": true,
+          "label": "Button",
+          "title": "Button"
+        }
+      ],
+      "image_sha256": "f96c22325afb8d27c1566d47b81482e503d3721b61837432550095dee673eca2",
+      "keyboard": {
+        "closed": true,
+        "count": 1,
+        "first_responder": "Finish Clear Agents",
+        "order": [
+          "Finish Clear Agents"
+        ]
+      },
+      "layout": {
+        "image_pixels": {
+          "height": 1440,
+          "width": 1680
+        },
+        "pixel_scale": 4.0,
+        "regions": {
+          "button:0": {
+            "frame": {
+              "height": 30.0,
+              "width": 88.0,
+              "x": 312.0,
+              "y": 18.0
+            },
+            "sampled_color_variants": 94,
+            "visible": true
+          },
+          "items": {
+            "frame": {
+              "height": 106.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 164.0
+            },
+            "sampled_color_variants": 1,
+            "visible": false
+          },
+          "preservation": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 60.0
+            },
+            "sampled_color_variants": 128,
+            "visible": true
+          },
+          "protected": {
+            "frame": {
+              "height": 46.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 112.0
+            },
+            "sampled_color_variants": 104,
+            "visible": true
+          },
+          "summary": {
+            "frame": {
+              "height": 38.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 276.0
+            },
+            "sampled_color_variants": 138,
+            "visible": true
+          },
+          "title": {
+            "frame": {
+              "height": 24.0,
+              "width": 380.0,
+              "x": 20.0,
+              "y": 320.0
+            },
+            "sampled_color_variants": 100,
+            "visible": true
+          }
+        },
+        "view_size": {
+          "height": 360.0,
+          "width": 420.0
+        },
+        "visible_regions_in_bounds": true
+      },
+      "native_appearance_name": "NSAppearanceNameDarkAqua",
+      "png": "dark_aqua-undone.png",
+      "shown": true,
+      "state": "undone",
+      "visible_copy": {
+        "items": "",
+        "preservation": "Only exact local completion receipts change. History, transcripts, hooks, credentials, settings, Other Macs, live asks, and failures stay.",
+        "protected": "Current canonical agent work and history are unchanged.",
+        "summary": "2 completion receipts were removed. Current canonical work decides what appears.",
+        "title": "Clear Agents Undone"
+      },
+      "visual_inspection": {
+        "accessibility_verified": true,
+        "clipping_verified": true,
+        "contrast_verified": true,
+        "copy_verified": true,
+        "focus_verified": true,
+        "geometry_verified": true,
+        "inspection_basis": "Production AppKit bitmap with visible-copy, responder, AX, bounds, painted-region, and Aqua/Dark Aqua checks."
+      }
+    }
+  ],
+  "schema": "p3.39-task-5-clear-agents-native-receipt-v1",
+  "source_files": {
+    ".superpowers/sdd/2026-08-30-jr-bar-p3-39-safe-clear-agents/render_clear_agents_receipts.py": {
+      "sha256": "4b7904f338bb6e0eae651f0942b852ccb4832ee568efc5e9e7bbe18dd206e2ba"
+    },
+    "src/sidepulse/clear_agents.py": {
+      "sha256": "2eb339a3dc0f6998641740dc5c7739ad33633f9b66c1fa49045726272e5b3c21"
+    },
+    "src/sidepulse/clear_agents_popover.py": {
+      "sha256": "ed35dde452f3aa06a1b5f09e7ae9fe51ae246079105fabf6cf3c6e1356110c4b"
+    },
+    "src/sidepulse/clear_agents_store.py": {
+      "sha256": "002b04b31dba6e455fb009ad1f851efabc661213158b86436c7ab289c1616927"
+    },
+    "src/sidepulse/status_bar_legacy.py": {
+      "sha256": "868761bd7a6b0f4051c4f6b7f893cc80ef5bdb8edcf949707e151887d5899875"
+    }
+  },
+  "source_only_disclaimer": "Source-only AppKit evidence. This is not installed-app, live-provider, live VoiceOver, physical-LED, signing, notarization, packaging, publication, updater, deployment, or release evidence.",
+  "states": [
+    "preview",
+    "protected_live_work",
+    "stale",
+    "saving",
+    "failure",
+    "successful_receipt",
+    "expired_undo",
+    "undone"
+  ]
+}

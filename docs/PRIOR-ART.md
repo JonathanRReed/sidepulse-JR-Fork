@@ -1,6 +1,6 @@
 # Prior art and attribution
 
-JR Bar is MIT licensed and stands on work by others. This file records
+JR-Bar is MIT licensed and stands on work by others. This file records
 what we studied, what we adopted, and under which terms — so a reader
 can trace any design decision back to its source.
 
@@ -46,7 +46,7 @@ code copied):
 
 **Where we deliberately diverge:** for Claude-CLI-owned credentials
 CodexBar *delegates* refresh back to the CLI (driving `claude /status`
-in a PTY) and never writes that Keychain item. JR Bar refreshes
+in a PTY) and never writes that Keychain item. JR-Bar refreshes
 directly and writes the rotated tokens back, so it needs no PTY
 subprocess and no dependency on `claude` being installed — at the cost
 of owning that write-back. Their delegated path is reported unreliable
@@ -73,7 +73,7 @@ Snapshot studied for P3.35: MIT, © 2026 Peter Kuhar, commit
 
 This is the original product lineage. It provided negative evidence for the
 old recency-style announcer behavior and positive evidence for keeping the
-product fork attribution explicit even as JR Bar diverges further.
+product fork attribution explicit even as JR-Bar diverges further.
 
 ## SidePulse fleet fork
 
@@ -102,6 +102,6 @@ Apple's public AppKit contracts.
 
 ## Product lineage
 
-JR Bar began as a fork of SidePulse and has since diverged substantially.
+JR-Bar began as a fork of SidePulse and has since diverged substantially.
 P3.35 continues that pattern: original implementation, explicit attribution,
 and ideas adapted from upstream and peers without code copying. See `LICENSE`.

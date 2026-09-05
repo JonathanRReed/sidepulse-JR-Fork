@@ -1,4 +1,4 @@
-# JR Bar feature and readiness matrix
+# JR-Bar feature and readiness matrix
 
 Updated 2026-08-31.
 
@@ -19,7 +19,7 @@ program, or cadence changes, and it reports invalidated and shortened work
 separately from renderer fallbacks. This is source-verified behavior, not a
 claim that the 24-frame ceiling is hardware-optimal.
 
-JR Bar (formerly SidePulse) is the product's display name going forward; bundle
+JR-Bar (formerly SidePulse) is the product's display name going forward; bundle
 identifiers, file paths, and the `sidepulse` CLI keep the old name for now.
 This document is the status authority for product claims, rewritten today from
 the live source rather than patched. A feature is **shipped** only when it is

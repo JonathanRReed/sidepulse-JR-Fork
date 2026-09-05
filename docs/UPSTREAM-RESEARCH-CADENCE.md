@@ -19,7 +19,7 @@ occurs:
 - the original upstream repository publishes a release or has five or more
   newly opened or materially updated PRs/issues since the last snapshot;
 - a credible upstream report concerns privacy, security, data loss, hardware
-  safety, or a regression relevant to JR Bar;
+  safety, or a regression relevant to JR-Bar;
 - a local provider, hardware, permission, dependency, or architecture change
   could alter a prior reachability or disposition decision; or
 - the owner explicitly requests a refresh.
@@ -41,7 +41,7 @@ unavailable, not silently carried forward as current.
 4. [T3 Code](https://github.com/pingdotgg/t3code), including its current
    release and README when projection, provider-instance, or remote-surface
    ideas are in scope.
-5. The JR Bar checkout: branch/ref, dirty-state ownership, relevant local
+5. The JR-Bar checkout: branch/ref, dirty-state ownership, relevant local
    source seams, and attributable tests or other evidence for each decision.
 
 The source set is a minimum. Additional first-party documentation may be

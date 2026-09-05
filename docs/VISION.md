@@ -1,4 +1,4 @@
-# JR Bar — the vision
+# JR-Bar: the vision
 
 Synthesized 2026-08-14 from source-first study of CodexBar (`c4ed34d0`) and
 t3code (`b73232bd`) plus research into the notch-utility landscape, the
@@ -7,7 +7,7 @@ agent-management market. Opinionated on purpose.
 
 ## 1. Thesis
 
-JR Bar is the ambient nervous system for developers who run more than one AI coding agent at a time. It is not an orchestrator — it never drives your agents, never touches your repo, never asks for GitHub write access. It watches every harness you already use (Claude Code, Codex, Cursor, Gemini, Devin, Grok, OpenCode, Hermes, Antigravity) and answers one question continuously, without you asking: **which one needs you right now?** The sentence that sells it: *"Stop keeping five agents in your head. The light tells you when one wants you, and only then."* The documented pain is not missing features — it is cognitive overload ("you need to keep the state of every agent in your head... the constant context-switching is brutal"; "my brain starts falling apart within minutes"). We sell the end of that, not a dashboard.
+JR-Bar is the ambient nervous system for developers who run more than one AI coding agent at a time. It is not an orchestrator — it never drives your agents, never touches your repo, never asks for GitHub write access. It watches every harness you already use (Claude Code, Codex, Cursor, Gemini, Devin, Grok, OpenCode, Hermes, Antigravity) and answers one question continuously, without you asking: **which one needs you right now?** The sentence that sells it: *"Stop keeping five agents in your head. The light tells you when one wants you, and only then."* The documented pain is not missing features — it is cognitive overload ("you need to keep the state of every agent in your head... the constant context-switching is brutal"; "my brain starts falling apart within minutes"). We sell the end of that, not a dashboard.
 
 THE THREE SURFACES ARE NOT THREE COPIES. Today they are — `virtual_device.py` mirrors the LED animation onto the notch, which means we ship one signal three times and call it a product. That must end. Each surface answers a different question, on a different timescale, in a different part of the visual field:
 
@@ -36,7 +36,7 @@ Rule that keeps them honest: **no fact appears on more than one rung of the ladd
 
 ## 2. The light language
 
-This is the soul of the product and it is currently wrong in the code. `signals.py` ships nine patterns (breathe, blink, double-blink, solid, sweep, ripple, comet, sparkle, heartbeat), twelve signal types, three escalation tiers, and a user-authored DSL Studio on top. Miller's absolute-judgment ceiling is ~7 categories on a single perceptual channel, and the applied color-coding literature (Christ 1975) puts the practical cap at **4 for casual users**. The Ambient Orb had full RGB and used three states. The build-light tradition that is JR Bar's true ancestor used two. We are encoding nine patterns × twelve sources and expecting recall that no human has.
+This is the soul of the product and it is currently wrong in the code. `signals.py` ships nine patterns (breathe, blink, double-blink, solid, sweep, ripple, comet, sparkle, heartbeat), twelve signal types, three escalation tiers, and a user-authored DSL Studio on top. Miller's absolute-judgment ceiling is ~7 categories on a single perceptual channel, and the applied color-coding literature (Christ 1975) puts the practical cap at **4 for casual users**. The Ambient Orb had full RGB and used three states. The build-light tradition that is JR-Bar's true ancestor used two. We are encoding nine patterns × twelve sources and expecting recall that no human has.
 
 **THE STATE AXIS — FOUR LIT STATES PLUS OFF. That is the whole vocabulary.**
 
@@ -108,7 +108,7 @@ Explicitly **not** in the dropdown: diffs, transcripts, cost history charts, cal
 
 **ACKNOWLEDGMENT IS PER-SURFACE, NOT GLOBAL.** t3code's read-receipt model applies directly and non-obviously: the LED, the Screen Bar, and the dropdown are three independent viewers of the same truth. Each tracks its own last-acknowledged timestamp. Dismissing the Screen Bar announcement must **not** clear the LED — the light's job is to persist until you actually deal with it. Opening the dropdown clears the dropdown's unseen markers and clears green (done) on the LED, but never clears amber (needs you); only responding to the ask clears amber. That distinction is the entire difference between a notification and a queue, and the queue is what people loved about the BlackBerry light.
 
-**REFRESH.** Adopt CodexBar's `AdaptiveRefreshPolicyCore` shape: a pure decision function over {now, last menu open, last coding activity, low-power, thermal} with menu-recency tiers, a coding-activity clamp, and thermal backoff — plus one JR Bar addition it lacks: **per-session urgency**, so a session near its context limit or with an unanswered ask polls faster than an idle one. Adopt its request coalescing (one in-flight fetch per source, generation-tracked) as-is. Adopt its **consent gate**: process-list inspection asks first and declining falls back to time-based refresh. We are a passive observer with agent-adjacent access on a developer's machine; consent theater is not optional for us, it is the trust foundation.
+**REFRESH.** Adopt CodexBar's `AdaptiveRefreshPolicyCore` shape: a pure decision function over {now, last menu open, last coding activity, low-power, thermal} with menu-recency tiers, a coding-activity clamp, and thermal backoff — plus one JR-Bar addition it lacks: **per-session urgency**, so a session near its context limit or with an unanswered ask polls faster than an idle one. Adopt its request coalescing (one in-flight fetch per source, generation-tracked) as-is. Adopt its **consent gate**: process-list inspection asks first and declining falls back to time-based refresh. We are a passive observer with agent-adjacent access on a developer's machine; consent theater is not optional for us, it is the trust foundation.
 
 ## 4. The notification engine
 
@@ -212,7 +212,7 @@ Crucially: `jrbar signal` also **reads** — `jrbar status --json` gives the who
 
 **Why.** 'Every harness or provider' is the promise, and a hooks-first pipeline can only see harnesses that support hooks AND that the user successfully configured. t3code reads transcripts specifically so usage stays complete for turns never driven through their product — we are a passive observer, so this applies to us even more strongly. Until this lands, our coverage claims are aspirational. ClaudeBar already lists 12 providers; CodexBar lists 69. We cannot win on breadth with bespoke integrations.
 
-**Proof it worked.** A harness we have never integrated becomes visible by adding one manifest file with no Python changes. Sessions started before JR Bar was installed appear correctly. Two JR Bar instances reading the same physical directory do not double-count.
+**Proof it worked.** A harness we have never integrated becomes visible by adding one manifest file with no Python changes. Sessions started before JR-Bar was installed appear correctly. Two JR-Bar instances reading the same physical directory do not double-count.
 
 ### 7. The open Signal API and its trust model  ·  RETIRED
 

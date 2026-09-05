@@ -116,7 +116,7 @@ before and after the broad gates. P3.38 is closed in source.
 
 These are source and isolated source-AppKit receipts. They do not prove live
 Focus authorization or a real Focus transition, every locale or DST case,
-installed-app VoiceOver or keyboard traversal, physical JR Bar or Screen Bar
+installed-app VoiceOver or keyboard traversal, physical JR-Bar or Screen Bar
 output, signing, packaging, notarization, publication, updater behavior, or
 release readiness. No app was installed and no permission was requested.
 
@@ -282,7 +282,7 @@ Power-hold tests cover canonical ordinary and closed-lid `caffeinate` commands,
 safe migration defaults, independent agent, display, battery, and closed-lid
 settings, and bounded live child replacement. On 2026-08-29, an isolated
 source AppKit process rendered Settings > Power with four separate cards and
-the titled window `JR Bar Settings: Power`. Its default projection reported
+the titled window `JR-Bar Settings: Power`. Its default projection reported
 agent hold on, display hold off, battery continuation on, and closed-lid
 policy Never. After writing agent hold off and display hold on to the same
 isolated settings store, a fresh source process restored those two switch
@@ -328,7 +328,7 @@ totals, current and peak queue depth, physical-write timing, oldest visible
 source age, registered and live worker counts, shutdown timing, refresh timing,
 counter reset and saturation, missing evidence, fixed copy, and content-free
 production wiring. On 2026-08-29, an isolated Python 3.13.15 AppKit process
-rendered `JR Bar Source Preview: Why Is It Doing That?` with the existing
+rendered `JR-Bar Source Preview: Why Is It Doing That?` with the existing
 decision explanation followed by all nine rows and the detailed timing section.
 The full text fit without scrolling, remained selectable in the accessibility
 tree, and showed `Unavailable` for unobserved values. The signed installed app
@@ -449,7 +449,7 @@ and preview programs. The focused AppKit-backed accessibility suite passed 6
 tests. `make fast` then passed with 84 contract, 139 fixture and schema, and
 297 focused tests. The complete suite passed 6,618 tests plus 7 subtests, with
 the same four known Python 3.12 multiprocessing fork deprecation warnings. A
-separate isolated AppKit process rendered `JR Bar Settings: Animations`,
+separate isolated AppKit process rendered `JR-Bar Settings: Animations`,
 selected the Animations pane, and exposed lid preview choices as
 `AXRadioButton` controls with labels and selected state. Additional isolated
 renders covered LED Behavior and the Color Studio state-animation surface;
@@ -598,9 +598,9 @@ After the rescue branch is merged into `main`, use the owner-Mac release gate
 from a dedicated release account. It requires signing identities, a
 notarytool profile, measured performance JSON outside the checkout, physical
 hardware confirmation, installed-upgrade authorization, and separate
-uninstall authorization. A differently versioned signed JR Bar installation
+uninstall authorization. A differently versioned signed JR-Bar installation
 and its package receipt must exist before the gate starts. The uninstall check preserves settings but removes
-external JR Bar integrations before reinstalling the exact PKG.
+external JR-Bar integrations before reinstalling the exact PKG.
 
 ```sh
 export APP_SIGN_IDENTITY='Developer ID Application: …'
@@ -697,7 +697,7 @@ signing, notarization, publication, or release readiness.
 
 The P2.25 device-targeting audit proved that the old single-device selector,
 preferred-target helpers, and Pro-before-Dot priority table had no runtime,
-Objective-C selector, packaging, or test call site. JR Bar's live path already
+Objective-C selector, packaging, or test call site. JR-Bar's live path already
 targets each connected inventory candidate through its own per-device
 controllers and bounded hardware-worker slot. The cleanup removed that dead
 chooser, its scalar controllers, singular target method, and scalar display

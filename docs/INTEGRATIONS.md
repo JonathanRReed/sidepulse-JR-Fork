@@ -1,6 +1,6 @@
 # T3 Code integration
 
-JR Bar consumes read-only status from T3 Code and displays provider/account usage and history computed by JR Bar providers. The integration is disabled by default and configured outside the primary `agent-monitor` settings document.
+JR-Bar consumes read-only status from T3 Code and displays provider/account usage and history computed by JR-Bar providers. The integration is disabled by default and configured outside the primary `agent-monitor` settings document.
 
 ## Commands
 
@@ -25,7 +25,7 @@ sidepulse integrations probe t3code
 sidepulse integrations probe t3code --json
 ```
 
-Restart the JR Bar status-bar app after changing integration settings:
+Restart the JR-Bar status-bar app after changing integration settings:
 
 ```bash
 sidepulse status-bar stop
@@ -52,7 +52,7 @@ The current adapter reads T3 Code’s local SQLite projection and preserves:
 - pending approval, user-input, and actionable-plan indicators
 - the official `t3code://threads/<environment>/<thread>` deep link when an environment ID is configured
 
-JR Bar maps the projected lifecycle into its canonical agent states. A T3 approval, input request, or actionable plan becomes `Waiting for Input`; running and starting sessions become `Working`; session errors become `Blocked / Error`; ready, idle, or stopped turns become completed or idle states according to the available turn facts.
+JR-Bar maps the projected lifecycle into its canonical agent states. A T3 approval, input request, or actionable plan becomes `Waiting for Input`; running and starting sessions become `Working`; session errors become `Blocked / Error`; ready, idle, or stopped turns become completed or idle states according to the available turn facts.
 
 ### Configuration
 
@@ -72,11 +72,11 @@ sidepulse integrations configure t3code --clear-environment-id
 
 ### Ownership and safety
 
-JR Bar opens `userdata/state.sqlite` with SQLite URI `mode=ro`, enables `PRAGMA query_only`, applies a short busy timeout, verifies required tables and columns, and caps the result at 512 active, non-archived threads. It never writes the database, invokes T3 commands, reads T3 authentication material, changes a thread, or dispatches provider actions.
+JR-Bar opens `userdata/state.sqlite` with SQLite URI `mode=ro`, enables `PRAGMA query_only`, applies a short busy timeout, verifies required tables and columns, and caps the result at 512 active, non-archived threads. It never writes the database, invokes T3 commands, reads T3 authentication material, changes a thread, or dispatches provider actions.
 
 Additive columns are accepted. Missing required columns fail closed as an unsupported schema. A failed or busy refresh retains the prior snapshot and marks its projected rows stale instead of replacing known-good state with fabricated values.
 
-The current upstream projection does not expose pull-request metadata. JR Bar therefore does not claim T3 pull-request compatibility or provide T3 mutation actions.
+The current upstream projection does not expose pull-request metadata. JR-Bar therefore does not claim T3 pull-request compatibility or provide T3 mutation actions.
 
 ## Settings and compatibility
 
@@ -86,7 +86,7 @@ Integration settings are stored at:
 ${XDG_CONFIG_HOME:-~/.config}/sidepulse/integrations.json
 ```
 
-The document is versioned, preserves unknown fields, rejects concurrent replacement, and becomes read-only when written by a newer JR Bar version. A malformed existing document is preserved and refused rather than silently replaced.
+The document is versioned, preserves unknown fields, rejects concurrent replacement, and becomes read-only when written by a newer JR-Bar version. A malformed existing document is preserved and refused rather than silently replaced.
 
 The packaged compatibility manifest is `sidepulse.resources/integration_compatibility.json`. It records the exact reviewed upstream commit, protocol fingerprint, minimum version, maximum tested version, fixture version, and connection mode. The CLI exposes this information through `sidepulse integrations status --json`.
 

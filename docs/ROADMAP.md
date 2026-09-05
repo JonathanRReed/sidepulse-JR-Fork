@@ -1,6 +1,6 @@
-# JR Bar roadmap
+# JR-Bar roadmap
 
-Living roadmap, updated 2026-08-30. JR Bar is the product name; the
+Living roadmap, updated 2026-08-30. JR-Bar is the product name; the
 `sidepulse` CLI, bundle identifiers, support paths, and SidePulse hardware
 names remain stable until a separately tested migration exists.
 
@@ -82,24 +82,24 @@ privacy mode. Each needs a local contract and evidence before adoption. See
 
 Statuses are deliberate dispositions, not implementation claims. `adopted`
 means the behavior or discipline is used substantially as described;
-`adapted` means it was reshaped for JR Bar's architecture or safety rules;
-`surpassed` means JR Bar already has a stronger or more complete local path;
+`adapted` means it was reshaped for JR-Bar's architecture or safety rules;
+`surpassed` means JR-Bar already has a stronger or more complete local path;
 `rejected` means the approach conflicts with a locked boundary; `waiting on
 evidence` means reachability, hardware, schema, performance, or security proof
 is still missing.
 
-| Source or idea | Status | JR Bar disposition and evidence |
+| Source or idea | Status | JR-Bar disposition and evidence |
 | --- | --- | --- |
 | Upstream isolated user installer | adopted | Ported as `scripts/install-user.sh` while sealed app-bundle and signed-package paths remain authoritative. [Upstream sync](UPSTREAM-SYNC.md) |
 | Upstream packaging, clean-install, version, and post-build guards | adopted | Carried through package-contract tests, clean-install validation, release-version checks, and checksums. [Upstream sync](UPSTREAM-SYNC.md) |
 | Upstream hook stability and compatibility | adopted | Fail-open current and legacy hook entry points are part of the fork's intake contract. [Feature matrix](FEATURE-MATRIX.md#agents-and-intake) |
-| Upstream PR #31 display-sleep-safe keep-awake | adapted | JR Bar keeps display assertion opt-in and separates ordinary, battery, and closed-lid policy. [Upstream sync](UPSTREAM-SYNC.md) |
+| Upstream PR #31 display-sleep-safe keep-awake | adapted | JR-Bar keeps display assertion opt-in and separates ordinary, battery, and closed-lid policy. [Upstream sync](UPSTREAM-SYNC.md) |
 | Upstream PR #32 hook-latency path | adapted | One bounded FIFO preserves ordering, tracked children, overload receipts, and shutdown drain instead of detached processes. [Upstream sync](UPSTREAM-SYNC.md) |
 | Upstream remote observation PR #27 | waiting on evidence | The literal host-management surface is not adopted. Evaluate only authenticated, bounded, stale-aware, content-minimized read-only observation after demonstrated need. [2026-08-30 refresh](UPSTREAM-REFRESH-2026-08-30.md#original-upstream-prs) |
-| Upstream custom terminal selection and status-bar patches | surpassed | JR Bar has fork-native terminal routing and controller architecture; behavior must be ported only with a local regression seam. [Upstream sync](UPSTREAM-SYNC.md) |
+| Upstream custom terminal selection and status-bar patches | surpassed | JR-Bar has fork-native terminal routing and controller architecture; behavior must be ported only with a local regression seam. [Upstream sync](UPSTREAM-SYNC.md) |
 | Upstream ScriptingBridge dependency | rejected | No import or reachable defect requires it; adding it would add install weight without repairing behavior. [Upstream sync](UPSTREAM-SYNC.md) |
 | CodexBar refresh, OAuth, Keychain, and redirect-safety patterns | adopted | Refresh taxonomy, pre-emptive refresh, item-attribute change detection, cadence discipline, and same-origin refusal are reimplemented locally. [Prior art](PRIOR-ART.md#codexbar) |
-| T3 provider-instance, receipt, projector, and drainable-worker patterns | adapted | JR Bar uses bounded read-only T3 projection and local receipt semantics without importing T3's controller or cloud assumptions. [Ecosystem research](ECOSYSTEM-RESEARCH.md#t3-code-pingdotggt3code-provider-tech-to-watch) |
+| T3 provider-instance, receipt, projector, and drainable-worker patterns | adapted | JR-Bar uses bounded read-only T3 projection and local receipt semantics without importing T3's controller or cloud assumptions. [Ecosystem research](ECOSYSTEM-RESEARCH.md#t3-code-pingdotggt3code-provider-tech-to-watch) |
 | T3Notch approvals, grouped cards, and activity context | adapted | Words belong in the announcer and Agent Browser; LEDs remain compact semantic cues. [Ecosystem research](ECOSYSTEM-RESEARCH.md#t3notch-zortos293t3notch-announcer-surface-ideas) |
 | Arbitrary executable effect plugins | rejected | Data-only effect packs may be considered later; executable plugins violate safety, privacy, and stability boundaries. [Master design](superpowers/specs/2026-08-28-jr-bar-master-roadmap-and-ambient-effects-design.md#considered-approaches) |
 | Independent per-surface effect implementations | rejected | One semantic effect system is the locked architecture so surfaces do not drift. [Master design](superpowers/specs/2026-08-28-jr-bar-master-roadmap-and-ambient-effects-design.md#considered-approaches) |

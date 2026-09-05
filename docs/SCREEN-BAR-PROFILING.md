@@ -1,6 +1,6 @@
 # Screen Bar profiling
 
-JR Bar separates runtime measurements from Instruments measurements. A runtime
+JR-Bar separates runtime measurements from Instruments measurements. A runtime
 capture proves what the app observed. An Instruments profile adds wakeups,
 energy impact, memory, and CPU evidence and binds those values to a raw trace.
 Neither file is a release claim by itself.
@@ -17,7 +17,7 @@ Capture each scenario for at least five minutes:
 6. `low-power`
 7. `hidden`
 
-The DND run is accepted only when JR Bar can observe an active macOS Focus.
+The DND run is accepted only when JR-Bar can observe an active macOS Focus.
 The low-power run is accepted only while Low Power Mode is active. The hidden
 run is accepted only when the Screen Bar is not visible and presents no
 frames. Unreadable Focus state remains `unknown`; it is never converted to a
@@ -25,7 +25,7 @@ successful DND observation.
 
 ## Capture one runtime profile
 
-Choose a private output path and launch JR Bar in the foreground with the
+Choose a private output path and launch JR-Bar in the foreground with the
 scenario named explicitly:
 
 ```bash
@@ -35,7 +35,7 @@ SIDEPULSE_SCREEN_BAR_PROFILE_OUTPUT="$PWD/performance-evidence/static.runtime.js
 ```
 
 Put the app into the named state, keep it there for at least 300 seconds, and
-quit it normally. JR Bar writes the profile only during termination. Without
+quit it normally. JR-Bar writes the profile only during termination. Without
 both environment variables, the ordinary runtime performs no profile export.
 During an explicit profiling run, a content-free state sampler observes the
 scenario every five seconds and whenever Screen Bar visibility or display
@@ -59,7 +59,7 @@ suppressed callbacks, presented frames, display refresh, visibility, display
 sleep, Low Power Mode, thermal state, and a content-free Focus state. A batch
 invalidation means prefetched work was discarded because command identity or
 timing changed. It is not counted as a JavaScriptCore failure. A truncation
-means JR Bar deliberately requested fewer than the 24-frame ceiling because a
+means JR-Bar deliberately requested fewer than the 24-frame ceiling because a
 finite cue had fewer deliverable samples remaining.
 
 ## Add Instruments evidence
@@ -119,7 +119,13 @@ using it in performance work.
 
 ## Current external gate
 
-On the 2026-08-29 development checkout, `xcrun xctrace version` fails because
-`xctrace` is not installed in the selected developer toolchain. No Instruments
-trace, physical-device energy result, or completed seven-scenario matrix is
-claimed from that environment.
+On 2026-09-05, Xcode 27 Beta was located at
+`/Users/jonathanreed/Downloads/Xcode-beta.app`. Its Instruments tools work when
+commands set `DEVELOPER_DIR` to that app's `Contents/Developer` directory.
+The system-wide selection still points to Command Line Tools.
+
+A 301.344-second Time Profiler diagnostic capture completed for the signed
+local candidate, PID 53091. It covered mixed live activity and Settings use,
+without a paired scenario runtime export. It therefore does not complete any
+row of the matrix above. The seven controlled captures, physical-device
+energy evidence, and final budget checks remain required.

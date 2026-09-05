@@ -1,4 +1,4 @@
-# JR Bar production release gate
+# JR-Bar production release gate
 
 A release tag may be published only after the authoritative macOS gate passes from a clean `main` checkout that exactly matches `origin/main`.
 
@@ -25,7 +25,7 @@ dist/SidePulse-<version>-<architecture>.pkg
 
 The filename keeps the SidePulse compatibility name because the package
 installs `SidePulse.app`, the `SidePulse` executable, and the `sidepulse` CLI.
-The application displays JR Bar to people.
+The application displays JR-Bar to people.
 
 Production packaging also creates a required supplemental Sparkle ZIP from the
 same signed, notarized, and stapled `SidePulse.app`. The signed `appcast.xml`
@@ -42,11 +42,11 @@ xcrun notarytool store-credentials sidepulse-notary \
   --apple-id <your-apple-id> --team-id AJ9VWBRNZN
 ```
 
-JR Bar embeds pinned Sparkle 2.9.6 and exposes `Software Update` only from a
+JR-Bar embeds pinned Sparkle 2.9.6 and exposes `Software Update` only from a
 complete packaged bundle. Sparkle owns its first automatic-check consent
 prompt because the app deliberately omits `SUEnableAutomaticChecks`. Stable is
 the default channel and uses a one-day phased rollout interval. Beta is an
-explicit opt-in channel. No JR Bar GitHub Release or update feed has been
+explicit opt-in channel. No JR-Bar GitHub Release or update feed has been
 published by this source tranche.
 
 The prepared Sparkle framework, helpers, tools, and license must match exact
@@ -87,29 +87,33 @@ The measurements must come from the signed candidate on the release Mac after a 
 
 The signed package installs the application payload and an owned `sidepulse` CLI link only. Package scripts do not install provider hooks, a user LaunchAgent, the privileged sleep helper, the eject guard, or T3 Code integration. Those are external mutable state and cannot be transactionally rolled back by Installer without risking pre-existing user setup.
 
-The ordinary user completes integrations from JR Bar's first-run setup or explicit CLI commands. The release gate exercises the explicit installed `status-bar start` command after package installation before it checks the LaunchAgent. This keeps package installation reversible while still testing the installed integration path.
+The ordinary user completes integrations from JR-Bar's first-run setup or explicit CLI commands. The release gate exercises the explicit installed `status-bar start` command after package installation before it checks the LaunchAgent. This keeps package installation reversible while still testing the installed integration path.
 
 ## Run the gate
 
-Use a dedicated release Mac or disposable QA account, connect the required
-physical hardware, and preserve an existing settings file for the
-installed-upgrade check. A differently versioned, Developer ID signed JR Bar
+Use a dedicated release Mac or disposable QA account and preserve an existing settings file for the
+installed-upgrade check. A differently versioned, Developer ID signed JR-Bar
 PKG must already be installed, with its package receipt present. Settings by
 themselves never count as upgrade evidence. The gate deliberately exercises the supported
 uninstaller, then reinstalls the exact same PKG. It preserves user settings but
 removes explicitly installed integrations and helpers. Do not run that portion
-against an everyday account. The default gate requires both SidePulse Pro and
-SidePulse Dot. Override `SIDEPULSE_REQUIRED_HARDWARE` with `pro`, `dot`, or
-`any` only for a documented hardware-matrix exception.
+against an everyday account. The default `software` profile requires no
+physical SidePulse and performs no hardware writes.
 
 ```bash
 export SIDEPULSE_PERFORMANCE_EVIDENCE='/absolute/path/outside-the-checkout/performance-evidence.json'
-export SIDEPULSE_HARDWARE_CONFIRM=1
 export SIDEPULSE_RUN_INSTALLED_UPGRADE=1
 export SIDEPULSE_RUN_UNINSTALL=1
 export SIDEPULSE_RELEASE_USER="$(id -un)"
 ./scripts/verify_macos_release.sh
 ```
+
+To verify optional SidePulse hardware, set `SIDEPULSE_REQUIRED_HARDWARE` to
+`pro`, `dot`, `both`, or `any`, connect the selected devices, and set
+`SIDEPULSE_HARDWARE_CONFIRM=1`. These profiles require reversible smoke writes
+and a receipt bound to the same candidate and hardware profile. A software
+release emits no hardware-smoke receipt and makes no physical-hardware
+validation claim.
 
 Set `SIDEPULSE_RELEASE_CHANNEL=beta` only for a beta release. To retain prior
 stable and beta entries, set `SIDEPULSE_SPARKLE_HISTORY_DIR` to an absolute
@@ -122,7 +126,7 @@ The gate builds first so one immutable candidate identity exists, then binds
 the full source suite, clean-wheel install, performance budget, Developer ID
 signatures, nested Sparkle signing, app and PKG notarization, app and PKG
 stapling, Gatekeeper, the exact updater ZIP and signed appcast, package
-contents, bundle closure, entitlements, reversible hardware writes, installed
+contents, bundle closure, entitlements, requested hardware checks, installed
 upgrade, settings preservation, supported uninstall, and clean PKG reinstall
 to that exact candidate. The clean reinstall verifies `doctor` and
 `sidepulse integrations status --json` without silently reinstalling external
@@ -138,7 +142,7 @@ after the evidence manifest was assembled.
 Successful verification produces `dist/release-verification.json` using the
 `jr-bar-release-evidence` schema. It contains the commit, final stapled PKG
 hash, deterministic app-tree hash, signing identities, SBOM and performance
-hashes, and one bounded receipt for every required check. Assembly fails when
+hashes, the selected `hardware_profile`, and one bounded receipt for every required check. Assembly fails when
 a receipt is missing, duplicated, failed, malformed, secret-shaped, changed
 on disk, or bound to another candidate. The pre-staple digest is checked
 against the notarization log, the final PKG is independently validated by

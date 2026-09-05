@@ -1,6 +1,6 @@
 # Effect authoring guide
 
-JR Bar effects are semantic, finite, and data-driven. An effect communicates a bounded meaning on one or more approved surfaces. It does not execute code, inspect provider content, bypass display policy, or own hardware writes. The authoring path is `effect_registry` -> semantic router -> finite policy -> runtime surface.
+JR-Bar effects are semantic, finite, and data-driven. An effect communicates a bounded meaning on one or more approved surfaces. It does not execute code, inspect provider content, bypass display policy, or own hardware writes. The authoring path is `effect_registry` -> semantic router -> finite policy -> runtime surface.
 
 ## Define an effect in the registry
 
@@ -62,7 +62,7 @@ they do not create a network store, execute code, or mutate the registry.
 
 Never treat a pack as an importable plugin. Pack parameters are metadata until a reviewed renderer understands them. A pack fallback must refer to another effect in the same pack. Preserve the original source and attribution URLs when redistributing a licensed pack, and do not infer permission from a missing license object.
 
-`src/sidepulse/effect_history.py` records what JR Bar attempted to present, where, and the bounded policy outcome. `EffectEvent` has a product-owned effect ID, semantic category, surface, outcome, optional closed suppression reason, and optional acknowledgement source. `record_effect_event`, `record_effect_events`, `mark_effect_history_seen`, and `project_effect_history` preserve bounded, content-free history. It stores no prompt, transcript, session identity, path, URL, or navigation target. Use the effect history store/runtime for persistence and scheduling, not the pure router or registry.
+`src/sidepulse/effect_history.py` records what JR-Bar attempted to present, where, and the bounded policy outcome. `EffectEvent` has a product-owned effect ID, semantic category, surface, outcome, optional closed suppression reason, and optional acknowledgement source. `record_effect_event`, `record_effect_events`, `mark_effect_history_seen`, and `project_effect_history` preserve bounded, content-free history. It stores no prompt, transcript, session identity, path, URL, or navigation target. Use the effect history store/runtime for persistence and scheduling, not the pure router or registry.
 
 The runtime owner composes routing, finite planning, admission and power policy, and the surface writer. Keep hardware writes, timers, notifications, and persistence outside registry, router, and policy modules. A settings preview is not proof that a physical device accepted a frame.
 
