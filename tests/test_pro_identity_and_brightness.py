@@ -154,7 +154,11 @@ def test_rekeyed_ghost_entry_is_not_persistable() -> None:
         connected=True,
         evidence="serial",
     )
-    with patch.object(status_bar._DEVICE_IDENTITIES, "snapshot", return_value=(pro,)):
+    # The registry is created on first use, so build it through its accessor
+    # before patching; otherwise this test only passes after some earlier test
+    # happened to touch it, which is exactly what the CI security job does not do.
+    identities = status_bar._device_identity_cache()
+    with patch.object(identities, "snapshot", return_value=(pro,)):
         assert not status_bar.persistable_device_identity(
             "sidepulse:dot:volume:2b55a4f03d29c236f7a51346",
             "/Volumes/SidePulse",
