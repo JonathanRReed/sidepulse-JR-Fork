@@ -1,25 +1,18 @@
-name: Self-hosted macOS production gate
+name: macOS production gate
 
-# Runs on the owner's Mac and consumes no GitHub-hosted minutes. The runner
-# label is intentionally specific so arbitrary self-hosted machines cannot
-# receive signing or hardware work.
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "Run full tests, or the signed release gate"
+      release_commit:
+        description: "Approved full commit SHA to test and release"
         required: true
-        default: tests
-        type: choice
-        options:
-          - tests
-          - release
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: sidepulse-self-hosted-${{ github.ref }}
+  group: sidepulse-macos-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -27,28 +20,45 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
-  macos:
-    runs-on: [self-hosted, macOS, ARM64, sidepulse-production]
-    timeout-minutes: 90
-    environment: ${{ inputs.mode == 'release' && 'sidepulse-production' || '' }}
+  tests:
+    runs-on: macos-14
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.release_commit }}
+          persist-credentials: false
+      - name: Bootstrap reviewed environment
+        run: ./scripts/bootstrap-dev.sh
+      - name: Full macOS suite
+        run: ./scripts/verify.sh --no-bootstrap
+
+  release:
+    if: github.ref_type == 'tag' && github.ref_protected == true && github.sha == inputs.release_commit
+    needs: tests
+    runs-on: [self-hosted, macOS, ARM64, sidepulse-production]
+    timeout-minutes: 90
+    environment: sidepulse-production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_commit }}
           persist-credentials: false
           clean: true
       - name: Bootstrap reviewed environment
         run: ./scripts/bootstrap-dev.sh
-      - name: Full macOS suite
-        if: inputs.mode == 'tests'
-        run: ./scripts/verify.sh --no-bootstrap
       - name: Signed installed release gate
-        if: inputs.mode == 'release'
         env:
+          BUILD_PYTHON: "python3.12"
           APP_SIGN_IDENTITY: ${{ secrets.APP_SIGN_IDENTITY }}
           INSTALLER_SIGN_IDENTITY: ${{ secrets.INSTALLER_SIGN_IDENTITY }}
           NOTARY_PROFILE: ${{ secrets.NOTARY_PROFILE }}
+          SPARKLE_KEY_ACCOUNT: ${{ secrets.SPARKLE_KEY_ACCOUNT }}
           SIDEPULSE_PERFORMANCE_EVIDENCE: ${{ vars.PERFORMANCE_EVIDENCE_PATH }}
           SIDEPULSE_HARDWARE_CONFIRM: "1"
           SIDEPULSE_RUN_INSTALLED_UPGRADE: "1"
+          SIDEPULSE_RUN_UNINSTALL: "1"
           SIDEPULSE_REQUIRED_HARDWARE: ${{ vars.REQUIRED_HARDWARE }}
+          SIDEPULSE_RELEASE_CHANNEL: ${{ vars.RELEASE_CHANNEL }}
+          SIDEPULSE_SPARKLE_HISTORY_DIR: ${{ vars.SPARKLE_HISTORY_DIR }}
         run: ./scripts/verify_macos_release.sh

@@ -1,5 +1,5 @@
 name: Documentation issue
-description: Report unclear, missing, outdated, or incorrect JR Bar documentation.
+description: Report unclear, missing, outdated, or incorrect JR-Bar documentation.
 title: "[Docs]: "
 labels:
   - documentation

@@ -11,8 +11,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: JR Bar and macOS version
-      placeholder: JR Bar 0.5.0, macOS 15.x
+      label: JR-Bar and macOS version
+      placeholder: JR-Bar 0.5.0, macOS 15.x
     validations:
       required: true
   - type: textarea

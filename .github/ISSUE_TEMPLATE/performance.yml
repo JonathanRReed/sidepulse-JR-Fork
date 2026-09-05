@@ -12,7 +12,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      placeholder: JR Bar version, macOS version, Mac model, display and hardware setup
+      placeholder: JR-Bar version, macOS version, Mac model, display and hardware setup
     validations:
       required: true
   - type: textarea

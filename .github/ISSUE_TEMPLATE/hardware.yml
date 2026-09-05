@@ -18,8 +18,8 @@ body:
   - type: input
     id: environment
     attributes:
-      label: macOS and JR Bar version
-      placeholder: macOS 15.x, JR Bar 0.5.0
+      label: macOS and JR-Bar version
+      placeholder: macOS 15.x, JR-Bar 0.5.0
     validations:
       required: true
   - type: textarea

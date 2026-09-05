@@ -1,9 +1,9 @@
-name: Tests (manual)
+name: Tests
 
-# Hosted minutes are opt-in. The self-hosted workflow is the no-credit macOS
-# path when a reviewed SidePulse runner is connected.
 on:
   workflow_dispatch:
+  pull_request:
+  push:
 
 permissions:
   contents: read
@@ -20,8 +20,35 @@ env:
   PIP_CONSTRAINT: ${{ github.workspace }}/requirements/release-constraints.txt
 
 jobs:
+  security:
+    name: Security checks
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install pinned development tools
+        run: |
+          python -m pip install pip==26.1.2
+          python -m pip install --constraint requirements/release-constraints.txt -e '.[dev]'
+      - name: Run security regression checks
+        run: >-
+          python -m pytest -q
+          tests/test_app_bundle_security.py
+          tests/test_dependency_and_entitlements.py
+          tests/test_persistence_integration_contract.py
+          tests/test_pro_identity_and_brightness.py
+          tests/test_weather_network_bounds.py
+          tests/test_workflow_contract.py
+
   portable:
     name: Portable Python ${{ matrix.python-version }}
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -54,6 +81,7 @@ jobs:
 
   macos:
     name: Full macOS Python ${{ matrix.python-version }}
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     timeout-minutes: 45
     strategy:
