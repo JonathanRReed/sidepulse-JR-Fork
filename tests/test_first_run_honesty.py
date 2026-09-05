@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -141,7 +142,7 @@ class IdleIsThreeDifferentThingsTests(unittest.TestCase):
         )
         self.controller.set_status(self.status_bar.STATE_IDLE)
         self.assertEqual(self.button.title, " Not set up")
-        self.assertEqual(self.button.tooltip, "JR Bar Agent Monitor: Not set up")
+        self.assertEqual(self.button.tooltip, "JR-Bar Agent Monitor: Not set up")
         # The state machine is untouched: idle-dim and every equality
         # test downstream still see plain Idle.
         self.assertEqual(self.controller.current_state, self.status_bar.STATE_IDLE)
@@ -154,7 +155,7 @@ class IdleIsThreeDifferentThingsTests(unittest.TestCase):
         self.controller.set_status(self.status_bar.STATE_IDLE)
         self.assertEqual(self.button.title, " Not hearing agents")
         self.assertEqual(
-            self.button.tooltip, "JR Bar Agent Monitor: Not hearing agents"
+            self.button.tooltip, "JR-Bar Agent Monitor: Not hearing agents"
         )
 
     def test_a_genuinely_idle_mac_is_still_called_idle(self) -> None:
@@ -163,7 +164,7 @@ class IdleIsThreeDifferentThingsTests(unittest.TestCase):
             {"claude": NOW - 60.0},
         )
         self.controller.set_status(self.status_bar.STATE_IDLE)
-        self.assertEqual(self.button.tooltip, "JR Bar Agent Monitor: Idle")
+        self.assertEqual(self.button.tooltip, "JR-Bar Agent Monitor: Idle")
         self.assertNotIn("Not", str(self.button.title))
 
     def test_a_provider_connected_ten_seconds_ago_is_never_called_broken(self) -> None:
@@ -173,7 +174,7 @@ class IdleIsThreeDifferentThingsTests(unittest.TestCase):
         """
         self.controller.current_intake_report = report([probe("claude", "Claude")])
         self.controller.set_status(self.status_bar.STATE_IDLE)
-        self.assertEqual(self.button.tooltip, "JR Bar Agent Monitor: Idle")
+        self.assertEqual(self.button.tooltip, "JR-Bar Agent Monitor: Idle")
         self.assertIsNone(
             intake_health.intake_alert_title(self.controller.current_intake_report)
         )
@@ -187,7 +188,7 @@ class IdleIsThreeDifferentThingsTests(unittest.TestCase):
         )
         self.controller.current_intake_report = current
         self.controller.set_status(self.status_bar.STATE_IDLE)
-        self.assertEqual(self.button.tooltip, "JR Bar Agent Monitor: Idle")
+        self.assertEqual(self.button.tooltip, "JR-Bar Agent Monitor: Idle")
         self.assertIn("Codex", intake_health.intake_alert_title(current))
 
     def test_an_unavailable_symbol_never_blanks_the_menu_bar(self) -> None:
@@ -206,7 +207,7 @@ class IdleIsThreeDifferentThingsTests(unittest.TestCase):
             [probe("claude", "Claude", installed=False)]
         )
         self.controller.set_status(self.status_bar.STATE_WORKING)
-        self.assertEqual(self.button.tooltip, "JR Bar Agent Monitor: Working")
+        self.assertEqual(self.button.tooltip, "JR-Bar Agent Monitor: Working")
 
     def test_the_honest_label_survives_the_accessibility_repaint(self) -> None:
         """set_status writes the title once and the accessibility pass
@@ -828,7 +829,8 @@ class IntakeRefreshTests(unittest.TestCase):
         status_bar = self.status_bar
 
         class _SyncIntakeService:
-            def request(self, _callback):
+            def request(self, _callback, *, force: bool = False):
+                del force
                 controller.applyIntakeProbeResult_(
                     IntakeProbeResult(1, tuple(status_bar.probe_providers()))
                 )
@@ -850,9 +852,12 @@ class IntakeRefreshTests(unittest.TestCase):
 
     def test_installing_a_hook_reprobes_instead_of_waiting_out_the_cache(self) -> None:
         calls: list[str] = []
+        reprobed = threading.Event()
 
         def _probe(**_kwargs):
             calls.append("probe")
+            if len(calls) == 2:
+                reprobed.set()
             return (probe("claude", "Claude"),)
 
         # Instance attributes, not class patches: refresh_ is an ObjC
@@ -870,6 +875,7 @@ class IntakeRefreshTests(unittest.TestCase):
             self.controller.hooksUpdated_(
                 {"ok": True, "changed": True, "provider": "claude", "install": True}
             )
+            self.assertTrue(reprobed.wait(1.0))
         self.assertEqual(len(calls), 2)
 
     def test_a_probe_that_explodes_never_takes_the_menu_bar_with_it(self) -> None:

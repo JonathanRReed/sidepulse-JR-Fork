@@ -104,7 +104,7 @@ for host in ["10.0.0.1", "172.16.0.1", "192.168.1.2", "169.254.1.2", "fc00::1", 
 do {
     let endpoint = try PhoneGlanceEndpoint(host: "fe80::1%en0", port: 8765)
     require(endpoint.host == "fe80::1%en0", "scoped host was not preserved")
-    require(endpoint.url.absoluteString == "http://[fe80::1%25en0]:8765/glance.json", "scope was not RFC 6874 encoded")
+    require(endpoint.url.absoluteString == "https://[fe80::1%25en0]:8765/glance.json", "scope was not RFC 6874 encoded")
 } catch {
     require(false, "rejected scoped link-local endpoint")
 }
@@ -116,6 +116,11 @@ for host in ["fe80::1%", "fe80::1%en0%other", "fe80::1%bad scope", "fe80::1%en0/
 }
 refused("port zero") { _ = try PhoneGlanceEndpoint(host: "192.168.1.2", port: 0) }
 refused("port overflow") { _ = try PhoneGlanceEndpoint(host: "192.168.1.2", port: 65_536) }
+require(PhoneGlanceCredential.isValid("A23456789012345678901234"), "valid access token was rejected")
+require(PhoneGlanceCredential.isValid(String(repeating: "A", count: 4096)), "maximum access token was rejected")
+for token in ["short", String(repeating: "A", count: 4097), "A23456789012345678901 34", "A23456789012345678901\n34", "A23456789012345678901é"] {
+    require(!PhoneGlanceCredential.isValid(token), "invalid access token was accepted")
+}
 
 func changed(_ transform: (inout [String: Any]) -> Void) throws -> Data {
     var object = try JSONSerialization.jsonObject(with: validData) as! [String: Any]
@@ -215,6 +220,27 @@ require(KeychainStore.classifyRead(status: errSecItemNotFound, data: nil) == .mi
 require(KeychainStore.classifyRead(status: errSecInteractionNotAllowed, data: nil) == .unavailable, "Keychain read failure was misclassified as missing")
 require(KeychainStore.classifyRead(status: errSecSuccess, data: Data("secret".utf8)) == .value("secret"), "valid Keychain data was not returned")
 require(KeychainStore.classifyRead(status: errSecSuccess, data: Data([0xff])) == .unavailable, "invalid Keychain data did not fail closed")
+
+let oldCredentials = try ProtectedPhoneGlanceCredentials(
+    secret: "previous-signing-secret",
+    accessToken: "previous-access-token-123"
+)
+var storedData = try JSONEncoder().encode(oldCredentials)
+let failingStore = PhoneGlanceCredentialStore(
+    readData: { .value(storedData) },
+    writeData: { _ in false }
+)
+let replacementCredentials = try ProtectedPhoneGlanceCredentials(
+    secret: "replacement-signing-secret",
+    accessToken: "replacement-access-token-123"
+)
+require(!failingStore.save(replacementCredentials), "failed credential commit reported success")
+require(failingStore.read() == .value(oldCredentials), "failed credential commit replaced the previous pair")
+
+let missingStore = PhoneGlanceCredentialStore(readData: { .missing }, writeData: { _ in true })
+require(missingStore.read() == .missing, "missing credential pair was not preserved")
+let unavailableStore = PhoneGlanceCredentialStore(readData: { .unavailable }, writeData: { _ in true })
+require(unavailableStore.read() == .unavailable, "unavailable credential pair was misclassified")
 '''
     )
     executable = tmp_path / "state-harness"
@@ -246,6 +272,135 @@ require(KeychainStore.classifyRead(status: errSecSuccess, data: Data([0xff])) ==
     assert run_result.returncode == 0, run_result.stderr
 
 
+@pytest.mark.skipif(platform.system() != "Darwin", reason="requires the Darwin Swift toolchain")
+def test_swift_client_sends_bearer_token_and_verifies_synthetic_https_response(tmp_path: Path):
+    fixture = tmp_path / "fixture.json"
+    fixture.write_bytes(json.dumps(_network_envelope(), separators=(",", ":")).encode())
+    harness = tmp_path / "main.swift"
+    harness.write_text(
+        r'''
+import Foundation
+
+final class GlanceProtocol: URLProtocol {
+    static var fixture = Data()
+    static var authorization: String?
+    static var mode = "valid"
+    static var requestCount = 0
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.requestCount += 1
+        Self.authorization = request.value(forHTTPHeaderField: "Authorization")
+        if Self.mode == "redirect" {
+            let response = HTTPURLResponse(url: request.url!, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: ["Location": "https://192.168.1.21:8738/glance.json"])!
+            let redirected = URLRequest(url: URL(string: "https://192.168.1.21:8738/glance.json")!)
+            client?.urlProtocol(self, wasRedirectedTo: redirected, redirectResponse: response)
+            return
+        }
+        let body: Data
+        let status: Int
+        let declaredLength: Int
+        switch Self.mode {
+        case "empty":
+            body = Data()
+            status = 200
+            declaredLength = 0
+        case "non-200":
+            body = Data()
+            status = 503
+            declaredLength = 0
+        case "declared-overflow":
+            body = Data()
+            status = 200
+            declaredLength = 8_193
+        case "streamed-overflow":
+            body = Data(repeating: 0x78, count: 8_193)
+            status = 200
+            declaredLength = -1
+        default:
+            body = Self.fixture
+            status = 200
+            declaredLength = body.count
+        }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: declaredLength >= 0 ? ["Content-Length": String(declaredLength)] : nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if !body.isEmpty { client?.urlProtocol(self, didLoad: body) }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+@main
+struct Harness {
+    static func fetch(configuration: URLSessionConfiguration) async throws -> VerifiedPhoneGlance {
+        try await PhoneGlanceClient.fetch(
+            endpoint: try PhoneGlanceEndpoint(host: "192.168.1.20", port: 8738),
+            secret: Data("python-to-swift-phone-glance-secret".utf8),
+            accessToken: "independent-access-token-123",
+            lastSequence: 41,
+            now: { Date(timeIntervalSince1970: 1_000) },
+            configuration: configuration
+        )
+    }
+
+    static func main() async throws {
+        GlanceProtocol.fixture = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [GlanceProtocol.self]
+        let token = "independent-access-token-123"
+        let verified = try await fetch(configuration: configuration)
+        guard verified.sequence == 42 else { exit(1) }
+        guard GlanceProtocol.authorization == "Bearer " + token else { exit(2) }
+        for mode in ["redirect", "empty", "non-200", "declared-overflow", "streamed-overflow"] {
+            GlanceProtocol.mode = mode
+            do {
+                _ = try await fetch(configuration: configuration)
+                exit(3)
+            } catch {
+                // Refusal is the required behavior.
+            }
+        }
+        let countBeforeInvalidCredentials = GlanceProtocol.requestCount
+        for invalidSecret in ["", String(repeating: "S", count: 4_097), token] {
+            do {
+                _ = try await PhoneGlanceClient.fetch(
+                    endpoint: try PhoneGlanceEndpoint(host: "192.168.1.20", port: 8738),
+                    secret: Data(invalidSecret.utf8),
+                    accessToken: token,
+                    lastSequence: nil,
+                    configuration: configuration
+                )
+                exit(4)
+            } catch {
+                // Invalid or reused credentials must fail before a request starts.
+            }
+        }
+        guard GlanceProtocol.requestCount == countBeforeInvalidCredentials else { exit(5) }
+    }
+}
+'''
+    )
+    executable = tmp_path / "client-header-harness"
+    compile_result = subprocess.run(
+        ["xcrun", "swiftc", "-parse-as-library", str(CONTRACT), str(CLIENT), str(harness), "-o", str(executable)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+    run_result = subprocess.run([str(executable), str(fixture)], capture_output=True, text=True, timeout=30)
+    assert run_result.returncode == 0, run_result.stderr
+
+
 def _private_ipv4() -> str | None:
     for interface in ("en0", "en1", "en2", "en3"):
         result = subprocess.run(
@@ -269,87 +424,28 @@ class _PhoneGlanceScenarioHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self.server.request_count += 1
-        if self.path != "/glance.json":
-            self.send_error(404)
-            return
-        scenario = self.server.scenario
-        if scenario == "redirect":
-            host, port = self.server.server_address[:2]
-            self.send_response(302)
-            self.send_header("Location", f"http://{host}:{port}/glance.json")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        if scenario == "non-200":
-            self.send_response(503)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        if scenario == "empty":
-            self.send_response(200)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        if scenario == "declared-overflow":
-            self.send_response(200)
-            self.send_header("Content-Length", str(8 * 1024 + 1))
-            self.end_headers()
-            return
-        if scenario == "streamed-overflow":
-            self.send_response(200)
-            self.send_header("Connection", "close")
-            self.end_headers()
-            try:
-                self.wfile.write(b"x" * (8 * 1024 + 1))
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-            return
-        if scenario == "slow-valid":
-            document = _network_envelope(
-                source_id="sidepulse:slow-instance",
-                sequence=1,
-                observed_at=1_005.5,
-                payload={"status": "working", "outcome": "pending"},
-            )
-            payload = json.dumps(document, separators=(",", ":")).encode()
-            Path(self.server.marker_path).write_text("ready", encoding="utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-            return
-        self.send_error(500)
+        self.send_error(404)
 
     def log_message(self, *_args) -> None:
         pass
 
 
 @pytest.mark.skipif(platform.system() != "Darwin", reason="requires the Darwin Swift toolchain")
-def test_live_swift_client_refuses_http_faults_and_verifies_after_slow_response(
+def test_live_swift_client_refuses_plaintext_http_before_sending_credentials(
     tmp_path: Path,
 ):
     host = _private_ipv4()
     if host is None:
         pytest.skip("no private IPv4 interface is available for the strict endpoint allowlist")
 
-    scenarios = (
-        "slow-valid",
-        "redirect",
-        "non-200",
-        "empty",
-        "declared-overflow",
-        "streamed-overflow",
-    )
+    scenarios = ("slow-valid",)
     servers = []
     threads = []
-    marker = tmp_path / "slow-valid-ready"
     try:
         for scenario in scenarios:
             server = ThreadingHTTPServer((host, 0), _PhoneGlanceScenarioHandler)
             server.scenario = scenario
             server.request_count = 0
-            server.marker_path = str(marker)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             servers.append(server)
@@ -380,36 +476,18 @@ func mustRefuse(_ label: String, _ operation: () async throws -> Void) async {
 struct Harness {
     static func main() async throws {
         let host = CommandLine.arguments[1]
-        let markerPath = CommandLine.arguments[2]
-        let ports = CommandLine.arguments.dropFirst(3).map { Int($0)! }
+        let ports = CommandLine.arguments.dropFirst(2).map { Int($0)! }
         let secret = Data("python-to-swift-phone-glance-secret".utf8)
-        let markerExists = {
-            FileManager.default.fileExists(atPath: markerPath)
-        }
-
-        let slowEndpoint = try PhoneGlanceEndpoint(host: host, port: ports[0])
-        let verified = try await PhoneGlanceClient.fetch(
-            endpoint: slowEndpoint,
-            secret: secret,
-            lastSequence: nil,
-            now: {
-                markerExists()
-                    ? Date(timeIntervalSince1970: 1_006)
-                    : Date(timeIntervalSince1970: 1_000)
-            }
-        )
-        require(verified.sourceID == "sidepulse:slow-instance", "slow valid response was not verified")
-
-        for (index, label) in ["redirect", "non-200", "empty", "declared overflow", "streamed overflow"].enumerated() {
-            let endpoint = try PhoneGlanceEndpoint(host: host, port: ports[index + 1])
-            await mustRefuse(label) {
-                _ = try await PhoneGlanceClient.fetch(
-                    endpoint: endpoint,
-                    secret: secret,
-                    lastSequence: nil,
-                    now: { Date() }
-                )
-            }
+        let endpoint = try PhoneGlanceEndpoint(host: host, port: ports[0])
+        require(endpoint.url.scheme == "https", "endpoint did not require HTTPS")
+        await mustRefuse("plaintext listener") {
+            _ = try await PhoneGlanceClient.fetch(
+                endpoint: endpoint,
+                secret: secret,
+                accessToken: "A23456789012345678901234",
+                lastSequence: nil,
+                now: { Date() }
+            )
         }
     }
 }
@@ -435,7 +513,7 @@ struct Harness {
         assert compile_result.returncode == 0, compile_result.stderr
 
         run_result = subprocess.run(
-            [str(executable), host, str(marker), *(str(server.server_port) for server in servers)],
+            [str(executable), host, *(str(server.server_port) for server in servers)],
             cwd=ROOT,
             capture_output=True,
             text=True,
@@ -445,6 +523,7 @@ struct Harness {
             server.scenario: server.request_count
             for server in servers
         }
+        assert counts["slow-valid"] == 0, counts
         assert run_result.returncode == 0, f"{run_result.stderr}\nrequest counts: {counts}"
     finally:
         for server in servers:

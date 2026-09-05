@@ -106,7 +106,7 @@ _DND_DIM_CHOICES: Final[tuple[tuple[str, str], ...]] = (
 )
 
 _AUTHORIZATION_HELP: Final = (
-    "JR Bar reads only whether a macOS Focus is active. Apple does not expose "
+    "JR-Bar reads only whether a macOS Focus is active. Apple does not expose "
     "the active Focus name through this public permission."
 )
 _STATUS_HELP: Final = (
@@ -233,7 +233,7 @@ def focus_authorization_text(observation: FocusStatusObservation) -> str:
         return "Focus status access has not been requested."
     if authorization is FocusAuthorization.DENIED:
         return (
-            "Focus status access is denied. JR Bar will not claim that Focus is active."
+            "Focus status access is denied. JR-Bar will not claim that Focus is active."
         )
     if authorization is FocusAuthorization.RESTRICTED:
         return "Focus status access is restricted on this Mac."
@@ -363,7 +363,7 @@ def _make_dnd_card(target, fields: dict[str, object], buttons: dict[str, object]
     outer, inner = native_ui.make_card("Do Not Disturb")
     inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
-            "Choose exactly what JR Bar may present. Agent state, history, and "
+            "Choose exactly what JR-Bar may present. Agent state, history, and "
             "the Agent Browser continue in every mode.",
             secondary=True,
             size=12.0,
@@ -398,7 +398,7 @@ def _make_dnd_card(target, fields: dict[str, object], buttons: dict[str, object]
     native_ui.set_accessibility_metadata(
         refusal,
         label="Do Not Disturb settings status",
-        help_text="Reports saved DND values that JR Bar refused without deleting valid settings.",
+        help_text="Reports saved DND values that JR-Bar refused without deleting valid settings.",
         role="AXStaticText",
     )
     refusal.setAccessibilityValue_("")
@@ -457,7 +457,7 @@ def _make_dnd_card(target, fields: dict[str, object], buttons: dict[str, object]
         native_ui.make_row(
             "Scheduled mode",
             schedule_mode,
-            help_text="What JR Bar presents while the daily schedule is active.",
+            help_text="What JR-Bar presents while the daily schedule is active.",
         )
     )
     fields["dnd_schedule_mode"] = schedule_mode
@@ -491,7 +491,7 @@ def _make_dnd_card(target, fields: dict[str, object], buttons: dict[str, object]
         native_ui.make_row(
             "Focus mode",
             focus_mode,
-            help_text="What JR Bar presents while macOS reports that a Focus is active.",
+            help_text="What JR-Bar presents while macOS reports that a Focus is active.",
         )
     )
     fields["dnd_focus_mode"] = focus_mode

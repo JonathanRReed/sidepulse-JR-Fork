@@ -15,7 +15,7 @@ from .product_identity import PRODUCT_DISPLAY_NAME
 
 
 def build_setup_window(target):
-    """The welcome window: what JR Bar is (shown live, not described),
+    """The welcome window: what JR-Bar is (shown live, not described),
     which agents to connect, and the Mac-level installs -- a first-run
     moment that should feel like the product, not a permissions form."""
     from AppKit import (
@@ -43,7 +43,7 @@ def build_setup_window(target):
         set_checkbox_state,
     )
 
-    width, height = 680, 800
+    width, height = 680, 900
     style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
     window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
         ((0, 0), (width, height)),
@@ -90,6 +90,21 @@ def build_setup_window(target):
     demo_container.addSubview_(demo_view)
     stack.addArrangedSubview_(demo_container)
 
+    start_outer, start_inner = native_ui.make_card("Start Software-Only")
+    start_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "The menu app and Screen Bar work without physical hardware. "
+            "Nothing below scans providers, devices, browsers, or other apps "
+            "until you choose it.",
+            secondary=True,
+            size=12.0,
+            max_width=560.0,
+        )
+    )
+    screen_bar = native_ui.make_checkbox("Use the on-screen Screen Bar", None, None)
+    start_inner.addArrangedSubview_(screen_bar)
+    stack.addArrangedSubview_(start_outer)
+
     # Connect Your Agents: the same contextual one-action rows the
     # Settings Agents pane uses, so first-run and settings agree.
     agents_outer, agents_inner = native_ui.make_card("Connect Your Agents")
@@ -108,6 +123,73 @@ def build_setup_window(target):
         setup_buttons[f"setup_{provider}_install"] = install_button
     stack.addArrangedSubview_(agents_outer)
 
+    preferences_outer, preferences_inner = native_ui.make_card("Privacy & Lighting")
+    privacy_mode = native_ui.make_checkbox(
+        "Privacy mode (hide account names and email addresses)", None, None
+    )
+    matched_lighting = native_ui.make_checkbox(
+        "Match Screen Bar and hardware lighting", None, None
+    )
+    sleep_dimming = native_ui.make_checkbox(
+        "Dim lighting during Sleep Focus", None, None
+    )
+    idle_off = native_ui.make_checkbox(
+        "Turn lighting nearly off when idle", None, None
+    )
+    for control in (privacy_mode, matched_lighting, sleep_dimming, idle_off):
+        preferences_inner.addArrangedSubview_(control)
+    stack.addArrangedSubview_(preferences_outer)
+
+    reset_outer, reset_inner = native_ui.make_card("Reset Celebrations")
+    reset_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Celebrate only confirmed provider quota resets. You can change "
+            "these channels per provider later in Usage Settings.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    reset_celebrations = native_ui.make_checkbox(
+        "Celebrate confirmed resets", None, None
+    )
+    reset_inner.addArrangedSubview_(reset_celebrations)
+    reset_channels = {}
+    channels = native_ui.make_stack(orientation="horizontal", spacing=native_ui.SPACE_S)
+    for key, label in (
+        ("reset_overlay", "Screen overlay"),
+        ("reset_hardware", "Hardware"),
+        ("reset_notification", "Notification"),
+        ("reset_sound", "Sound"),
+    ):
+        control = native_ui.make_checkbox(label, None, None)
+        channels.addArrangedSubview_(control)
+        reset_channels[key] = control
+    channels.addArrangedSubview_(native_ui.make_hspacer())
+    reset_inner.addArrangedSubview_(channels)
+    stack.addArrangedSubview_(reset_outer)
+
+    optional_outer, optional_inner = native_ui.make_card("Optional Integrations")
+    optional_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Open a focused setup page only for the integrations you choose.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    optional_buttons = {}
+    for key, title, action in (
+        ("configure_physical_devices", "Physical devices…", "openSetupPhysicalDevices:"),
+        ("configure_t3", "T3 Code…", "openSetupT3:"),
+        ("configure_alcove", "Alcove…", "openSetupAlcove:"),
+        ("configure_agent_deck", "Agent Deck…", "openSetupAgentDeck:"),
+    ):
+        button = native_ui.make_button(title, target, action)
+        optional_inner.addArrangedSubview_(button)
+        optional_buttons[key] = button
+    stack.addArrangedSubview_(optional_outer)
+
     # Set Up This Mac: the three system-level installs as switch rows.
     mac_outer, mac_inner = native_ui.make_card("Set Up This Mac")
     launch_row, launch, launch_status = _setup_toggle_row(
@@ -116,8 +198,9 @@ def build_setup_window(target):
     mac_inner.addArrangedSubview_(launch_row)
     eject_row, eject_guard, eject_status = _setup_toggle_row(
         SD_EJECT_GUARD_DISPLAY_NAME,
-        "Keep SidePulse Pro/SidePulse Dot available after sleep.",
+        "Choose an exact SidePulse volume in Devices before installing this guard.",
     )
+    eject_guard.setEnabled_(False)
     mac_inner.addArrangedSubview_(eject_row)
     sleep_row, sleep_helper, sleep_status = _setup_toggle_row(
         "Closed-Lid Sleep Prevention",
@@ -197,17 +280,35 @@ def build_setup_window(target):
     setup_buttons["fda_grant"] = fda_button
     setup_buttons.update(
         {
+            "screen_bar": screen_bar,
+            "privacy_mode": privacy_mode,
+            "reset_celebrations": reset_celebrations,
+            **reset_channels,
+            "matched_lighting": matched_lighting,
+            "sleep_dimming": sleep_dimming,
+            "idle_off": idle_off,
+            **optional_buttons,
             "launch": launch,
             "eject_guard": eject_guard,
             "eject_guard_uninstall": eject_uninstall,
             "sleep_helper": sleep_helper,
         }
     )
-    # Recommended defaults, set ONCE here -- refresh_setup_window only
+    # Software-only defaults, set ONCE here -- refresh_setup_window only
     # touches enablement, never the checked state, so a user's opt-out
     # survives every refresh (each provider Install click triggers one).
-    for key in ("launch", "eject_guard", "sleep_helper"):
+    for key in (
+        "screen_bar",
+        "privacy_mode",
+        "reset_celebrations",
+        "matched_lighting",
+        "sleep_dimming",
+    ):
         set_checkbox_state(setup_buttons[key], True)
+    for key in reset_channels:
+        set_checkbox_state(setup_buttons[key], True)
+    for key in ("launch", "eject_guard", "sleep_helper", "idle_off"):
+        set_checkbox_state(setup_buttons[key], False)
     target.setup_fields = setup_fields
     target.setup_buttons = setup_buttons
     return window

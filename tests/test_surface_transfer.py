@@ -170,6 +170,29 @@ def test_device_brightness_dims_both_surfaces_by_the_same_amount() -> None:
     assert strip_scale == pytest.approx(screen_scale, abs=0.01)
 
 
+def test_screen_core_does_not_apply_semantic_intensity_twice() -> None:
+    """The sampled RGB already contains animation and brightness intensity."""
+    red, green, blue, alpha = tone_mapped_led_color(
+        0.5,
+        0.25,
+        0.0,
+        0.5,
+        boost=1.0,
+        alpha_scale=1.0,
+    )
+
+    assert (red, green, blue) == (0.5, 0.25, 0.0)
+    assert alpha == 1.0, "using 0.5 here composites the same dimming a second time"
+
+
+def test_screen_glow_layer_uses_alpha_only_as_its_layer_calibration() -> None:
+    bright = tone_mapped_led_color(1.0, 0.5, 0.0, 1.0, alpha_scale=0.18)
+    dim = tone_mapped_led_color(0.2, 0.1, 0.0, 0.2, alpha_scale=0.18)
+
+    assert bright[3] == pytest.approx(0.18)
+    assert dim[3] == pytest.approx(0.18)
+
+
 # --- the strip's assumption, stated once and correctable -------------------
 
 

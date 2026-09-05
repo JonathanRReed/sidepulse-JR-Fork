@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a clean install contains and runs the exact JR Bar candidate."""
+"""Verify a clean install contains and runs the exact JR-Bar candidate."""
 
 from __future__ import annotations
 

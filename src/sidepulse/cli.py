@@ -59,6 +59,16 @@ from .trusted_tools import trusted_system_tool
 from .watch_run import WatchRunPlanError, execute_watch_run, plan_watch_run
 
 PHONE_GLANCE_SECRET_ENV = "SIDEPULSE_PHONE_GLANCE_SECRET"
+PHONE_GLANCE_ACCESS_TOKEN_ENV = "SIDEPULSE_PHONE_GLANCE_ACCESS_TOKEN"
+SERVE_ACCESS_TOKEN_ENV = "SIDEPULSE_SERVE_ACCESS_TOKEN"
+
+
+class _StoreAndRequestSdEjectGuard(argparse.Action):
+    """Treat existing guard configuration flags as an explicit install request."""
+
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        setattr(namespace, self.dest, values)
+        namespace.sd_eject_guard = True
 
 
 def main(argv: list[str] | None = None, *, prog: str = "agent-monitor") -> int:
@@ -122,10 +132,21 @@ def build_sidepulse_parser() -> argparse.ArgumentParser:
     add_provider_log_arguments(setup)
     setup.add_argument("--dry-run", action="store_true", help="Show what would change.")
     setup.add_argument(
+        "--sd-eject-guard",
+        action="store_true",
+        help="Install SidePulse Pro Eject Prevention for a physical LED bar.",
+    )
+    setup.add_argument(
         "--sd-eject-guard-scope",
         choices=("auto", "system", "user"),
         default="auto",
+        action=_StoreAndRequestSdEjectGuard,
         help="Install the SD eject guard as a system service when possible, or as a user agent.",
+    )
+    setup.add_argument(
+        "--sd-eject-guard-volume-uuid",
+        action=_StoreAndRequestSdEjectGuard,
+        help="Exact SidePulse volume UUID to protect. Without it the guard is installed disabled.",
     )
     setup.add_argument(
         "--no-status-bar",
@@ -209,6 +230,11 @@ def add_sidepulse_sdejectguard_parser(subparsers: argparse._SubParsersAction) ->
         "--interactive",
         action="store_true",
         help="Run the guard in this terminal instead of launchd.",
+    )
+    start.add_argument(
+        "--volume-uuid",
+        required=True,
+        help="Exact SidePulse volume UUID to protect.",
     )
     start.set_defaults(func=cmd_sidepulse_sdejectguard_start)
 
@@ -458,9 +484,16 @@ def cmd_sidepulse_sdejectguard_start(args: argparse.Namespace) -> int:
             if args.dry_run:
                 print(f"{SD_EJECT_GUARD_DISPLAY_NAME}: would run interactively ({args.scope})")
                 return 0
-            return run_sd_eject_guard_interactive(scope=args.scope)
+            return run_sd_eject_guard_interactive(
+                scope=args.scope,
+                volume_uuid=args.volume_uuid,
+            )
 
-        result = install_sd_eject_guard(scope=args.scope, dry_run=args.dry_run)
+        result = install_sd_eject_guard(
+            scope=args.scope,
+            dry_run=args.dry_run,
+            volume_uuid=args.volume_uuid,
+        )
     except (SdEjectGuardInstallError, OSError, subprocess.CalledProcessError) as exc:
         print(f"{SD_EJECT_GUARD_DISPLAY_NAME}: {exc}", file=sys.stderr)
         return 1
@@ -581,7 +614,7 @@ def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
             print(f"status-bar: {action}")
             print(f"  plist: {result.plist_path}")
 
-    if args.no_sd_eject_guard:
+    if args.no_sd_eject_guard or not args.sd_eject_guard:
         return 0
 
     from .sd_eject_guard_launch import (
@@ -594,13 +627,15 @@ def cmd_sidepulse_setup(args: argparse.Namespace) -> int:
         guard_result = install_sd_eject_guard(
             scope=args.sd_eject_guard_scope,
             dry_run=args.dry_run,
+            volume_uuid=args.sd_eject_guard_volume_uuid,
         )
     except (SdEjectGuardInstallError, OSError, subprocess.CalledProcessError) as exc:
         print(f"{SD_EJECT_GUARD_DISPLAY_NAME}: {exc}", file=sys.stderr)
         print(
             f"{SD_EJECT_GUARD_DISPLAY_NAME}: skipped (it protects the "
             "LED bar's SD card during ejects; install Xcode Command "
-            "Line Tools and re-run `sidepulse setup` to add it).",
+            "Line Tools and re-run `sidepulse setup --sd-eject-guard` "
+            "with your selected guard options to add it).",
             file=sys.stderr,
         )
         return 0
@@ -765,7 +800,7 @@ def add_watch_run_parser(subparsers: argparse._SubParsersAction) -> None:
 def add_demo_parser(subparsers: argparse._SubParsersAction) -> None:
     demo = subparsers.add_parser(
         "demo",
-        help="Run a deterministic, no-I/O JR Bar preview scenario.",
+        help="Run a deterministic, no-I/O JR-Bar preview scenario.",
     )
     demo.add_argument(
         "scenario",
@@ -826,6 +861,11 @@ def add_serve_arguments(parser: argparse.ArgumentParser) -> None:
         help="Loopback port (default 8737).",
     )
     parser.add_argument(
+        "--allow-anonymous-status",
+        action="store_true",
+        help="Allow unauthenticated loopback status reads for legacy clients.",
+    )
+    parser.add_argument(
         "--phone-glance",
         action="store_true",
         help=(
@@ -865,6 +905,18 @@ def add_glance_arguments(subparsers: argparse._SubParsersAction) -> None:
         dest="glance_source_id",
         default="sidepulse",
         help="Bounded opaque source identity for the signed glance.",
+    )
+    glance.add_argument(
+        "--tls-cert",
+        type=Path,
+        required=True,
+        help="PEM certificate chain trusted by the client, with this private IP in its SAN.",
+    )
+    glance.add_argument(
+        "--tls-key",
+        type=Path,
+        required=True,
+        help="Protected PEM private key for the TLS certificate, without a passphrase.",
     )
     glance.set_defaults(func=cmd_glance)
 
@@ -1003,7 +1055,17 @@ def add_effects_parser(subparsers) -> None:
 def cmd_serve(args: argparse.Namespace) -> int:
     from .serve import serve
 
+    allow_anonymous_status = bool(getattr(args, "allow_anonymous_status", False))
+    raw_status_token = os.environ.get(SERVE_ACCESS_TOKEN_ENV)
+    if not allow_anonymous_status and not raw_status_token:
+        print(
+            f"sidepulse serve: {SERVE_ACCESS_TOKEN_ENV} is required unless "
+            "--allow-anonymous-status is set",
+            file=sys.stderr,
+        )
+        return 2
     glance_secret = None
+    glance_access_token = None
     if bool(getattr(args, "phone_glance", False)):
         raw_secret = os.environ.get(PHONE_GLANCE_SECRET_ENV)
         if not raw_secret:
@@ -1014,10 +1076,24 @@ def cmd_serve(args: argparse.Namespace) -> int:
             )
             return 2
         glance_secret = raw_secret.encode("utf-8")
+        raw_glance_access_token = os.environ.get(PHONE_GLANCE_ACCESS_TOKEN_ENV)
+        if not raw_glance_access_token:
+            print(
+                f"sidepulse serve: {PHONE_GLANCE_ACCESS_TOKEN_ENV} is required "
+                "with --phone-glance",
+                file=sys.stderr,
+            )
+            return 2
+        glance_access_token = raw_glance_access_token.encode("utf-8")
     try:
         serve(
             port=int(getattr(args, "port", 8737)),
+            status_access_token=(
+                raw_status_token.encode("utf-8") if raw_status_token else None
+            ),
+            allow_anonymous_status=allow_anonymous_status,
             glance_secret=glance_secret,
+            glance_access_token=glance_access_token,
             glance_source_id=str(
                 getattr(args, "phone_glance_source_id", "sidepulse")
             ),
@@ -1038,13 +1114,23 @@ def cmd_glance(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    raw_access_token = os.environ.get(PHONE_GLANCE_ACCESS_TOKEN_ENV)
+    if not raw_access_token:
+        print(
+            f"sidepulse glance: {PHONE_GLANCE_ACCESS_TOKEN_ENV} is required",
+            file=sys.stderr,
+        )
+        return 2
     try:
         bind_address = validate_bind_address(str(args.bind_address))
         glance_serve(
             bind_address=bind_address,
             port=int(args.port),
             glance_secret=raw_secret.encode("utf-8"),
+            access_token=raw_access_token.encode("utf-8"),
             glance_source_id=str(args.glance_source_id),
+            tls_cert=getattr(args, "tls_cert", None),
+            tls_key=getattr(args, "tls_key", None),
         )
     except (OSError, ValueError):
         print("sidepulse glance: invalid private listener configuration", file=sys.stderr)
@@ -1194,7 +1280,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return 0
-    print(f"JR Bar demo: {run.scenario.value}")
+    print(f"JR-Bar demo: {run.scenario.value}")
     print(
         f"  {len(run.events)} events, {len(final.agents)} agents, "
         f"{len(final.devices)} devices, {len(final.machines)} remote machines"

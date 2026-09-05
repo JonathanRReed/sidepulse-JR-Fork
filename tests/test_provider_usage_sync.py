@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
 from sidepulse.provider_usage_platform import (
     ProviderSourceState,
     ProviderUsageSnapshot,
     UsageLane,
 )
 from sidepulse.provider_usage_sync import (
+    SYNC_OBSERVATION_MAX_PACKET_DELTA_SECONDS,
+    SYNC_PACKET_FUTURE_SKEW_SECONDS,
     SYNC_PACKET_MAX_AGE_SECONDS,
     MachineUsageObservation,
     ProviderSyncPacket,
@@ -122,6 +126,62 @@ def test_authentic_but_stale_packet_is_rejected_on_decode():
         assert "freshness" in str(exc)
     else:
         raise AssertionError("stale sync packet accepted")
+
+
+def test_authentic_packet_from_beyond_clock_skew_is_rejected() -> None:
+    now = 1000.0
+    packet = ProviderSyncPacket(
+        1,
+        "mac-mini",
+        now + SYNC_PACKET_FUTURE_SKEW_SECONDS + 1.0,
+        (),
+        (),
+        ("quota",),
+    )
+    secret = b"fixture-shared-secret-32-bytes!!"
+
+    with pytest.raises(StaleSyncPacketError, match="future"):
+        decode_signed_packet(encode_signed_packet(packet, secret), secret, now=now)
+
+
+@pytest.mark.parametrize("kind", ("quota", "machine"))
+def test_packet_rejects_each_future_dated_observation(kind: str) -> None:
+    generated_at = 1000.0
+    observed_at = generated_at + SYNC_PACKET_FUTURE_SKEW_SECONDS + 1.0
+    packet = ProviderSyncPacket(
+        1,
+        "mac-mini",
+        generated_at,
+        (snapshot("claude", observed_at, 25),) if kind == "quota" else (),
+        (observation("mac-mini", "claude", observed_at, 100),)
+        if kind == "machine"
+        else (),
+        (kind,) if kind == "quota" else ("token_usage",),
+    )
+    secret = b"fixture-shared-secret-32-bytes!!"
+
+    with pytest.raises(StaleSyncPacketError, match="observation"):
+        decode_signed_packet(encode_signed_packet(packet, secret), secret, now=generated_at)
+
+
+@pytest.mark.parametrize("kind", ("quota", "machine"))
+def test_packet_rejects_observations_materially_older_than_its_stamp(kind: str) -> None:
+    generated_at = 1_000_000.0
+    observed_at = generated_at - SYNC_OBSERVATION_MAX_PACKET_DELTA_SECONDS - 1.0
+    packet = ProviderSyncPacket(
+        1,
+        "mac-mini",
+        generated_at,
+        (snapshot("claude", observed_at, 25),) if kind == "quota" else (),
+        (observation("mac-mini", "claude", observed_at, 100),)
+        if kind == "machine"
+        else (),
+        ("quota",) if kind == "quota" else ("token_usage",),
+    )
+    secret = b"fixture-shared-secret-32-bytes!!"
+
+    with pytest.raises(StaleSyncPacketError, match="observation"):
+        decode_signed_packet(encode_signed_packet(packet, secret), secret, now=generated_at)
 
 
 def test_account_quota_uses_freshest_observation_and_is_never_summed():

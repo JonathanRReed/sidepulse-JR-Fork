@@ -16,11 +16,11 @@ import pytest
 
 from sidepulse.local_api_contract import LocalAPIRequest, ReplayGuard
 from sidepulse.phone_glance import PhoneGlancePolicy, receive_phone_glance
+from sidepulse.product_identity import PRODUCT_DISPLAY_NAME
 from sidepulse.provider_usage_store import default_provider_usage_state_path
 from sidepulse.providers import default_state_dir
 from sidepulse.serve import (
     _read_json,
-    _ServeHandler,
     build_authenticated_local_api_response,
     build_phone_glance_projection,
     build_serve_document,
@@ -284,7 +284,7 @@ def test_symlinked_state_files_fail_closed(tmp_path: Path) -> None:
 
 
 def test_endpoint_serves_json_and_404s_elsewhere() -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _ServeHandler)
+    server = create_serve_server(port=0, allow_anonymous_status=True)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -293,7 +293,9 @@ def test_endpoint_serves_json_and_404s_elsewhere() -> None:
             f"http://127.0.0.1:{port}/status.json", timeout=5
         ) as response:
             assert response.status == 200
-            assert response.headers["Server"].startswith("JR Bar ")
+            assert response.headers["Server"].startswith(
+                f"{PRODUCT_DISPLAY_NAME} "
+            )
             payload = json.loads(response.read().decode("utf-8"))
             assert payload["schema_version"] == 2
             assert payload["privacy"] == "redacted"
@@ -302,6 +304,50 @@ def test_endpoint_serves_json_and_404s_elsewhere() -> None:
             raise AssertionError("unexpected 200")
         except urllib.error.HTTPError as error:
             assert error.code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_status_endpoint_requires_bearer_authentication_by_default() -> None:
+    token = b"local-status-access-token"
+    server = create_serve_server(port=0, status_access_token=token)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as missing:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/status.json", timeout=5)
+        assert missing.value.code == 401
+
+        wrong = urllib.request.Request(
+            f"http://127.0.0.1:{port}/status.json",
+            headers={"Authorization": "Bearer wrong"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as invalid:
+            urllib.request.urlopen(wrong, timeout=5)
+        assert invalid.value.code == 401
+
+        authenticated = urllib.request.Request(
+            f"http://127.0.0.1:{port}/status.json",
+            headers={"Authorization": f"Bearer {token.decode('ascii')}"},
+        )
+        with urllib.request.urlopen(authenticated, timeout=5) as response:
+            assert response.status == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_status_endpoint_has_no_anonymous_default_even_without_a_token() -> None:
+    server = create_serve_server(port=0)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/status.json", timeout=5)
+        assert raised.value.code == 401
     finally:
         server.shutdown()
         server.server_close()
@@ -328,19 +374,23 @@ def test_signed_glance_endpoint_returns_only_the_existing_envelope(
     tmp_path: Path,
 ) -> None:
     secret = b"in-memory-glance-secret"
+    access_token = b"independent-glance-access-token"
     server = create_serve_server(
         port=0,
         home=tmp_path,
         glance_secret=secret,
+        glance_access_token=access_token,
         glance_source_id="phone",
     )
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/glance.json", timeout=5
-        ) as response:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/glance.json",
+            headers={"Authorization": f"Bearer {access_token.decode('ascii')}"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
             encoded = response.read()
             assert response.status == 200
             assert response.headers["Cache-Control"] == "no-store"
@@ -379,10 +429,12 @@ def test_signed_glance_endpoint_returns_only_the_existing_envelope(
 
 
 def test_glance_sequence_is_increasing_and_bounded(tmp_path: Path) -> None:
+    access_token = b"independent-glance-access-token"
     server = create_serve_server(
         port=0,
         home=tmp_path,
         glance_secret=b"in-memory-glance-secret",
+        glance_access_token=access_token,
         glance_source_id="phone",
         glance_sequence_limit=2,
     )
@@ -392,13 +444,15 @@ def test_glance_sequence_is_increasing_and_bounded(tmp_path: Path) -> None:
     try:
         sequences = []
         for _ in range(2):
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/glance.json", timeout=5
-            ) as response:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/glance.json",
+                headers={"Authorization": f"Bearer {access_token.decode('ascii')}"},
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
                 sequences.append(json.loads(response.read())["sequence"])
         assert sequences == [1, 2]
         with pytest.raises(urllib.error.HTTPError) as raised:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/glance.json", timeout=5)
+            urllib.request.urlopen(request, timeout=5)
         assert raised.value.code == 503
     finally:
         server.shutdown()
@@ -409,7 +463,13 @@ def test_cli_phone_glance_is_opt_in_and_keeps_the_secret_out_of_arguments(
     monkeypatch,
     capsys,
 ) -> None:
-    from sidepulse.cli import PHONE_GLANCE_SECRET_ENV, build_sidepulse_parser, cmd_serve
+    from sidepulse.cli import (
+        PHONE_GLANCE_ACCESS_TOKEN_ENV,
+        PHONE_GLANCE_SECRET_ENV,
+        SERVE_ACCESS_TOKEN_ENV,
+        build_sidepulse_parser,
+        cmd_serve,
+    )
 
     parser = build_sidepulse_parser()
     disabled = parser.parse_args(["serve"])
@@ -419,6 +479,8 @@ def test_cli_phone_glance_is_opt_in_and_keeps_the_secret_out_of_arguments(
     calls = []
     monkeypatch.setattr("sidepulse.serve.serve", lambda **kwargs: calls.append(kwargs))
     monkeypatch.delenv(PHONE_GLANCE_SECRET_ENV, raising=False)
+    monkeypatch.setenv(SERVE_ACCESS_TOKEN_ENV, "local-status-token")
+    monkeypatch.setenv(PHONE_GLANCE_ACCESS_TOKEN_ENV, "private-glance-token")
 
     assert disabled.phone_glance is False
     assert cmd_serve(enabled) == 2
@@ -431,12 +493,34 @@ def test_cli_phone_glance_is_opt_in_and_keeps_the_secret_out_of_arguments(
     assert calls == [
         {
             "port": 8737,
+            "status_access_token": b"local-status-token",
+            "allow_anonymous_status": False,
             "glance_secret": b"private-test-secret",
+            "glance_access_token": b"private-glance-token",
             "glance_source_id": "phone",
         }
     ]
     output = capsys.readouterr()
     assert "private-test-secret" not in output.out + output.err
+
+
+def test_cli_status_requires_token_unless_anonymous_compatibility_is_explicit(
+    monkeypatch, capsys
+) -> None:
+    from sidepulse.cli import SERVE_ACCESS_TOKEN_ENV, build_sidepulse_parser, cmd_serve
+
+    parser = build_sidepulse_parser()
+    calls = []
+    monkeypatch.setattr("sidepulse.serve.serve", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.delenv(SERVE_ACCESS_TOKEN_ENV, raising=False)
+
+    assert cmd_serve(parser.parse_args(["serve"])) == 2
+    assert SERVE_ACCESS_TOKEN_ENV in capsys.readouterr().err
+    assert calls == []
+
+    assert cmd_serve(parser.parse_args(["serve", "--allow-anonymous-status"])) == 0
+    assert calls[-1]["allow_anonymous_status"] is True
+    assert calls[-1]["status_access_token"] is None
 
 
 @pytest.mark.parametrize(
@@ -471,6 +555,38 @@ def test_glance_listener_accepts_private_and_link_local_ip_literals() -> None:
     assert validate_bind_address("fe80::20%en0") == "fe80::20%en0"
 
 
+def test_glance_request_token_must_be_distinct_from_response_signing_secret() -> None:
+    from sidepulse.glance_server import GlanceServerConfiguration
+    from sidepulse.serve import ServeConfiguration
+
+    shared = b"x" * 32
+    with pytest.raises(ValueError, match="distinct"):
+        GlanceServerConfiguration(
+            bind_address="192.168.1.20",
+            glance_secret=shared,
+            access_token=shared,
+        )
+    with pytest.raises(ValueError, match="distinct"):
+        ServeConfiguration(
+            glance_secret=shared,
+            glance_access_token=shared,
+        )
+
+
+def test_http_bearer_tokens_have_a_bounded_private_credential_length() -> None:
+    from sidepulse.glance_server import GlanceServerConfiguration
+    from sidepulse.serve import ServeConfiguration
+
+    with pytest.raises(ValueError, match="access token"):
+        ServeConfiguration(status_access_token=b"short")
+    with pytest.raises(ValueError, match="access token"):
+        GlanceServerConfiguration(
+            bind_address="192.168.1.20",
+            glance_secret=b"independent-signing-secret",
+            access_token=b"short",
+        )
+
+
 @pytest.mark.parametrize(
     "address",
     (
@@ -492,13 +608,22 @@ def test_glance_listener_rejects_unsafe_or_inapplicable_ipv6_scopes(
 
 
 def test_glance_cli_requires_explicit_private_bind_and_secret(monkeypatch, capsys) -> None:
-    from sidepulse.cli import PHONE_GLANCE_SECRET_ENV, build_parser, cmd_glance
+    from sidepulse.cli import (
+        PHONE_GLANCE_ACCESS_TOKEN_ENV,
+        PHONE_GLANCE_SECRET_ENV,
+        build_parser,
+        cmd_glance,
+    )
 
     parser = build_parser()
     args = parser.parse_args(
-        ["glance", "--bind-address", "192.168.1.20", "--port", "8738"]
+        [
+            "glance", "--bind-address", "192.168.1.20", "--port", "8738",
+            "--tls-cert", "/test/certificate.pem", "--tls-key", "/test/key.pem",
+        ]
     )
     monkeypatch.delenv(PHONE_GLANCE_SECRET_ENV, raising=False)
+    monkeypatch.delenv(PHONE_GLANCE_ACCESS_TOKEN_ENV, raising=False)
     calls = []
     monkeypatch.setattr(
         "sidepulse.glance_server.glance_serve", lambda **kwargs: calls.append(kwargs)
@@ -509,13 +634,20 @@ def test_glance_cli_requires_explicit_private_bind_and_secret(monkeypatch, capsy
     assert PHONE_GLANCE_SECRET_ENV in capsys.readouterr().err
 
     monkeypatch.setenv(PHONE_GLANCE_SECRET_ENV, "private-test-secret")
+    assert cmd_glance(args) == 2
+    assert PHONE_GLANCE_ACCESS_TOKEN_ENV in capsys.readouterr().err
+
+    monkeypatch.setenv(PHONE_GLANCE_ACCESS_TOKEN_ENV, "private-access-token")
     assert cmd_glance(args) == 0
     assert calls == [
         {
             "bind_address": "192.168.1.20",
             "port": 8738,
             "glance_secret": b"private-test-secret",
+            "access_token": b"private-access-token",
             "glance_source_id": "sidepulse",
+            "tls_cert": Path("/test/certificate.pem"),
+            "tls_key": Path("/test/key.pem"),
         }
     ]
 
@@ -538,20 +670,24 @@ def test_glance_listener_has_no_status_or_query_routes(tmp_path: Path) -> None:
     )
 
     secret = b"in-memory-glance-secret"
+    access_token = b"independent-glance-access-token"
     server = ThreadingHTTPServer(("127.0.0.1", 0), _GlanceOnlyHandler)
     server.glance_configuration = GlanceServerConfiguration(
         bind_address="192.168.1.20",
         home=tmp_path,
         glance_secret=secret,
+        access_token=access_token,
     )
     server.glance_sequence = _GlanceSequence(start=0)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/glance.json", timeout=5
-        ) as response:
+        authenticated = urllib.request.Request(
+            f"http://127.0.0.1:{port}/glance.json",
+            headers={"Authorization": f"Bearer {access_token.decode('ascii')}"},
+        )
+        with urllib.request.urlopen(authenticated, timeout=5) as response:
             assert response.status == 200
             assert set(json.loads(response.read())) == {
                 "source_id",
@@ -578,7 +714,7 @@ def test_glance_listener_has_no_status_or_query_routes(tmp_path: Path) -> None:
 
 
 def test_create_glance_server_serves_glance_but_not_status(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, glance_tls_material
 ) -> None:
     from sidepulse import glance_server
 
@@ -587,19 +723,28 @@ def test_create_glance_server_serves_glance_but_not_status(
             super().__init__(("127.0.0.1", 0), handler, configuration)
 
     monkeypatch.setattr(glance_server, "_GlanceHTTPServer", LoopbackTestServer)
+    cert, key = glance_tls_material
     server = glance_server.create_glance_server(
         bind_address="192.168.1.20",
         port=0,
         home=tmp_path,
         glance_secret=b"in-memory-glance-secret",
+        access_token=b"independent-glance-access-token",
+        tls_cert=cert,
+        tls_key=key,
     )
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/glance.json", timeout=5
-        ) as response:
+        request = urllib.request.Request(
+            f"https://127.0.0.1:{port}/glance.json",
+            headers={"Authorization": "Bearer independent-glance-access-token"},
+        )
+        import ssl
+
+        context = ssl.create_default_context(cafile=cert)
+        with urllib.request.urlopen(request, timeout=5, context=context) as response:
             assert response.status == 200
             assert json.loads(response.read())["payload"] == {
                 "status": "unknown",
@@ -607,7 +752,7 @@ def test_create_glance_server_serves_glance_but_not_status(
             }
         with pytest.raises(urllib.error.HTTPError) as raised:
             urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/status.json", timeout=5
+                f"https://127.0.0.1:{port}/status.json", timeout=5, context=context
             )
         assert raised.value.code == 404
     finally:
@@ -621,12 +766,14 @@ def test_private_listener_source_is_stable_per_instance_and_changes_on_restart()
     first = GlanceServerConfiguration(
         bind_address="192.168.1.20",
         glance_secret=b"in-memory-glance-secret",
+        access_token=b"independent-glance-access-token",
         glance_source_id="phone",
         glance_instance_id="a" * 32,
     )
     restarted = GlanceServerConfiguration(
         bind_address="192.168.1.20",
         glance_secret=b"in-memory-glance-secret",
+        access_token=b"independent-glance-access-token",
         glance_source_id="phone",
         glance_instance_id="b" * 32,
     )

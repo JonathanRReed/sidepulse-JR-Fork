@@ -68,6 +68,26 @@ def test_inventory_ignores_non_sidepulse_and_failed_probes(tmp_path: Path) -> No
     assert identities[0].kind is DeviceKind.DOT
 
 
+def test_inventory_rejects_mount_replaced_during_identity_probe(tmp_path: Path) -> None:
+    mount = tmp_path / "SidePulseDot"
+    mount.mkdir()
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+
+    def runner(arguments, **kwargs):
+        mount.rename(tmp_path / "detached")
+        replacement.rename(mount)
+        return completed(
+            {
+                "MountPoint": str(mount),
+                "VolumeName": "SidePulseDot",
+                "VolumeUUID": "stale-volume-uuid",
+            }
+        )
+
+    assert inventory_mounts(tmp_path, runner=runner) == ()
+
+
 def test_identity_cache_returns_last_snapshot_without_blocking(tmp_path: Path) -> None:
     root = tmp_path / "Volumes"
     mount = root / "SidePulseDot"

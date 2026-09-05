@@ -33,7 +33,7 @@ def test_upstream_cadence_contains_required_safety_and_ledger_contract() -> None
         "Relevant forks",
         "[CodexBar]",
         "[T3 Code]",
-        "JR Bar checkout",
+        "JR-Bar checkout",
     ):
         assert required_source in cadence
 

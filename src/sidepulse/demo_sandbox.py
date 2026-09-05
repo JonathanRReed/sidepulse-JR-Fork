@@ -1,4 +1,4 @@
-"""Deterministic, side-effect-free fixtures for the JR Bar preview surfaces.
+"""Deterministic, side-effect-free fixtures for the JR-Bar preview surfaces.
 
 The demo sandbox is deliberately not a second runtime.  It produces small,
 content-minimized event timelines and typed snapshots that a future UI can

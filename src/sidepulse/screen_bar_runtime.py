@@ -20,18 +20,6 @@ def _min_glow(view) -> float:
         return 0.25
 
 
-def _visible_identity(view, colors):
-    identity = view._bar_identity_color(colors)
-    if max(identity) > 0.001:
-        return identity
-    program = str(getattr(view, "current_program", "") or "").strip().lower()
-    if program == "off":
-        return identity
-    # Connected but silent is an outline, not an apparently missing surface.
-    # The user's 0% minimum-glow choice still wins and may make it fully dark.
-    return (0.10, 0.34, 0.40, design.OUTLINE_ALPHA * _min_glow(view))
-
-
 def _rounded_status_band(view, *, bracket_allowed: bool) -> None:
     from . import virtual_device as vd
 
@@ -83,30 +71,7 @@ def _rounded_status_band(view, *, bracket_allowed: bool) -> None:
     )
     y = min(lift + design.VERTICAL_INSET, max(0.0, height - band_height))
     radius = min(design.CORNER_RADIUS, band_height / 2.0, band_width / 2.0)
-    identity = _visible_identity(view, colors)
-    red, green, blue, alpha = identity
     floor = _min_glow(view)
-
-    # A bounded bloom makes the surface readable without turning it into a
-    # full-width menu-bar rule. It is deliberately one shared color so bloom
-    # cannot shift hue by clipping channels independently.
-    halo_y = max(0.0, y - 1.5)
-    halo_height = min(max(0.0, height - halo_y), band_height + 5.0)
-    if halo_height > 0.0:
-        halo_left = max(0.0, left - 2.0)
-        halo_right = min(width, right + 2.0)
-        halo = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            ((halo_left, halo_y), (halo_right - halo_left, halo_height)),
-            min(radius + 2.0, halo_height / 2.0),
-            min(radius + 2.0, halo_height / 2.0),
-        )
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(
-            red,
-            green,
-            blue,
-            min(0.28, max(0.0, alpha) * design.HALO_ALPHA),
-        ).set()
-        halo.fill()
 
     core = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
         ((left, y), (band_width, band_height)),
@@ -114,68 +79,74 @@ def _rounded_status_band(view, *, bracket_allowed: bool) -> None:
         radius,
     )
     cg_context = vd.current_cg_context()
-    notch_width, wing_offset = view._notch_geometry()
-    if notch_width <= 0.0:
-        return
-    led_width = notch_width / vd.LED_COUNT
+    # Fit all eight LEDs into the measured band, including a narrower Alcove
+    # contour. Sampling the original notch width would crop the endpoint LEDs.
+    led_width = band_width / vd.LED_COUNT
     NSGraphicsContext.saveGraphicsState()
     try:
         core.addClip()
-        column_x = left
-        while column_x < right:
-            column_width = min(vd.BLEND_COLUMN_WIDTH, right - column_x)
-            center_x = column_x + column_width / 2.0
-            color = vd.glow_color_for_column(
-                colors,
-                led_width,
-                notch_width,
-                wing_offset,
-                center_x,
-                taper_floor=1.0,
-            )
-            vd.fill_rect_with_cg(
-                cg_context,
-                ((column_x, y), (column_width, band_height)),
-                vd.tone_mapped_led_color(
-                    *color,
-                    boost=vd.LED_CORE_BOOST,
-                    alpha_scale=0.95,
-                ),
-            )
-            column_x += column_width
-        # A restrained highlight gives the band a native luminous edge without
-        # creating the old one-pixel line across the entire window.
-        vd.fill_rect_with_cg(
-            cg_context,
-            ((left, y + band_height - 0.55), (band_width, 0.55)),
-            (1.0, 1.0, 1.0, min(0.12, max(0.0, alpha * 0.10))),
+        runs = vd._glow_runs(
+            view._glow_geometry_cache,
+            view._glow_paint_cache,
+            colors=colors,
+            brightness=view.brightness,
+            led_width=led_width,
+            notch_width=band_width,
+            x_start=left,
+            x_end=right,
+            wing_offset=left,
+            wing_taper_floor=1.0,
+            silhouette=(
+                view.alcove_silhouette[3]
+                if view.alcove_silhouette is not None
+                else "rounded-status-band"
+            ),
+            screen_identity=view.render_screen_identity,
+            scale=view.render_scale,
         )
+        core_rect = ((left, y), (band_width, band_height))
+        if not vd.draw_horizontal_glow_gradient(
+            cg_context,
+            core_rect,
+            runs,
+            boost=vd.LED_CORE_BOOST,
+            alpha_scale=0.95,
+        ):
+            for run in runs:
+                if run is None:
+                    continue
+                run_x, run_width, color = run
+                vd.fill_rect_with_cg(
+                    cg_context,
+                    ((run_x, y), (run_width, band_height)),
+                    vd.tone_mapped_led_color(
+                        *color,
+                        boost=vd.LED_CORE_BOOST,
+                        alpha_scale=0.95,
+                    ),
+                )
     finally:
         NSGraphicsContext.restoreGraphicsState()
 
-    # Leave an outline for the connected-but-silent state unless the user chose
-    # a zero minimum glow. This distinguishes healthy quiet from a missing bar
-    # while preserving the explicit pitch-black setting.
-    outline_alpha = min(
-        0.62,
-        max(design.OUTLINE_ALPHA * floor, alpha * 0.55),
-    )
+    # The optional housing outline is neutral and independent of the signal.
+    # Never spread a comet's color over the dark remainder of the band.
+    off = str(getattr(view, "current_program", "")).strip().lower() == "off"
+    outline_alpha = 0.0 if off else design.OUTLINE_ALPHA * floor
     if outline_alpha > 0.001:
         NSColor.colorWithCalibratedRed_green_blue_alpha_(
-            red,
-            green,
-            blue,
+            0.25,
+            0.25,
+            0.25,
             outline_alpha,
         ).set()
         core.setLineWidth_(0.8)
         core.stroke()
 
     if bracket_allowed and str(getattr(view, "bracket_style", "auto")) == "bracket":
-        edge = _visible_identity(view, colors)
         riser = min(vd.WING_RISER_WIDTH, max(2.0, band_height))
         view._draw_wing_riser(
             cg_context,
-            edge,
+            colors[0],
             left,
             min(right, left + riser),
             min(height, band_height + 8.0),
@@ -183,7 +154,7 @@ def _rounded_status_band(view, *, bracket_allowed: bool) -> None:
         )
         view._draw_wing_riser(
             cg_context,
-            edge,
+            colors[-1],
             max(left, right - riser),
             right,
             min(height, band_height + 8.0),

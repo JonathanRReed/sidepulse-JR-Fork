@@ -19,6 +19,7 @@ _EXACT_REQUIREMENT = re.compile(
 _CONSTRAINT = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]*==[^;\s]+(?:\s*;.+)?$"
 )
+_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}(?:\s*\\)?$")
 _REQUIRED_CONSTRAINTS = frozenset(
     {
         "pip",
@@ -66,6 +67,7 @@ def validate_dependency_policy(root: Path) -> tuple[str, ...]:
     failures = []
     pyproject_path = root / "pyproject.toml"
     constraints_path = root / "requirements" / "release-constraints.txt"
+    lock_path = root / "requirements" / "release-lock.txt"
     document = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
     project = document.get("project") or {}
     optional = project.get("optional-dependencies") or {}
@@ -87,6 +89,37 @@ def validate_dependency_policy(root: Path) -> tuple[str, ...]:
     missing = sorted(_REQUIRED_CONSTRAINTS - constrained_names)
     if missing:
         failures.append(f"missing release constraints: {', '.join(missing)}")
+
+    lock_lines = lock_path.read_text(encoding="utf-8").splitlines()
+    locked_names: set[str] = set()
+    current_requirement: str | None = None
+    current_has_hash = False
+    for raw in lock_lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if not raw.startswith((" ", "\t")):
+            if current_requirement is not None and not current_has_hash:
+                failures.append(f"release lock entry has no SHA-256 hash: {current_requirement}")
+            current_requirement = line.removesuffix("\\").strip()
+            current_has_hash = "--hash=sha256:" in current_requirement
+            if "==" not in current_requirement:
+                failures.append(f"non-exact release lock entry: {current_requirement}")
+            else:
+                locked_names.add(_name(current_requirement))
+        elif _HASH.fullmatch(line):
+            current_has_hash = True
+    if current_requirement is not None and not current_has_hash:
+        failures.append(f"release lock entry has no SHA-256 hash: {current_requirement}")
+    release_inputs = []
+    for raw in (root / "requirements" / "release.in").read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            release_inputs.append(line)
+    release_input_names = {_name(line) for line in release_inputs}
+    missing_locked = sorted(release_input_names - locked_names)
+    if missing_locked:
+        failures.append(f"release constraints absent from hash lock: {', '.join(missing_locked)}")
 
     for requirement in requirements:
         name = _name(requirement)
@@ -123,6 +156,8 @@ def validate_dependency_policy(root: Path) -> tuple[str, ...]:
         failures.append("packaging/build_macos_pkg.sh does not pin PyInstaller")
     if "release-environment.txt" not in package_build:
         failures.append("packaging/build_macos_pkg.sh does not snapshot its environment")
+    if "release-lock.txt" not in package_build or "--require-hashes" not in package_build:
+        failures.append("packaging/build_macos_pkg.sh does not enforce the hash-bound release lock")
     return tuple(failures)
 
 

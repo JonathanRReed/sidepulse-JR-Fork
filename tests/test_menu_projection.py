@@ -44,20 +44,37 @@ def test_root_menu_is_compact_and_semantic() -> None:
         "agents",
         "usage",
         "devices",
-        "screen_bar",
         "warning:0",
         "warning:1",
         "diagnostics",
         "setup",
-        "settings",
         "dnd",
+        "quick_settings",
         "clear_agents",
         "quit",
     ]
-    assert plan.rows[0].title == "2 active · 1 needs you"
+    assert plan.rows[0].title == "1 needs you · 2 active"
     assert plan.rows[2].title == "Usage · Claude 36% · Codex 71%"
-    assert plan.rows[3].title == "Hardware · 2 connected"
+    assert plan.rows[3].title == "Hardware · 2 connected · Screen Bar on"
     assert plan.rows[3].kind is MenuRowKind.SUBMENU
+    quick = next(row for row in plan.rows if row.key == "quick_settings")
+    assert quick.title == "Quick Settings"
+    assert quick.kind is MenuRowKind.SUBMENU
+
+
+def test_glance_omits_zero_counts_and_leads_with_attention() -> None:
+    plan = project_root_menu(inputs(active_count=0, needs_you_count=2, ready_count=3))
+
+    assert plan.rows[0].title == "2 need you · 3 ready"
+
+
+def test_hardware_summary_names_screen_bar_without_a_physical_device() -> None:
+    plan = project_root_menu(
+        inputs(connected_device_count=0, screen_bar_enabled=False)
+    )
+
+    hardware = next(row for row in plan.rows if row.key == "devices")
+    assert hardware.title == "Hardware · Screen Bar off"
 
 
 def test_setup_and_clear_agents_hide_when_not_needed() -> None:

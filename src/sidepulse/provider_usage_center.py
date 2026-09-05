@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from .provider_account_identity import (
+    configured_user_alias,
+    project_provider_account_identity,
+)
 from .provider_feature_settings import ProviderInstanceVisualProjection
-from .provider_usage_platform import ProviderSourceState, provider_descriptor
+from .provider_usage_platform import ProviderSourceState
 from .provider_usage_qol import format_lane_meter, format_reset_countdown, usage_totals
 from .provider_usage_runtime import ProviderUsageState
 from .provider_usage_sync import MergedProviderSync
@@ -25,7 +29,7 @@ class UsageCenterLane:
     #: The title without the text-glyph meter -- for renderers that draw
     #: a REAL bar and would otherwise show the meter twice.
     plain_title: str = ""
-    source_instance_id: str = "default"
+    source_instance_id: str = field(default="default", repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,8 +42,10 @@ class UsageCenterSection:
     metrics: tuple[str, ...]
     action_label: str | None
     incident: str | None
-    source_instance_id: str = "default"
+    source_instance_id: str = field(default="default", repr=False)
     color_override: str | None = None
+    tooltip: str | None = None
+    accessibility_label: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +78,7 @@ def project_usage_center(
     now: float,
     merged_sync: MergedProviderSync | None = None,
     visual: ProviderInstanceVisualProjection | None = None,
+    privacy_mode: bool = False,
 ) -> UsageCenterProjection:
     state = apply_merged_sync_to_state(state, merged_sync)
     sections = []
@@ -150,18 +157,23 @@ def project_usage_center(
             )
         except StopIteration:
             visual_policy = None
-        section_title = (
-            visual_policy.label
-            if visual_policy is not None
-            else provider_descriptor(snapshot.provider_id).label
+        alias = configured_user_alias(
+            provider_id=snapshot.provider_id,
+            source_instance_id=snapshot.source_instance_id,
+            visual_label=None if visual_policy is None else visual_policy.label,
         )
-        if visual_policy is None and snapshot.source_instance_id != "default":
-            section_title += f" · {snapshot.source_instance_id}"
+        identity = project_provider_account_identity(
+            provider_id=snapshot.provider_id,
+            source_instance_id=snapshot.source_instance_id,
+            account_label=snapshot.account_label,
+            user_alias=alias,
+            privacy_mode=privacy_mode,
+        )
         sections.append(
             UsageCenterSection(
                 snapshot.provider_id,
-                section_title,
-                snapshot.account_label,
+                identity.primary_label,
+                identity.account_detail,
                 _status_label(snapshot.state),
                 tuple(lanes),
                 tuple(metrics),
@@ -169,6 +181,8 @@ def project_usage_center(
                 snapshot.incident,
                 snapshot.source_instance_id,
                 None if visual_policy is None else visual_policy.color_override,
+                identity.full_label,
+                identity.full_label,
             )
         )
     aggregate = []

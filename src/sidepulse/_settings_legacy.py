@@ -97,6 +97,12 @@ MAX_IDLE_DIM_AFTER_MINUTES = 180.0
 DEFAULT_IDLE_DIM_FRACTION = 0.3
 MIN_IDLE_DIM_FRACTION = 0.05
 MAX_IDLE_DIM_FRACTION = 1.0
+DEFAULT_SLEEP_DIM_FRACTION = 0.2
+MIN_SLEEP_DIM_FRACTION = 0.05
+MAX_SLEEP_DIM_FRACTION = 1.0
+DEFAULT_IDLE_AUTO_OFF_AFTER_MINUTES = 60.0
+MIN_IDLE_AUTO_OFF_AFTER_MINUTES = 5.0
+MAX_IDLE_AUTO_OFF_AFTER_MINUTES = 1440.0
 
 # Matches keep_awake.AWAKE_GRACE_SECONDS's own long-standing default (300s)
 # exactly, so making this adjustable doesn't change anyone's existing
@@ -279,11 +285,10 @@ class AgentMonitorSettings:
     # Amber glow when a Reminder comes due. Off by default: enabling it
     # presents the system Reminders prompt (see reminders_watch.py).
     reminder_alerts_enabled: bool = False
-    # Severe/Extreme weather warnings (NWS). Location: manual lat/lon
-    # if set, otherwise a one-shot IP geolocation -- deliberately not
-    # CoreLocation (a Location prompt would cost another bundle
-    # re-sign and another lost FDA grant).
+    # Severe/Extreme weather warnings (NWS). Manual coordinates work alone.
+    # Network-address geolocation is a separate, default-off consent.
     weather_alerts_enabled: bool = False
+    weather_ip_geolocation_enabled: bool = False
     weather_latitude: float | None = None
     weather_longitude: float | None = None
     # Named calibration/brightness profiles (Day/Night/Travel slots),
@@ -339,6 +344,12 @@ class AgentMonitorSettings:
     idle_dim_enabled: bool = True
     idle_dim_after_minutes: float = DEFAULT_IDLE_DIM_AFTER_MINUTES
     idle_dim_fraction: float = DEFAULT_IDLE_DIM_FRACTION
+    # Display sleep is a dim state, not an implicit hardware-off command.
+    # Auto-off remains a separate long-idle choice below.
+    sleep_dim_enabled: bool = True
+    sleep_dim_fraction: float = DEFAULT_SLEEP_DIM_FRACTION
+    idle_auto_off_enabled: bool = False
+    idle_auto_off_after_minutes: float = DEFAULT_IDLE_AUTO_OFF_AFTER_MINUTES
     # Dims/quiets the LEDs while a macOS Focus (Do Not Disturb, Work,
     # Sleep, etc.) is active, matching the same "don't be a nagging light"
     # spirit as idle dimming. Off by default -- detecting the active Focus
@@ -852,6 +863,21 @@ class AgentMonitorSettings:
     def with_idle_dim_fraction(self, fraction: float) -> AgentMonitorSettings:
         return replace(self, idle_dim_fraction=normalize_idle_dim_fraction(fraction))
 
+    def with_sleep_dim_enabled(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, sleep_dim_enabled=bool(enabled))
+
+    def with_sleep_dim_fraction(self, fraction: float) -> AgentMonitorSettings:
+        return replace(self, sleep_dim_fraction=normalize_sleep_dim_fraction(fraction))
+
+    def with_idle_auto_off_enabled(self, enabled: bool) -> AgentMonitorSettings:
+        return replace(self, idle_auto_off_enabled=bool(enabled))
+
+    def with_idle_auto_off_after_minutes(self, minutes: float) -> AgentMonitorSettings:
+        return replace(
+            self,
+            idle_auto_off_after_minutes=normalize_idle_auto_off_after_minutes(minutes),
+        )
+
     def with_subagent_asks_alert(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, subagent_asks_alert=bool(enabled))
 
@@ -1289,6 +1315,11 @@ class AgentMonitorSettings:
     def with_weather_alerts_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, weather_alerts_enabled=bool(enabled))
 
+    def with_weather_ip_geolocation_enabled(
+        self, enabled: bool
+    ) -> AgentMonitorSettings:
+        return replace(self, weather_ip_geolocation_enabled=bool(enabled))
+
     def with_capacity_history_enabled(self, enabled: bool) -> AgentMonitorSettings:
         return replace(self, capacity_history_enabled=bool(enabled))
 
@@ -1484,6 +1515,7 @@ class AgentMonitorSettings:
             "calendar_lead_minutes": self.calendar_lead_minutes,
             "reminder_alerts_enabled": self.reminder_alerts_enabled,
             "weather_alerts_enabled": self.weather_alerts_enabled,
+            "weather_ip_geolocation_enabled": self.weather_ip_geolocation_enabled,
             "weather_latitude": self.weather_latitude,
             "weather_longitude": self.weather_longitude,
             "calibration_profiles": dict(sorted(self.calibration_profiles.items())),
@@ -1507,6 +1539,10 @@ class AgentMonitorSettings:
             "idle_dim_enabled": self.idle_dim_enabled,
             "idle_dim_after_minutes": self.idle_dim_after_minutes,
             "idle_dim_fraction": self.idle_dim_fraction,
+            "sleep_dim_enabled": self.sleep_dim_enabled,
+            "sleep_dim_fraction": self.sleep_dim_fraction,
+            "idle_auto_off_enabled": self.idle_auto_off_enabled,
+            "idle_auto_off_after_minutes": self.idle_auto_off_after_minutes,
             "focus_sync_enabled": self.focus_sync_enabled,
             "active_scene": _scene_setting(self.active_scene),
             **dnd_payload,
@@ -1779,6 +1815,9 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         reminder_alerts_enabled=_bool_setting(data.get("reminder_alerts_enabled"), False),
         weather_alerts_enabled=_bool_setting(data.get("weather_alerts_enabled"), False),
+        weather_ip_geolocation_enabled=_bool_setting(
+            data.get("weather_ip_geolocation_enabled"), False
+        ),
         weather_latitude=_optional_dimension(data.get("weather_latitude"), -90.0, 90.0),
         weather_longitude=_optional_dimension(data.get("weather_longitude"), -180.0, 180.0),
         calibration_profiles=(
@@ -1817,6 +1856,17 @@ def load_settings(path: Path | None = None) -> AgentMonitorSettings:
         ),
         idle_dim_fraction=normalize_idle_dim_fraction(
             data.get("idle_dim_fraction"), default=DEFAULT_IDLE_DIM_FRACTION
+        ),
+        sleep_dim_enabled=_bool_setting(data.get("sleep_dim_enabled"), True),
+        sleep_dim_fraction=normalize_sleep_dim_fraction(
+            data.get("sleep_dim_fraction"), default=DEFAULT_SLEEP_DIM_FRACTION
+        ),
+        idle_auto_off_enabled=_bool_setting(
+            data.get("idle_auto_off_enabled"), False
+        ),
+        idle_auto_off_after_minutes=normalize_idle_auto_off_after_minutes(
+            data.get("idle_auto_off_after_minutes"),
+            default=DEFAULT_IDLE_AUTO_OFF_AFTER_MINUTES,
         ),
         focus_sync_enabled=_bool_setting(data.get("focus_sync_enabled"), False),
         active_scene=_scene_setting(data.get("active_scene")),
@@ -2046,6 +2096,25 @@ def normalize_idle_dim_fraction(value: object, *, default: float = DEFAULT_IDLE_
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return default
     return max(MIN_IDLE_DIM_FRACTION, min(MAX_IDLE_DIM_FRACTION, float(value)))
+
+
+def normalize_sleep_dim_fraction(
+    value: object, *, default: float = DEFAULT_SLEEP_DIM_FRACTION
+) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return default
+    return max(MIN_SLEEP_DIM_FRACTION, min(MAX_SLEEP_DIM_FRACTION, float(value)))
+
+
+def normalize_idle_auto_off_after_minutes(
+    value: object, *, default: float = DEFAULT_IDLE_AUTO_OFF_AFTER_MINUTES
+) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return default
+    return max(
+        MIN_IDLE_AUTO_OFF_AFTER_MINUTES,
+        min(MAX_IDLE_AUTO_OFF_AFTER_MINUTES, float(value)),
+    )
 
 
 def normalize_closed_lid_grace_minutes(

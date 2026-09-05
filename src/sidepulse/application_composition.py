@@ -1,4 +1,4 @@
-"""Explicit production composition root for the JR Bar AppKit application.
+"""Explicit production composition root for the JR-Bar AppKit application.
 
 This module is deliberately inert on import. The foreground entrypoints call
 ``compose_status_bar_application`` immediately before the retained runtime

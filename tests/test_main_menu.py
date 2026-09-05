@@ -35,6 +35,12 @@ def test_main_menu_carries_the_standard_editing_and_window_shortcuts() -> None:
     assert ("terminate:", "q") in rows
 
 
+def test_settings_is_reachable_without_the_status_menu() -> None:
+    """Command-comma must route to the existing settings action."""
+    rows = _flatten(build_main_menu())
+    assert ("openSettings:", ",") in rows
+
+
 def test_every_item_targets_the_responder_chain_not_a_fixed_object() -> None:
     """Nil targets are the point: Cmd-W must close whichever window is
     key, and Cmd-C must reach whichever field has focus."""

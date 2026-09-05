@@ -50,11 +50,13 @@ def _qualified_calls(node: ast.AST) -> list[str]:
 def test_percent_and_reset_state_use_the_shared_writer() -> None:
     percent = _function(PERCENT_HISTORY, "record_state_observations")
     usage_apply = _function(USAGE_STATUS_BAR, "applyProviderUsageState_")
+    reset_persist = _function(USAGE_STATUS_BAR, "_persist_reset_delivery_state")
 
     assert "submit" in _calls(percent)
     assert "Thread" not in _calls(percent)
-    assert "submit" in _calls(usage_apply)
-    assert "save_seen_reset_events" in _calls(usage_apply)
+    assert "_persist_reset_delivery_state" in _calls(usage_apply)
+    assert "submit" in _calls(reset_persist)
+    assert "_persist_reset_delivery_state" in _calls(usage_apply)
     assert "Thread" not in _calls(usage_apply)
 
 

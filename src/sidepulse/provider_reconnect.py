@@ -242,7 +242,7 @@ def repair_grok_credential(
 
 
 # ---------------------------------------------------------------------------
-# Claude: Claude Code owns renewal; JR Bar only copies a current access token.
+# Claude: Claude Code owns renewal; JR-Bar only copies a current access token.
 
 
 def repair_claude_credential(
@@ -282,7 +282,7 @@ def repair_claude_credential(
             RepairOutcome.NEEDS_PROVIDER_REFRESH,
             "Claude Code owns this sign-in. Run `claude` once so Claude Code "
             "can mint a current access token, then click Reconnect Claude. "
-            "JR Bar never consumes the refresh token or changes Claude "
+            "JR-Bar never consumes the refresh token or changes Claude "
             "Code's Keychain item.",
         )
     if credential is None:
@@ -372,7 +372,7 @@ def claude_token_is_stale(
 
     A missing or unreadable stamp counts as stale so the collector may
     re-read Claude Code's item under an existing standing grant. It does
-    not authorize JR Bar to renew or mutate that external credential.
+    not authorize JR-Bar to renew or mutate that external credential.
     """
     try:
         if source_instance_id == "default":
@@ -403,7 +403,7 @@ def sync_claude_credential_in_background(
     when a prior consented read recorded a standing grant, so no dialog
     can surprise the user from a background thread. It never consumes a
     refresh token and never mutates Claude Code's Keychain item. True
-    means JR Bar's own stored access token changed.
+    means JR-Bar's own stored access token changed.
     """
     del home  # signature symmetry with the other background repairs
     try:

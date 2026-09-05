@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create JR Bar's exact supplemental Sparkle update archive."""
+"""Create JR-Bar's exact supplemental Sparkle update archive."""
 
 from __future__ import annotations
 

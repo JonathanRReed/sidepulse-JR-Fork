@@ -8,7 +8,7 @@ request so it never needs the app's process (or even the app running --
 it serves the last persisted truth with its timestamps, and honesty
 lives in those timestamps).
 
-    GET /status.json   anonymous agent aggregates + redacted provider quota
+    GET /status.json   authenticated agent aggregates + redacted provider quota
 
 Loopback only, read only, no query parameters, nothing written. The public
 schema is rebuilt from an allowlist and never forwards persisted rows.
@@ -63,6 +63,7 @@ _PROVIDER_IDS = frozenset(item.provider_id for item in provider_descriptors())
 _DEFAULT_GLANCE_SOURCE_ID = "sidepulse"
 _MAX_GLANCE_SEQUENCE = 1_000_000
 _MAX_GLANCE_SECRET_BYTES = 4_096
+_MAX_ACCESS_TOKEN_BYTES = 4_096
 
 
 def _read_json(path: Path) -> object | None:
@@ -354,7 +355,10 @@ class ServeConfiguration:
     """
 
     home: Path | None = None
+    status_access_token: bytes | None = field(default=None, repr=False)
+    allow_anonymous_status: bool = False
     glance_secret: bytes | None = field(default=None, repr=False)
+    glance_access_token: bytes | None = field(default=None, repr=False)
     glance_source_id: str = _DEFAULT_GLANCE_SOURCE_ID
     glance_sequence_limit: int = _MAX_GLANCE_SEQUENCE
     glance_sequence_start: int = 0
@@ -362,12 +366,26 @@ class ServeConfiguration:
     def __post_init__(self) -> None:
         if self.home is not None and not isinstance(self.home, Path):
             raise ValueError("invalid serve home")
+        if type(self.allow_anonymous_status) is not bool:
+            raise ValueError("invalid anonymous status setting")
+        for token in (self.status_access_token, self.glance_access_token):
+            if token is not None and (
+                type(token) is not bytes
+                or not 24 <= len(token) <= _MAX_ACCESS_TOKEN_BYTES
+            ):
+                raise ValueError("invalid access token")
         if self.glance_secret is not None and (
             type(self.glance_secret) is not bytes
             or not self.glance_secret
             or len(self.glance_secret) > _MAX_GLANCE_SECRET_BYTES
         ):
             raise ValueError("invalid glance secret")
+        if (
+            self.glance_secret is not None
+            and self.glance_access_token is not None
+            and hmac.compare_digest(self.glance_secret, self.glance_access_token)
+        ):
+            raise ValueError("glance access token and signing secret must be distinct")
         # PhoneGlancePolicy owns the bounded source identity contract.
         PhoneGlancePolicy(self.glance_source_id)
         if (
@@ -421,8 +439,14 @@ class _ServeHandler(BaseHTTPRequestHandler):
         if route not in ("/", "/status.json"):
             self.send_error(404)
             return
+        configuration = self._configuration()
+        if not configuration.allow_anonymous_status and not self._authenticated(
+            configuration.status_access_token
+        ):
+            self._send_authentication_required()
+            return
         payload = json.dumps(
-            build_serve_document(self._configuration().home),
+            build_serve_document(configuration.home),
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
@@ -443,6 +467,9 @@ class _ServeHandler(BaseHTTPRequestHandler):
         configuration = self._configuration()
         if not configuration.glance_enabled:
             self._send_glance_error(404)
+            return
+        if not self._authenticated(configuration.glance_access_token):
+            self._send_authentication_required()
             return
         sequence = getattr(self.server, "glance_sequence", None)
         if not isinstance(sequence, _GlanceSequence):
@@ -481,6 +508,25 @@ class _ServeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _authenticated(self, expected: bytes | None) -> bool:
+        if expected is None:
+            return False
+        supplied = self.headers.get("Authorization")
+        if not isinstance(supplied, str) or not supplied.startswith("Bearer "):
+            return False
+        try:
+            candidate = supplied[7:].encode("ascii")
+        except UnicodeEncodeError:
+            return False
+        return hmac.compare_digest(candidate, expected)
+
+    def _send_authentication_required(self) -> None:
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", "Bearer")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def log_message(self, *_args) -> None:
         """Quiet by design; integrators poll this."""
 
@@ -488,13 +534,19 @@ class _ServeHandler(BaseHTTPRequestHandler):
 def serve(
     *,
     port: int = SERVE_DEFAULT_PORT,
+    status_access_token: bytes | None = None,
+    allow_anonymous_status: bool = False,
     glance_secret: bytes | None = None,
+    glance_access_token: bytes | None = None,
     glance_source_id: str = _DEFAULT_GLANCE_SOURCE_ID,
 ) -> None:
     """Blocking loopback server; Ctrl-C stops it."""
     server = create_serve_server(
         port=port,
+        status_access_token=status_access_token,
+        allow_anonymous_status=allow_anonymous_status,
         glance_secret=glance_secret,
+        glance_access_token=glance_access_token,
         glance_source_id=glance_source_id,
     )
     print(f"sidepulse serve: http://127.0.0.1:{int(port)}/status.json")
@@ -512,7 +564,10 @@ def create_serve_server(
     *,
     port: int = SERVE_DEFAULT_PORT,
     home: Path | None = None,
+    status_access_token: bytes | None = None,
+    allow_anonymous_status: bool = False,
     glance_secret: bytes | None = None,
+    glance_access_token: bytes | None = None,
     glance_source_id: str = _DEFAULT_GLANCE_SOURCE_ID,
     glance_sequence_limit: int = _MAX_GLANCE_SEQUENCE,
     glance_sequence_start: int = 0,
@@ -520,7 +575,10 @@ def create_serve_server(
     """Create the loopback server with explicit, testable configuration."""
     configuration = ServeConfiguration(
         home=home,
+        status_access_token=status_access_token,
+        allow_anonymous_status=allow_anonymous_status,
         glance_secret=glance_secret,
+        glance_access_token=glance_access_token,
         glance_source_id=glance_source_id,
         glance_sequence_limit=glance_sequence_limit,
         glance_sequence_start=glance_sequence_start,

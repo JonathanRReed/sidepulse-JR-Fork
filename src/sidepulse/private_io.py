@@ -265,8 +265,16 @@ def ensure_private_file(path: Path) -> Path:
         return target
 
 
-def atomic_private_write(path: Path, data: str | bytes) -> Path:
-    """Atomically replace a sensitive file through a unique private scratch."""
+def atomic_private_write(
+    path: Path,
+    data: str | bytes,
+    *,
+    overwrite: bool = True,
+    mode: int = PRIVATE_FILE_MODE,
+) -> Path:
+    """Publish a sensitive file atomically; optional create-only never replaces."""
+    if mode not in (PRIVATE_FILE_MODE, PRIVATE_DIRECTORY_MODE):
+        raise ValueError("private file mode must be 0o600 or 0o700")
     payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
     with _private_parent(path) as (target, parent_descriptor, name):
         _require_private_leaf(target, parent_descriptor, name)
@@ -279,20 +287,28 @@ def atomic_private_write(path: Path, data: str | bytes) -> Path:
             descriptor = os.open(
                 scratch_name,
                 _open_flags(exclusive=True),
-                PRIVATE_FILE_MODE,
+                mode,
                 dir_fd=parent_descriptor,
             )
             opened = os.fstat(descriptor)
             _require_opened_leaf(target.with_name(scratch_name), None, opened)
             scratch_identity = (opened.st_dev, opened.st_ino)
-            os.fchmod(descriptor, PRIVATE_FILE_MODE)
+            os.fchmod(descriptor, mode)
             _write_all(descriptor, payload)
             os.fsync(descriptor)
             os.close(descriptor)
             descriptor = None
 
             _require_private_leaf(target, parent_descriptor, name)
-            _replace_private_leaf(scratch_name, name, parent_descriptor)
+            if overwrite:
+                _replace_private_leaf(scratch_name, name, parent_descriptor)
+            else:
+                # link is an atomic no-replace publication, unlike a preceding
+                # existence check followed by rename. Drop the scratch link
+                # before private readers validate the leaf's link count.
+                os.link(scratch_name, name, src_dir_fd=parent_descriptor,
+                        dst_dir_fd=parent_descriptor, follow_symlinks=False)
+                os.unlink(scratch_name, dir_fd=parent_descriptor)
             _fsync_private_parent(parent_descriptor)
             return target
         finally:

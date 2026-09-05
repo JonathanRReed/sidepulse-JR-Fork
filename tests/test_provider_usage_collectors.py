@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 from sidepulse.provider_usage_collectors import (
@@ -10,8 +11,8 @@ from sidepulse.provider_usage_collectors import (
     collect_cursor,
     collect_devin,
     collect_grok,
-    collect_opencode,
     collect_openai_api,
+    collect_opencode,
 )
 from sidepulse.provider_usage_settings import default_provider_usage_settings
 
@@ -51,14 +52,7 @@ class FixtureHttp:
 def preference(provider, **changes):
     pref = default_provider_usage_settings().preference(provider)
     if "browser_sources" in changes:
-        pref = pref.__class__(
-            pref.provider_id,
-            pref.enabled,
-            changes["browser_sources"],
-            pref.reset_celebrations,
-            pref.threshold_remaining,
-            pref.options,
-        )
+        pref = replace(pref, browser_sources=changes["browser_sources"])
     for key, value in changes.get("options", {}).items():
         pref = pref.with_option(key, value)
     return pref
@@ -236,6 +230,13 @@ def test_antigravity_allows_http_loopback_and_discovers_dynamically():
         observed_at=1000,
         http_json=http2,
         command_runner=runner,
+        process_identity_resolver=lambda pid: (
+            pid,
+            "/Applications/Antigravity.app/Contents/Resources/bin/language_server",
+            501,
+            123456,
+            789,
+        ),
     )
     assert res2.state.value == "ready"
     assert "http://127.0.0.1:44556" in http2.calls[0][1]
@@ -294,24 +295,38 @@ def test_antigravity_multi_port_discovery_tries_candidate_ports():
         observed_at=1000,
         http_json=http_fail_then_succeed,
         command_runner=runner,
+        process_identity_resolver=lambda pid: (
+            pid,
+            "/Applications/Antigravity.app/Contents/Resources/bin/language_server",
+            501,
+            123456,
+            789,
+        ),
     )
     assert result.state.value == "ready"
     assert len(result.lanes) == 4
-    labels = [l.label for l in result.lanes]
+    labels = [lane.label for lane in result.lanes]
     assert "Gemini Weekly" in labels
     assert "Gemini 5-Hour" in labels
     assert "Claude + GPT Weekly" in labels
     assert "Claude + GPT 5-Hour" in labels
 
 
-def test_antigravity_endpoint_cache_reuses_live_process():
-    import os
+def test_antigravity_endpoint_cache_reuses_only_the_same_verified_process():
     import sidepulse.provider_usage_collectors as puc
 
     puc._cached_antigravity_connection.clear()
     puc._cached_antigravity_connection["endpoint"] = "http://127.0.0.1:9999"
     puc._cached_antigravity_connection["csrf"] = "token-123"
-    puc._cached_antigravity_connection["pid"] = os.getpid()
+    identity = (
+        12345,
+        "/Applications/Antigravity.app/Contents/Resources/bin/language_server",
+        501,
+        123456,
+        789,
+    )
+    puc._cached_antigravity_connection["pid"] = identity[0]
+    puc._cached_antigravity_connection["process_identity"] = identity
 
     called_urls = []
     def mock_http(method, url, **kwargs):
@@ -335,11 +350,68 @@ def test_antigravity_endpoint_cache_reuses_live_process():
         preference("antigravity"),
         observed_at=1000,
         http_json=mock_http,
+        process_identity_resolver=lambda pid: identity if pid == identity[0] else None,
     )
     assert res.state.value == "ready"
     assert len(called_urls) == 1
     assert "http://127.0.0.1:9999" in called_urls[0]
     puc._cached_antigravity_connection.clear()
+
+
+def test_antigravity_discovery_rejects_process_name_spoof_before_http():
+    def runner(args, _timeout):
+        if args[0] == "ps":
+            return "12345 /tmp/language_server --csrf_token attacker\n"
+        if args[0] == "lsof":
+            return "fake 12345 user 12u IPv4 0x1 0t0 TCP 127.0.0.1:44556 (LISTEN)\n"
+        return ""
+
+    http_calls = []
+    result = collect_antigravity(
+        preference("antigravity"),
+        observed_at=1000,
+        http_json=lambda *args, **kwargs: http_calls.append((args, kwargs)),
+        command_runner=runner,
+        process_identity_resolver=lambda _pid: None,
+        home=Path("/nonexistent-antigravity-test-home"),
+    )
+
+    assert result.state.value == "source_not_found"
+    assert http_calls == []
+
+
+def test_antigravity_cache_is_dropped_when_pid_identity_changes():
+    import sidepulse.provider_usage_collectors as puc
+
+    old_identity = (
+        12345,
+        "/Applications/Antigravity.app/Contents/Resources/bin/language_server",
+        501,
+        123456,
+        789,
+    )
+    replacement_identity = (*old_identity[:3], 123457, 100)
+    puc._cached_antigravity_connection.clear()
+    puc._cached_antigravity_connection.update(
+        endpoint="http://127.0.0.1:9999",
+        csrf="token-123",
+        pid=old_identity[0],
+        process_identity=old_identity,
+    )
+    http_calls = []
+
+    result = collect_antigravity(
+        preference("antigravity"),
+        observed_at=1000,
+        http_json=lambda *args, **kwargs: http_calls.append((args, kwargs)),
+        command_runner=lambda _args, _timeout: "",
+        process_identity_resolver=lambda _pid: replacement_identity,
+        home=Path("/nonexistent-antigravity-test-home"),
+    )
+
+    assert result.state.value == "source_not_found"
+    assert http_calls == []
+    assert puc._cached_antigravity_connection == {}
 
 
 def test_openai_admin_usage_uses_official_organization_endpoints():

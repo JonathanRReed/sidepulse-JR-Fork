@@ -133,7 +133,7 @@ def test_generic_notification_copy_contains_only_product_owned_provider_semantic
 ) -> None:
     copy = generic_notification_copy(route_factory())
 
-    assert copy == GenericNotificationCopy("JR Bar", expected_body)
+    assert copy == GenericNotificationCopy("JR-Bar", expected_body)
 
 
 def test_notification_copy_never_echoes_opaque_or_private_shaped_source_values() -> None:
@@ -147,7 +147,7 @@ def test_notification_copy_never_echoes_opaque_or_private_shaped_source_values()
 
     copy = generic_notification_copy(_route(event))
 
-    assert copy == GenericNotificationCopy("JR Bar", "A Provider session finished")
+    assert copy == GenericNotificationCopy("JR-Bar", "A Provider session finished")
     rendered = f"{copy.title} {copy.body}"
     assert sentinel not in rendered
     assert "secret" not in rendered.lower()

@@ -547,7 +547,11 @@ def test_final_controller_starts_updater_before_base_launch_and_first_menu(
         "start_sparkle_updater",
         lambda: events.append(("sparkle", runtime)) or runtime,
     )
-    monkeypatch.setattr(provider_host, "load_seen_reset_events", lambda: ())
+    monkeypatch.setattr(
+        provider_host,
+        "load_reset_delivery_state",
+        provider_host.ResetDeliveryState,
+    )
     monkeypatch.setattr(provider_usage_store, "load_provider_usage_state", lambda: None)
 
     target = SparkleLaunchTarget.alloc()

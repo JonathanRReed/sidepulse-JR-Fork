@@ -12,14 +12,175 @@ from __future__ import annotations
 
 from itertools import pairwise
 
+from sidepulse.alcove_observation import capture_display_region_image
 from sidepulse.virtual_device import (
     LED_BAND_HEIGHT,
+    NotchCaptureRequest,
+    NotchSilhouetteProbe,
+    _capture_notch_runs,
     _validated_notch_silhouette,
     notch_bar_path_from_insets,
 )
 
 SCALE = 2.0
 FRAME_X = 0.0
+
+
+def _request() -> NotchCaptureRequest:
+    return NotchCaptureRequest(
+        screen_id="1:0:0:1512:982",
+        display_id=1,
+        frame_x=0.0,
+        screen_width=1512.0,
+        scale=2.0,
+        rows=32,
+        excluded_window_number=90,
+    )
+
+
+def test_notch_probe_schedules_one_capture_and_serves_the_cached_result() -> None:
+    tasks = []
+    calls = []
+    expected = (663.0, 186.0, ((0.0, 0.0),) * 32)
+    probe = NotchSilhouetteProbe(
+        probe=lambda request, max_width: calls.append((request, max_width)) or expected,
+        start_refresh=tasks.append,
+    )
+
+    assert probe.read(_request(), max_width=191.0, now=10.0) is None
+    assert probe.read(_request(), max_width=191.0, now=10.1) is None
+    assert len(tasks) == 1
+    assert calls == []
+
+    tasks.pop()()
+
+    assert probe.read(_request(), max_width=191.0, now=10.2) == expected
+    assert calls == [(_request(), 191.0)]
+    assert tasks == []
+
+
+def test_macos_15_notch_capture_uses_screen_capture_kit_only(monkeypatch) -> None:
+    from sidepulse import virtual_device
+
+    image = object()
+    monkeypatch.setattr(virtual_device, "_macos_major_version", lambda: 15)
+    monkeypatch.setattr(
+        virtual_device,
+        "capture_display_region_image",
+        lambda **kwargs: image,
+    )
+    monkeypatch.setattr(
+        virtual_device,
+        "_legacy_notch_capture_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy capture")),
+    )
+    monkeypatch.setattr(
+        virtual_device,
+        "_notch_runs_from_image",
+        lambda captured, request: (("sck", captured), request.scale, request.frame_x),
+    )
+
+    assert _capture_notch_runs(_request()) == (("sck", image), 2.0, 0.0)
+
+
+def test_pre_macos_15_notch_capture_keeps_the_legacy_fallback(monkeypatch) -> None:
+    from sidepulse import virtual_device
+
+    image = object()
+    monkeypatch.setattr(virtual_device, "_macos_major_version", lambda: 14)
+    monkeypatch.setattr(
+        virtual_device,
+        "capture_display_region_image",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("ScreenCaptureKit")),
+    )
+    monkeypatch.setattr(virtual_device, "_legacy_notch_capture_image", lambda _request: image)
+    monkeypatch.setattr(
+        virtual_device,
+        "_notch_runs_from_image",
+        lambda captured, request: (("legacy", captured), request.scale, request.frame_x),
+    )
+
+    assert _capture_notch_runs(_request()) == (("legacy", image), 2.0, 0.0)
+
+
+def test_screen_capture_kit_display_capture_targets_display_and_excludes_own_window() -> None:
+    image = object()
+
+    class Display:
+        def displayID(self):
+            return 1
+
+    class Window:
+        def windowID(self):
+            return 90
+
+    class Content:
+        def displays(self):
+            return [Display()]
+
+        def windows(self):
+            return [Window()]
+
+    class Shareable:
+        @staticmethod
+        def getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_(
+            _exclude_desktop, _on_screen_only, callback
+        ):
+            callback(Content(), None)
+
+    class Filter:
+        last = None
+
+        @classmethod
+        def alloc(cls):
+            cls.last = cls()
+            return cls.last
+
+        def initWithDisplay_excludingWindows_(self, display, excluded):
+            self.display = display
+            self.excluded = excluded
+            return self
+
+    class Configuration:
+        @classmethod
+        def alloc(cls):
+            return cls()
+
+        def init(self):
+            return self
+
+        def setWidth_(self, value):
+            self.width = value
+
+        def setHeight_(self, value):
+            self.height = value
+
+        def setShowsCursor_(self, value):
+            self.shows_cursor = value
+
+        def setSourceRect_(self, value):
+            self.source_rect = value
+
+    class ScreenshotManager:
+        @staticmethod
+        def captureImageWithFilter_configuration_completionHandler_(
+            _filter, _configuration, callback
+        ):
+            callback(image, None)
+
+    result = capture_display_region_image(
+        display_id=1,
+        source_width=1512.0,
+        source_height=32.0,
+        pixel_width=3024,
+        pixel_height=64,
+        excluded_window_number=90,
+        api=(Shareable, Filter, Configuration, ScreenshotManager),
+    )
+
+    assert result is image
+    assert Filter.last.display.displayID() == 1
+    assert [window.windowID() for window in Filter.last.excluded] == [90]
 
 
 def _notch_runs(top_width_pt=186.0, depth=32, radius=10, left_pt=663.0):

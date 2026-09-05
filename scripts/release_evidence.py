@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and validate exact-candidate JR Bar release evidence."""
+"""Build and validate exact-candidate JR-Bar release evidence."""
 
 from __future__ import annotations
 
@@ -48,6 +48,8 @@ REQUIRED_RECEIPT_KINDS = frozenset(
         "update-archive",
     }
 )
+HARDWARE_PROFILES = frozenset({"software", "any", "pro", "dot", "both"})
+SOFTWARE_RECEIPT_KINDS = REQUIRED_RECEIPT_KINDS - {"hardware-smoke"}
 APP_INPUT_RECEIPTS = frozenset(
     {
         "app-gatekeeper",
@@ -599,11 +601,15 @@ def _validate_details(
     details: Mapping[str, object],
     *,
     candidate: Mapping[str, object],
+    hardware_profile: str,
 ) -> None:
     app = candidate["app"]
     update_archive = candidate["update_archive"]
     assert isinstance(app, Mapping) and isinstance(update_archive, Mapping)
-    if kind == "pkg-signature":
+    if kind == "hardware-smoke":
+        if details.get("hardware_profile") != hardware_profile:
+            raise EvidenceError("hardware-smoke receipt has another hardware profile")
+    elif kind == "pkg-signature":
         identity = _require_text(details.get("installer_identity"), "installer identity")
         team = _require_text(details.get("team_identifier"), "installer team identifier")
         if "Developer ID Installer:" not in identity:
@@ -689,7 +695,10 @@ def _validate_receipts(
     sbom_sha256: str,
     performance_sha256: str,
     appcast_sha256: str,
+    hardware_profile: str,
 ) -> tuple[dict[str, object], ...]:
+    if hardware_profile not in HARDWARE_PROFILES:
+        raise EvidenceError(f"unknown release hardware profile: {hardware_profile}")
     by_kind: dict[str, Mapping[str, object]] = {}
     for receipt in receipts:
         kind = _require_text(receipt.get("kind"), "receipt kind")
@@ -698,7 +707,12 @@ def _validate_receipts(
         if kind in by_kind:
             raise EvidenceError(f"duplicate release receipt kind: {kind}")
         by_kind[kind] = receipt
-    missing = sorted(REQUIRED_RECEIPT_KINDS - by_kind.keys())
+    required_kinds = (
+        SOFTWARE_RECEIPT_KINDS
+        if hardware_profile == "software"
+        else REQUIRED_RECEIPT_KINDS
+    )
+    missing = sorted(required_kinds - by_kind.keys())
     if missing:
         raise EvidenceError(f"missing required release receipt: {', '.join(missing)}")
 
@@ -749,7 +763,12 @@ def _validate_receipts(
         details = receipt.get("details")
         if not isinstance(details, Mapping):
             raise EvidenceError(f"{kind} receipt details are invalid")
-        _validate_details(kind, details, candidate=candidate)
+        _validate_details(
+            kind,
+            details,
+            candidate=candidate,
+            hardware_profile=hardware_profile,
+        )
         _assert_no_secret(receipt)
     notarization_details_value = by_kind["notarization"].get("details")
     stapling_details_value = by_kind["stapling"].get("details")
@@ -796,7 +815,7 @@ def _validate_channel_metadata(
     appcast_record: Mapping[str, object],
 ) -> None:
     path = _record_at_root(record, root=root)
-    channel = load_json_object(path, label="JR Bar update channel metadata")
+    channel = load_json_object(path, label="JR-Bar update channel metadata")
     if channel.get("document") != "jr-bar-update-channel":
         raise EvidenceError("update channel metadata document type is invalid")
     if channel.get("schema_version") != 1:
@@ -831,6 +850,7 @@ def build_manifest(
     sbom: Path,
     performance_evidence: Path,
     artifacts: Sequence[Path],
+    hardware_profile: str = "software",
     generated_at: str | None = None,
 ) -> dict[str, object]:
     release_root = root.resolve(strict=True)
@@ -881,11 +901,13 @@ def build_manifest(
         sbom_sha256=str(sbom_record["sha256"]),
         performance_sha256=str(performance_record["sha256"]),
         appcast_sha256=str(appcast_record["sha256"]),
+        hardware_profile=hardware_profile,
     )
     document = {
         "document": DOCUMENT_NAME,
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at or _utc_now(),
+        "hardware_profile": hardware_profile,
         "candidate": dict(candidate),
         "sbom": sbom_record,
         "performance_evidence": performance_record,
@@ -939,6 +961,15 @@ def _run_receipt_command(args: argparse.Namespace) -> int:
     details: dict[str, object] = {}
     if args.kind == "pkg-signature":
         details.update(installer_signature_details(complete_output))
+    elif args.kind == "hardware-smoke":
+        try:
+            require_index = command.index("--require")
+            hardware_profile = command[require_index + 1]
+        except (ValueError, IndexError) as exc:
+            raise EvidenceError("hardware-smoke command has no hardware profile") from exc
+        if hardware_profile not in HARDWARE_PROFILES - {"software"}:
+            raise EvidenceError("hardware-smoke command has an invalid hardware profile")
+        details["hardware_profile"] = hardware_profile
     candidate_app = candidate.get("app")
     candidate_archive = candidate.get("update_archive")
     if not isinstance(candidate_app, Mapping) or not isinstance(candidate_archive, Mapping):

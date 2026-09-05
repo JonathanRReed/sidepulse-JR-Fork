@@ -153,10 +153,12 @@ def _glance_title(inputs: MenuProjectionInputs) -> str:
         if inputs.ready_count > 0:
             return f"{inputs.ready_count} ready for review"
         return "No agents active"
-    parts = [f"{inputs.active_count} active"]
+    parts = []
     if inputs.needs_you_count:
         count = inputs.needs_you_count
         parts.append(f"{count} {'needs' if count == 1 else 'need'} you")
+    if inputs.active_count:
+        parts.append(f"{inputs.active_count} active")
     if inputs.ready_count:
         parts.append(f"{inputs.ready_count} ready")
     return " · ".join(parts)
@@ -312,14 +314,13 @@ def project_root_menu(inputs: MenuProjectionInputs) -> RootMenuProjection:
             "devices",
             # One semantic row for the whole physical concern: devices,
             # the Screen Bar, brightness, keep-awake, calibration, timer.
-            f"Hardware · {inputs.connected_device_count} connected",
+            (
+                f"Hardware · {inputs.connected_device_count} connected · "
+                f"Screen Bar {'on' if inputs.screen_bar_enabled else 'off'}"
+                if inputs.connected_device_count
+                else f"Hardware · Screen Bar {'on' if inputs.screen_bar_enabled else 'off'}"
+            ),
             MenuRowKind.SUBMENU,
-        ),
-        MenuRow(
-            "screen_bar",
-            "Screen Bar",
-            MenuRowKind.TOGGLE,
-            action="toggleVirtualDevice:",
         ),
     ]
     rows.extend(_warning_rows(inputs.warning_rows))
@@ -337,10 +338,14 @@ def project_root_menu(inputs: MenuProjectionInputs) -> RootMenuProjection:
         )
     rows.extend(
         (
-            MenuRow("settings", "Settings…", MenuRowKind.ACTION, action="openSettings:"),
             MenuRow(
                 "dnd",
                 _dnd_title(inputs),
+                MenuRowKind.SUBMENU,
+            ),
+            MenuRow(
+                "quick_settings",
+                "Quick Settings",
                 MenuRowKind.SUBMENU,
             ),
         )

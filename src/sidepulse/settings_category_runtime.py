@@ -1,13 +1,6 @@
-"""AppKit host for the seven-category Settings information architecture.
-
-This module composes the retained, tested pane builders inside stable category
-containers.  It does not duplicate their controls or add another window or
-Objective-C controller class.
-"""
+"""AppKit host for the consolidated Settings categories."""
 
 from __future__ import annotations
-
-from typing import Literal, NamedTuple
 
 from AppKit import (
     NSLayoutConstraint,
@@ -18,163 +11,30 @@ from AppKit import (
 
 from . import settings_navigation as navigation
 from .product_identity import PRODUCT_DISPLAY_NAME
-
-_BRACKET_STYLE_CHOICES = ("auto", "spatial", "identity", "bracket")
-
-MAX_PROVIDER_PROFILE_SETTINGS_ROWS = 128
-
-# This composition facade deliberately declares no classes. Functional named
-# tuples keep the render boundary immutable and typed without becoming another
-# controller or weakening the existing no-class architecture ratchet.
-ProviderProfileSettingsChoice = NamedTuple(  # noqa: UP014
-    "ProviderProfileSettingsChoice",
-    [("value", str | int | None), ("label", str)],
+from .provider_profile_settings import (
+    MAX_PROVIDER_PROFILE_SETTINGS_ROWS,
+    ProviderInstanceProfileSettingsModel,
+    ProviderInstanceProfileSettingsRow,
+    ProviderProfileSettingsChoice,
+    ProviderProfileSettingsField,
+    build_provider_instance_profile_settings_model,
+    provider_instance_profile_settings_row,
 )
-ProviderProfileSettingsField = NamedTuple(  # noqa: UP014
-    "ProviderProfileSettingsField",
-    [
-        (
-            "key",
-            Literal[
-                "label",
-                "color_override",
-                "retention_days",
-                "remote_sharing_choice",
-                "open_session_action",
-            ],
-        ),
-        ("label", str),
-        ("control_kind", Literal["text", "color", "choice"]),
-        ("value", str | int | None),
-        ("options", tuple[ProviderProfileSettingsChoice, ...]),
-        ("help_text", str),
-    ],
+from .provider_profile_settings import (
+    safe_provider_instance_control_id as _safe_provider_instance_control_id,
 )
-ProviderInstanceProfileSettingsRow = NamedTuple(  # noqa: UP014
-    "ProviderInstanceProfileSettingsRow",
-    [
-        ("provider_id", str),
-        ("source_instance_id", str),
-        ("heading", str),
-        ("fields", tuple[ProviderProfileSettingsField, ...]),
-    ],
+from .provider_profile_settings import (
+    safe_provider_instance_label as _safe_provider_instance_label,
 )
-ProviderInstanceProfileSettingsModel = NamedTuple(  # noqa: UP014
-    "ProviderInstanceProfileSettingsModel",
-    [("rows", tuple[ProviderInstanceProfileSettingsRow, ...])],
+from .provider_reset_settings_pane import (
+    ProviderResetChannel,
+    ProviderResetSettingsModel,
+    ProviderResetSettingsRow,
+    build_provider_reset_settings_model,
+    render_provider_reset_settings,
+    sync_provider_reset_checkboxes,
 )
-
-_RETENTION_SETTINGS_CHOICES = (
-    ProviderProfileSettingsChoice(0, "Don't keep history"),
-    ProviderProfileSettingsChoice(7, "7 days"),
-    ProviderProfileSettingsChoice(30, "30 days"),
-    ProviderProfileSettingsChoice(90, "90 days"),
-)
-_REMOTE_SHARING_SETTINGS_CHOICES = (
-    ProviderProfileSettingsChoice("never", "This Mac only"),
-    ProviderProfileSettingsChoice("status_only", "Quota status only"),
-)
-_OPEN_SESSION_SETTINGS_CHOICES = (
-    ProviderProfileSettingsChoice("app", "Provider app"),
-    ProviderProfileSettingsChoice("terminal", "Terminal"),
-    ProviderProfileSettingsChoice("vscode", "Visual Studio Code"),
-)
-
-
-def build_provider_instance_profile_settings_model(
-    policies,
-) -> ProviderInstanceProfileSettingsModel:
-    """Build the privacy-safe, AppKit-independent instance settings model."""
-    from .provider_feature_settings import ProviderInstancePolicyProjection
-
-    if type(policies) is not ProviderInstancePolicyProjection:
-        raise TypeError("expected ProviderInstancePolicyProjection")
-    visual_items = policies.visual.providers
-    if len(visual_items) > MAX_PROVIDER_PROFILE_SETTINGS_ROWS:
-        raise ValueError("too many provider profiles for Settings")
-    identities = {item.identity for item in visual_items}
-    if any(
-        {item.identity for item in projection.providers} != identities
-        for projection in (
-            policies.retention,
-            policies.sharing,
-            policies.session_action,
-        )
-    ):
-        raise ValueError("profile policy domains must contain the same exact provider instances")
-
-    rows = []
-    for visual in visual_items:
-        provider_id, source_instance_id = visual.identity
-        retention = policies.retention.provider(provider_id, source_instance_id)
-        sharing = policies.sharing.provider(provider_id, source_instance_id)
-        session_action = policies.session_action.provider(provider_id, source_instance_id)
-        rows.append(
-            ProviderInstanceProfileSettingsRow(
-                provider_id,
-                source_instance_id,
-                visual.label,
-                (
-                    ProviderProfileSettingsField(
-                        "label",
-                        "Name",
-                        "text",
-                        visual.label,
-                        (),
-                        "A local name for this exact provider account or profile.",
-                    ),
-                    ProviderProfileSettingsField(
-                        "color_override",
-                        "Accent",
-                        "color",
-                        visual.color_override,
-                        (),
-                        "Use a custom accent, or keep the provider's default color.",
-                    ),
-                    ProviderProfileSettingsField(
-                        "retention_days",
-                        "Usage history",
-                        "choice",
-                        retention.retention_days,
-                        _RETENTION_SETTINGS_CHOICES,
-                        "Choose how long this Mac keeps percentage history for this instance.",
-                    ),
-                    ProviderProfileSettingsField(
-                        "remote_sharing_choice",
-                        "Remote sharing",
-                        "choice",
-                        sharing.remote_sharing_choice,
-                        _REMOTE_SHARING_SETTINGS_CHOICES,
-                        "Choose whether other configured Macs can receive quota status.",
-                    ),
-                    ProviderProfileSettingsField(
-                        "open_session_action",
-                        "Open session with",
-                        "choice",
-                        session_action.open_session_action,
-                        _OPEN_SESSION_SETTINGS_CHOICES,
-                        "Choose how JR Bar opens work from this exact instance.",
-                    ),
-                ),
-            )
-        )
-    return ProviderInstanceProfileSettingsModel(tuple(rows))
-
-
-def provider_instance_profile_settings_row(
-    model: ProviderInstanceProfileSettingsModel,
-    provider_id: str,
-    source_instance_id: str = "default",
-) -> ProviderInstanceProfileSettingsRow:
-    """Return one exact row, never a provider-level fallback."""
-    if type(model) is not ProviderInstanceProfileSettingsModel:
-        raise TypeError("expected ProviderInstanceProfileSettingsModel")
-    return next(
-        row
-        for row in model.rows
-        if (row.provider_id, row.source_instance_id)
-        == (provider_id, source_instance_id)
-    )
+from .settings_installation import install_settings_navigation
 
 
 def _provider_profile_control_payload(row, field, value):
@@ -212,13 +72,19 @@ def _provider_profile_control(target, row, field, ui):
             if option.value == field.value:
                 control.selectItem_(item)
     control.setIdentifier_(
-        f"provider-profile:{row.provider_id}:{row.source_instance_id}:{field.key}"
+        _safe_provider_instance_control_id(
+            row.provider_id,
+            row.source_instance_id,
+            field.key,
+        )
     )
     control.setRepresentedObject_(payload)
     return control
 
 
-def _render_provider_instance_profile_cards(target, stack, model, ui) -> None:
+def _render_provider_instance_profile_cards(
+    target, stack, model, ui, *, privacy_mode: bool = False
+) -> None:
     from .provider_usage_platform import provider_descriptor
 
     cards = {}
@@ -229,25 +95,21 @@ def _render_provider_instance_profile_cards(target, stack, model, ui) -> None:
         outer.setAccessibilityElement_(True)
         ui.set_accessibility_metadata(
             outer,
-            label=(
-                f"{row.heading} provider profile, "
-                f"{descriptor.label}, {row.source_instance_id}"
-            ),
-            help_text=(
-                "Settings for the exact "
-                f"{descriptor.label} source {row.source_instance_id}."
-            ),
+            label=f"{row.heading} provider profile, {descriptor.label}",
+            help_text=f"Settings for this exact {descriptor.label} account.",
             role="AXGroup",
         )
         inner.addArrangedSubview_(
             ui.make_label(
-                f"{descriptor.label} · {row.source_instance_id}",
+                descriptor.label,
                 secondary=True,
                 size=11.0,
             )
         )
         for field in row.fields:
             control = _provider_profile_control(target, row, field, ui)
+            if field.key == "label":
+                control.setEnabled_(not privacy_mode)
             control_row = ui.make_row(
                 field.label,
                 control,
@@ -266,7 +128,9 @@ def _render_provider_instance_profile_cards(target, stack, model, ui) -> None:
     target._sidepulse_provider_profile_settings_controls = controls
 
 
-def _sync_provider_instance_profile_settings(target, settings) -> None:
+def _sync_provider_instance_profile_settings(
+    target, settings, *, force: bool = False
+) -> None:
     """Refresh cached profile cards from one committed durable snapshot."""
     from .provider_feature_settings import project_instance_policies
     from .provider_usage_platform import provider_descriptor
@@ -275,9 +139,19 @@ def _sync_provider_instance_profile_settings(target, settings) -> None:
     if type(settings) is not ProviderUsageSettings:
         raise TypeError("expected ProviderUsageSettings")
     model = build_provider_instance_profile_settings_model(
-        project_instance_policies(settings)
+        project_instance_policies(settings),
+        privacy_mode=settings.menu_display.privacy_mode,
     )
+    privacy_mode = settings.menu_display.privacy_mode
+    if (
+        not force
+        and model == getattr(target, "_sidepulse_provider_profile_settings_model", None)
+        and privacy_mode
+        == getattr(target, "_sidepulse_provider_profile_settings_privacy_mode", None)
+    ):
+        return
     target._sidepulse_provider_profile_settings_model = model
+    target._sidepulse_provider_profile_settings_privacy_mode = privacy_mode
     cards = getattr(target, "_sidepulse_provider_profile_settings_cards", {})
     controls = getattr(target, "_sidepulse_provider_profile_settings_controls", {})
     for row in model.rows:
@@ -289,8 +163,7 @@ def _sync_provider_instance_profile_settings(target, settings) -> None:
                 arranged[0].setStringValue_(row.heading)
             descriptor = provider_descriptor(row.provider_id)
             card.setAccessibilityLabel_(
-                f"{row.heading} provider profile, "
-                f"{descriptor.label}, {row.source_instance_id}"
+                f"{row.heading} provider profile, {descriptor.label}"
             )
         for field in row.fields:
             control = controls.get((*identity, field.key))
@@ -299,10 +172,16 @@ def _sync_provider_instance_profile_settings(target, settings) -> None:
             payload = _provider_profile_control_payload(row, field, field.value)
             control.setRepresentedObject_(payload)
             control.setAccessibilityLabel_(f"{row.heading}, {field.label}")
+            active_editor = control.currentEditor() if field.key == "label" else None
+            if field.key == "label":
+                control.setEnabled_(not settings.menu_display.privacy_mode)
             if field.control_kind in {"text", "color"}:
                 control.setStringValue_(
                     "" if field.value is None else str(field.value)
                 )
+                if field.key == "label" and settings.menu_display.privacy_mode:
+                    if active_editor is not None:
+                        active_editor.setString_(str(field.value))
                 continue
             for index in range(control.numberOfItems()):
                 item = control.itemAtIndex_(index)
@@ -338,7 +217,7 @@ def save_provider_instance_profile_setting(
             None,
         )
         try:
-            _sync_provider_instance_profile_settings(target, committed)
+            _sync_provider_instance_profile_settings(target, committed, force=True)
         except (TypeError, ValueError, StopIteration) as restore_exc:
             log(f"provider profile settings restore: {restore_exc}")
         message = getattr(target, "set_settings_message", None)
@@ -346,7 +225,7 @@ def save_provider_instance_profile_setting(
             message(f"Could not save provider profile: {exc}")
         return False
 
-    _sync_provider_instance_profile_settings(target, updated)
+    _sync_provider_instance_profile_settings(target, updated, force=True)
     message = getattr(target, "set_settings_message", None)
     if callable(message):
         message("Provider profile saved.")
@@ -354,28 +233,6 @@ def save_provider_instance_profile_setting(
     if window is not None:
         window.refresh(target.provider_usage_state)
     return True
-
-
-def install_settings_navigation(legacy, settings_window) -> None:
-    """Make both halves of the extracted Settings implementation agree."""
-    items = navigation.sidebar_items()
-    icons = navigation.sidebar_icons()
-    legacy.SETTINGS_SIDEBAR_ITEMS = items
-    legacy.DEFAULT_SETTINGS_PANE = navigation.SETTINGS_CATEGORIES[0].key
-    legacy.SIDEBAR_ICONS = {**getattr(legacy, "SIDEBAR_ICONS", {}), **icons}
-    # build_settings_window lives in the extracted module and captured its own
-    # globals when `_install` ran, so patch its copy as well.
-    settings_window.DEFAULT_SETTINGS_PANE = navigation.SETTINGS_CATEGORIES[0].key
-
-    # The explicit geometry style is a fourth option, separate from color
-    # projection. Patch every module copy before settings are loaded so a saved
-    # `bracket` value survives validation and round-trips normally.
-    from . import _settings_legacy, settings
-
-    _settings_legacy.BRACKET_STYLE_CHOICES = _BRACKET_STYLE_CHOICES
-    settings.BRACKET_STYLE_CHOICES = _BRACKET_STYLE_CHOICES
-    settings_window.BRACKET_STYLE_CHOICES = _BRACKET_STYLE_CHOICES
-    legacy.BRACKET_STYLE_CHOICES = _BRACKET_STYLE_CHOICES
 
 
 def _ensure_storage(target) -> None:
@@ -443,7 +300,7 @@ def _native_usage_pane(target):
     from .provider_usage_platform import provider_descriptor
     from .provider_usage_settings import (
         ProviderUsageSettings,
-        load_provider_usage_settings,
+        default_provider_usage_settings,
     )
 
     usage_settings = getattr(
@@ -452,15 +309,22 @@ def _native_usage_pane(target):
         None,
     )
     if type(usage_settings) is not ProviderUsageSettings:
-        usage_settings = load_provider_usage_settings().settings
+        # Settings construction is a paint path. The provider worker replaces
+        # this immutable default with its cached snapshot asynchronously; opening
+        # the window never reads provider, browser, or integration files.
+        usage_settings = default_provider_usage_settings()
         target._sidepulse_provider_usage_settings_snapshot = usage_settings
     target._sidepulse_provider_presentation_settings = (
         project_presentation_settings(usage_settings)
     )
     profile_settings_model = build_provider_instance_profile_settings_model(
-        project_instance_policies(usage_settings)
+        project_instance_policies(usage_settings),
+        privacy_mode=usage_settings.menu_display.privacy_mode,
     )
     target._sidepulse_provider_profile_settings_model = profile_settings_model
+    target._sidepulse_provider_profile_settings_privacy_mode = (
+        usage_settings.menu_display.privacy_mode
+    )
     display_outer, display_inner = ui.make_card("In the Usage Menu")
     display_inner.addArrangedSubview_(
         ui.make_wrapping_label(
@@ -478,6 +342,7 @@ def _native_usage_pane(target):
         ("show_cost", "Estimated cost"),
         ("show_detail_lanes", "Model-scoped lanes (e.g. “Fable only”)"),
         ("show_menu_bar_percent", "Tightest limit next to the menu-bar icon"),
+        ("privacy_mode", "Privacy mode (hide account names and email addresses)"),
     ):
         box = ui.make_checkbox(label, target, "toggleUsageMenuElement:")
         box.setIdentifier_(flag)
@@ -502,11 +367,23 @@ def _native_usage_pane(target):
         provider_counts[preference.provider_id] = (
             provider_counts.get(preference.provider_id, 0) + 1
         )
+    provider_ordinals = {}
     for preference in usage_settings.providers:
+        provider_ordinals[preference.provider_id] = (
+            provider_ordinals.get(preference.provider_id, 0) + 1
+        )
         provider_label = provider_descriptor(preference.provider_id).label
         if provider_counts[preference.provider_id] > 1:
-            provider_label = (
-                f"{provider_label} · {preference.source_instance_id}"
+            provider_label = _safe_provider_instance_label(
+                preference.provider_id,
+                preference.source_instance_id,
+                preference.label,
+                privacy_mode=usage_settings.menu_display.privacy_mode,
+                account_number=(
+                    provider_ordinals[preference.provider_id]
+                    if usage_settings.menu_display.privacy_mode
+                    else None
+                ),
             )
         box = ui.make_checkbox(
             provider_label,
@@ -525,17 +402,21 @@ def _native_usage_pane(target):
         provider_boxes.append(box)
     stack.addArrangedSubview_(providers_outer)
 
+    reset_boxes = render_provider_reset_settings(target, stack, usage_settings, ui)
+
     _render_provider_instance_profile_cards(
         target,
         stack,
         profile_settings_model,
         ui,
+        privacy_mode=usage_settings.menu_display.privacy_mode,
     )
 
     # The pane is cached across reopens. Keeping the box references lets
     # refresh_native_usage_summary apply worker-observed external changes
     # without touching disk on the AppKit path.
     target._sidepulse_usage_menu_boxes = (tuple(element_boxes), tuple(provider_boxes))
+    target._sidepulse_provider_reset_boxes = tuple(reset_boxes)
 
     return ui.wrap_in_scroll_pane(stack), {
         "native_usage_summary": summary,
@@ -564,6 +445,7 @@ def _sync_usage_menu_checkboxes(target) -> None:
     if not boxes:
         return
     try:
+        from .provider_usage_platform import provider_descriptor
         from .provider_usage_settings import ProviderUsageSettings
 
         settings = getattr(
@@ -581,6 +463,12 @@ def _sync_usage_menu_checkboxes(target) -> None:
             preference.identity: preference.menu_visible
             for preference in settings.providers
         }
+        provider_counts: dict[str, int] = {}
+        for preference in settings.providers:
+            provider_counts[preference.provider_id] = (
+                provider_counts.get(preference.provider_id, 0) + 1
+            )
+        provider_ordinals: dict[str, int] = {}
         for box in provider_boxes:
             represented = getattr(box, "representedObject", None)
             payload = represented() if callable(represented) else None
@@ -595,6 +483,25 @@ def _sync_usage_menu_checkboxes(target) -> None:
             box.setState_(
                 1 if visible.get(identity, True) else 0
             )
+            preference = settings.preference(*identity)
+            provider_id, source_instance_id = identity
+            provider_ordinals[provider_id] = provider_ordinals.get(provider_id, 0) + 1
+            label = provider_descriptor(provider_id).label
+            if provider_counts.get(provider_id, 0) > 1:
+                label = _safe_provider_instance_label(
+                    provider_id,
+                    source_instance_id,
+                    preference.label,
+                    privacy_mode=settings.menu_display.privacy_mode,
+                    account_number=(
+                        provider_ordinals[provider_id]
+                        if settings.menu_display.privacy_mode
+                        else None
+                    ),
+                )
+            box.setTitle_(label)
+        _sync_provider_instance_profile_settings(target, settings)
+        sync_provider_reset_checkboxes(target, settings)
     except Exception:
         return
 
@@ -602,23 +509,13 @@ def _sync_usage_menu_checkboxes(target) -> None:
 def _build_child(target, page_key: str):
     if page_key == navigation.NATIVE_USAGE_PAGE:
         return _native_usage_pane(target)
+    if page_key == navigation.NATIVE_EFFECT_STUDIO_PAGE:
+        from .lighting_settings_pane import build_effects_page
+
+        return build_effects_page(target)
     from . import settings_window
 
     return settings_window._build_settings_pane(target, page_key)
-
-
-def _install_explicit_bracket_style(target) -> None:
-    popup = getattr(target, "settings_fields", {}).get("bracket_style_popup")
-    if popup is None:
-        return
-    for index in range(popup.numberOfItems()):
-        if popup.itemAtIndex_(index).representedObject() == "bracket":
-            return
-    popup.addItemWithTitle_("Rounded band with corner brackets")
-    item = popup.lastItem()
-    item.setRepresentedObject_("bracket")
-    if target.settings.screen_bar_bracket_style == "bracket":
-        popup.selectItem_(item)
 
 
 def _after_child_built(target, page_key: str) -> None:
@@ -634,7 +531,13 @@ def _after_child_built(target, page_key: str) -> None:
     elif page_key == "capacity":
         target.refresh_capacity_settings_projection()
     elif page_key == "colors_screen_bar":
-        _install_explicit_bracket_style(target)
+        from .lighting_settings_pane import install_explicit_bracket_style
+
+        install_explicit_bracket_style(target)
+    elif page_key == navigation.NATIVE_EFFECT_STUDIO_PAGE:
+        from .lighting_settings_pane import refresh_brightness_behavior_controls
+
+        refresh_brightness_behavior_controls(target)
     elif page_key == navigation.NATIVE_USAGE_PAGE:
         refresh_native_usage_summary(target)
 
@@ -798,7 +701,11 @@ __all__ = [
     "ProviderInstanceProfileSettingsRow",
     "ProviderProfileSettingsChoice",
     "ProviderProfileSettingsField",
+    "ProviderResetChannel",
+    "ProviderResetSettingsModel",
+    "ProviderResetSettingsRow",
     "build_provider_instance_profile_settings_model",
+    "build_provider_reset_settings_model",
     "ensure_category",
     "install_settings_navigation",
     "provider_instance_profile_settings_row",

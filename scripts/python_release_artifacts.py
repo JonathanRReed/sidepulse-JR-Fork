@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build exact JR Bar wheel and source-distribution release assets."""
+"""Build exact JR-Bar wheel and source-distribution release assets."""
 
 from __future__ import annotations
 

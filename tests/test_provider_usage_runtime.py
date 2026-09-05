@@ -68,6 +68,214 @@ def snapshot(provider, *, state=ProviderSourceState.READY, remaining=50, observe
     )
 
 
+def test_refresh_attaches_only_a_confirmed_provider_incident(tmp_path):
+    settings = default_provider_usage_settings()
+    lookups: list[tuple[str, float]] = []
+
+    def incident_lookup(provider_id: str, observed_at: float) -> str | None:
+        lookups.append((provider_id, observed_at))
+        return "OpenAI: Elevated API errors" if provider_id == "codex" else None
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={
+            "codex": lambda _pref, _home, observed, _credentials: snapshot(
+                "codex", observed=observed
+            )
+        },
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: 1000.0,
+        incident_lookup=incident_lookup,
+    )
+
+    result = service.refresh_now(providers=("codex",)).by_provider("codex")
+
+    assert result.incident == "OpenAI: Elevated API errors"
+    assert lookups == [("codex", 1000.0)]
+
+
+def test_default_incident_lookup_starts_only_the_requested_provider(monkeypatch):
+    from sidepulse.provider_usage_runtime import _default_incident_lookup
+
+    starts: list[tuple[str, ...]] = []
+
+    class Poller:
+        def start(self, *, provider_ids):
+            starts.append(provider_ids)
+
+        def incident_for(self, provider_id, *, now):
+            assert provider_id == "codex"
+            assert now == 1000.0
+            return None
+
+    monkeypatch.setattr(
+        "sidepulse.status_feeds.shared_status_feed_poller", lambda: Poller()
+    )
+
+    assert _default_incident_lookup("codex", 1000.0) is None
+    assert starts == [("codex",)]
+
+
+def test_incident_lookup_is_deduplicated_across_provider_instances(tmp_path):
+    settings = default_provider_usage_settings()
+    settings = settings.with_instance(
+        dataclass_replace(settings.preference("claude"), source_instance_id="work")
+    )
+    lookups: list[tuple[str, float]] = []
+
+    def incident_lookup(provider_id: str, observed_at: float) -> str | None:
+        lookups.append((provider_id, observed_at))
+        return "Anthropic: API errors"
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={
+            "claude": lambda preference, _home, observed, _credentials: dataclass_replace(
+                snapshot("claude", observed=observed),
+                source_instance_id=preference.source_instance_id,
+            )
+        },
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: 1000.0,
+        incident_lookup=incident_lookup,
+    )
+
+    result = service.refresh_now(providers=("claude",), force=True)
+
+    assert lookups == [("claude", 1000.0)]
+    assert {item.incident for item in result.snapshots} == {"Anthropic: API errors"}
+
+
+def test_disabled_provider_performs_no_incident_lookup(tmp_path):
+    settings = default_provider_usage_settings().with_enabled("grok", False)
+
+    def forbidden(*_args):
+        raise AssertionError("disabled provider performed incident lookup")
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={"grok": forbidden},
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: 1000.0,
+        incident_lookup=forbidden,
+    )
+
+    result = service.refresh_now(providers=("grok",), force=True)
+
+    assert result.by_provider("grok").state is ProviderSourceState.DISABLED
+
+
+def test_attempted_collector_failure_still_gets_incident_context(tmp_path):
+    settings = default_provider_usage_settings()
+
+    def broken(*_args):
+        raise RuntimeError("usage endpoint failed")
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={"codex": broken},
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: 1000.0,
+        incident_lookup=lambda _provider, _observed: "OpenAI: API errors",
+    )
+
+    result = service.refresh_now(providers=("codex",), force=True)
+
+    assert result.by_provider("codex").state is ProviderSourceState.ERROR
+    assert result.by_provider("codex").incident == "OpenAI: API errors"
+
+
+def test_partial_refresh_preserves_untouched_provider_incident(tmp_path):
+    settings = default_provider_usage_settings()
+    decisions = {
+        "codex": "OpenAI: first incident",
+        "claude": "Anthropic: preserved incident",
+    }
+    lookups: list[str] = []
+
+    def incident_lookup(provider_id: str, _observed_at: float) -> str | None:
+        lookups.append(provider_id)
+        return decisions.get(provider_id)
+
+    collectors = {
+        provider_id: (
+            lambda selected: lambda _pref, _home, observed, _credentials: snapshot(
+                selected, observed=observed
+            )
+        )(provider_id)
+        for provider_id in ("codex", "claude")
+    }
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors=collectors,
+        credentials=object(),
+        home=tmp_path,
+        clock=iter((1000.0, 1100.0)).__next__,
+        incident_lookup=incident_lookup,
+    )
+    service.refresh_now(providers=("codex", "claude"), force=True)
+    lookups.clear()
+    decisions["codex"] = None
+
+    result = service.refresh_now(providers=("codex",), force=True)
+
+    assert lookups == ["codex"]
+    assert result.by_provider("codex").incident is None
+    assert result.by_provider("claude").incident == "Anthropic: preserved incident"
+
+
+def test_superseded_incident_lookup_cannot_publish(tmp_path):
+    settings = default_provider_usage_settings()
+    first_lookup_started = threading.Event()
+    release_first_lookup = threading.Event()
+    lookup_calls = 0
+    lookup_lock = threading.Lock()
+    superseded = threading.Event()
+
+    def incident_lookup(_provider_id: str, _observed_at: float) -> str | None:
+        nonlocal lookup_calls
+        with lookup_lock:
+            lookup_calls += 1
+            call = lookup_calls
+        if call == 1:
+            first_lookup_started.set()
+            assert release_first_lookup.wait(3.0)
+            return "OpenAI: stale incident"
+        return "OpenAI: current incident"
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={
+            "codex": lambda _pref, _home, observed, _credentials: snapshot(
+                "codex", observed=observed
+            )
+        },
+        credentials=object(),
+        home=tmp_path,
+        clock=time.time,
+        incident_lookup=incident_lookup,
+        receipt_handler=lambda receipt: (
+            superseded.set()
+            if receipt.outcome is RefreshPublicationOutcome.SUPERSEDED
+            else None
+        ),
+    )
+    service.request(callback=lambda _state: None, providers=("codex",), force=True)
+    assert first_lookup_started.wait(1.0)
+
+    current = service.refresh_now(providers=("codex",), force=True)
+    release_first_lookup.set()
+    assert superseded.wait(2.0)
+
+    assert current.by_provider("codex").incident == "OpenAI: current incident"
+    assert service.snapshot().by_provider("codex").incident == "OpenAI: current incident"
+    service.close()
+
+
 def test_refresh_preserves_registry_order_and_disabled_state(tmp_path):
     settings = default_provider_usage_settings().with_enabled("grok", False)
     collectors = {
@@ -93,6 +301,32 @@ def test_refresh_preserves_registry_order_and_disabled_state(tmp_path):
     )
     assert state.by_provider("grok").state is ProviderSourceState.DISABLED
     assert state.refreshing is False
+
+
+def test_disabled_provider_skips_collector_and_credential_filesystem_probe(
+    tmp_path,
+    monkeypatch,
+):
+    settings = default_provider_usage_settings().with_enabled("grok", False)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("disabled provider performed I/O")
+
+    monkeypatch.setattr(
+        "sidepulse.provider_usage_runtime.credential_fingerprint",
+        forbidden,
+    )
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={"grok": forbidden},
+        credentials=object(),
+        home=tmp_path,
+        clock=lambda: 1000.0,
+    )
+
+    result = service.refresh_now(providers=("grok",), force=True)
+
+    assert result.by_provider("grok").state is ProviderSourceState.DISABLED
 
 
 def test_last_known_good_is_retained_when_refresh_fails(tmp_path):
@@ -235,7 +469,10 @@ def test_request_runs_off_caller_thread_and_coalesces(tmp_path):
     assert third.refreshing is True
     gate.set()
     assert callbacks_ready.wait(3)
-    assert len(collector_threads) == 2
+    # The replacement always owns publication. If the obsolete worker has
+    # not entered its collector yet, the generation fence cancels that read;
+    # otherwise both collectors drain and only the replacement publishes.
+    assert 1 <= len(collector_threads) <= 2
     assert all(
         name != threading.current_thread().name for name in collector_threads
     )
@@ -243,6 +480,168 @@ def test_request_runs_off_caller_thread_and_coalesces(tmp_path):
     assert all(name != threading.current_thread().name for name in callback_threads)
     assert callbacks and callbacks[0].refreshing is False
     service.close()
+
+
+def test_replacement_refresh_publishes_first_and_older_generation_cannot_publish(tmp_path):
+    settings = default_provider_usage_settings()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    replacement_done = threading.Event()
+    calls_lock = threading.Lock()
+    calls = 0
+    callbacks = []
+    superseded = threading.Event()
+
+    def record_receipt(receipt):
+        if receipt.outcome is RefreshPublicationOutcome.SUPERSEDED:
+            superseded.set()
+
+    def collect(_pref, _home, observed, _credentials):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call = calls
+        if call == 1:
+            first_started.set()
+            assert release_first.wait(3.0)
+            return snapshot("codex", remaining=10, observed=observed)
+        if call == 2:
+            return snapshot("codex", remaining=80, observed=observed)
+        return snapshot(
+            "codex",
+            state=ProviderSourceState.UNAVAILABLE,
+            observed=observed,
+        )
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={"codex": collect},
+        credentials=object(),
+        home=tmp_path,
+        clock=time.time,
+        receipt_handler=record_receipt,
+    )
+
+    service.request(
+        callback=lambda state: callbacks.append(state),
+        providers=("codex",),
+        force=True,
+    )
+    assert first_started.wait(1.0)
+    service.request(
+        callback=lambda state: (callbacks.append(state), replacement_done.set()),
+        providers=("codex",),
+        force=True,
+    )
+
+    assert replacement_done.wait(1.0), "replacement waited for the obsolete refresh"
+    assert service.snapshot().by_provider("codex").lanes[0].remaining_percent == 80
+    release_first.set()
+    assert superseded.wait(2.0)
+
+    assert service.snapshot().by_provider("codex").lanes[0].remaining_percent == 80
+    assert all(
+        state.by_provider("codex").lanes[0].remaining_percent == 80
+        for state in callbacks
+    )
+    assert superseded.is_set()
+    failed = service.refresh_now(providers=("codex",), force=True)
+    assert failed.by_provider("codex").state is ProviderSourceState.STALE
+    assert failed.by_provider("codex").lanes[0].remaining_percent == 80
+    service.close()
+
+
+def test_refresh_now_replaces_async_work_and_delivers_its_pending_callback(tmp_path):
+    settings = default_provider_usage_settings()
+    async_started = threading.Event()
+    release_async = threading.Event()
+    callback_done = threading.Event()
+    calls_lock = threading.Lock()
+    calls = 0
+    callbacks = []
+
+    def collect(_pref, _home, observed, _credentials):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call = calls
+        if call == 1:
+            async_started.set()
+            assert release_async.wait(3.0)
+            return snapshot("codex", remaining=10, observed=observed)
+        return snapshot("codex", remaining=80, observed=observed)
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={"codex": collect},
+        credentials=object(),
+        home=tmp_path,
+        clock=time.time,
+    )
+    caller_thread = threading.current_thread()
+    service.request(
+        callback=lambda state: (
+            callbacks.append((threading.current_thread(), state)),
+            callback_done.set(),
+        ),
+        providers=("codex",),
+        force=True,
+    )
+    assert async_started.wait(1.0)
+
+    replacement = service.refresh_now(providers=("codex",), force=True)
+
+    assert replacement.by_provider("codex").lanes[0].remaining_percent == 80
+    assert callback_done.wait(1.0), "superseded async callback was leaked"
+    assert len(callbacks) == 1
+    callback_thread, callback_state = callbacks[0]
+    assert callback_thread is not caller_thread
+    assert callback_state.by_provider("codex").lanes[0].remaining_percent == 80
+    with service._lock:
+        assert service._callbacks == []
+
+    release_async.set()
+    service.close()
+
+
+def test_close_refuses_late_publication_and_callback(tmp_path):
+    settings = default_provider_usage_settings()
+    started = threading.Event()
+    release = threading.Event()
+    refused = threading.Event()
+    callbacks = []
+
+    def collect(_pref, _home, observed, _credentials):
+        started.set()
+        assert release.wait(3.0)
+        return snapshot("codex", remaining=15, observed=observed)
+
+    service = ProviderUsageService(
+        settings_loader=lambda: settings,
+        collectors={"codex": collect},
+        credentials=object(),
+        home=tmp_path,
+        clock=time.time,
+        receipt_handler=lambda receipt: (
+            refused.set()
+            if receipt.outcome is RefreshPublicationOutcome.REFUSED
+            else None
+        ),
+    )
+    initial = service.snapshot()
+    service.request(
+        callback=callbacks.append,
+        providers=("codex",),
+        force=True,
+    )
+    assert started.wait(1.0)
+
+    service.close()
+    release.set()
+    assert refused.wait(2.0)
+
+    assert callbacks == []
+    assert service.snapshot().snapshots == initial.snapshots
 
 
 def test_request_uses_the_service_clock_for_refresh_gating(tmp_path):
@@ -606,9 +1005,6 @@ def test_forced_request_during_callback_delivery_is_not_swallowed(tmp_path):
     assert second_round.wait(3), "the mid-delivery forced request was swallowed"
     assert len(collects) == 2
     assert [name for name, _s in states] == ["first", "second"]
-    with service._lock:
-        assert service._rerun_requested is False
-        assert not service._forced_providers
     service.close()
 
 

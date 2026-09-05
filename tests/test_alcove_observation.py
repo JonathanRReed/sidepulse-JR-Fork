@@ -53,6 +53,12 @@ def test_alcove_silhouette_is_frozen_and_rejects_unsafe_boundary_values() -> Non
         (AlcoveCaptureStatus.CAPTURED, 0.0, 0.0, AlcoveConfidenceState.FRESH),
         (AlcoveCaptureStatus.CAPTURED, 0.0, 2.01, AlcoveConfidenceState.STALE),
         (AlcoveCaptureStatus.IMAGE_UNUSABLE, 0.0, None, AlcoveConfidenceState.UNSUPPORTED),
+        (
+            AlcoveCaptureStatus.CAPTURE_API_UNAVAILABLE,
+            0.0,
+            None,
+            AlcoveConfidenceState.UNSUPPORTED,
+        ),
         (AlcoveCaptureStatus.CAPTURE_FAILED, 0.0, None, AlcoveConfidenceState.RECOVERING),
     ],
 )

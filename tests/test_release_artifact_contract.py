@@ -20,7 +20,7 @@ def test_pkg_is_the_only_authoritative_macos_release_artifact() -> None:
 
     assert document == {
         "schema_version": 3,
-        "product_display_name": "JR Bar",
+        "product_display_name": "JR-Bar",
         "compatibility_app_bundle": "SidePulse.app",
         "authoritative_macos_artifact": {
             "kind": "pkg",

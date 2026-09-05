@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare the pinned Sparkle distribution for JR Bar packaging."""
+"""Prepare the pinned Sparkle distribution for JR-Bar packaging."""
 
 from __future__ import annotations
 

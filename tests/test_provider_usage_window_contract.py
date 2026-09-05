@@ -77,6 +77,7 @@ def _controller_for_refresh(module, *, wall_clock, monotonic_clock):
     controller._message = ""
     controller._message_until = 0.0
     controller._refresh_timer = None
+    controller._privacy_mode = False
     controller.action_target = None
     return controller
 
@@ -178,6 +179,38 @@ def test_usage_window_accepts_injected_wall_and_monotonic_clocks(
     assert parameters["monotonic_clock"].default is time.monotonic
 
 
+def test_usage_window_accepts_explicit_privacy_mode(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = _load_controller_module(monkeypatch)
+    parameters = inspect.signature(module.ProviderUsageWindowController).parameters
+
+    assert parameters["privacy_mode"].default is False
+
+
+def test_usage_window_privacy_mode_can_follow_live_settings(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = _load_controller_module(monkeypatch)
+    controller = _controller_for_refresh(
+        module,
+        wall_clock=lambda: 500.0,
+        monotonic_clock=lambda: 100.0,
+    )
+
+    from sidepulse.provider_usage_runtime import ProviderUsageState
+
+    state = ProviderUsageState((), None, None, False)
+    controller._last_state = state
+    refreshes = []
+    monkeypatch.setattr(controller, "refresh", refreshes.append)
+
+    controller.set_privacy_mode(True)
+
+    assert controller._privacy_mode is True
+    assert refreshes == [state]
+
+
 def test_usage_window_projection_uses_injected_wall_clock(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -195,7 +228,7 @@ def test_usage_window_projection_uses_injected_wall_clock(
     monkeypatch.setattr(
         module,
         "project_usage_center",
-        lambda _state, *, now, merged_sync, visual: (
+        lambda _state, *, now, merged_sync, visual, privacy_mode: (
             projection_calls.append(now)
             or SimpleNamespace(subtitle="subtitle", aggregate_metrics=(), sections=())
         ),
@@ -231,7 +264,7 @@ def test_usage_window_message_expires_at_exact_monotonic_deadline(
     monkeypatch.setattr(
         module,
         "project_usage_center",
-        lambda _state, *, now, merged_sync, visual: SimpleNamespace(
+        lambda _state, *, now, merged_sync, visual, privacy_mode: SimpleNamespace(
             subtitle="subtitle", aggregate_metrics=(), sections=()
         ),
     )
@@ -296,7 +329,7 @@ def test_usage_window_passes_only_the_privacy_safe_visual_projection(
     monkeypatch.setattr(
         module,
         "project_usage_center",
-        lambda _state, *, now, merged_sync, visual: (
+        lambda _state, *, now, merged_sync, visual, privacy_mode: (
             received.append(visual)
             or SimpleNamespace(subtitle="subtitle", aggregate_metrics=(), sections=())
         ),
@@ -306,6 +339,42 @@ def test_usage_window_passes_only_the_privacy_safe_visual_projection(
     controller.refresh(ProviderUsageState((), None, None, False))
 
     assert received == [visual]
+
+
+def test_usage_window_passes_privacy_mode_to_safe_identity_projection(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = _load_controller_module(monkeypatch)
+    from sidepulse.provider_usage_runtime import ProviderUsageState
+
+    controller = _controller_for_refresh(
+        module,
+        wall_clock=lambda: 500.0,
+        monotonic_clock=lambda: 100.0,
+    )
+    controller._privacy_mode = True
+    received: list[bool] = []
+    monkeypatch.setattr(module, "cached_merged_sync", lambda _state: None)
+    monkeypatch.setattr(
+        module,
+        "project_usage_center",
+        lambda _state, *, now, merged_sync, visual, privacy_mode: (
+            received.append(privacy_mode)
+            or SimpleNamespace(subtitle="subtitle", aggregate_metrics=(), sections=())
+        ),
+    )
+    monkeypatch.setattr(module, "_label", lambda text, **_kwargs: text)
+
+    controller.refresh(ProviderUsageState((), None, None, False))
+
+    assert received == [True]
+
+
+def test_usage_window_never_reprocesses_safe_projected_account_labels():
+    source = MODULE.read_text(encoding="utf-8")
+
+    assert "def _account_display(" not in source
+    assert "_label(section.account" in source
 
 
 def test_usage_window_meter_prefers_exact_profile_color(

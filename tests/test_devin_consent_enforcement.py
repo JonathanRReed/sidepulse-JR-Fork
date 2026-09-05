@@ -71,6 +71,77 @@ def test_browser_sources_setting_alone_never_invokes_a_browser_reader(monkeypatc
     assert calls == [], "organization remains required, but no browser was read"
 
 
+def test_explicit_import_never_falls_back_to_a_broad_browser_scan(monkeypatch):
+    from sidepulse import browser_session_import, provider_browser_access
+    from sidepulse.provider_browser_consent import LoadedBrowserConsents
+
+    monkeypatch.setattr(
+        provider_browser_access,
+        "load_provider_usage_settings",
+        lambda: (_ for _ in ()).throw(AssertionError("no session should be saved")),
+    )
+    monkeypatch.setattr(
+        "sidepulse.provider_browser_consent.load_browser_consents",
+        lambda: LoadedBrowserConsents(
+            BrowserConsentStore.empty(), read_only=False, unknown_fields=()
+        ),
+    )
+    monkeypatch.setattr(
+        browser_session_import,
+        "import_devin_session_from_profile",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("missing consent must fail before filesystem access")
+        ),
+    )
+    broad_reads = []
+    monkeypatch.setattr(
+        browser_session_import,
+        "import_devin_session",
+        lambda *_args, **_kwargs: broad_reads.append(True),
+    )
+
+    assert provider_browser_access._import_browser_session("devin") is None
+    assert broad_reads == []
+
+
+def test_unauthorized_background_repair_requires_exact_persisted_consent(monkeypatch):
+    from sidepulse import browser_session_import
+    from sidepulse import provider_usage_collectors as collectors
+    from sidepulse.provider_browser_consent import LoadedBrowserConsents
+
+    monkeypatch.setattr(
+        "sidepulse.provider_browser_consent.load_browser_consents",
+        lambda: LoadedBrowserConsents(
+            BrowserConsentStore.empty(), read_only=False, unknown_fields=()
+        ),
+    )
+    monkeypatch.setattr(
+        browser_session_import,
+        "import_devin_session_from_profile",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("missing consent must fail before filesystem access")
+        ),
+    )
+    broad_reads = []
+    monkeypatch.setattr(
+        browser_session_import,
+        "import_devin_session",
+        lambda *_args, **_kwargs: broad_reads.append(True),
+    )
+
+    result = collectors.collect_devin(
+        _preference().with_option("organization", "org/acme"),
+        observed_at=1000.0,
+        credentials=Credentials("stale-devin-token"),
+        http_json=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            collectors.ProviderHttpError(401, "unauthorized")
+        ),
+    )
+
+    assert result.state.value == "needs_sign_in"
+    assert broad_reads == []
+
+
 def test_consent_resolver_fails_closed_before_reading_for_missing_or_wrong_scope(
     tmp_path: Path,
 ):

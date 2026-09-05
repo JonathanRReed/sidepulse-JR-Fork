@@ -278,7 +278,7 @@ def test_one_bad_persisted_entry_does_not_discard_a_valid_known_binding() -> Non
     [
         (GlobalActionBindingState.UNASSIGNED, "Not set"),
         (GlobalActionBindingState.ACTIVE, "⌃K"),
-        (GlobalActionBindingState.LOCAL_CONFLICT, "Already used by JR Bar"),
+        (GlobalActionBindingState.LOCAL_CONFLICT, "Already used by JR-Bar"),
         (GlobalActionBindingState.UNSUPPORTED, "Shortcut not supported"),
         (
             GlobalActionBindingState.REGISTRATION_REFUSED,

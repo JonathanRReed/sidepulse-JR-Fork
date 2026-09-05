@@ -1,11 +1,22 @@
 # Changelog
 
-All notable changes to the JR fork are documented here.
+All notable changes to JR-Bar are documented here.
 
 ## Unreleased
 
 ## 0.6.0
 
+- JR-Bar now presents provider attention, activity, authoritative quota limits,
+  account aliases, privacy-safe menu rows, reset delivery receipts, and local
+  usage heatmaps through one command-center model. T3 Code and Agent Deck
+  compatibility are read-only. Creator Micro 2 output uses an approved-device
+  identity boundary and yields device ownership to Agent Deck when configured.
+  Provider exhaustion can release a stale keep-awake claim without pretending
+  that the agent process stopped.
+- Screen Bar glow layers now use native Core Graphics gradients instead of
+  hundreds of Python-to-Quartz rectangle fills per frame. Continuous ambient
+  sampling uses the same bounded cadence as the display surface while finite
+  alerts keep their responsive cadence.
 - macOS packaging now delegates PKG assembly to an executable, testable
   standard-library seam with fixed production tool paths, explicit missing-tool
   failures, signed and unsigned command coverage, and clear certificate-error
@@ -87,7 +98,7 @@ All notable changes to the JR fork are documented here.
 
 ## 0.5.0 — Coalescence
 
-The name is **JR Bar** now (display-name-first; bundle ids stay `io.sidepulse`). Fully divergent from upstream by decision, not drift.
+The name is **JR-Bar** now (display-name-first; bundle ids stay `io.sidepulse`). Fully divergent from upstream by decision, not drift.
 
 ### One system, ~12,000 fewer lines
 

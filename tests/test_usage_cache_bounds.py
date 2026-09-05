@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 from pathlib import Path
 
@@ -314,3 +315,115 @@ def test_a_remembered_empty_entry_is_served_from_cache(tmp_path: Path) -> None:
     assert second.source_coverage["claude"].cache_hits == 2, (
         "the out-of-window file was re-read instead of served from cache"
     )
+
+
+def test_year_of_positive_files_does_not_repeat_reads_past_the_view_cache_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = time.time()
+    root = tmp_path / "projects"
+    paths = []
+    for index in range(6):
+        paths.append(_write_transcript(
+            root, f"session-{index}.jsonl",
+            [_claude_line(f"s{index}", f"m{index}-{n}", now - (n + 1) * DAY) for n in range(40)],
+        ))
+    cache = tmp_path / "usage-scan-cache.json"
+    monkeypatch.setattr(usage_stats, "USAGE_CACHE_MAX_BYTES", 4_000)
+    cold = _scan(root, cache, since_epoch=now - 365 * DAY)
+    assert len(cold.records) == 240
+    reads = []
+    original = usage_stats._read_verified_prefix
+
+    def observed(path, info, resume_offset=0):
+        reads.append((path, resume_offset, info.st_size))
+        return original(path, info, resume_offset)
+
+    monkeypatch.setattr(usage_stats, "_read_verified_prefix", observed)
+    warm = _scan(root, cache, since_epoch=now - 365 * DAY)
+    assert warm.records == cold.records
+    assert reads == [], "unchanged positive files must survive the view-cache byte limit"
+    assert warm.source_coverage["claude"].cache_hits == 6
+
+    changed = paths[0]
+    offset = changed.stat().st_size
+    with changed.open("a", encoding="utf-8") as handle:
+        handle.write(_claude_line("s0", "appended", now - 1) + "\n")
+    updated = _scan(root, cache, since_epoch=now - 365 * DAY)
+    assert len(updated.records) == 241
+    assert reads == [(changed, offset, changed.stat().st_size)]
+
+
+def test_changing_date_ranges_reuses_the_full_file_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = time.time()
+    root = tmp_path / "projects"
+    _write_transcript(root, "session.jsonl", [
+        _claude_line("s1", "fresh", now - DAY),
+        _claude_line("s1", "old", now - 200 * DAY),
+    ])
+    cache = tmp_path / "usage-scan-cache.json"
+    assert len(_scan(root, cache, since_epoch=now - 7 * DAY).records) == 1
+
+    def unexpected_read(*_args, **_kwargs):
+        pytest.fail("changing the chart range re-opened an already indexed transcript")
+
+    monkeypatch.setattr(usage_stats, "_read_verified_prefix", unexpected_read)
+    assert len(_scan(root, cache, since_epoch=now - 365 * DAY).records) == 2
+
+
+def test_warm_index_validates_metadata_without_opening_unchanged_transcripts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = time.time()
+    root = tmp_path / "projects"
+    transcript = _write_transcript(root, "session.jsonl", [_claude_line("s1", "m1", now - DAY)])
+    cache = tmp_path / "usage-scan-cache.json"
+    cold = _scan(root, cache, since_epoch=0.0)
+    transcript_opens = []
+    original = os.open
+
+    def observed(path, flags, *args, **kwargs):
+        if Path(path) == transcript:
+            transcript_opens.append(path)
+        return original(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", observed)
+    warm = _scan(root, cache, since_epoch=0.0)
+    assert warm.records == cold.records
+    assert warm.source_coverage["claude"].cache_hits == 1
+    assert transcript_opens == [], "metadata-only cache hits must not reopen source files"
+
+
+@pytest.mark.parametrize("corruption", ["records", "negative-index", "negative-tokens", "timestamp", "tables"])
+def test_invalid_index_document_cannot_replace_source_usage(tmp_path: Path, corruption: str) -> None:
+    now = time.time()
+    root = tmp_path / "projects"
+    _write_transcript(root, "session.jsonl", [_claude_line("s1", "m1", now - DAY)])
+    cache = tmp_path / "usage-scan-cache.json"
+    _scan(root, cache, since_epoch=0.0)
+    # Remove the legacy fallback so an invalid index must be reparsed.
+    cache.write_text("{}", encoding="utf-8")
+    connection = sqlite3.connect(cache.with_suffix(".files.sqlite3"))
+    try:
+        key, text = connection.execute("SELECT file_key, document FROM files").fetchone()
+        document = json.loads(text)
+        if corruption == "records":
+            document["entry"]["records"] = None
+        elif corruption == "negative-index":
+            document["entry"]["records"][0][1] = -1
+        elif corruption == "negative-tokens":
+            document["entry"]["records"][0][4] = -1
+        elif corruption == "timestamp":
+            document["entry"]["records"][0][3] = float("nan")
+        else:
+            document["sessions"] = {}
+        connection.execute("UPDATE files SET document = ? WHERE file_key = ?", (json.dumps(document), key))
+        connection.commit()
+    finally:
+        connection.close()
+    recovered = _scan(root, cache, since_epoch=0.0)
+    assert recovered.input_tokens == 10
+    assert recovered.output_tokens == 5
+    assert recovered.source_coverage["claude"].files_read == 1

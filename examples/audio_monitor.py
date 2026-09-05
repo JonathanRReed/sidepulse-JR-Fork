@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 REPO_SRC = Path(__file__).resolve().parents[1] / "src"
 if REPO_SRC.exists():
     sys.path.insert(0, str(REPO_SRC))
@@ -21,7 +20,6 @@ from sidepulse.device_writer import (  # noqa: E402
     write_led_program,
 )
 from sidepulse.led_status import apply_brightness, led_count_for_target  # noqa: E402
-
 
 DEFAULT_FPS = 25.0
 DEFAULT_IDLE_BRIGHTNESS = 0.08

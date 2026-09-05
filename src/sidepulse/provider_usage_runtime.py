@@ -52,6 +52,18 @@ _TRANSIENT_FAILURE_STATES = frozenset(
 )
 
 Collector = Callable[[object, Path, float, object], ProviderUsageSnapshot]
+IncidentLookup = Callable[[str, float], str | None]
+
+
+def _default_incident_lookup(provider_id: str, observed_at: float) -> str | None:
+    from .status_feeds import shared_status_feed_poller
+
+    poller = shared_status_feed_poller()
+    poller.start(provider_ids=(provider_id,))
+    incident = poller.incident_for(provider_id, now=observed_at)
+    if incident is None:
+        return None
+    return f"{incident.vendor}: {incident.description}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,8 +225,8 @@ def _default_collectors() -> dict[str, Collector]:
         collect_cursor,
         collect_devin,
         collect_grok,
-        collect_opencode,
         collect_openai_api,
+        collect_opencode,
     )
 
     return {
@@ -309,6 +321,7 @@ class ProviderUsageService:
         state_loader: Callable[[], ProviderUsageState] | None = None,
         state_saver: Callable[[ProviderUsageState], object] | None = None,
         receipt_handler: Callable[[RefreshPublicationReceipt], object] | None = None,
+        incident_lookup: IncidentLookup = _default_incident_lookup,
     ) -> None:
         self._settings_loader = settings_loader
         self._credentials = credentials
@@ -319,6 +332,7 @@ class ProviderUsageService:
         if receipt_handler is not None and not callable(receipt_handler):
             raise ValueError("invalid refresh receipt handler")
         self._receipt_handler = receipt_handler
+        self._incident_lookup = incident_lookup
         self._lock = threading.RLock()
         self._closed = False
         self._settings_snapshot: ProviderUsageSettings | None = None
@@ -337,20 +351,19 @@ class ProviderUsageService:
             if snapshot.state in {ProviderSourceState.READY, ProviderSourceState.STALE}
         }
         self._state = loaded_state
-        self._callbacks: list[Callable[[ProviderUsageState], None]] = []
+        self._callbacks: list[
+            tuple[int, Callable[[ProviderUsageState], None]]
+        ] = []
         self._worker: threading.Thread | None = None
+        self._workers: set[threading.Thread] = set()
+        self._refresh_generation = 0
         # Per-provider retry gates (see provider_reconnect): terminal
         # auth failures wait for the credential source to change,
         # transient failures ride an exponential ladder. In-memory only
         # -- a relaunch deliberately retries everything once.
         self._failure_gates: dict[tuple[str, str], FailureGate] = {}
-        # Providers the NEXT worker run must collect even through a
-        # gate, because a person just clicked something.
-        self._forced_providers: set[str] = set()
-        self._rerun_requested = False
         self._refresh_receipts: deque[RefreshPublicationReceipt] = deque(maxlen=32)
         self._refresh_sequence = 0
-        self._last_publication_outcome: RefreshPublicationOutcome | None = None
         self._last_publication_revision: int | None = None
         #: When the owner last opened the menu -- the cadence ladder's
         #: only attention signal. None means 'not since launch'.
@@ -426,7 +439,6 @@ class ProviderUsageService:
                 error_code,
             )
             self._refresh_receipts.append(receipt)
-            self._last_publication_outcome = outcome
             handler = self._receipt_handler
         if handler is not None:
             try:
@@ -474,7 +486,8 @@ class ProviderUsageService:
         *,
         providers: tuple[ProviderRefreshScope, ...] | None,
         force: bool = False,
-    ) -> ProviderUsageState:
+        generation: int | None = None,
+    ) -> tuple[ProviderUsageState, RefreshPublicationOutcome]:
         observed_at = float(self._clock())
         settings, settings_revision = self._settings_with_revision()
         collection_settings = project_collection_settings(settings)
@@ -486,11 +499,20 @@ class ProviderUsageService:
             item for item in selected or ()
             if isinstance(item, tuple) and len(item) == 2
         )
+        with self._lock:
+            previous_state = self._state
+            last_known_good = dict(self._last_known_good)
+            failure_gates = dict(self._failure_gates)
         previous_by_provider = {
-            snapshot.identity: snapshot for snapshot in self.snapshot().snapshots
+            snapshot.identity: snapshot for snapshot in previous_state.snapshots
         }
         snapshots: list[ProviderUsageSnapshot] = []
+        refreshed_provider_ids: set[str] = set()
         for preference in collection_settings.providers:
+            if generation is not None:
+                with self._lock:
+                    if self._closed or generation != self._refresh_generation:
+                        break
             provider_id = preference.provider_id
             identity = preference.identity
             if selected is not None and (
@@ -505,7 +527,7 @@ class ProviderUsageService:
                 # A disabled provider's old failure gate must not
                 # outlive the disable: re-enabling should probe fresh,
                 # not serve the pre-disable failure for up to an hour.
-                self._failure_gates.pop(identity, None)
+                failure_gates.pop(identity, None)
                 snapshots.append(
                     _empty_snapshot(
                         provider_id,
@@ -528,7 +550,7 @@ class ProviderUsageService:
                     )
                 )
                 continue
-            gate = self._failure_gates.get(identity, FailureGate())
+            gate = failure_gates.get(identity, FailureGate())
             fingerprint = credential_fingerprint(self._home, provider_id)
             previous = previous_by_provider.get(identity)
             if previous is not None and not should_collect(
@@ -560,6 +582,7 @@ class ProviderUsageService:
                     )
                 except Exception:
                     pass
+            refreshed_provider_ids.add(provider_id)
             try:
                 candidate = collector(
                     preference,
@@ -590,22 +613,22 @@ class ProviderUsageService:
                     source_instance_id=preference.source_instance_id,
                 )
             if candidate.state in _TERMINAL_FAILURE_STATES:
-                self._failure_gates[identity] = note_failure(
+                failure_gates[identity] = note_failure(
                     gate,
                     now=observed_at,
                     terminal=True,
                     fingerprint=fingerprint,
                 )
             elif candidate.state in _TRANSIENT_FAILURE_STATES:
-                self._failure_gates[identity] = note_failure(
+                failure_gates[identity] = note_failure(
                     gate,
                     now=observed_at,
                     terminal=False,
                     fingerprint=None,
                 )
             else:
-                self._failure_gates.pop(identity, None)
-            previous_good = self._last_known_good.get(identity)
+                failure_gates.pop(identity, None)
+            previous_good = last_known_good.get(identity)
             if (
                 candidate.state is ProviderSourceState.READY
                 and not candidate.lanes
@@ -627,7 +650,7 @@ class ProviderUsageService:
                     )
                 )
             elif candidate.state is ProviderSourceState.READY:
-                self._last_known_good[identity] = candidate
+                last_known_good[identity] = candidate
                 snapshots.append(candidate)
             elif candidate.state is ProviderSourceState.STALE and candidate.lanes:
                 # A stale-but-real reading is NEWER information than the
@@ -645,7 +668,24 @@ class ProviderUsageService:
                 )
             else:
                 snapshots.append(candidate)
-        ordered = tuple(snapshots)
+        incident_decisions: dict[str, str | None] = {}
+        for provider_id in sorted(refreshed_provider_ids):
+            try:
+                incident_decisions[provider_id] = self._incident_lookup(
+                    provider_id, observed_at
+                )
+            except Exception:
+                incident_decisions[provider_id] = None
+        incident_snapshots = [
+            replace(
+                snapshot,
+                incident=incident_decisions[snapshot.provider_id],
+            )
+            if snapshot.provider_id in incident_decisions
+            else snapshot
+            for snapshot in snapshots
+        ]
+        ordered = tuple(incident_snapshots)
         cadence_plan = plan_adaptive_refresh_cadence(
             ordered,
             observed_at=observed_at,
@@ -671,11 +711,19 @@ class ProviderUsageService:
             if self._closed:
                 publication_outcome = RefreshPublicationOutcome.REFUSED
                 result = self._state
+            elif (
+                generation is not None
+                and generation != self._refresh_generation
+            ):
+                publication_outcome = RefreshPublicationOutcome.SUPERSEDED
+                result = self._state
             elif settings_revision != self._settings_revision:
                 publication_outcome = RefreshPublicationOutcome.SUPERSEDED
                 result = self._state
             else:
                 self._state = state
+                self._last_known_good = last_known_good
+                self._failure_gates = failure_gates
                 self._last_cadence_plan = cadence_plan
                 self._last_publication_revision = settings_revision
                 result = state
@@ -691,7 +739,7 @@ class ProviderUsageService:
             settings_revision,
             error_code=publication_error,
         )
-        return result
+        return result, publication_outcome
 
     def refresh_now(
         self,
@@ -708,7 +756,90 @@ class ProviderUsageService:
                     self._settings_revision,
                 )
                 return self._state
-        return self._run_refresh(providers=providers, force=force)
+            self._refresh_generation += 1
+            generation = self._refresh_generation
+            self._callbacks = [
+                (generation, callback)
+                for _old_generation, callback in self._callbacks
+            ]
+        state, _outcome = self._run_refresh(
+            providers=providers,
+            force=force,
+            generation=generation,
+        )
+        if _outcome is RefreshPublicationOutcome.ACCEPTED:
+            with self._lock:
+                self._start_callback_delivery_locked(generation, state)
+        return state
+
+    def _start_callback_delivery_locked(
+        self,
+        generation: int,
+        state: ProviderUsageState,
+    ) -> None:
+        if not any(
+            callback_generation == generation
+            for callback_generation, _callback in self._callbacks
+        ):
+            return
+        threading.Thread(
+            target=self._deliver_callbacks,
+            args=(generation, state),
+            name=f"SidePulseProviderUsageCallback-{generation}",
+            daemon=True,
+        ).start()
+
+    def _deliver_callbacks(
+        self,
+        generation: int,
+        state: ProviderUsageState,
+    ) -> None:
+        with self._lock:
+            if self._closed or generation != self._refresh_generation:
+                return
+            callbacks = tuple(
+                callback
+                for callback_generation, callback in self._callbacks
+                if callback_generation == generation
+            )
+            self._callbacks = [
+                item for item in self._callbacks if item[0] != generation
+            ]
+        for callback in callbacks:
+            with self._lock:
+                if self._closed or generation != self._refresh_generation:
+                    return
+                try:
+                    callback(state)
+                except Exception:
+                    continue
+
+    def _start_worker_locked(
+        self,
+        *,
+        generation: int,
+        providers: tuple[ProviderRefreshScope, ...] | None,
+        force: bool,
+    ) -> None:
+        worker = threading.Thread(
+            target=self._worker_main,
+            kwargs={
+                "generation": generation,
+                "providers": providers,
+                "force": force,
+            },
+            name=f"SidePulseProviderUsage-{generation}",
+            daemon=True,
+        )
+        self._worker = worker
+        self._workers.add(worker)
+        try:
+            worker.start()
+        except Exception:
+            self._workers.discard(worker)
+            if self._worker is worker:
+                self._worker = None
+            raise
 
     def request(
         self,
@@ -733,63 +864,62 @@ class ProviderUsageService:
                 and now < self._state.next_refresh_at
             ):
                 return self._state
-            self._callbacks.append(callback)
-            if self._worker is not None and self._worker.is_alive():
-                if force:
-                    # A person clicked while a background run was in
-                    # flight. That run already read the OLD credential;
-                    # piggybacking on it is how "Reconnect" used to
-                    # report stale results as fresh ones. Run once more
-                    # after it finishes.
-                    self._rerun_requested = True
-                    if providers is not None:
-                        self._forced_providers.update(providers)
+            active = any(worker.is_alive() for worker in self._workers)
+            if active and not force:
+                self._callbacks.append((self._refresh_generation, callback))
                 return self._state
+            self._refresh_generation += 1
+            generation = self._refresh_generation
+            # A forced request replaces every undelivered request. Move
+            # their callbacks to the new generation so nobody observes the
+            # obsolete result that happened to start first.
+            self._callbacks = [
+                (generation, pending_callback)
+                for _old_generation, pending_callback in self._callbacks
+            ]
+            self._callbacks.append((generation, callback))
             self._state = replace(self._state, refreshing=True)
-            self._worker = threading.Thread(
-                target=self._worker_main,
-                kwargs={"providers": providers, "force": force},
-                name="SidePulseProviderUsage",
-                daemon=True,
+            self._start_worker_locked(
+                generation=generation,
+                providers=providers,
+                force=force,
             )
-            self._worker.start()
             return self._state
 
     def _worker_main(
         self,
         *,
+        generation: int,
         providers: tuple[ProviderRefreshScope, ...] | None,
         force: bool = False,
     ) -> None:
-        pending_providers = providers
-        pending_force = force
         while True:
-            state = self._run_refresh(
-                providers=pending_providers, force=pending_force
+            state, outcome = self._run_refresh(
+                providers=providers,
+                force=force,
+                generation=generation,
             )
             with self._lock:
-                if (
-                    self._rerun_requested
-                    or self._last_publication_outcome
-                    is RefreshPublicationOutcome.SUPERSEDED
-                    or (
-                        self._last_publication_outcome
-                        is RefreshPublicationOutcome.ACCEPTED
-                        and self._last_publication_revision
-                        != self._settings_revision
-                    )
-                ):
-                    pending_providers = (
-                        tuple(sorted(self._forced_providers, key=repr)) or None
-                    )
-                    if pending_providers is None:
-                        pending_providers = providers
-                    pending_force = True
-                    self._rerun_requested = False
-                    self._forced_providers.clear()
+                if self._closed or generation != self._refresh_generation:
+                    self._workers.discard(threading.current_thread())
+                    if self._worker is threading.current_thread():
+                        self._worker = None
+                    return
+                if outcome is RefreshPublicationOutcome.SUPERSEDED:
+                    # The settings revision changed during collection. This
+                    # generation remains current, so repeat it with the new
+                    # settings. A newer refresh generation takes the branch
+                    # above and retires this worker instead.
+                    force = True
                     continue
-                callbacks = tuple(self._callbacks)
-                self._callbacks.clear()
+                callbacks = tuple(
+                    callback
+                    for callback_generation, callback in self._callbacks
+                    if callback_generation == generation
+                )
+                self._callbacks = [
+                    item for item in self._callbacks if item[0] != generation
+                ]
                 publication_revision = self._last_publication_revision
                 # Retire the worker UNDER THE LOCK, in the same critical
                 # section as the final rerun check. The exit used to
@@ -798,7 +928,9 @@ class ProviderUsageService:
                 # on a thread that would never look at its flags again:
                 # the click was swallowed and the leaked flags fired a
                 # spurious forced run up to five minutes later.
-                self._worker = None
+                self._workers.discard(threading.current_thread())
+                if self._worker is threading.current_thread():
+                    self._worker = None
             superseded_callbacks = False
             for index, callback in enumerate(callbacks):
                 # Keep the revision check and callback invocation in one
@@ -807,10 +939,18 @@ class ProviderUsageService:
                 # or waits until the callback has begun and is ordered after
                 # the publication it observes.
                 with self._lock:
+                    if (
+                        self._closed
+                        or generation != self._refresh_generation
+                    ):
+                        return
                     if publication_revision != self._settings_revision:
-                        self._callbacks = list(callbacks[index:]) + self._callbacks
-                        self._rerun_requested = True
+                        self._callbacks = [
+                            (generation, pending_callback)
+                            for pending_callback in callbacks[index:]
+                        ] + self._callbacks
                         self._worker = threading.current_thread()
+                        self._workers.add(threading.current_thread())
                         superseded_callbacks = True
                         break
                     try:
@@ -818,17 +958,21 @@ class ProviderUsageService:
                     except Exception:
                         continue
             if superseded_callbacks:
-                pending_providers = providers
-                pending_force = True
+                force = True
                 continue
             break
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
-            worker = self._worker
-        if worker is not None and worker.is_alive():
-            worker.join(timeout=1.0)
+            self._refresh_generation += 1
+            self._callbacks.clear()
+            workers = tuple(self._workers)
+        deadline = time.monotonic() + 1.0
+        for worker in workers:
+            if worker is threading.current_thread():
+                continue
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
 __all__ = [

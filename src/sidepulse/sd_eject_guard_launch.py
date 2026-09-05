@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+import re
 import subprocess
 from dataclasses import dataclass
 from importlib.resources import as_file, files
@@ -17,6 +18,7 @@ SD_EJECT_GUARD_DISPLAY_NAME = "SidePulse Pro Eject Prevention"
 SD_EJECT_GUARD_BINARY_NAME = SD_EJECT_GUARD_DISPLAY_NAME
 SD_EJECT_GUARD_LEGACY_BINARY_NAMES = ("sd_eject_guard",)
 SD_EJECT_GUARD_SCOPES = ("auto", "system", "user")
+_VOLUME_UUID = re.compile(r"(?=.{4,64}\Z)[A-Fa-f0-9]+(?:-[A-Fa-f0-9]+)*\Z")
 
 SdEjectGuardScope = Literal["auto", "system", "user"]
 ResolvedSdEjectGuardScope = Literal["system", "user"]
@@ -76,6 +78,7 @@ def install_sd_eject_guard(
     scope: SdEjectGuardScope = "auto",
     dry_run: bool = False,
     start: bool = True,
+    volume_uuid: str | None = None,
     source_path: Path | None = None,
     user_paths: SdEjectGuardPaths | None = None,
     system_paths: SdEjectGuardPaths | None = None,
@@ -88,7 +91,8 @@ def install_sd_eject_guard(
         )
 
     paths = paths_for_scope(resolved_scope, user_paths=user_paths, system_paths=system_paths)
-    plist = build_sd_eject_guard_plist(paths)
+    selected_volume_uuid = validate_volume_uuid(volume_uuid)
+    plist = build_sd_eject_guard_plist(paths, volume_uuid=selected_volume_uuid)
     data = plistlib.dumps(plist, sort_keys=False)
     existing = paths.plist_path.read_bytes() if paths.plist_path.exists() else None
     plist_changed = existing != data
@@ -146,7 +150,7 @@ def install_sd_eject_guard(
             or (dry_run and needs_compile)
         ),
         compiled=compiled,
-        started=start and not dry_run,
+        started=bool(start and selected_volume_uuid is not None and not dry_run),
         dry_run=dry_run,
         cleanup_removed=cleanup_removed,
         cleanup_skipped=cleanup_skipped,
@@ -184,10 +188,14 @@ def ensure_sd_eject_guard_binary(
 def run_sd_eject_guard_interactive(
     *,
     scope: SdEjectGuardScope = "auto",
+    volume_uuid: str,
     source_path: Path | None = None,
     user_paths: SdEjectGuardPaths | None = None,
     system_paths: SdEjectGuardPaths | None = None,
 ) -> int:
+    selected_volume_uuid = validate_volume_uuid(volume_uuid)
+    if selected_volume_uuid is None:
+        raise SdEjectGuardInstallError("a selected SidePulse volume UUID is required")
     paths = ensure_sd_eject_guard_binary(
         scope=scope,
         source_path=source_path,
@@ -195,7 +203,10 @@ def run_sd_eject_guard_interactive(
         system_paths=system_paths,
     )
     try:
-        return subprocess.run([str(paths.binary_path)], check=False).returncode
+        return subprocess.run(
+            [str(paths.binary_path), "--volume-uuid", selected_volume_uuid],
+            check=False,
+        ).returncode
     except KeyboardInterrupt:
         return 130
 
@@ -412,12 +423,29 @@ def default_user_data_dir(home: Path | None = None) -> Path:
     return base / ".local" / "share"
 
 
-def build_sd_eject_guard_plist(paths: SdEjectGuardPaths) -> dict[str, Any]:
+def validate_volume_uuid(value: str | None) -> str | None:
+    if value is None:
+        return None
+    selected = value.strip()
+    if _VOLUME_UUID.fullmatch(selected) is None:
+        raise SdEjectGuardInstallError("invalid SidePulse volume UUID")
+    return selected.upper()
+
+
+def build_sd_eject_guard_plist(
+    paths: SdEjectGuardPaths,
+    *,
+    volume_uuid: str | None = None,
+) -> dict[str, Any]:
+    selected_volume_uuid = validate_volume_uuid(volume_uuid)
+    arguments = [str(paths.binary_path)]
+    if selected_volume_uuid is not None:
+        arguments.extend(("--volume-uuid", selected_volume_uuid))
     return {
         "Label": SD_EJECT_GUARD_LABEL,
-        "ProgramArguments": [str(paths.binary_path)],
-        "RunAtLoad": True,
-        "KeepAlive": True,
+        "ProgramArguments": arguments,
+        "RunAtLoad": selected_volume_uuid is not None,
+        "KeepAlive": selected_volume_uuid is not None,
         "StandardOutPath": str(paths.stdout_path),
         "StandardErrorPath": str(paths.stderr_path),
         "WorkingDirectory": "/",
@@ -501,10 +529,6 @@ def restart_sd_eject_guard(
     bootout_sd_eject_guard(plist_path, scope)
     launchctl = str(trusted_system_tool("launchctl"))
     subprocess.run([launchctl, "bootstrap", domain, str(plist_path)], check=True)
-    subprocess.run(
-        [launchctl, "kickstart", "-k", f"{domain}/{SD_EJECT_GUARD_LABEL}"],
-        check=False,
-    )
 
 
 def bootout_sd_eject_guard(

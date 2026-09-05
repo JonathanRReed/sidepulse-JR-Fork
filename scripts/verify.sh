@@ -104,7 +104,7 @@ if [ "$PORTABLE" -eq 1 ]; then
 elif [ "$(uname -s)" = "Darwin" ]; then
     "$PYTHON" -m pytest tests -q
 else
-    echo "Full JR Bar verification requires macOS and PyObjC." >&2
+    echo "Full JR-Bar verification requires macOS and PyObjC." >&2
     echo "Use --portable for the platform-neutral production gate." >&2
     exit 3
 fi
@@ -153,4 +153,4 @@ if [ "$(uname -s)" = "Darwin" ] && \
     BUILD_PYTHON="$PYTHON" "$ROOT_DIR/packaging/build_macos_pkg.sh"
 fi
 
-printf '%s\n' "JR Bar verification passed."
+printf '%s\n' "JR-Bar verification passed."

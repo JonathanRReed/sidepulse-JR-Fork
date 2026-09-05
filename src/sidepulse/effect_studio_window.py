@@ -847,7 +847,7 @@ class EffectStudioWindowController(NSObject):
 
     def _reload_pack_popup(self) -> None:
         self.pack_popup.removeAllItems()
-        self.pack_popup.addItemWithTitle_("Built-in JR Bar effects")
+        self.pack_popup.addItemWithTitle_("Built-in JR-Bar effects")
         self.pack_popup.addItemsWithTitles_(
             [pack.name for pack in self.catalog.packs]
         )

@@ -1,4 +1,4 @@
-"""Private-network, glance-only HTTP listener.
+"""Private-network, glance-only HTTPS listener.
 
 The general status server remains loopback-only. This listener is deliberately
 separate and exposes only the signed ``/glance.json`` projection on an
@@ -13,6 +13,7 @@ import ipaddress
 import re
 import secrets
 import socket
+import ssl
 import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,7 +27,9 @@ from .phone_glance import (
 from .product_identity import PRODUCT_DISPLAY_NAME
 
 GLANCE_DEFAULT_PORT = 8738
+_MAX_CONCURRENT_CONNECTIONS = 8
 _MAX_SECRET_BYTES = 4_096
+_MAX_ACCESS_TOKEN_BYTES = 4_096
 _MAX_SEQUENCE = (1 << 63) - 1
 _INSTANCE_ID = re.compile(r"[0-9a-f]{32}\Z")
 _SCOPE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}\Z")
@@ -84,6 +87,7 @@ class GlanceServerConfiguration:
     bind_address: str
     home: Path | None = None
     glance_secret: bytes = field(repr=False, default=b"")
+    access_token: bytes = field(repr=False, default=b"")
     glance_source_id: str = "sidepulse"
     glance_instance_id: str = field(default_factory=lambda: secrets.token_hex(16))
 
@@ -98,6 +102,14 @@ class GlanceServerConfiguration:
             or len(self.glance_secret) > _MAX_SECRET_BYTES
         ):
             raise ValueError("invalid glance secret")
+        if (
+            type(self.access_token) is not bytes
+            or not 24 <= len(self.access_token) <= _MAX_ACCESS_TOKEN_BYTES
+            or any(byte < 33 or byte > 126 for byte in self.access_token)
+        ):
+            raise ValueError("invalid glance access token")
+        if hmac.compare_digest(self.glance_secret, self.access_token):
+            raise ValueError("glance access token and signing secret must be distinct")
         PhoneGlancePolicy(self.glance_source_id)
         if (
             type(self.glance_instance_id) is not str
@@ -141,6 +153,9 @@ class _GlanceOnlyHandler(BaseHTTPRequestHandler):
         ):
             self._send_failure(503)
             return
+        if not self._authenticated(configuration.access_token):
+            self._send_authentication_required()
+            return
         next_sequence = sequence.next()
         if next_sequence is None:
             self._send_failure(503)
@@ -177,6 +192,23 @@ class _GlanceOnlyHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _authenticated(self, expected: bytes) -> bool:
+        supplied = self.headers.get("Authorization")
+        if not isinstance(supplied, str) or not supplied.startswith("Bearer "):
+            return False
+        try:
+            candidate = supplied[7:].encode("ascii")
+        except UnicodeEncodeError:
+            return False
+        return hmac.compare_digest(candidate, expected)
+
+    def _send_authentication_required(self) -> None:
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", "Bearer")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     do_HEAD = _send_not_found
     do_POST = _send_not_found
     do_PUT = _send_not_found
@@ -194,11 +226,76 @@ class _GlanceHTTPServer(ThreadingHTTPServer):
     def __init__(self, address, handler, configuration: GlanceServerConfiguration) -> None:
         self.glance_configuration = configuration
         self.glance_sequence = _GlanceSequence(start=0)
-        super().__init__(address, handler)
+        self._slots = threading.BoundedSemaphore(_MAX_CONCURRENT_CONNECTIONS)
+        super().__init__(address, handler, bind_and_activate=False)
+
+    def process_request(self, request, client_address) -> None:
+        # Admission precedes TLS and HTTP reads, including authentication.
+        if not self._slots.acquire(blocking=False):
+            try:
+                request.close()
+            except OSError:
+                pass
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            # Socket cleanup can run more than once after a dispatch error.
+            # Only the admitted worker owns this release.
+            self._slots.release()
+
+    def get_request(self):
+        connection, address = super().get_request()
+        # TLS handshakes run on the request thread, not the accept loop.
+        connection.settimeout(5.0)
+        return connection, address
+
+    def handle_error(self, request, client_address) -> None:
+        """Malformed or failed connections must not amplify request details into logs."""
 
 
 class _GlanceHTTPServerV6(_GlanceHTTPServer):
     address_family = socket.AF_INET6
+
+
+def _verify_tls_bind_identity(
+    context: ssl.SSLContext, certificate: Path, bind_address: str
+) -> None:
+    """Check the loaded identity against the IP without opening a socket.
+
+    The self-check trusts the supplied chain only in memory. Real clients still
+    need their own trusted CA. Scope IDs route IPv6, but are not part of an IP SAN.
+    """
+    verifier = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    verifier.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    verifier.load_verify_locations(cafile=certificate)
+    server_input, server_output = ssl.MemoryBIO(), ssl.MemoryBIO()
+    client_input, client_output = ssl.MemoryBIO(), ssl.MemoryBIO()
+    server = context.wrap_bio(server_input, server_output, server_side=True)
+    client = verifier.wrap_bio(
+        client_input, client_output, server_hostname=bind_address.split("%", 1)[0]
+    )
+    while True:
+        try:
+            client.do_handshake()
+            return
+        except ssl.SSLWantReadError:
+            server_input.write(client_output.read())
+        try:
+            server.do_handshake()
+        except ssl.SSLWantReadError:
+            pass
+        response = server_output.read()
+        if not response:
+            raise ValueError("TLS identity self-check made no progress")
+        client_input.write(response)
 
 
 def create_glance_server(
@@ -207,17 +304,40 @@ def create_glance_server(
     port: int = GLANCE_DEFAULT_PORT,
     home: Path | None = None,
     glance_secret: bytes,
+    access_token: bytes,
     glance_source_id: str = "sidepulse",
+    tls_cert: Path | None = None,
+    tls_key: Path | None = None,
 ) -> ThreadingHTTPServer:
-    """Create a glance-only listener after validating its exact bind address."""
+    """Require a usable TLS identity before binding the private listener."""
     configuration = GlanceServerConfiguration(
         bind_address=bind_address,
         home=home,
         glance_secret=glance_secret,
+        access_token=access_token,
         glance_source_id=glance_source_id,
     )
+    if tls_cert is None or tls_key is None:
+        raise ValueError("TLS certificate and private key are required")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    # An encrypted key must fail without an interactive password prompt.
+    context.load_cert_chain(tls_cert, tls_key, password="")
+    _verify_tls_bind_identity(context, tls_cert, configuration.bind_address)
     server_class = _GlanceHTTPServerV6 if ":" in configuration.bind_address else _GlanceHTTPServer
-    return server_class((configuration.bind_address, int(port)), _GlanceOnlyHandler, configuration)
+    server = server_class(
+        (configuration.bind_address, int(port)), _GlanceOnlyHandler, configuration
+    )
+    try:
+        server.socket = context.wrap_socket(
+            server.socket, server_side=True, do_handshake_on_connect=False
+        )
+        server.server_bind()
+        server.server_activate()
+    except BaseException:
+        server.server_close()
+        raise
+    return server
 
 
 def glance_serve(
@@ -225,17 +345,23 @@ def glance_serve(
     bind_address: str,
     port: int = GLANCE_DEFAULT_PORT,
     glance_secret: bytes,
+    access_token: bytes,
     glance_source_id: str = "sidepulse",
+    tls_cert: Path | None = None,
+    tls_key: Path | None = None,
 ) -> None:
     """Run the private glance listener until interrupted."""
     server = create_glance_server(
         bind_address=bind_address,
         port=port,
         glance_secret=glance_secret,
+        access_token=access_token,
         glance_source_id=glance_source_id,
+        tls_cert=tls_cert,
+        tls_key=tls_key,
     )
     display_host = f"[{bind_address}]" if ":" in bind_address else bind_address
-    print(f"sidepulse glance: http://{display_host}:{int(port)}/glance.json")
+    print(f"sidepulse glance: https://{display_host}:{int(port)}/glance.json")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

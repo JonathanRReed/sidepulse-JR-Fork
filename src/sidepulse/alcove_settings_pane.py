@@ -15,7 +15,7 @@ from .alcove_observation import AlcoveCaptureStatus, AlcoveConfidenceProjection
 
 ALCOVE_PERMISSION_BUTTON_LABEL = "Open Screen Recording Settings"
 ALCOVE_PERMISSION_BUTTON_HELP = (
-    "Grant Screen Recording access so JR Bar can follow Alcove's capsule."
+    "Grant Screen Recording access so JR-Bar can follow Alcove's capsule."
 )
 
 

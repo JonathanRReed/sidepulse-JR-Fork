@@ -1,7 +1,7 @@
 """Pure information architecture for SidePulse Settings.
 
 The retained AppKit panes are intentionally preserved, but they are no longer
-exposed as fifteen unrelated destinations.  This module owns the seven stable
+exposed as fifteen unrelated destinations.  This module owns the eight stable
 categories, their child pages, and every translation from a legacy pane key to
 the category a person sees.
 """
@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Final
 
 NATIVE_USAGE_PAGE: Final = "native_usage"
+NATIVE_EFFECT_STUDIO_PAGE: Final = "effect_studio"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +60,7 @@ SETTINGS_CATEGORIES: Final = (
         "Overview",
         "house",
         (SettingsPage("profile", "Overview"),),
-        "Identity, defaults, and this Mac at a glance.",
+        "Global shortcuts and app details.",
     ),
     SettingsCategory(
         "agents_providers",
@@ -77,6 +78,7 @@ SETTINGS_CATEGORIES: Final = (
         "gauge",
         (
             SettingsPage(NATIVE_USAGE_PAGE, "Usage Center"),
+            SettingsPage("usage_activity", "Activity"),
             SettingsPage("history", "History"),
             SettingsPage("capacity", "Capacity"),
         ),
@@ -95,13 +97,14 @@ SETTINGS_CATEGORIES: Final = (
     ),
     SettingsCategory(
         "appearance_motion",
-        "Appearance & Motion",
+        "Lighting",
         "paintpalette",
         (
-            SettingsPage("color_studio", "Studio"),
-            SettingsPage("animations", "Lid Animations"),
+            SettingsPage("color_studio", "Colors"),
+            SettingsPage(NATIVE_EFFECT_STUDIO_PAGE, "Effects"),
+            SettingsPage("animations", "Lid Programs"),
         ),
-        "One studio for color, animation, previews, and saved looks.",
+        "Colors, live effects, lid programs, previews, and saved looks.",
     ),
     SettingsCategory(
         "notifications_focus",
@@ -127,7 +130,7 @@ SETTINGS_CATEGORIES: Final = (
     ),
     SettingsCategory(
         "advanced_diagnostics",
-        "Advanced & Diagnostics",
+        "Advanced",
         "wrench.and.screwdriver",
         (SettingsPage("debug", "Diagnostics"),),
         "Diagnostics and recovery.",
@@ -177,6 +180,7 @@ def legacy_page_keys() -> tuple[str, ...]:
 
 
 __all__ = [
+    "NATIVE_EFFECT_STUDIO_PAGE",
     "NATIVE_USAGE_PAGE",
     "SETTINGS_CATEGORIES",
     "SettingsCategory",

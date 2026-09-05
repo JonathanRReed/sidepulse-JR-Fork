@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
+from .provider_account_identity import (
+    configured_user_alias,
+    project_provider_account_identity,
+)
 from .provider_feature_settings import ProviderInstanceVisualProjection
 from .provider_usage_platform import (
     ProviderSourceState,
@@ -33,22 +36,21 @@ class ProviderUsageMenuRow:
     #: Indexes into lane_lines whose lane has crossed the provider's
     #: low-remaining threshold -- renderers paint these as a warning.
     alert_lane_indexes: tuple[int, ...] = ()
-    source_instance_id: str = "default"
-
-
-def _identity_label(snapshot: ProviderUsageSnapshot) -> str | None:
-    labels = []
-    if snapshot.account_label:
-        labels.append(snapshot.account_label)
-    if snapshot.source_instance_id != "default":
-        labels.append(snapshot.source_instance_id)
-    return " · ".join(labels) if labels else None
+    source_instance_id: str = field(default="default", repr=False)
+    tooltip: str | None = None
+    accessibility_label: str | None = None
+    compact: bool = False
+    collapsed_count: int = 0
+    collapsed_rows: tuple[ProviderUsageMenuRow, ...] = ()
 
 
 def _display_identity(
     snapshot: ProviderUsageSnapshot,
     visual: ProviderInstanceVisualProjection | None,
-) -> tuple[str, str | None, bool]:
+    *,
+    privacy_mode: bool,
+) -> tuple[str, str | None, bool, str]:
+    visual_label = None
     if visual is not None:
         try:
             policy = visual.provider(
@@ -58,12 +60,20 @@ def _display_identity(
         except StopIteration:
             pass
         else:
-            return policy.label, snapshot.account_label, True
-    return (
-        provider_descriptor(snapshot.provider_id).label,
-        _identity_label(snapshot),
-        False,
+            visual_label = policy.label
+    alias = configured_user_alias(
+        provider_id=snapshot.provider_id,
+        source_instance_id=snapshot.source_instance_id,
+        visual_label=visual_label,
     )
+    identity = project_provider_account_identity(
+        provider_id=snapshot.provider_id,
+        source_instance_id=snapshot.source_instance_id,
+        account_label=snapshot.account_label,
+        user_alias=alias,
+        privacy_mode=privacy_mode,
+    )
+    return identity.primary_label, identity.account_detail, alias is not None, identity.full_label
 
 
 def _lane_lines(
@@ -116,6 +126,13 @@ class ProviderUsageMenuProjection:
     refreshing: bool
     needs_setup: bool
 
+    @property
+    def account_rows(self) -> tuple[ProviderUsageMenuRow, ...]:
+        rows = []
+        for row in self.rows:
+            rows.extend(row.collapsed_rows or (row,))
+        return tuple(rows)
+
 
 def _state_label(snapshot: ProviderUsageSnapshot) -> str:
     return {
@@ -150,12 +167,31 @@ def _row(
     *,
     now: float,
     display: MenuUsageDisplay,
+    visible_account_count: int = 1,
+    account_position: int = 1,
     threshold: float | None = None,
     visual: ProviderInstanceVisualProjection | None = None,
+    privacy_mode: bool = False,
 ) -> ProviderUsageMenuRow:
-    provider_label, identity_label, _custom_label = _display_identity(
+    identity_primary, _identity_detail, custom_label, _full_label = _display_identity(
         snapshot,
         visual,
+        privacy_mode=privacy_mode,
+    )
+    provider_label = provider_descriptor(snapshot.provider_id).label
+    identity_label = None
+    if visible_account_count > 1:
+        if custom_label and not privacy_mode and "@" not in identity_primary:
+            if provider_label.casefold() in identity_primary.casefold():
+                provider_label = identity_primary
+            else:
+                identity_label = identity_primary
+        else:
+            identity_label = f"Account {account_position}"
+    full_label = (
+        provider_label
+        if identity_label is None
+        else f"{provider_label} · {identity_label}"
     )
     lane = most_constrained_lane(snapshot)
     if lane is None:
@@ -225,7 +261,88 @@ def _row(
         lane_lines,
         alert_indexes,
         snapshot.source_instance_id,
+        full_label,
+        full_label,
     )
+
+
+def _snapshot_headroom(snapshot: ProviderUsageSnapshot) -> float | None:
+    lane = most_constrained_lane(snapshot)
+    return None if lane is None else lane.remaining_percent
+
+
+def _compact_account_rows(
+    snapshots: tuple[ProviderUsageSnapshot, ...],
+    rows: tuple[ProviderUsageMenuRow, ...],
+    *,
+    thresholds: dict[object, float],
+    active_instances: frozenset[tuple[str, str]],
+) -> tuple[ProviderUsageMenuRow, ...]:
+    by_provider: dict[str, list[tuple[ProviderUsageSnapshot, ProviderUsageMenuRow]]] = {}
+    provider_order = []
+    for snapshot, row in zip(snapshots, rows, strict=True):
+        if snapshot.provider_id not in by_provider:
+            provider_order.append(snapshot.provider_id)
+        by_provider.setdefault(snapshot.provider_id, []).append((snapshot, row))
+
+    result = []
+    for provider_id in provider_order:
+        group = by_provider[provider_id]
+        if len(group) < 4:
+            result.extend(row for _snapshot, row in group)
+            continue
+        ordered = sorted(
+            group,
+            key=lambda item: (
+                _snapshot_headroom(item[0]) is None,
+                _snapshot_headroom(item[0])
+                if _snapshot_headroom(item[0]) is not None
+                else 101.0,
+                item[0].source_instance_id,
+            ),
+        )
+        numeric = [item for item in ordered if _snapshot_headroom(item[0]) is not None]
+        most_constrained = numeric[0][0].identity if numeric else None
+        full = []
+        healthy = []
+        for snapshot, row in ordered:
+            threshold = thresholds.get(snapshot.identity, thresholds.get(provider_id))
+            headroom = _snapshot_headroom(snapshot)
+            keep_full = (
+                snapshot.identity in active_instances
+                or snapshot.identity == most_constrained
+                or snapshot.action_label is not None
+                or snapshot.state not in {ProviderSourceState.READY, ProviderSourceState.STALE}
+                or (threshold is not None and headroom is not None and headroom <= threshold)
+            )
+            (full if keep_full else healthy).append(row)
+        result.extend(full)
+        if len(healthy) < 2:
+            result.extend(healthy)
+            continue
+        compact_rows = tuple(replace(row, compact=True) for row in healthy)
+        provider_label = provider_descriptor(provider_id).label
+        count = len(compact_rows)
+        full_labels = "; ".join(row.tooltip or row.title for row in compact_rows)
+        result.append(
+            ProviderUsageMenuRow(
+                provider_id=provider_id,
+                title=f"{provider_label} · {count} healthy accounts",
+                detail="; ".join(row.title for row in compact_rows),
+                usage_detail=None,
+                action_label=None,
+                stale=False,
+                source_instance_id=f"collapsed:{provider_id}",
+                tooltip=full_labels,
+                accessibility_label=(
+                    f"{provider_label}, {count} healthy accounts. {full_labels}"
+                ),
+                compact=True,
+                collapsed_count=count,
+                collapsed_rows=compact_rows,
+            )
+        )
+    return tuple(result)
 
 
 def project_usage_menu(
@@ -237,6 +354,8 @@ def project_usage_menu(
     hidden_instances: frozenset[tuple[str, str]] = frozenset(),
     thresholds: dict[object, float] | None = None,
     visual: ProviderInstanceVisualProjection | None = None,
+    privacy_mode: bool = False,
+    active_instances: frozenset[tuple[str, str]] = frozenset(),
 ) -> ProviderUsageMenuProjection:
     display = MenuUsageDisplay() if display is None else display
     thresholds = {} if thresholds is None else thresholds
@@ -246,18 +365,32 @@ def project_usage_menu(
         if snapshot.provider_id not in hidden_providers
         and snapshot.identity not in hidden_instances
     )
+    visible_account_counts: dict[str, int] = {}
+    for snapshot in snapshots:
+        visible_account_counts[snapshot.provider_id] = (
+            visible_account_counts.get(snapshot.provider_id, 0) + 1
+        )
+    account_positions: dict[str, int] = {}
+    positioned_snapshots = []
+    for snapshot in snapshots:
+        position = account_positions.get(snapshot.provider_id, 0) + 1
+        account_positions[snapshot.provider_id] = position
+        positioned_snapshots.append((snapshot, position))
     rows = tuple(
         _row(
             snapshot,
             now=now,
             display=display,
+            visible_account_count=visible_account_counts[snapshot.provider_id],
+            account_position=position,
             threshold=thresholds.get(
                 snapshot.identity,
                 thresholds.get(snapshot.provider_id),
             ),
             visual=visual,
+            privacy_mode=privacy_mode,
         )
-        for snapshot in snapshots
+        for snapshot, position in positioned_snapshots
     )
     actionable = tuple(
         snapshot
@@ -271,56 +404,28 @@ def project_usage_menu(
             continue
         lane = most_constrained_lane(snapshot)
         if lane is not None and lane.remaining_percent is not None:
-            display_label, identity_label, custom_label = _display_identity(
-                snapshot,
-                visual,
-            )
             constrained.append(
                 (
                     lane.remaining_percent,
                     snapshot.provider_id,
-                    display_label,
-                    identity_label,
-                    custom_label,
+                    snapshot,
+                    lane,
                 )
             )
-    constrained.sort(key=lambda item: (item[0], item[1], item[3] or ""))
+    constrained.sort(key=lambda item: (item[0], item[1], item[2].source_instance_id))
     if state.refreshing and not state.snapshots:
         title = "Usage · refreshing…"
     elif constrained:
-        # EVERY provider with a number, tightest first -- the cap at two
-        # made a five-provider setup look like a two-provider app. Past
-        # four the labels drop to compact form so the row still fits.
-        shown = constrained if len(constrained) <= 6 else constrained[:6]
-        compact = len(shown) > 4
-        provider_counts = Counter(item[1] for item in shown)
-        labels = []
-        for remaining, _provider_id, display_label, identity, custom_label in shown:
-            id_text = identity
-            if id_text and len(id_text) > 16:
-                if "@" in id_text:
-                    user = id_text.split("@")[0]
-                    id_text = f"{user[:8]}…" if len(user) > 8 else user
-                else:
-                    id_text = f"{id_text[:6]}…"
-            if compact:
-                needs_disambiguation = provider_counts[_provider_id] > 1 or custom_label
-                part = f" {id_text}" if (id_text and needs_disambiguation) else ""
-                labels.append(
-                    f"{display_label if custom_label else display_label[:2]}{part} {remaining:.0f}%"
-                )
-            else:
-                part = f" · {id_text}" if id_text else ""
-                labels.append(f"{display_label}{part} {remaining:.0f}%")
-        # The tightest lane's meter rides in the row itself: the
-        # at-a-glance answer with zero hovering. Curated off with the
-        # same switch as the per-lane meters.
-        meter = (
-            f"{format_lane_meter(constrained[0][0])}  "
-            if display.show_meters
-            else ""
+        # The root menu is a command-center summary, not a second Usage
+        # Center. Show one decision-worthy value and its reset; detailed
+        # provider/account rows remain in the submenu and dedicated window.
+        remaining, provider_id, snapshot, lane = constrained[0]
+        title = (
+            f"Usage · {provider_descriptor(provider_id).label} {remaining:.0f}% · "
+            f"{format_reset_countdown(lane.reset_at, now=now)}"
         )
-        title = f"Usage · {meter}" + " · ".join(labels)
+        if snapshot.state is ProviderSourceState.STALE:
+            title += f" · {_staleness_marker(snapshot)}"
     elif actionable:
         title = "Usage · setup needed"
     elif state.snapshots:
@@ -329,7 +434,12 @@ def project_usage_menu(
         title = "Usage · not collected"
     return ProviderUsageMenuProjection(
         title,
-        rows,
+        _compact_account_rows(
+            snapshots,
+            rows,
+            thresholds=thresholds,
+            active_instances=active_instances,
+        ),
         state.refreshing,
         bool(actionable),
     )

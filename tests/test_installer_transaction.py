@@ -336,7 +336,7 @@ def test_openclaw_late_write_failure_rolls_back_all_provider_owned_files(tmp_pat
     from sidepulse.private_io import _write_all as real_write_all
 
     def fail_hook_md(descriptor: int, data: bytes):
-        if b"# JR Bar Status" in data:
+        if b"# JR-Bar Status" in data:
             raise OSError("late write")
         return real_write_all(descriptor, data)
 

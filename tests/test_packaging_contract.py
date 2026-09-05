@@ -166,7 +166,7 @@ def test_package_builder_declares_the_reviewed_focus_status_usage() -> None:
     )
 
     description = (
-        "JR Bar uses Focus Status only when you choose Allow Focus Status, "
+        "JR-Bar uses Focus Status only when you choose Allow Focus Status, "
         "so Do Not Disturb can follow whether a macOS Focus is active."
     )
     assert f'FOCUS_STATUS_USAGE_DESCRIPTION="{description}"' in source

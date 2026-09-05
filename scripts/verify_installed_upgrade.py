@@ -220,7 +220,7 @@ def main() -> int:
                     kind="settings-preservation",
                     tool="verify_installed_upgrade.py",
                     input_path=args.pkg,
-                    output_text="upgrade preserved existing JR Bar settings",
+                    output_text="upgrade preserved existing JR-Bar settings",
                     details={
                         "settings_state": "preserved",
                         "before_settings_sha256": before_settings_sha256,

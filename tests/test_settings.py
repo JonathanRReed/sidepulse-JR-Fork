@@ -49,6 +49,50 @@ def test_capacity_history_is_opt_in() -> None:
     assert settings.capacity_history_retention_days == 7
 
 
+def test_weather_ip_geolocation_is_a_separate_default_off_persisted_consent(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "settings.json"
+    default = AgentMonitorSettings().with_weather_alerts_enabled(True)
+
+    assert default.weather_ip_geolocation_enabled is False
+    configured = default.with_weather_ip_geolocation_enabled(True)
+    save_settings(configured, target)
+
+    assert load_settings(target).weather_ip_geolocation_enabled is True
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["weather_ip_geolocation_enabled"] is True
+
+
+def test_sleep_dim_and_idle_auto_off_are_separate_persisted_choices(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "settings.json"
+    configured = (
+        AgentMonitorSettings()
+        .with_sleep_dim_enabled(True)
+        .with_sleep_dim_fraction(0.2)
+        .with_idle_auto_off_enabled(True)
+        .with_idle_auto_off_after_minutes(45.0)
+    )
+
+    save_settings(configured, target)
+    restored = load_settings(target)
+
+    assert restored.sleep_dim_enabled is True
+    assert restored.sleep_dim_fraction == 0.2
+    assert restored.idle_auto_off_enabled is True
+    assert restored.idle_auto_off_after_minutes == 45.0
+
+
+def test_sleep_dim_defaults_on_but_never_normalizes_to_off() -> None:
+    settings = AgentMonitorSettings().with_sleep_dim_fraction(0.0)
+
+    assert settings.sleep_dim_enabled is True
+    assert settings.sleep_dim_fraction == 0.05
+    assert settings.idle_auto_off_enabled is False
+
+
 def test_capacity_history_settings_round_trip_only_supported_retention(tmp_path: Path) -> None:
     """The persisted retention policy may only select 7, 30, or 90 days."""
     target = tmp_path / "settings.json"

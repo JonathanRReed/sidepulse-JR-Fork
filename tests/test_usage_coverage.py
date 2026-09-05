@@ -572,8 +572,9 @@ def test_failed_read_is_not_persisted_as_a_successful_empty_cache_entry(
     assert _coverage(recovered, "claude").cache_hits == 0
 
 
+@pytest.mark.parametrize("change", ["replacement", "symlink", "directory", "removed", "permission"])
 def test_warm_cache_hit_revalidates_physical_file_after_discovery(
-    tmp_path: Path,
+    tmp_path: Path, change: str,
 ) -> None:
     root = tmp_path / "claude"
     candidate = _write_rows(root / "cached.jsonl", _claude_row("old", tokens=41))
@@ -586,8 +587,16 @@ def test_warm_cache_hit_revalidates_physical_file_after_discovery(
     def replacing_before_validation(path: Path, expected_stat: os.stat_result):
         nonlocal replaced
         if not replaced and path == candidate:
-            candidate.rename(held)
-            _write_rows(candidate, _claude_row("replacement", tokens=999))
+            if change == "permission":
+                candidate.chmod(0)
+            else:
+                candidate.rename(held)
+                if change == "replacement":
+                    _write_rows(candidate, _claude_row("replacement", tokens=999))
+                elif change == "symlink":
+                    candidate.symlink_to(held)
+                elif change == "directory":
+                    candidate.mkdir()
             replaced = True
         return real_validation(path, expected_stat)
 
@@ -618,7 +627,10 @@ def test_warm_cache_hit_revalidates_physical_file_after_discovery(
 def test_structurally_corrupt_cache_entry_is_reparsed_instead_of_published(
     tmp_path: Path,
     corruption: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Exercise the legacy fallback without the independent, valid file index.
+    monkeypatch.setattr(usage_stats.UsageFileIndex, "open", lambda *_args, **_kwargs: None)
     root = tmp_path / "claude"
     _write_rows(
         root / "valid.jsonl",
@@ -662,7 +674,9 @@ def test_wrong_cache_container_shapes_fall_back_to_cold_scan(
     tmp_path: Path,
     field: str,
     replacement: object,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(usage_stats.UsageFileIndex, "open", lambda *_args, **_kwargs: None)
     root = tmp_path / "claude"
     _write_rows(root / "valid.jsonl", _claude_row("valid", tokens=53))
     cache_path = tmp_path / "state" / "usage-cache.json"

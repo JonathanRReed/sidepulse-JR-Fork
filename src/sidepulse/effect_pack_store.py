@@ -105,7 +105,7 @@ class _StoredLeaf:
 
 
 def default_effect_pack_store_path(home: Path | None = None) -> Path:
-    """Return the pack directory inside JR Bar's existing private state root."""
+    """Return the pack directory inside JR-Bar's existing private state root."""
 
     return default_state_dir(home) / EFFECT_PACK_STORE_DIRECTORY
 

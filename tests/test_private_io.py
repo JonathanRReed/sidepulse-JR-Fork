@@ -60,6 +60,44 @@ def test_private_write_ignores_permissive_umask(tmp_path: Path) -> None:
     assert mode(target) == 0o600
 
 
+def test_create_only_private_write_preserves_existing_recovery_data(tmp_path: Path) -> None:
+    target = tmp_path / "backup.json"
+    atomic_private_write(target, "first backup", overwrite=False)
+    with pytest.raises(FileExistsError):
+        atomic_private_write(target, "replacement backup", overwrite=False)
+    assert read_private_text(target) == "first backup"
+    assert target.stat().st_nlink == 1
+    assert list(tmp_path.glob("backup.json.*.tmp")) == []
+
+
+def test_create_only_private_publish_has_one_winner_when_two_writers_race(tmp_path: Path) -> None:
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    target = tmp_path / "backup.json"
+    barrier = threading.Barrier(2)
+    original_link = os.link
+
+    def competing_link(*args, **kwargs):
+        barrier.wait(timeout=2)
+        return original_link(*args, **kwargs)
+
+    def publish(value):
+        try:
+            atomic_private_write(target, value, overwrite=False)
+        except FileExistsError:
+            return None
+        return value
+
+    with patch("sidepulse.private_io.os.link", side_effect=competing_link), ThreadPoolExecutor(2) as executor:
+        outcomes = list(executor.map(publish, ("first", "second")))
+    winners = [value for value in outcomes if value is not None]
+    assert len(winners) == 1
+    assert read_private_text(target) == winners[0]
+    assert target.stat().st_nlink == 1
+    assert list(tmp_path.glob("backup.json.*.tmp")) == []
+
+
 def test_existing_broad_file_and_parent_are_tightened_without_data_loss(
     tmp_path: Path,
 ) -> None:

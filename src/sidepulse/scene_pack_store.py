@@ -52,7 +52,7 @@ class _StoredLeaf:
 
 
 def default_scene_pack_store_path(home: Path | None = None) -> Path:
-    """Return the Scene pack directory in JR Bar's private state root."""
+    """Return the Scene pack directory in JR-Bar's private state root."""
 
     return default_state_dir(home) / SCENE_PACK_STORE_DIRECTORY
 

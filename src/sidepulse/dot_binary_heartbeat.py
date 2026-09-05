@@ -234,7 +234,7 @@ DOT_BINARY_HEARTBEAT_LEGEND: Final = (
     ),
     DotLegendEntry(1, "recovery", "Recovery", "two slow pulses", "steady low", "A source recovered."),
     DotLegendEntry(1, "environment", "Environment", "steady dim", "steady dim", "An ambient system state is active."),
-    DotLegendEntry(1, "idle", "Idle", "steady faint", "steady faint", "JR Bar is alive and watching."),
+    DotLegendEntry(1, "idle", "Idle", "steady faint", "steady faint", "JR-Bar is alive and watching."),
     DotLegendEntry(1, "none", "No state", "dark", "dark", "No semantic state is active."),
     DotLegendEntry(2, "fleet:none", "Fleet: none", "dark", "dark", "No main fleet member is visible."),
     DotLegendEntry(2, "fleet:solo", "Fleet: solo", "steady dim", "steady dim", "One main fleet member is visible."),

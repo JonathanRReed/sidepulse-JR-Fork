@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Define the authoritative JR Bar macOS release artifact."""
+"""Define the authoritative JR-Bar macOS release artifact."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import re
 import sys
 from pathlib import Path
 
-PRODUCT_DISPLAY_NAME = "JR Bar"
+PRODUCT_DISPLAY_NAME = "JR-Bar"
 COMPATIBILITY_APP_BUNDLE = "SidePulse.app"
 AUTHORITATIVE_ARTIFACT_KIND = "pkg"
 REQUIRED_SIGNING_INPUTS = (

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import plistlib
+import stat
 import subprocess
 import threading
 from collections.abc import Callable
@@ -103,10 +105,27 @@ def hardware_status_serial(mount_path: Path) -> str | None:
     Bounded read; any I/O or parse trouble means "unknown", never an
     exception into the inventory sweep.
     """
+    mount_fd: int | None = None
+    status_fd: int | None = None
     try:
-        with (Path(mount_path) / STATUS_FILE_NAME).open("rb") as status_file:
-            payload = status_file.read(STATUS_MAX_BYTES)
+        mount_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
+        mount_fd = os.open(Path(mount_path), mount_flags)
+        status_fd = os.open(
+            STATUS_FILE_NAME,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=mount_fd,
+        )
+        if not stat.S_ISREG(os.fstat(status_fd).st_mode):
+            return None
+        payload = os.read(status_fd, STATUS_MAX_BYTES + 1)
     except OSError:
+        return None
+    finally:
+        if status_fd is not None:
+            os.close(status_fd)
+        if mount_fd is not None:
+            os.close(mount_fd)
+    if len(payload) > STATUS_MAX_BYTES:
         return None
     for raw_line in payload.decode("utf-8", errors="replace").splitlines():
         parts = raw_line.split()
@@ -151,7 +170,7 @@ def inventory_mounts(
             (
                 path
                 for path in root.iterdir()
-                if path.is_dir() and _sidepulse_candidate(path)
+                if path.is_dir() and not path.is_symlink() and _sidepulse_candidate(path)
             ),
             key=lambda path: path.name.casefold(),
         )[:MAX_MOUNT_CANDIDATES]
@@ -160,8 +179,18 @@ def inventory_mounts(
 
     identities: dict[str, StableDeviceIdentity] = {}
     for candidate in candidates:
+        try:
+            before = candidate.lstat()
+        except OSError:
+            continue
         facts = diskutil_facts(candidate, runner=runner)
         if facts is None:
+            continue
+        try:
+            after = candidate.lstat()
+        except OSError:
+            continue
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
             continue
         facts = refine_facts_with_hardware_status(facts, candidate)
         identity = derive_device_identity(facts, trusted_mount_root=root)

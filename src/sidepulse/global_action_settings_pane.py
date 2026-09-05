@@ -64,7 +64,7 @@ _PERSISTED_REFUSAL_STATUS: Final = (
 _SAVE_FAILURE_STATUS: Final = (
     "Could not save shortcut. The previous binding is unchanged."
 )
-_LOCAL_CONFLICT_FALLBACK: Final = "another JR Bar action"
+_LOCAL_CONFLICT_FALLBACK: Final = "another JR-Bar action"
 _MAX_DETAIL_LENGTH: Final = 96
 
 _ESCAPE_KEY_CODE = 53
@@ -212,7 +212,7 @@ def _validation_status(error: ShortcutValidationError | ValueError) -> str:
         }:
             return "Include Command or Control."
         if error.code is ShortcutValidationCode.RESERVED_MENU_EQUIVALENT:
-            return "That shortcut is reserved by JR Bar. Press another shortcut."
+            return "That shortcut is reserved by JR-Bar. Press another shortcut."
     return "That shortcut is not supported. Press another shortcut."
 
 

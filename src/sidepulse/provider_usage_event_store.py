@@ -6,6 +6,12 @@ import json
 import re
 from pathlib import Path
 
+from .provider_reset_events import (
+    ResetDeliveryState,
+    decode_reset_delivery_state,
+    encode_reset_delivery_state,
+)
+
 RESET_EVENT_STORE_SCHEMA_VERSION = 1
 MAX_SEEN_RESET_EVENTS = 512
 _EVENT_ID = re.compile(r"[a-z][a-z0-9-]{0,31}:[a-z0-9][a-z0-9._:-]{0,127}:[0-9a-f]{24}\Z")
@@ -59,10 +65,37 @@ def save_seen_reset_events(
     return target
 
 
+def load_reset_delivery_state(path: Path | None = None) -> ResetDeliveryState:
+    target = default_reset_event_store_path() if path is None else Path(path)
+    try:
+        from .private_io import read_private_text
+
+        return decode_reset_delivery_state(
+            read_private_text(target, max_bytes=128 * 1024)
+        )
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        return ResetDeliveryState()
+
+
+def save_reset_delivery_state(
+    state: ResetDeliveryState,
+    path: Path | None = None,
+) -> Path:
+    if type(state) is not ResetDeliveryState:
+        raise ValueError("invalid reset delivery state")
+    target = default_reset_event_store_path() if path is None else Path(path)
+    from .private_io import atomic_private_write
+
+    atomic_private_write(target, encode_reset_delivery_state(state))
+    return target
+
+
 __all__ = [
     "MAX_SEEN_RESET_EVENTS",
     "RESET_EVENT_STORE_SCHEMA_VERSION",
     "default_reset_event_store_path",
+    "load_reset_delivery_state",
     "load_seen_reset_events",
+    "save_reset_delivery_state",
     "save_seen_reset_events",
 ]

@@ -1,4 +1,4 @@
-"""Pure semantic event-to-effect arbitration for JR Bar surfaces.
+"""Pure semantic event-to-effect arbitration for JR-Bar surfaces.
 
 The router consumes content-free facts that runtime owners have already
 collected. It performs no rendering, notification delivery, settings access,

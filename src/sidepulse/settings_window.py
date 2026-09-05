@@ -54,7 +54,7 @@ from . import signals as signals_module
 from .alcove_observation import (
     AlcoveCaptureStatus,
     AlcoveConfidenceProjection,
-    alcove_follow_blocker,
+    alcove_follow_blocker,  # compatibility patch point; paint paths do not call it
     latest_alcove_status,
     project_alcove_confidence,
     request_screen_recording_access,
@@ -251,27 +251,17 @@ OPERATOR_HISTORY_FIELD_MANIFEST: tuple[str, ...] = (
 
 
 def usage_graph_legend_text(settings) -> str:
-    """Legend under the usage chart, honest about the current metric.
+    """Describe the selected provider set and the current metric."""
+    from .provider_usage_platform import provider_descriptors
 
-    Percent mode charts the whole registry from remembered capacity
-    observations; the token/cost/sessions modes chart the curated
-    local-transcript providers. One legend claiming the other's
-    provider set was a small lie every time the mode switched."""
+    labels = {descriptor.provider_id: descriptor.label for descriptor in provider_descriptors()}
+    selected = " · ".join(labels.get(provider, provider) for provider in settings.usage_graph_providers)
     mode = getattr(settings, "usage_display_mode", "tokens")
     if mode == "percent":
-        return "All providers · worst remaining % each day"
+        return selected + " · lowest recorded remaining % each day"
     if mode == "sessions":
-        return (
-            "Every watched provider · sessions from transcripts "
-            "(Claude, Codex) and hook ledgers (the rest)"
-        )
-    return (
-        " · ".join(
-            provider_id.title() for provider_id in settings.usage_graph_providers
-        )
-        + " · tokens and cost exist only in local transcripts — other "
-        "providers chart under Sessions or Percent left"
-    )
+        return selected + " · daily session counts"
+    return selected + (" · API-equivalent estimates" if mode == "cost" else " · recorded tokens")
 
 
 def refresh_usage_graph_legend(target) -> None:
@@ -653,7 +643,7 @@ def _capacity_policy_copy(policy, active_sources: frozenset) -> tuple[str, str]:
     if policy.state is CapacityPolicyState.LINK_ONLY:
         return (
             "Check provider",
-            "This source is link-only. JR Bar does not read a browser or private endpoint for it.",
+            "This source is link-only. JR-Bar does not read a browser or private endpoint for it.",
         )
     if policy.state is CapacityPolicyState.UPSTREAM_DELEGATED:
         return (
@@ -776,7 +766,8 @@ def _build_profile_pane(target: StatusBarController):
     )
     today_inner.addArrangedSubview_(period_label)
     fields["profile_usage_period_label"] = period_label
-    usage_summary = getattr(target, "usage_summary_text", None)
+    cached_model = getattr(target, "usage_graph_model", None) or {}
+    usage_summary = cached_model.get("summary") or getattr(target, "usage_summary_text", None)
     usage_label = native_ui.make_label(
         usage_summary
         or (
@@ -788,16 +779,6 @@ def _build_profile_pane(target: StatusBarController):
     )
     today_inner.addArrangedSubview_(usage_label)
     fields["profile_usage_label"] = usage_label
-    detail_label = native_ui.make_label(
-        getattr(target, "usage_detail_text", None) or "", secondary=True, size=11.0
-    )
-    today_inner.addArrangedSubview_(detail_label)
-    fields["profile_usage_detail"] = detail_label
-    codex_label = native_ui.make_label(
-        getattr(target, "codex_summary_text", None) or "", secondary=False, size=13.0
-    )
-    today_inner.addArrangedSubview_(codex_label)
-    fields["profile_codex_label"] = codex_label
     graph = UsageGraphView.alloc().initWithFrame_(((0, 0), (560.0, 180.0)))
     graph.setTranslatesAutoresizingMaskIntoConstraints_(False)
     native_ui.constrain_width(graph, 560.0)
@@ -814,6 +795,19 @@ def _build_profile_pane(target: StatusBarController):
         or scanning_placeholder(target.settings)
     )
     fields["profile_usage_graph"] = graph
+    from .usage_heatmap_view import UsageHeatmapView
+
+    heatmap = UsageHeatmapView.alloc().initWithFrame_(((0, 0), (560.0, 126.0)))
+    heatmap.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    native_ui.constrain_width(heatmap, 560.0)
+    native_ui.constrain_height(heatmap, 126.0)
+    today_inner.addArrangedSubview_(heatmap)
+    existing_heatmap = (getattr(target, "usage_graph_model", None) or {}).get(
+        "heatmap"
+    )
+    if existing_heatmap is not None:
+        heatmap.setHeatmap_(existing_heatmap)
+    fields["profile_usage_heatmap"] = heatmap
     # Populate immediately from the local scan -- never wait for (or ride)
     # the capacity acceptance protocol; see usage_graph_worker.
     refresh_usage_graph(target)
@@ -925,7 +919,7 @@ def _build_profile_pane(target: StatusBarController):
             "toggleUsageGraphProvider:",
             help_text=(
                 transcript_help
-                if provider_id in ("claude", "codex")
+                if provider_id in ("claude", "codex", "opencode")
                 else ledger_help
             ),
         )
@@ -939,10 +933,10 @@ def _build_profile_pane(target: StatusBarController):
     fields["usage_graph_provider_switches"] = provider_switches
     today_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
-            "Tokens and cost exist only in Claude and Codex's local "
-            f"transcripts. Sessions covers every provider {PRODUCT_DISPLAY_NAME} "
-            "watches (from its own hook ledgers), and Percent left "
-            "charts remembered remaining-percent readings for everyone.",
+            "Token counts come from local usage records, never from estimated "
+            "step counts. Sessions also includes hook-ledger activity. A session "
+            "seen on two days counts twice in the daily totals. Percent left "
+            "uses recorded quota readings and carries the last known value through gaps.",
             secondary=True,
             size=10.0,
             max_width=560.0,
@@ -965,7 +959,7 @@ def _build_profile_pane(target: StatusBarController):
             "credential Claude Code already stores, and shows every window it "
             "reports — the 5-hour and weekly ceilings and the weekly Opus and "
             "Sonnet sub-caps. Off until you turn it on. This Claude feature "
-            "never reads browser sessions or private provider endpoints."
+            "does not read browser sessions. Browser access has separate consent."
         ),
     )
     plan_limits_switch.setState_(
@@ -984,10 +978,8 @@ def _build_profile_pane(target: StatusBarController):
     today_inner.addArrangedSubview_(codex_pct_row)
     today_inner.addArrangedSubview_(
         native_ui.make_wrapping_label(
-            "Costs use Anthropic list rates; cached reads bill at a tenth "
-            "of the uncached rate — \u201csaved with caching\u201d is that "
-            "difference. Counted once per message, so resumed sessions "
-            "never double-count.",
+            "API-equivalent estimates use the local pricing table, not subscription "
+            "charges. Models without a known price are excluded from cost totals.",
             secondary=True,
             size=11.0,
             max_width=560.0,
@@ -995,6 +987,13 @@ def _build_profile_pane(target: StatusBarController):
     )
     stack.addArrangedSubview_(today_outer)
 
+    return native_ui.wrap_in_scroll_pane(stack), fields
+
+
+def _build_overview_pane(target: StatusBarController):
+    """App details and global actions, without starting a transcript scan."""
+    stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
+    fields: dict[str, object] = {}
     global_action_settings_pane = build_global_action_settings_pane(target)
     fields["global_action_settings_pane"] = global_action_settings_pane
     stack.addArrangedSubview_(global_action_settings_pane.view)
@@ -1030,9 +1029,60 @@ def _build_profile_pane(target: StatusBarController):
     return native_ui.wrap_in_scroll_pane(stack), fields
 
 
+def _cached_settings_devices(target: StatusBarController):
+    """Return the runtime's cached device projection without first-open I/O."""
+    if (
+        not getattr(target, "_runtime_started", False)
+        and getattr(target, "_device_discovery_cache", None) is None
+    ):
+        return ()
+    return tuple(target.status_bar_devices(remember=False))
+
+
 def _build_devices_pane(target: StatusBarController):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
-    devices = target.status_bar_devices(remember=False)
+    creator_outer, creator_inner = native_ui.make_card("Creator Micro 2")
+    creator_toggle = native_ui.make_checkbox(
+        f"Connect Creator Micro 2 to {PRODUCT_DISPLAY_NAME}",
+        target,
+        "toggleCreatorMicroOutput:",
+    )
+    creator_toggle.setState_(
+        1 if getattr(target, "_creator_micro_output_enabled", False) else 0
+    )
+    creator_inner.addArrangedSubview_(creator_toggle)
+    receipt = getattr(target, "_creator_micro_output_receipt", None)
+    creator_status = native_ui.make_wrapping_label(
+        (
+            f"Status: {receipt.reason.replace('_', ' ')}"
+            if receipt is not None
+            else f"Off by default. {PRODUCT_DISPLAY_NAME} checks firmware support before sending output."
+        ),
+        secondary=True,
+        size=12.0,
+        max_width=560.0,
+    )
+    target._creator_micro_output_status_label = creator_status
+    creator_inner.addArrangedSubview_(creator_status)
+    creator_inner.addArrangedSubview_(
+        native_ui.make_wrapping_label(
+            "Only one controller should own the pad. Close Work Louder Input and remove "
+            "the device connection in Codex Micro before enabling JR-Bar.",
+            secondary=True,
+            size=11.0,
+            max_width=560.0,
+        )
+    )
+    stack.addArrangedSubview_(creator_outer)
+    from .deck_settings_pane import build_deck_settings_card
+
+    deck_pane = build_deck_settings_card(
+        target,
+        getattr(target, "_deck_control_settings", None),
+    )
+    target.deck_settings_pane = deck_pane
+    stack.addArrangedSubview_(deck_pane.view)
+    devices = _cached_settings_devices(target)
     device_controls: dict[str, dict[str, object]] = {}
     if not devices:
         outer, inner = native_ui.make_card("Devices")
@@ -1406,7 +1456,7 @@ SCREEN_BAR_PREVIEW_WING_WIDTH = 12.0
 
 def _build_colors_screen_bar_pane(target: StatusBarController):
     stack = native_ui.make_fill_stack(spacing=native_ui.SPACE_L)
-    glow_outer, glow_inner = native_ui.make_card("Minimum Glow")
+    glow_outer, glow_inner = native_ui.make_card("Visibility")
     glow_slider = native_ui.make_slider(
         min_value=0.0,
         max_value=100.0,
@@ -1417,12 +1467,12 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
     )
     glow_inner.addArrangedSubview_(
         native_ui.make_row(
-            "Dim floor",
+            "Minimum visibility",
             glow_slider,
             help_text=(
-                "How dark the bar may get. 0% = pitch black: only the "
-                "moving signal shows — the relay dot ticking around, "
-                "the timer filling up. Higher keeps a soft outline."
+                "Keeps overall bar brightness and a neutral outline readable. "
+                "Does not brighten the animation's dark gaps or faint colors. "
+                "At 0%, only the animation shows."
             ),
         )
     )
@@ -1507,8 +1557,7 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
     inner.addArrangedSubview_(alcove_controls.status_row)
     inner.addArrangedSubview_(alcove_controls.permission_row)
     native_ui.add_separator(inner)
-    # Bracket coloring: Auto keeps the on-screen bracket in lockstep
-    # with the physical LEDs' ripple whenever a crowd is lit.
+    # Auto keeps the physical LED positions, including a lone moving head.
     bracket_popup = native_ui.make_popup_button(target, "setBracketStyle:")
     for label, style_key in (
         ("Automatic", "auto"),
@@ -1525,10 +1574,9 @@ def _build_colors_screen_bar_pane(target: StatusBarController):
             "Bracket colors",
             bracket_popup,
             help_text=(
-                "Automatic mirrors the light bar's own per-LED animation "
-                "whenever two or more LEDs are lit, and falls back to one "
-                "blended identity color when a lone agent would leave the "
-                "bracket mostly dark."
+                "Automatic follows each LED, including dark gaps between "
+                "moving lights. Choose Single identity color to blend the "
+                "whole bar into one color instead."
             ),
         )
     )
@@ -1667,11 +1715,24 @@ def screen_bar_wing_status_text(
 def alcove_follow_projection(target) -> AlcoveConfidenceProjection:
     """Resolve the Alcove row once from the shared confidence contract."""
     following = bool(getattr(target.settings, "screen_bar_follow_alcove", True))
-    blocker = alcove_follow_blocker(following=following)
+    # Settings consumes the observation worker's last immutable snapshot.
+    # Permission and window probes run only after explicit Alcove opt-in.
+    blocker = None if following else AlcoveCaptureStatus.NOT_FOLLOWING
     return project_alcove_confidence(
         following=following,
         snapshot=latest_alcove_status(),
         blocker=blocker,
+        now=time.monotonic(),
+    )
+
+
+def _probe_alcove_follow_projection(target) -> AlcoveConfidenceProjection:
+    """Probe only after an explicit Alcove permission/setup action."""
+    following = bool(getattr(target.settings, "screen_bar_follow_alcove", True))
+    return project_alcove_confidence(
+        following=following,
+        snapshot=latest_alcove_status(),
+        blocker=alcove_follow_blocker(following=following),
         now=time.monotonic(),
     )
 
@@ -1785,14 +1846,22 @@ class SidePulseAlcoveActions(NSObject):
             reset_alcove_status()
         else:
             open_url(SCREEN_RECORDING_SETTINGS_URL)
-        refresh_alcove_follow_controls(self.controller)
+        projection = _probe_alcove_follow_projection(self.controller)
+        refresh_alcove_settings_controls(
+            self.controller,
+            projection=projection,
+            wing_status_text=screen_bar_wing_status_text(
+                self.controller,
+                projection=projection,
+            ),
+        )
         message = getattr(self.controller, "set_settings_message", None)
         if callable(message):
             message(
                 # Not "following is live": permission is one of four
                 # things that have to be true, and the row already knows
                 # which of them currently is.
-                alcove_follow_status_text(self.controller)
+                projection.message
                 if granted is True
                 else (
                     f"Turn {PRODUCT_DISPLAY_NAME} on under Screen Recording, then "
@@ -2431,12 +2500,22 @@ def _build_extras_pane(target: StatusBarController):
         "toggleWeatherAlerts:",
         help_text=(
             "An urgent heartbeat while a Severe or Extreme National "
-            "Weather Service warning covers your area. Location comes "
-            "from your network address — no Location permission "
-            "needed. A live agent ask still takes the bar first."
+            "Weather Service warning covers your area. Weather alerts stay off until you enter coordinates "
+            "or separately allow network-address location."
         ),
     )
     weather_inner.addArrangedSubview_(weather_row)
+    native_ui.add_separator(weather_inner)
+    ip_row, ip_switch = native_ui.make_switch_row(
+        "Use network address for weather location",
+        target,
+        "applyWeatherLocation:",
+        help_text=(
+            "When enabled, weather checks send your public IP address to ipapi.co "
+            "to estimate latitude and longitude. This is separate from weather alerts."
+        ),
+    )
+    weather_inner.addArrangedSubview_(ip_row)
     native_ui.add_separator(weather_inner)
     lat_field = native_ui.make_field(
         ""
@@ -2466,9 +2545,8 @@ def _build_extras_pane(target: StatusBarController):
             "Location override",
             location_controls,
             help_text=(
-                "Leave both blank to locate automatically from your "
-                "network address. NWS alerts cover the United States "
-                "and its territories."
+                "Enter both values to avoid IP-based location. If both are blank, "
+                "weather checks run only when the separate network-address switch is on."
             ),
         )
     )
@@ -2520,6 +2598,7 @@ def _build_extras_pane(target: StatusBarController):
         "calendar_alerts_enabled": cal_switch,
         "reminder_alerts_enabled": rem_switch,
         "weather_alerts_enabled": weather_switch,
+        "weather_ip_geolocation_enabled": ip_switch,
         "capacity_history_enabled": history_switch,
         "quota_alerts_enabled": quota_switch,
     }
@@ -3368,6 +3447,9 @@ def _build_settings_pane(target: StatusBarController, key: str):
     buttons may be empty. The Devices builder also installs its own
     control map (it owns per-device rows)."""
     if key == "profile":
+        pane, fields = _build_overview_pane(target)
+        return pane, fields, {}
+    if key == "usage_activity":
         pane, fields = _build_profile_pane(target)
         return pane, fields, {}
     if key == "history":

@@ -133,24 +133,6 @@ def _hstack(*views, spacing: float = 8.0):
     return stack
 
 
-_UUID_ISH = None
-
-
-def _account_display(account: str) -> str:
-    """A raw UUID is an implementation detail, not an account name."""
-    import re
-
-    global _UUID_ISH
-    if _UUID_ISH is None:
-        _UUID_ISH = re.compile(
-            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-            re.IGNORECASE,
-        )
-    if _UUID_ISH.fullmatch(account.strip()):
-        return f"account {account.strip()[:8]}…"
-    return account
-
-
 def _visual_projection(action_target) -> ProviderInstanceVisualProjection | None:
     policies = getattr(action_target, "_sidepulse_provider_instance_policies", None)
     if type(policies) is ProviderInstancePolicyProjection:
@@ -173,9 +155,11 @@ class ProviderUsageWindowController:
         *,
         wall_clock: Callable[[], float] = time.time,
         monotonic_clock: Callable[[], float] = time.monotonic,
+        privacy_mode: bool = False,
     ) -> None:
         self._wall_clock = wall_clock
         self._monotonic_clock = monotonic_clock
+        self._privacy_mode = bool(privacy_mode)
         style = (
             NSWindowStyleMaskTitled
             | NSWindowStyleMaskClosable
@@ -230,6 +214,17 @@ class ProviderUsageWindowController:
             self.stack.removeArrangedSubview_(view)
             view.removeFromSuperview()
 
+    def set_privacy_mode(self, enabled: bool) -> None:
+        """Follow the live user setting without rebuilding the window."""
+
+        updated = bool(enabled)
+        if updated == self._privacy_mode:
+            return
+        self._privacy_mode = updated
+        state = getattr(self, "_last_state", None)
+        if type(state) is ProviderUsageState:
+            self.refresh(state)
+
     def _card(self, title_views, body_views):
         card = NSStackView.alloc().init()
         card.setTranslatesAutoresizingMaskIntoConstraints_(False)
@@ -269,6 +264,7 @@ class ProviderUsageWindowController:
             # settings, Keychain credentials, cached packets, or a network.
             merged_sync=cached_merged_sync(state),
             visual=_visual_projection(self.action_target),
+            privacy_mode=self._privacy_mode,
         )
         self._clear()
 
@@ -291,7 +287,7 @@ class ProviderUsageWindowController:
             title_views = [title_row]
             if section.account:
                 title_views.append(
-                    _label(_account_display(section.account), secondary=True, size=11.0)
+                    _label(section.account, secondary=True, size=11.0)
                 )
             body: list = []
             for lane in section.lanes:

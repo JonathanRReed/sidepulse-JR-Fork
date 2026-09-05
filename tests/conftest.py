@@ -63,6 +63,28 @@ _LIVE_VOLUME_ROOT = Path("/Volumes")
 _LIVE_LAUNCH_AGENT_ROOT = Path.home().expanduser() / "Library" / "LaunchAgents"
 
 
+@pytest.fixture(scope="session")
+def glance_tls_material(tmp_path_factory):
+    """Generate a test-only TLS identity without changing system trust."""
+    directory = tmp_path_factory.mktemp("glance-tls")
+    certificate = directory / "certificate.pem"
+    private_key = directory / "key.pem"
+    subprocess.run(
+        [
+            "/usr/bin/openssl", "req", "-x509", "-newkey", "rsa:2048",
+            "-nodes", "-batch", "-days", "1", "-subj", "/CN=localhost",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1,IP:192.168.1.20,IP:fc00::1,IP:fe80::1,DNS:localhost",
+            "-keyout", str(private_key), "-out", str(certificate),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=20,
+    )
+    private_key.chmod(0o600)
+    return certificate, private_key
+
+
 @pytest.fixture(autouse=True)
 def isolate_live_settings_file(tmp_path, monkeypatch):
     """Keep all settings facades on one per-test path."""

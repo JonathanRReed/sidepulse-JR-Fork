@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture a fail-closed pre-upgrade JR Bar installation baseline."""
+"""Capture a fail-closed pre-upgrade JR-Bar installation baseline."""
 
 from __future__ import annotations
 

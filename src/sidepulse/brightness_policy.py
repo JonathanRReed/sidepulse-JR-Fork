@@ -1,4 +1,4 @@
-"""Pure brightness-policy decisions for the retained JR Bar runtime."""
+"""Pure brightness-policy decisions for the retained JR-Bar runtime."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ MIN_ESCALATION_VISIBLE_BRIGHTNESS = 12
 # Screen Bar the matching perceived-light floor. Explicit zero factors still
 # bypass it below.
 MIN_AMBIENT_VISIBLE_BRIGHTNESS = 61
+MIN_SLEEP_DIM_FACTOR = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +67,29 @@ def _normalized_result(
     return BrightnessPolicyResult(brightness=brightness, trace=tuple(trace))
 
 
+def sleep_dim_factor(
+    *,
+    enabled: bool,
+    fraction: float,
+    display_asleep: bool,
+) -> float:
+    if not enabled or not display_asleep:
+        return 1.0
+    return float(fraction)
+
+
+def idle_auto_off_due(
+    *,
+    enabled: bool,
+    idle_since_monotonic: float | None,
+    after_minutes: float,
+    now_monotonic: float,
+) -> bool:
+    if not enabled or idle_since_monotonic is None:
+        return False
+    return now_monotonic - idle_since_monotonic >= after_minutes * 60.0
+
+
 def plan_ambient_brightness(
     *,
     base_brightness: float,
@@ -77,13 +101,31 @@ def plan_ambient_brightness(
     is_screen_bar: bool,
     screen_bar_min_glow: float,
     dnd_factor: float | None = None,
+    sleep_factor: float = 1.0,
+    idle_auto_off: bool = False,
 ) -> BrightnessPolicyResult:
     scaled = float(base_brightness)
     trace: list[BrightnessTraceStep] = [
         BrightnessTraceStep("base", before=scaled, after=scaled)
     ]
+    if idle_auto_off:
+        trace.append(
+            BrightnessTraceStep(
+                "idle_auto_off",
+                before=scaled,
+                after=0.0,
+                factor=0.0,
+            )
+        )
+        return _normalized_result(0.0, trace)
+    sleep_dim = max(MIN_SLEEP_DIM_FACTOR, min(1.0, float(sleep_factor)))
+    for name, factor in (("idle_dim", idle_factor),):
+        scaled, step = _scaled_step(name, scaled, factor)
+        trace.append(step)
+    if sleep_dim < 1.0:
+        scaled, step = _scaled_step("sleep_dim", scaled, sleep_dim)
+        trace.append(step)
     for name, factor in (
-        ("idle_dim", idle_factor),
         ("focus_sync", focus_factor),
         ("night_dim", night_factor),
         ("global_brightness", global_factor),
@@ -168,8 +210,11 @@ def plan_signal_brightness(
 
 __all__ = [
     "MIN_ESCALATION_VISIBLE_BRIGHTNESS",
+    "MIN_SLEEP_DIM_FACTOR",
     "BrightnessPolicyResult",
     "BrightnessTraceStep",
+    "idle_auto_off_due",
     "plan_ambient_brightness",
     "plan_signal_brightness",
+    "sleep_dim_factor",
 ]

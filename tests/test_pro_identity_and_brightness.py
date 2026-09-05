@@ -9,6 +9,7 @@ edited an entry no write path ever read. The firmware's STATUS.TXT
 
 from __future__ import annotations
 
+import os
 import plistlib
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -99,6 +100,33 @@ def test_garbage_status_txt_is_tolerated(tmp_path: Path) -> None:
     assert hardware_status_serial(mount) is None
     identities = inventory_mounts(tmp_path, runner=_runner_for(mount))
     assert len(identities) == 1
+
+
+def test_status_txt_symlink_is_not_followed(tmp_path: Path) -> None:
+    mount = tmp_path / "SidePulse"
+    mount.mkdir()
+    attacker_file = tmp_path / "attacker-status.txt"
+    attacker_file.write_text("serial SPP-ATTACKER\n", encoding="utf-8")
+    (mount / "STATUS.TXT").symlink_to(attacker_file)
+
+    assert hardware_status_serial(mount) is None
+
+
+def test_status_txt_fifo_does_not_block_inventory(tmp_path: Path) -> None:
+    mount = tmp_path / "SidePulse"
+    mount.mkdir()
+    os.mkfifo(mount / "STATUS.TXT")
+
+    assert hardware_status_serial(mount) is None
+
+
+def test_symlinked_mount_candidate_is_not_inventoried(tmp_path: Path) -> None:
+    real_mount = tmp_path / "real-volume"
+    real_mount.mkdir()
+    _write_status(real_mount)
+    (tmp_path / "SidePulse").symlink_to(real_mount, target_is_directory=True)
+
+    assert inventory_mounts(tmp_path, runner=_runner_for(real_mount)) == ()
 
 
 def test_refine_is_a_noop_without_serial(tmp_path: Path) -> None:

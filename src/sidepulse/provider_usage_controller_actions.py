@@ -55,6 +55,14 @@ def apply_provider_usage_settings_snapshot(
         project_presentation_settings(settings)
     )
     controller._sidepulse_provider_instance_policies = policies
+    window = getattr(controller, "_sidepulse_provider_usage_window", None)
+    set_privacy_mode = getattr(window, "set_privacy_mode", None)
+    if callable(set_privacy_mode):
+        set_privacy_mode(settings.menu_display.privacy_mode)
+    if getattr(controller, "_sidepulse_usage_menu_boxes", None):
+        from .settings_category_runtime import refresh_native_usage_summary
+
+        refresh_native_usage_summary(controller)
     if notify_service:
         service = getattr(controller, "_sidepulse_provider_usage_service", None)
         notify = getattr(service, "note_settings_updated", None)
@@ -127,6 +135,8 @@ def update_provider_instance_profile(
             value = value.upper() or None
 
     loaded = loader()
+    if field_key == "label" and loaded.settings.menu_display.privacy_mode:
+        raise ValueError("provider profile names cannot be changed in privacy mode")
     profile = loaded.settings.profile(provider_id, source_instance_id)
     values = {
         "label": profile.label,

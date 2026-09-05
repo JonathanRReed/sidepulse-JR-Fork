@@ -17,14 +17,19 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from urllib.parse import quote
 
-from .provider_facts import SourceKey, WorkIdentifier, WorkKey
 from .models import AgentMode, AgentStatus, parse_datetime
+from .provider_facts import SourceKey, WorkIdentifier, WorkKey
 
 T3_DATABASE_RELATIVE_PATH = Path("userdata") / "state.sqlite"
 T3_SQLITE_TIMEOUT_SECONDS = 0.75
+T3_SQLITE_MAX_VALUE_BYTES = 128 * 1024
+T3_MAX_QUERY_STEPS = 2_000_000
+T3_QUERY_PROGRESS_INTERVAL = 1_000
+T3_QUERY_TIMEOUT_SECONDS = 0.5
 T3_POLL_INTERVAL_SECONDS = 2.0
 T3_MAX_THREADS = 512
 T3_MAX_TITLE_LENGTH = 160
@@ -108,6 +113,72 @@ _SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~:-]{0,255}\Z")
 
 
 @dataclass(frozen=True, slots=True)
+class T3ReadOnlyPolicy:
+    """Pure admission decision for optional T3 reads."""
+
+    enabled: bool
+    activity_statistics_enabled: bool
+    base_dir: str | None
+    environment_id: str | None
+
+    @property
+    def should_instantiate(self) -> bool:
+        return self.enabled
+
+    @property
+    def should_poll(self) -> bool:
+        return self.enabled
+
+    @property
+    def may_scan_activity_statistics(self) -> bool:
+        return self.enabled and self.activity_statistics_enabled
+
+
+def _optional_setting_text(settings: object, name: str) -> str | None:
+    value = getattr(settings, name, None)
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def project_t3_read_only_policy(
+    settings: object,
+    *,
+    activity_statistics_enabled: bool | None = None,
+) -> T3ReadOnlyPolicy:
+    """Project settings without touching the filesystem or T3 runtime."""
+    if activity_statistics_enabled is None:
+        activity_statistics_enabled = (
+            getattr(settings, "t3code_activity_statistics_enabled", False) is True
+        )
+    elif type(activity_statistics_enabled) is not bool:
+        raise TypeError("activity_statistics_enabled must be a bool or None")
+    return T3ReadOnlyPolicy(
+        enabled=getattr(settings, "t3code_enabled", False) is True,
+        activity_statistics_enabled=activity_statistics_enabled,
+        base_dir=_optional_setting_text(settings, "t3code_base_dir"),
+        environment_id=_optional_setting_text(settings, "t3code_environment_id"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class T3DeepLinkCandidate:
+    """A navigation hint, not a verified desktop control channel."""
+
+    uri: str
+    experimental: bool = True
+    desktop_handler_verified: bool = False
+
+
+class T3ObservationState(str, Enum):
+    ATTENTION = "attention"
+    ACTIVE = "active"
+    FAILED = "failed"
+    IDLE = "idle"
+
+
+@dataclass(frozen=True, slots=True)
 class T3ThreadView:
     thread_id: str
     project_id: str
@@ -141,6 +212,23 @@ class T3ThreadView:
             or self.has_actionable_plan
         )
 
+    @property
+    def deep_link_candidate(self) -> T3DeepLinkCandidate | None:
+        if self.deep_link is None:
+            return None
+        return T3DeepLinkCandidate(uri=self.deep_link)
+
+    @property
+    def observation_state(self) -> T3ObservationState:
+        if self.needs_user:
+            return T3ObservationState.ATTENTION
+        status = (self.session_status or "").casefold()
+        if status in {"connecting", "starting", "running", "waiting"}:
+            return T3ObservationState.ACTIVE
+        if status == "error":
+            return T3ObservationState.FAILED
+        return T3ObservationState.IDLE
+
     def to_agent_status(self, *, stale: bool = False) -> AgentStatus:
         mode, event_name, message = _agent_state_for_thread(self)
         session_id = _safe_session_identifier(
@@ -151,9 +239,13 @@ class T3ThreadView:
             + (f" · {self.branch}" if self.branch else ""),
             T3_MAX_TITLE_LENGTH,
         )
+        source_instance = _safe_source_instance_identifier(
+            self.provider_instance or "default"
+        )
+        work_id = _safe_work_identifier(self.thread_id)
         work_key = WorkKey(
-            SourceKey(self.provider, "t3code", "default", "threads"),
-            WorkIdentifier(session_id),
+            SourceKey(self.provider, "t3code", source_instance, "threads"),
+            WorkIdentifier(work_id),
         )
         return AgentStatus(
             provider=self.provider,
@@ -246,6 +338,26 @@ def _safe_session_identifier(value: str) -> str:
         return text
     digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
     return f"t3-{digest[:32]}"
+
+
+def _safe_source_instance_identifier(value: str) -> str:
+    candidate = _safe_session_identifier(value)[:64]
+    try:
+        SourceKey("other", "t3code", candidate, "threads")
+    except ValueError:
+        digest = hashlib.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()
+        return f"t3-instance-{digest[:48]}"
+    return candidate
+
+
+def _safe_work_identifier(value: str) -> str:
+    candidate = _safe_session_identifier(value)[:64]
+    try:
+        WorkIdentifier(candidate)
+    except ValueError:
+        digest = hashlib.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()
+        return f"t3-thread-{digest[:48]}"
+    return candidate
 
 
 def _normalize_provider(*values: object) -> str:
@@ -378,6 +490,7 @@ def _open_read_only(
         timeout=T3_SQLITE_TIMEOUT_SECONDS,
     )
     connection.row_factory = sqlite3.Row
+    connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, T3_SQLITE_MAX_VALUE_BYTES)
     connection.execute("PRAGMA query_only = ON")
     connection.execute(
         f"PRAGMA busy_timeout = {int(T3_SQLITE_TIMEOUT_SECONDS * 1000)}"
@@ -397,6 +510,22 @@ def read_t3_snapshot(
         raise FileNotFoundError(database)
     connection = _open_read_only(database, connector=connector)
     try:
+        deadline = time.monotonic() + T3_QUERY_TIMEOUT_SECONDS
+        progress_calls = 0
+
+        def query_budget_exhausted() -> int:
+            nonlocal progress_calls
+            progress_calls += 1
+            return int(
+                progress_calls * T3_QUERY_PROGRESS_INTERVAL
+                > T3_MAX_QUERY_STEPS
+                or time.monotonic() >= deadline
+            )
+
+        connection.set_progress_handler(
+            query_budget_exhausted,
+            T3_QUERY_PROGRESS_INTERVAL,
+        )
         columns = {
             table: _table_columns(connection, table) for table in _REQUIRED_COLUMNS
         }
@@ -550,12 +679,14 @@ class T3SnapshotService:
     def __init__(
         self,
         *,
+        enabled: bool = False,
         base_dir: Path | str | None = None,
         environment_id: str | None = None,
         reader: Callable[..., T3Snapshot] = read_t3_snapshot,
         monotonic: Callable[[], float] = time.monotonic,
         minimum_interval: float = T3_POLL_INTERVAL_SECONDS,
     ) -> None:
+        self._enabled = bool(enabled)
         self._base_dir = base_dir
         self._environment_id = environment_id
         self._reader = reader
@@ -581,7 +712,7 @@ class T3SnapshotService:
     ) -> T3Observation:
         now = self._monotonic()
         with self._lock:
-            if self._closed:
+            if self._closed or not self._enabled:
                 return self._observation_locked()
             due = (
                 force
@@ -660,17 +791,94 @@ class T3SnapshotService:
                 pass
 
 
+def reconcile_t3_snapshot_service(
+    current: object | None,
+    *,
+    previous_policy: T3ReadOnlyPolicy | None,
+    policy: T3ReadOnlyPolicy,
+    factory: Callable[..., object] | None = None,
+) -> object | None:
+    """Admit one configured service without touching a disabled T3 path."""
+    if type(policy) is not T3ReadOnlyPolicy:
+        raise TypeError("policy must be T3ReadOnlyPolicy")
+    if not policy.should_instantiate:
+        close = getattr(current, "close", None)
+        if callable(close):
+            close()
+        return None
+    if current is not None and previous_policy == policy:
+        return current
+    close = getattr(current, "close", None)
+    if callable(close):
+        close()
+    service_factory = factory or T3SnapshotService
+    return service_factory(
+        enabled=True,
+        base_dir=policy.base_dir,
+        environment_id=policy.environment_id,
+    )
+
+
+def update_t3_snapshot_runtime(
+    target: object,
+    settings: object,
+    *,
+    factory: Callable[..., object] | None = None,
+) -> T3ReadOnlyPolicy:
+    """Reconcile one status-bar poll from explicit integration settings."""
+    policy = project_t3_read_only_policy(settings)
+    previous_policy = getattr(target, "_t3_read_only_policy", None)
+    current = getattr(target, "_t3_snapshot_service", None)
+    service = reconcile_t3_snapshot_service(
+        current,
+        previous_policy=(
+            previous_policy
+            if type(previous_policy) is T3ReadOnlyPolicy
+            else None
+        ),
+        policy=policy,
+        factory=factory,
+    )
+    setattr(target, "_t3_read_only_policy", policy)
+    setattr(target, "_t3_snapshot_service", service)
+
+    replace = getattr(getattr(target, "monitor", None), "replace_external_statuses", None)
+    cleared = False
+    if service is None or service is not current:
+        if callable(replace):
+            replace("t3code", ())
+        cleared = True
+    if service is None:
+        return policy
+
+    observation = service.observation()
+    if observation.snapshot is not None and observation.snapshot.compatible:
+        if callable(replace):
+            replace("t3code", observation.statuses)
+    elif not observation.in_flight and not cleared and callable(replace):
+        replace("t3code", ())
+    if policy.should_poll:
+        service.request()
+    return policy
+
+
 __all__ = [
     "T3_DATABASE_RELATIVE_PATH",
     "T3_MAXIMUM_TESTED_VERSION",
     "T3_MINIMUM_VERSION",
     "T3_PROTOCOL_FINGERPRINT",
     "T3_SOURCE_COMMIT",
+    "T3DeepLinkCandidate",
     "T3Observation",
+    "T3ObservationState",
+    "T3ReadOnlyPolicy",
     "T3Snapshot",
     "T3SnapshotService",
     "T3ThreadView",
     "default_t3_base_dir",
+    "project_t3_read_only_policy",
     "read_t3_snapshot",
+    "reconcile_t3_snapshot_service",
     "t3_database_path",
+    "update_t3_snapshot_runtime",
 ]

@@ -26,6 +26,10 @@ MAX_SYNC_PACKET_BYTES = 2 * 1024 * 1024
 #: wrote a packet, not when -- an attacker who captured last month's
 #: envelope could otherwise replay a rosy quota forever.
 SYNC_PACKET_MAX_AGE_SECONDS = 7 * 24 * 60 * 60.0
+#: Small allowance for clocks that are not perfectly synchronized across Macs.
+SYNC_PACKET_FUTURE_SKEW_SECONDS = 5 * 60.0
+#: Observations must describe the same bounded period as their packet stamp.
+SYNC_OBSERVATION_MAX_PACKET_DELTA_SECONDS = SYNC_PACKET_MAX_AGE_SECONDS
 _MAX_QUOTA_SNAPSHOTS = 32
 _MAX_MACHINE_USAGE = 64
 _DEVICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -364,6 +368,17 @@ def decode_signed_packet(
     current = time.time() if now is None else float(now)
     if packet.generated_at < current - float(max_age_seconds):
         raise StaleSyncPacketError("sync packet is outside the freshness window")
+    if packet.generated_at > current + SYNC_PACKET_FUTURE_SKEW_SECONDS:
+        raise StaleSyncPacketError("sync packet is stamped too far in the future")
+    observations = (*packet.quota_snapshots, *packet.machine_usage)
+    if any(
+        item.observed_at > current + SYNC_PACKET_FUTURE_SKEW_SECONDS
+        or item.observed_at
+        < packet.generated_at - SYNC_OBSERVATION_MAX_PACKET_DELTA_SECONDS
+        or item.observed_at > packet.generated_at + SYNC_PACKET_FUTURE_SKEW_SECONDS
+        for item in observations
+    ):
+        raise StaleSyncPacketError("sync packet contains an inconsistent observation")
     return packet
 
 
@@ -416,6 +431,8 @@ def merge_provider_sync(
 __all__ = [
     "MAX_SYNC_PACKET_BYTES",
     "PROVIDER_SYNC_SCHEMA_VERSION",
+    "SYNC_OBSERVATION_MAX_PACKET_DELTA_SECONDS",
+    "SYNC_PACKET_FUTURE_SKEW_SECONDS",
     "SYNC_PACKET_MAX_AGE_SECONDS",
     "MachineUsageObservation",
     "MergedProviderSync",

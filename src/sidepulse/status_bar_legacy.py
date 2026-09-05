@@ -211,8 +211,10 @@ from .global_hotkeys import (  # noqa: E402
     HotkeyCleanupError,
 )
 from .brightness_policy import (
+    idle_auto_off_due,
     plan_ambient_brightness,
     plan_signal_brightness,
+    sleep_dim_factor,
 )
 from .dnd_controller import DndChangeResult, DndController
 from .dnd_policy import (
@@ -562,10 +564,12 @@ from .presentation_scheduler import (
     plan_presentation_schedule,
 )
 from .private_export import write_private_export
+from .private_io import atomic_private_write
 from .provider_capacity import negotiate_provider_capacity_policies
 from .provider_contracts import NegotiatedProviderContract, ProviderIdentifier
 from .provider_facts import NextActor, RequestKey, SourceFreshness, WorkKey
 from .power_policy import apply_power_hold_settings
+from .quota_power_hold import QuotaPowerHoldCoordinator, quota_adjusted_work_mode
 from .providers import (
     HOOK_PROVIDERS,
     PROVIDER_SPECS,
@@ -734,6 +738,18 @@ def _capacity_descriptors_by_source():
 
 
 CAPACITY_DESCRIPTORS_BY_SOURCE = _capacity_descriptors_by_source()
+
+
+def _capacity_evidence_classes_by_source():
+    """Retain negotiated evidence authority by exact canonical source."""
+    return {
+        row.policy.source: row.policy.evidence_class
+        for row in negotiate_provider_capacity_policies(negotiated_provider_sources())
+        if row.descriptor is not None and row.policy.source is not None
+    }
+
+
+CAPACITY_EVIDENCE_CLASSES_BY_SOURCE = _capacity_evidence_classes_by_source()
 # The refresh scope and the producer's account scope have to be the same
 # string. `CapacityRefreshCoordinator._validate_snapshot` rejects a snapshot
 # whose lanes sit outside the key's (source, pool, account, auth_mode) scope,
@@ -1118,8 +1134,11 @@ class RemindersObservationResult:
 class WeatherObservationRequest:
     latitude: float | None
     longitude: float | None
+    allow_ip_location: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.allow_ip_location) is not bool:
+            raise ValueError("invalid weather IP location consent")
         latitude = self.latitude
         longitude = self.longitude
         if (latitude is None) != (longitude is None):
@@ -1832,7 +1851,7 @@ def replay_recent_debug_logs(
     max_lines: int = STATUS_BAR_STARTUP_REPLAY_LINES,
 ) -> int:
     # Restoring the persisted canonical state already covers old events. The
-    # startup tail exists to recover sessions that changed while JR Bar was
+    # startup tail exists to recover sessions that changed while JR-Bar was
     # stopped, so replay only the newest observation for each session/agent.
     # Replaying every Pre/PostToolUse pair made startup cost grow with log
     # volume and reduced the same large state hundreds of times.
@@ -2283,6 +2302,10 @@ class StatusBarController(NSObject):
         # provider. Retained so the Why panel can name a refusal; the card
         # only ever gets to say how MANY windows went missing.
         self._capacity_detail_inputs: dict[str, tuple[CapacitySnapshot, CapacityProjection]] = {}
+        # Empty until an account-aware runtime explicitly binds a canonical
+        # WorkKey. Provider names alone never authorise quota to release a hold.
+        self._power_hold_account_bindings_by_work = {}
+        self._quota_power_holds = QuotaPowerHoldCoordinator()
         self._capacity_history_store: CapacityHistoryStore | None = None
         self._capacity_history_retention_days: int | None = None
         self._capacity_history_generation = 0
@@ -3189,15 +3212,11 @@ class StatusBarController(NSObject):
         try:
             self.ingest_transcript_fallback()
             try:
-                t3_service = getattr(self, "_t3_snapshot_service", None)
-                if t3_service is None:
-                    from .t3_compat import T3SnapshotService
-                    t3_service = T3SnapshotService()
-                    self._t3_snapshot_service = t3_service
-                obs = t3_service.observation()
-                if obs.snapshot is not None and obs.snapshot.compatible:
-                    self.monitor.replace_external_statuses("t3code", obs.snapshot.agent_statuses())
-                t3_service.request()
+                from .integration_settings import load_integration_settings
+                from .t3_compat import update_t3_snapshot_runtime
+
+                integration_settings = load_integration_settings().settings
+                update_t3_snapshot_runtime(self, integration_settings)
             except Exception as _t3_exc:
                 log_status_bar(f"t3 snapshot error: {_t3_exc}")
             _t_ingest = time.monotonic()
@@ -5045,13 +5064,15 @@ class StatusBarController(NSObject):
             return
         self._usage_provider_models = models
         shared = payload.get("shared") or {}
+        current_graph = getattr(self, "usage_graph_model", None)
+        activity_owned = isinstance(current_graph, dict) and "summary" in current_graph
         if "usage_graph" in shared or payload.get("shared_error") is not None:
             self._usage_local_scan_complete = True
         if "day_bars" in shared:
             self.usage_day_bars = shared.get("day_bars") or []
         if "hourly" in shared:
             self.usage_hourly = shared.get("hourly") or []
-        if "usage_graph" in shared:
+        if "usage_graph" in shared and not activity_owned:
             self.usage_graph_model = shared["usage_graph"]
         claude_model = models.get("claude")
         codex_model = models.get("codex")
@@ -5067,7 +5088,7 @@ class StatusBarController(NSObject):
         usage_label = fields.get("profile_usage_label")
         if usage_label is not None:
             usage_label.setStringValue_(
-                self.usage_summary_text
+                (current_graph.get("summary") if activity_owned else self.usage_summary_text)
                 or (
                     "No Claude activity in this period."
                     if self._usage_local_scan_complete
@@ -5088,6 +5109,12 @@ class StatusBarController(NSObject):
             graph.setModel_(
                 getattr(self, "usage_graph_model", None) or {}
             )
+            if activity_owned:
+                # The Activity worker owns provider filters, heatmap and summary.
+                # A quota refresh must not replace them with its legacy projection.
+                from .usage_graph_worker import refresh_usage_graph
+
+                refresh_usage_graph(self)
         period_label = fields.get("profile_usage_period_label")
         if period_label is not None:
             period_label.setStringValue_(
@@ -6784,7 +6811,16 @@ class StatusBarController(NSObject):
         save_settings(self.settings)
         self.weather_watch_retry_at = 0.0
         if enabled:
-            self.set_settings_message("Weather warnings on — checking your area…")
+            has_manual_location = (
+                self.settings.weather_latitude is not None
+                and self.settings.weather_longitude is not None
+            )
+            if has_manual_location or self.settings.weather_ip_geolocation_enabled:
+                self.set_settings_message("Weather warnings on. Checking your area.")
+            else:
+                self.set_settings_message(
+                    "Weather warnings need coordinates or separate network-location consent."
+                )
         else:
             self.set_settings_message("Weather warnings off.")
         self.reconcile_lid_observation()
@@ -6793,6 +6829,25 @@ class StatusBarController(NSObject):
 
     @objc.IBAction
     def applyWeatherLocation_(self, _sender):
+        ip_switch = self.settings_buttons.get("weather_ip_geolocation_enabled")
+        if _sender is ip_switch and ip_switch is not None:
+            enabled = bool(ip_switch.state())
+            self.settings = self.settings.with_weather_ip_geolocation_enabled(enabled)
+            save_settings(self.settings)
+            self.weather_watch_retry_at = 0.0
+            self._advance_weather_observation_generation()
+            if enabled:
+                self.set_settings_message(
+                    "Network location on. Weather checks may send your IP address to ipapi.co."
+                )
+                if self.settings.weather_alerts_enabled:
+                    self._weather_observation_timer_fired()
+            else:
+                weather_watch.invalidate_ip_location()
+                self.set_settings_message(
+                    "Network location off. Enter latitude and longitude for weather alerts."
+                )
+            return
         lat_field = self.settings_fields.get("weather_latitude_field")
         lon_field = self.settings_fields.get("weather_longitude_field")
         if lat_field is None or lon_field is None:
@@ -6816,8 +6871,7 @@ class StatusBarController(NSObject):
             return
         if (latitude is None) != (longitude is None):
             self.set_settings_message(
-                "Enter BOTH latitude and longitude, or leave both blank "
-                "for automatic."
+                "Enter both latitude and longitude, or leave both blank."
             )
             return
         self.settings = self.settings.with_weather_location(latitude, longitude)
@@ -6827,7 +6881,14 @@ class StatusBarController(NSObject):
         self._advance_weather_observation_generation()
         self._weather_observation_timer_fired()
         if latitude is None:
-            self.set_settings_message("Weather location: automatic (network address).")
+            if self.settings.weather_ip_geolocation_enabled:
+                self.set_settings_message(
+                    "Weather location uses your network address with separate consent."
+                )
+            else:
+                self.set_settings_message(
+                    "Weather alerts need coordinates or network-location consent."
+                )
         else:
             self.set_settings_message(
                 f"Weather location set to {latitude:g}, {longitude:g}."
@@ -11914,6 +11975,10 @@ class StatusBarController(NSObject):
             self.settings.weather_alerts_enabled,
         )
         set_checkbox_state(
+            self.settings_buttons.get("weather_ip_geolocation_enabled"),
+            self.settings.weather_ip_geolocation_enabled,
+        )
+        set_checkbox_state(
             self.settings_buttons.get("quota_alerts_enabled"),
             self.settings.quota_alerts_enabled,
         )
@@ -12889,6 +12954,20 @@ class StatusBarController(NSObject):
         return plan_ambient_brightness(
             base_brightness=base,
             idle_factor=self.idle_dim_scale_factor(),
+            sleep_factor=sleep_dim_factor(
+                enabled=self.settings.sleep_dim_enabled,
+                fraction=self.settings.sleep_dim_fraction,
+                display_asleep=bool(
+                    self._presentation_scheduler_inputs is not None
+                    and self._presentation_scheduler_inputs.display_asleep
+                ),
+            ),
+            idle_auto_off=idle_auto_off_due(
+                enabled=self.settings.idle_auto_off_enabled,
+                idle_since_monotonic=self.idle_since_monotonic,
+                after_minutes=self.settings.idle_auto_off_after_minutes,
+                now_monotonic=time.monotonic(),
+            ),
             focus_factor=1.0,
             night_factor=self.night_dim_scale_factor(),
             global_factor=float(self.settings.global_brightness_scale),
@@ -14455,6 +14534,8 @@ class StatusBarController(NSObject):
         request = command.payload
         try:
             if request.latitude is None:
+                if not request.allow_ip_location:
+                    return WeatherObservationResult(False, False, None)
                 latitude, longitude = weather_watch.ip_location()
                 location = WeatherObservationRequest(latitude, longitude)
             else:
@@ -16107,6 +16188,7 @@ class StatusBarController(NSObject):
                 payload=WeatherObservationRequest(
                     self.settings.weather_latitude,
                     self.settings.weather_longitude,
+                    self.settings.weather_ip_geolocation_enabled,
                 ),
             )
         )
@@ -16654,6 +16736,27 @@ class StatusBarController(NSObject):
         self.device_settings_controls = device_controls
 
     def sync_keep_awake(self, mode: AgentMode) -> None:
+        quota_holds = getattr(self, "_quota_power_holds", None)
+        snapshot = getattr(self, "last_snapshot", None)
+        if isinstance(quota_holds, QuotaPowerHoldCoordinator) and snapshot is not None:
+            capacity_by_provider = {
+                provider_id: capacity_snapshot
+                for provider_id, (capacity_snapshot, _projection) in getattr(
+                    self, "_capacity_detail_inputs", {}
+                ).items()
+            }
+            mode = quota_adjusted_work_mode(
+                mode,
+                statuses=snapshot.statuses,
+                bindings_by_work=getattr(
+                    self, "_power_hold_account_bindings_by_work", {}
+                ),
+                capacity_by_provider=capacity_by_provider,
+                evidence_class_by_source=CAPACITY_EVIDENCE_CLASSES_BY_SOURCE,
+                context=capacity_execution_context(),
+                coordinator=quota_holds,
+                now=time.time(),
+            )
         was_running = self.keep_awake.process_running()
         apply_power_hold_settings(self.keep_awake, self.closed_lid_awake, self.settings)
         # Kept fresh here (rather than only at construction) so adjusting
@@ -19172,8 +19275,9 @@ def should_show_setup_window(settings) -> bool:
 
 
 def open_terminal_setup_command(command: str, *, filename: str = "install-sleep-helper.command") -> Path:
+    if not filename or filename in {".", ".."} or Path(filename).name != filename:
+        raise ValueError("setup command filename must be a non-empty basename")
     state_dir = default_state_dir()
-    state_dir.mkdir(parents=True, exist_ok=True)
     script_path = state_dir / filename
     script = "\n".join(
         [
@@ -19196,8 +19300,7 @@ def open_terminal_setup_command(command: str, *, filename: str = "install-sleep-
             "",
         ]
     )
-    script_path.write_text(script, encoding="utf-8")
-    script_path.chmod(0o700)
+    atomic_private_write(script_path, script, mode=0o700)
     # Name the terminal explicitly. A bare `open` hands the .command file
     # to whatever app owns that file type -- on any Mac where Ghostty,
     # iTerm2 or a text editor claims it, the script is opened rather than

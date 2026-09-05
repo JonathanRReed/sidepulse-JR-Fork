@@ -101,12 +101,14 @@ def test_menu_display_and_visibility_round_trip(tmp_path) -> None:
         default_provider_usage_settings()
         .with_menu_flag("show_cost", False)
         .with_menu_flag("show_detail_lanes", False)
+        .with_menu_flag("privacy_mode", True)
         .with_menu_visible("devin", False)
     )
     save_provider_usage_settings(updated, path)
     loaded = load_provider_usage_settings(path).settings
     assert loaded.menu_display.show_cost is False
     assert loaded.menu_display.show_detail_lanes is False
+    assert loaded.menu_display.privacy_mode is True
     assert loaded.menu_display.show_meters is True
     assert loaded.preference("devin").menu_visible is False
     assert loaded.preference("claude").menu_visible is True
@@ -124,12 +126,17 @@ def test_menu_display_tolerates_old_documents_and_junk(tmp_path) -> None:
                 "providers": [
                     {"provider_id": "claude", "menu_visible": "yes-please"},
                 ],
-                "menu_display": {"show_meters": "definitely", "surprise": 1},
+                "menu_display": {
+                    "show_meters": "definitely",
+                    "privacy_mode": "definitely",
+                    "surprise": 1,
+                },
             }
         )
     )
     loaded = load_provider_usage_settings(path).settings
     assert loaded.menu_display.show_meters is True
+    assert loaded.menu_display.privacy_mode is False
     assert loaded.preference("claude").menu_visible is True
     assert loaded.hidden_menu_providers() == frozenset()
 

@@ -14,16 +14,48 @@ def test_package_builder_fails_fast_and_never_defaults_to_apple_python_39() -> N
 
     assert "set -euo pipefail" in text
     assert 'BUILD_PYTHON="${BUILD_PYTHON:-/usr/bin/python3}"' not in text
-    assert "JR Bar requires Python 3.10+" in text
-    assert "sys.version_info < (3, 10)" in text
+    assert "JR-Bar release packaging requires Python 3.12" in text
+    assert "sys.version_info[:2] != (3, 12)" in text
     assert "scripts/validate_release_version.py" in text
+
+
+def test_release_workflow_selects_the_locked_python_runtime() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "self-hosted-macos.yml").read_text(encoding="utf-8")
+
+    assert 'BUILD_PYTHON: "python3.12"' in workflow
+
+
+def test_source_install_drops_only_the_incompatible_build_constraint() -> None:
+    text = BUILD_SCRIPT.read_text(encoding="utf-8")
+
+    assert (
+        'env -u PIP_BUILD_CONSTRAINT "$VENV_DIR/bin/python" -m pip install '
+        '"$ROOT_DIR" --no-deps --no-build-isolation'
+    ) in text
+    assert 'export PIP_CONSTRAINT="$CONSTRAINTS"' in text
+    assert 'export PIP_BUILD_CONSTRAINT="$CONSTRAINTS"' in text
+
+
+def test_package_builder_embeds_creator_micro_backend() -> None:
+    text = BUILD_SCRIPT.read_text(encoding="utf-8")
+
+    assert "--hidden-import sidepulse.creator_micro_adapter" in text
+    assert "--hidden-import sidepulse.creator_micro_hidapi" in text
+    assert "--hidden-import hid" in text
+
+
+def test_package_builder_embeds_distribution_metadata_for_runtime_version() -> None:
+    text = BUILD_SCRIPT.read_text(encoding="utf-8")
+
+    assert "--copy-metadata sidepulse" in text
 
 
 def test_package_builder_sets_display_name_without_changing_bundle_identity() -> None:
     text = BUILD_SCRIPT.read_text(encoding="utf-8")
 
-    assert 'PRODUCT_DISPLAY_NAME="JR Bar"' in text
+    assert 'PRODUCT_DISPLAY_NAME="JR-Bar"' in text
     assert ":CFBundleDisplayName string $PRODUCT_DISPLAY_NAME" in text
+    assert ":CFBundleName string $PRODUCT_DISPLAY_NAME" in text
     assert 'MINIMUM_SUPPORTED_MACOS="11.0"' in text
     assert ":LSMinimumSystemVersion string $MINIMUM_SUPPORTED_MACOS" in text
     assert "--name SidePulse" in text

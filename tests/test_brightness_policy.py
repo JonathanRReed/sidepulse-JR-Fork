@@ -400,3 +400,39 @@ def test_ambient_brightness_trace_exposes_final_rounding_and_clamping(
         before=base_brightness,
         after=float(expected),
     )
+
+
+def test_sleep_dims_the_shared_brightness_intent_without_turning_it_off() -> None:
+    result = plan_ambient_brightness(
+        base_brightness=255,
+        idle_factor=1.0,
+        sleep_factor=0.0,
+        focus_factor=1.0,
+        night_factor=1.0,
+        global_factor=1.0,
+        escalation_boost=1.0,
+        is_screen_bar=False,
+        screen_bar_min_glow=0.0,
+    )
+
+    assert result.brightness == MIN_AMBIENT_VISIBLE_BRIGHTNESS
+    sleep_step = next(step for step in result.trace if step.name == "sleep_dim")
+    assert sleep_step.factor > 0.0
+
+
+def test_idle_auto_off_is_separate_and_authoritative_over_visibility_floors() -> None:
+    result = plan_ambient_brightness(
+        base_brightness=255,
+        idle_factor=0.3,
+        sleep_factor=0.2,
+        idle_auto_off=True,
+        focus_factor=1.0,
+        night_factor=1.0,
+        global_factor=1.0,
+        escalation_boost=2.0,
+        is_screen_bar=True,
+        screen_bar_min_glow=0.75,
+    )
+
+    assert result.brightness == 0
+    assert _names(result.trace) == ("base", "idle_auto_off", "normalize")

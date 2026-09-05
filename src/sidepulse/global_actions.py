@@ -125,7 +125,7 @@ _MODIFIER_SYMBOLS = {
 }
 
 # Exact macOS virtual-key-code plus modifier equivalents already owned by the
-# JR Bar responder chain. The presentation label is deliberately absent from
+# JR-Bar responder chain. The presentation label is deliberately absent from
 # this identity because it is not execution authority.
 _RESERVED_MENU_EQUIVALENTS = frozenset(
     {
@@ -178,7 +178,7 @@ def validate_shortcut(chord: ShortcutChord) -> None:
     if (key_code, modifiers) in _RESERVED_MENU_EQUIVALENTS:
         raise ShortcutValidationError(
             ShortcutValidationCode.RESERVED_MENU_EQUIVALENT,
-            "shortcut is reserved by a JR Bar menu command",
+            "shortcut is reserved by a JR-Bar menu command",
         )
 
 
@@ -229,7 +229,7 @@ def validate_global_action_bindings(
         if conflicting_action is not None:
             raise ShortcutValidationError(
                 ShortcutValidationCode.DUPLICATE_BINDING,
-                "two JR Bar global actions cannot use the same shortcut",
+                "two JR-Bar global actions cannot use the same shortcut",
                 action=action_key,
                 conflicting_action=conflicting_action,
             )
@@ -363,10 +363,10 @@ def project_global_action_status(
         value = formatted
         help_text = (
             f"Use {formatted} to reveal the current ask or Agent Browser. "
-            "JR Bar cannot detect every shortcut used by other apps."
+            "JR-Bar cannot detect every shortcut used by other apps."
         )
     elif state is GlobalActionBindingState.LOCAL_CONFLICT:
-        value = "Already used by JR Bar"
+        value = "Already used by JR-Bar"
         help_text = (
             "Choose another shortcut to reveal the current ask or Agent Browser."
         )

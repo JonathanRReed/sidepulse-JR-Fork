@@ -12,13 +12,9 @@ select_python() {
         candidates=("$PYTHON")
     else
         candidates=(
-            python3.13
             python3.12
-            python3.11
-            python3.10
-            /opt/homebrew/bin/python3
-            /usr/local/bin/python3
-            python3
+            /opt/homebrew/bin/python3.12
+            /usr/local/bin/python3.12
         )
     fi
 
@@ -28,7 +24,7 @@ select_python() {
         if [ -z "$resolved" ]; then
             continue
         fi
-        if "$resolved" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' 2>/dev/null; then
+        if "$resolved" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))' 2>/dev/null; then
             printf '%s\n' "$resolved"
             return 0
         fi
@@ -38,7 +34,8 @@ select_python() {
 
 PYTHON_BIN="$(select_python || true)"
 if [ -z "$PYTHON_BIN" ]; then
-    echo "JR Bar requires Python 3.10+. Install Homebrew Python 3.13 or set PYTHON." >&2
+    echo "JR-Bar development and release tooling requires Python 3.12." >&2
+    echo "Install Homebrew Python 3.12 or set PYTHON to that interpreter." >&2
     exit 2
 fi
 if [ ! -f "$CONSTRAINTS" ]; then
@@ -46,7 +43,14 @@ if [ ! -f "$CONSTRAINTS" ]; then
     exit 2
 fi
 
-if [ ! -x "$VENV_DIR/bin/python" ]; then
+if [ -x "$VENV_DIR/bin/python" ]; then
+    if ! "$VENV_DIR/bin/python" -c \
+        'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))' 2>/dev/null; then
+        echo "The existing virtual environment at $VENV_DIR does not use Python 3.12." >&2
+        echo "Choose a new SIDEPULSE_DEV_VENV or remove and recreate that environment." >&2
+        exit 2
+    fi
+else
     "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi
 

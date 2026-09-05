@@ -1,4 +1,4 @@
-"""Command-line configuration and diagnostics for the T3 Code integration."""
+"""Command-line configuration and diagnostics for optional integrations."""
 
 from __future__ import annotations
 
@@ -18,13 +18,13 @@ from .integration_settings import (
 from .product_identity import PRODUCT_DISPLAY_NAME
 from .t3_compat import read_t3_snapshot
 
-INTEGRATION_NAMES = frozenset({"t3code"})
+INTEGRATION_NAMES = frozenset({"agent-deck", "creator-micro", "t3code"})
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sidepulse-integrations",
-        description=f"Configure and inspect the {PRODUCT_DISPLAY_NAME} T3 Code integration.",
+        description=f"Configure and inspect {PRODUCT_DISPLAY_NAME} compatibility integrations.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -35,14 +35,14 @@ def build_parser() -> argparse.ArgumentParser:
     for command, enabled in (("enable", True), ("disable", False)):
         mutation = subparsers.add_parser(
             command,
-            help=f"{command.title()} T3 Code.",
+            help=f"{command.title()} an integration.",
         )
-        mutation.add_argument("integration", choices=("t3code",))
+        mutation.add_argument("integration", choices=tuple(sorted(INTEGRATION_NAMES)))
         mutation.set_defaults(func=cmd_enabled, enabled=enabled)
 
     configure = subparsers.add_parser(
         "configure",
-        help="Set T3 Code options.",
+        help="Configure an integration.",
     )
     configure_subparsers = configure.add_subparsers(
         dest="integration",
@@ -53,7 +53,17 @@ def build_parser() -> argparse.ArgumentParser:
     t3code.add_argument("--environment-id")
     t3code.add_argument("--clear-base-dir", action="store_true")
     t3code.add_argument("--clear-environment-id", action="store_true")
+    t3code.add_argument(
+        "--activity-statistics",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Include bounded T3 task-completion activity in usage history.",
+    )
     t3code.set_defaults(func=cmd_configure_t3code)
+    agent_deck = configure_subparsers.add_parser("agent-deck")
+    agent_deck.add_argument("--snapshot-path", type=Path)
+    agent_deck.add_argument("--clear-snapshot-path", action="store_true")
+    agent_deck.set_defaults(func=cmd_configure_agent_deck)
 
     probe = subparsers.add_parser(
         "probe",
@@ -71,22 +81,24 @@ def _status_document(loaded) -> dict[str, object]:
     compatibility = manifest.entry("t3code")
     return {
         "settingsPath": str(default_integration_settings_path()),
-        "readOnly": loaded.compatibility.read_only,
+        "settingsFileReadOnly": loaded.compatibility.read_only,
         "t3code": {
             "enabled": settings.t3code_enabled,
+            "activityStatisticsEnabled": (settings.t3code_activity_statistics_enabled),
             "baseDir": settings.t3code_base_dir,
             "environmentId": settings.t3code_environment_id,
-            "minimumVersion": (
-                compatibility.minimum_version if compatibility is not None else None
-            ),
-            "maximumTestedVersion": (
-                compatibility.maximum_tested_version
-                if compatibility is not None
-                else None
-            ),
-            "connectionMode": (
-                compatibility.connection_mode if compatibility is not None else None
-            ),
+            "minimumVersion": (compatibility.minimum_version if compatibility is not None else None),
+            "maximumTestedVersion": (compatibility.maximum_tested_version if compatibility is not None else None),
+            "connectionMode": (compatibility.connection_mode if compatibility is not None else None),
+        },
+        "agent-deck": {
+            "enabled": settings.agent_deck_enabled,
+            "snapshotPath": settings.agent_deck_snapshot_path,
+            "connectionMode": "configured-readonly-deck-snapshot-v1",
+        },
+        "creator-micro": {
+            "enabled": settings.creator_micro_enabled,
+            "connectionMode": "hidapi-explicit-identity-bound-output",
         },
     }
 
@@ -96,7 +108,10 @@ def _print_status(document: dict[str, object], *, machine: bool) -> None:
         print(json.dumps(document, indent=2, sort_keys=True))
         return
     print(f"settings: {document['settingsPath']}")
-    print(f"read-only: {'yes' if document['readOnly'] else 'no'}")
+    print(
+        "settings file read-only: "
+        f"{'yes' if document['settingsFileReadOnly'] else 'no'}"
+    )
     row = document["t3code"]
     assert isinstance(row, dict)
     print(f"t3code: {'enabled' if row['enabled'] else 'disabled'}")
@@ -127,9 +142,32 @@ def _save_updated(loaded, settings) -> int:
 
 def cmd_enabled(args: argparse.Namespace) -> int:
     loaded = load_integration_settings()
+    settings = loaded.settings
+    if (
+        args.integration == "creator-micro"
+        and args.enabled
+        and settings.creator_micro_device_serial is None
+    ):
+        from .creator_micro_hidapi import (
+            DeviceIdentityError,
+            HidApiTransport,
+            select_unique_stable_serial,
+        )
+
+        try:
+            serial = select_unique_stable_serial(HidApiTransport().enumerate())
+        except (DeviceIdentityError, OSError) as exc:
+            print(f"sidepulse-integrations: {exc}", file=sys.stderr)
+            return 1
+        settings = settings.with_creator_micro(
+            enabled=True,
+            device_serial=serial,
+        )
+    else:
+        settings = settings.with_enabled(args.integration, args.enabled)
     return _save_updated(
         loaded,
-        loaded.settings.with_enabled("t3code", args.enabled),
+        settings,
     )
 
 
@@ -151,10 +189,27 @@ def cmd_configure_t3code(args: argparse.Namespace) -> int:
         )
     if args.environment_id is not None or args.clear_environment_id:
         settings = settings.with_t3code(
-            environment_id=(
-                None if args.clear_environment_id else args.environment_id
-            ),
+            environment_id=(None if args.clear_environment_id else args.environment_id),
         )
+    if args.activity_statistics is not None:
+        settings = settings.with_t3code(
+            activity_statistics_enabled=args.activity_statistics,
+        )
+    return _save_updated(loaded, settings)
+
+
+def cmd_configure_agent_deck(args: argparse.Namespace) -> int:
+    if args.snapshot_path is not None and args.clear_snapshot_path:
+        print(
+            "sidepulse-integrations: choose --snapshot-path or --clear-snapshot-path",
+            file=sys.stderr,
+        )
+        return 2
+    loaded = load_integration_settings()
+    path = None if args.clear_snapshot_path else args.snapshot_path
+    settings = loaded.settings.with_agent_deck(
+        snapshot_path=str(path.expanduser()) if path is not None else None,
+    )
     return _save_updated(loaded, settings)
 
 
@@ -214,6 +269,16 @@ def _print_probe(document: dict[str, object], *, machine: bool) -> None:
 
 def cmd_probe(args: argparse.Namespace) -> int:
     settings = load_integration_settings().settings
+    if settings.t3code_enabled is not True:
+        _print_probe(
+            {
+                "integration": "t3code",
+                "available": False,
+                "reason": "integration_disabled",
+            },
+            machine=args.json,
+        )
+        return 1
     try:
         document = _t3_probe_document(settings)
     except (FileNotFoundError, OSError, ValueError) as exc:

@@ -318,6 +318,40 @@ def test_cached_merged_sync_reads_local_documents_without_fetching(tmp_path: Pat
     assert merged.total_input_tokens == 0
 
 
+def test_cached_merged_sync_rejects_future_dated_verified_packet(tmp_path: Path) -> None:
+    from sidepulse.provider_usage_sync import SYNC_PACKET_FUTURE_SKEW_SECONDS
+    from sidepulse.provider_usage_sync_runtime import load_cached_merged_sync
+    from sidepulse.provider_usage_sync_transport import publish_local_packet
+
+    secret = b"x" * 32
+    now = 1200.0
+    remote_packet = ProviderSyncPacket(
+        1,
+        "macbook",
+        now + SYNC_PACKET_FUTURE_SKEW_SECONDS + 1.0,
+        usage_state("work").snapshots,
+        (),
+        ("quota", "token_usage"),
+    )
+    directory = tmp_path / "published"
+    publish_local_packet(
+        encode_signed_packet(remote_packet, secret),
+        directory / "macbook.remote.packet",
+    )
+
+    merged = load_cached_merged_sync(
+        usage_state(),
+        settings_loader=lambda: settings(tmp_path),
+        sharing_loader=lambda: sharing_projection(("default", "status_only")),
+        credentials=Credentials(secret),
+        local_directory=directory,
+        now=now,
+    )
+
+    assert merged is not None
+    assert all(snapshot.source_instance_id != "work" for snapshot in merged.quota_snapshots)
+
+
 def test_cached_merge_keeps_verified_remote_when_local_policy_loader_fails(
     tmp_path: Path,
 ):

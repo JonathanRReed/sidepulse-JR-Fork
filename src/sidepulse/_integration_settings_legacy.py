@@ -11,9 +11,9 @@ from pathlib import Path
 from .private_io import atomic_private_write, read_private_text
 from .product_identity import PRODUCT_DISPLAY_NAME
 
-INTEGRATION_SETTINGS_SCHEMA_VERSION = 2
+INTEGRATION_SETTINGS_SCHEMA_VERSION = 5
 INTEGRATION_SETTINGS_MAX_BYTES = 64 * 1024
-INTEGRATION_NAMES = frozenset({"t3code"})
+INTEGRATION_NAMES = frozenset({"agent-deck", "creator-micro", "t3code"})
 _RETIRED_CODEXBAR_KEYS = frozenset(
     {
         "codexbar_enabled",
@@ -42,50 +42,95 @@ class IntegrationSettingsCompatibility:
     read_only: bool = False
 
     def __post_init__(self) -> None:
-        if not (
-            type(self.source_version) is int
-            and self.source_version >= 1
-            and type(self.read_only) is bool
-        ):
+        if not (type(self.source_version) is int and self.source_version >= 1 and type(self.read_only) is bool):
             raise IntegrationSettingsError("invalid integration settings compatibility")
 
 
 @dataclass(frozen=True, slots=True)
 class IntegrationSettings:
     t3code_enabled: bool = False
+    t3code_activity_statistics_enabled: bool = False
     t3code_base_dir: str | None = None
     t3code_environment_id: str | None = None
+    agent_deck_enabled: bool = False
+    agent_deck_snapshot_path: str | None = None
+    creator_micro_enabled: bool = False
+    creator_micro_device_serial: str | None = None
 
     def __post_init__(self) -> None:
         if not (
             type(self.t3code_enabled) is bool
+            and type(self.t3code_activity_statistics_enabled) is bool
+            and type(self.agent_deck_enabled) is bool
+            and type(self.creator_micro_enabled) is bool
             and _optional_bounded_text(self.t3code_base_dir, 4096)
             and _optional_bounded_text(self.t3code_environment_id, 256)
+            and _optional_bounded_text(self.agent_deck_snapshot_path, 4096)
+            and _optional_bounded_text(self.creator_micro_device_serial, 256)
+            and (
+                not self.creator_micro_enabled
+                or self.creator_micro_device_serial is not None
+            )
         ):
             raise IntegrationSettingsError("invalid integration settings")
 
     def with_enabled(self, integration: str, enabled: bool) -> IntegrationSettings:
         if integration not in INTEGRATION_NAMES or type(enabled) is not bool:
             raise IntegrationSettingsError("invalid integration selection")
-        return replace(self, t3code_enabled=enabled)
+        field = {
+            "agent-deck": "agent_deck_enabled",
+            "creator-micro": "creator_micro_enabled",
+            "t3code": "t3code_enabled",
+        }[integration]
+        return replace(self, **{field: enabled})
+
+    def with_agent_deck(
+        self,
+        *,
+        enabled: bool | object = _UNSET,
+        snapshot_path: str | object | None = _UNSET,
+    ) -> IntegrationSettings:
+        return replace(
+            self,
+            agent_deck_enabled=(self.agent_deck_enabled if enabled is _UNSET else enabled),
+            agent_deck_snapshot_path=(
+                self.agent_deck_snapshot_path if snapshot_path is _UNSET else _clean_optional_text(snapshot_path)
+            ),
+        )
+
+    def with_creator_micro(
+        self,
+        *,
+        enabled: bool,
+        device_serial: str | object | None = _UNSET,
+    ) -> IntegrationSettings:
+        return replace(
+            self,
+            creator_micro_enabled=enabled,
+            creator_micro_device_serial=(
+                self.creator_micro_device_serial
+                if device_serial is _UNSET
+                else _clean_optional_text(device_serial)
+            ),
+        )
 
     def with_t3code(
         self,
         *,
+        activity_statistics_enabled: bool | object = _UNSET,
         base_dir: str | object | None = _UNSET,
         environment_id: str | object | None = _UNSET,
     ) -> IntegrationSettings:
         return replace(
             self,
-            t3code_base_dir=(
-                self.t3code_base_dir
-                if base_dir is _UNSET
-                else _clean_optional_text(base_dir)
+            t3code_activity_statistics_enabled=(
+                self.t3code_activity_statistics_enabled
+                if activity_statistics_enabled is _UNSET
+                else activity_statistics_enabled
             ),
+            t3code_base_dir=(self.t3code_base_dir if base_dir is _UNSET else _clean_optional_text(base_dir)),
             t3code_environment_id=(
-                self.t3code_environment_id
-                if environment_id is _UNSET
-                else _clean_optional_text(environment_id)
+                self.t3code_environment_id if environment_id is _UNSET else _clean_optional_text(environment_id)
             ),
         )
 
@@ -93,8 +138,13 @@ class IntegrationSettings:
         return {
             "settings_schema_version": INTEGRATION_SETTINGS_SCHEMA_VERSION,
             "t3code_enabled": self.t3code_enabled,
+            "t3code_activity_statistics_enabled": (self.t3code_activity_statistics_enabled),
             "t3code_base_dir": self.t3code_base_dir,
             "t3code_environment_id": self.t3code_environment_id,
+            "agent_deck_enabled": self.agent_deck_enabled,
+            "agent_deck_snapshot_path": self.agent_deck_snapshot_path,
+            "creator_micro_enabled": self.creator_micro_enabled,
+            "creator_micro_device_serial": self.creator_micro_device_serial,
         }
 
 
@@ -169,14 +219,35 @@ def _optional_text(
 
 
 def _settings_from_document(document: dict[str, object]) -> IntegrationSettings:
+    creator_micro_device_serial = _optional_text(
+        document,
+        "creator_micro_device_serial",
+        256,
+    )
     return IntegrationSettings(
         t3code_enabled=_bool(document, "t3code_enabled", False),
+        t3code_activity_statistics_enabled=_bool(
+            document,
+            "t3code_activity_statistics_enabled",
+            False,
+        ),
         t3code_base_dir=_optional_text(document, "t3code_base_dir", 4096),
         t3code_environment_id=_optional_text(
             document,
             "t3code_environment_id",
             256,
         ),
+        agent_deck_enabled=_bool(document, "agent_deck_enabled", False),
+        agent_deck_snapshot_path=_optional_text(
+            document,
+            "agent_deck_snapshot_path",
+            4096,
+        ),
+        creator_micro_enabled=(
+            _bool(document, "creator_micro_enabled", False)
+            and creator_micro_device_serial is not None
+        ),
+        creator_micro_device_serial=creator_micro_device_serial,
     )
 
 
@@ -250,15 +321,11 @@ def save_integration_settings(
     except FileNotFoundError:
         pass
     if loaded is not None and current_digest != loaded.source_digest:
-        raise IntegrationSettingsConcurrentWriteError(
-            "integration settings changed after they were loaded"
-        )
+        raise IntegrationSettingsConcurrentWriteError("integration settings changed after they were loaded")
 
     encoded = settings.to_dict()
     document = {
-        key: value
-        for key, value in current.items()
-        if key not in encoded and key not in _RETIRED_CODEXBAR_KEYS
+        key: value for key, value in current.items() if key not in encoded and key not in _RETIRED_CODEXBAR_KEYS
     }
     document.update(encoded)
     payload = json.dumps(document, indent=2, sort_keys=True, allow_nan=False) + "\n"

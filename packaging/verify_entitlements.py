@@ -11,14 +11,11 @@ from pathlib import Path
 
 REQUIRED_ENTITLEMENTS = {
     "com.apple.security.automation.apple-events": True,
-    # JavaScriptCore executes the packaged sdled.wasm firmware model. PyObjC's
-    # JavaScriptCore bridge requires JIT and executable-memory permissions
-    # under the hardened runtime. No other dynamic-code entitlement is allowed.
-    "com.apple.security.cs.allow-jit": True,
-    "com.apple.security.cs.allow-unsigned-executable-memory": True,
 }
 FORBIDDEN_ENTITLEMENTS = frozenset(
     {
+        "com.apple.security.cs.allow-jit",
+        "com.apple.security.cs.allow-unsigned-executable-memory",
         "com.apple.security.cs.disable-library-validation",
         "com.apple.security.cs.allow-dyld-environment-variables",
         "com.apple.security.get-task-allow",

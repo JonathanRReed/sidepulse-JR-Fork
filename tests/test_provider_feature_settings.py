@@ -30,6 +30,7 @@ def test_projection_separates_collection_presentation_and_sync_settings() -> Non
     assert type(projection.sync) is ProviderSyncSettingsProjection
     assert projection.collection.provider("cursor").enabled is False
     assert projection.presentation.provider("devin").menu_visible is False
+    assert projection.presentation.menu.privacy_mode is False
     assert projection.sync.device_id == "mac-mini"
 
 
@@ -45,6 +46,18 @@ def test_projections_are_immutable_and_do_not_cross_boundaries() -> None:
     assert not hasattr(projection.collection, "sync")
     assert not hasattr(projection.presentation, "peers")
     assert not hasattr(projection.sync, "menu_display")
+
+
+def test_reset_channel_defaults_reach_the_presentation_projection() -> None:
+    projection = project_provider_feature_settings(
+        default_provider_usage_settings(),
+        default_provider_sync_settings(),
+    )
+    feature = projection.presentation.provider("codex")
+    assert feature.reset_overlay is True
+    assert feature.reset_hardware is True
+    assert feature.reset_notification is True
+    assert feature.reset_sound is True
 
 
 def test_change_receipt_is_exact_bounded_and_monotonic() -> None:
@@ -68,6 +81,22 @@ def test_change_receipt_is_exact_bounded_and_monotonic() -> None:
         }
     )
     assert len(changed.receipt.changed_feature_ids) <= ProviderSettingsChangeReceipt.MAX_FEATURE_IDS
+
+
+def test_privacy_mode_is_a_presentation_only_setting() -> None:
+    initial = project_provider_feature_settings(
+        default_provider_usage_settings(),
+        default_provider_sync_settings(),
+    )
+    changed = project_provider_feature_settings(
+        default_provider_usage_settings().with_menu_flag("privacy_mode", True),
+        default_provider_sync_settings(),
+        previous=initial,
+    )
+
+    assert changed.presentation.menu.privacy_mode is True
+    assert "presentation.menu.privacy_mode" in changed.receipt.changed_feature_ids
+    assert not hasattr(changed.collection, "privacy_mode")
 
 
 def test_change_receipt_rejects_non_monotonic_revision() -> None:

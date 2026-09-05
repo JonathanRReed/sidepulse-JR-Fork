@@ -1,4 +1,4 @@
-"""Bounded Waybar client for JR Bar's loopback, redacted status API.
+"""Bounded Waybar client for JR-Bar's loopback, redacted status API.
 
 The client accepts either the public ``/status.json`` document or the v1
 ``status.read`` capability envelope. It renders only aggregate fields that are
@@ -161,7 +161,7 @@ def _capacity_percentage(value: object) -> int | None:
 def unavailable_waybar_document() -> dict[str, object]:
     return {
         "text": "JR unavailable",
-        "tooltip": "JR Bar status is unavailable.",
+        "tooltip": "JR-Bar status is unavailable.",
         "class": ["sidepulse", "unavailable"],
     }
 
@@ -201,7 +201,7 @@ def build_waybar_document(status: Mapping[str, object]) -> dict[str, object]:
 
     percentage = _capacity_percentage(status.get("usage"))
     tooltip_lines = [
-        "JR Bar",
+        "JR-Bar",
         f"Active: {active}",
         f"Waiting: {waiting}",
         f"Needs attention: {needs_user}",
@@ -353,7 +353,7 @@ def _write_waybar(output: TextIO, document: Mapping[str, object]) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sidepulse-waybar",
-        description="Render JR Bar's redacted loopback status as Waybar JSON.",
+        description="Render JR-Bar's redacted loopback status as Waybar JSON.",
     )
     parser.add_argument("--url", default=DEFAULT_WAYBAR_URL)
     parser.add_argument("--timeout", default=DEFAULT_TIMEOUT_SECONDS, type=float)

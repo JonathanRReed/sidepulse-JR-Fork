@@ -123,7 +123,7 @@ trap rollback EXIT
 gh release create "$tag" \
     --repo JonathanRReed/sidepulse-JR-Fork \
     --target "$head_sha" \
-    --title "JR Bar $version" \
+    --title "JR-Bar $version" \
     --generate-notes \
     --draft
 release_created=1
@@ -156,7 +156,7 @@ if ! gh release view updates --repo JonathanRReed/sidepulse-JR-Fork >/dev/null 2
     gh release create updates \
         --repo JonathanRReed/sidepulse-JR-Fork \
         --target "$head_sha" \
-        --title "JR Bar Updates" \
+        --title "JR-Bar Updates" \
         --notes "Durable signed Sparkle update feed." \
         --draft
     updates_created=1

@@ -10,6 +10,7 @@ SPARKLE_DISTRIBUTION="$BUILD_DIR/sparkle-distribution"
 APP_NOTARY_ZIP="$BUILD_DIR/SidePulse-app-notary.zip"
 REQUESTED_BUILD_PYTHON="${BUILD_PYTHON:-}"
 CONSTRAINTS="$ROOT_DIR/requirements/release-constraints.txt"
+LOCKFILE="$ROOT_DIR/requirements/release-lock.txt"
 PINNED_PIP="26.1.2"
 PINNED_PYINSTALLER="6.21.0"
 VENV_DIR="$BUILD_DIR/venv"
@@ -17,10 +18,10 @@ APP_PATH="$BUILD_DIR/pyinstaller/SidePulse.app"
 COMPONENT_PKG="$BUILD_DIR/SidePulse-component.pkg"
 ENVIRONMENT_SNAPSHOT="$DIST_DIR/release-environment.txt"
 APP_ID="io.sidepulse.app"
-PRODUCT_DISPLAY_NAME="JR Bar"
+PRODUCT_DISPLAY_NAME="JR-Bar"
 MINIMUM_SUPPORTED_MACOS="11.0"
-APPLE_EVENTS_USAGE_DESCRIPTION="JR Bar uses Automation only to open a reviewed resume command in Terminal or iTerm2 when you choose Open."
-FOCUS_STATUS_USAGE_DESCRIPTION="JR Bar uses Focus Status only when you choose Allow Focus Status, so Do Not Disturb can follow whether a macOS Focus is active."
+APPLE_EVENTS_USAGE_DESCRIPTION="JR-Bar uses Automation only to open a reviewed resume command in Terminal or iTerm2 when you choose Open."
+FOCUS_STATUS_USAGE_DESCRIPTION="JR-Bar uses Focus Status only when you choose Allow Focus Status, so Do Not Disturb can follow whether a macOS Focus is active."
 SPARKLE_FEED_URL="https://github.com/JonathanRReed/sidepulse-JR-Fork/releases/download/updates/appcast.xml"
 SPARKLE_PUBLIC_KEY_FILE="$ROOT_DIR/packaging/sparkle_public_ed_key.txt"
 
@@ -38,8 +39,7 @@ select_build_python() {
         candidates=("$REQUESTED_BUILD_PYTHON")
     else
         candidates=(
-            /opt/homebrew/bin/python3.13
-            python3.13
+            /opt/homebrew/bin/python3.12
             python3.12
             python3.11
             python3.10
@@ -58,7 +58,7 @@ select_build_python() {
         if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
             continue
         fi
-        if "$resolved" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' 2>/dev/null; then
+        if "$resolved" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))' 2>/dev/null; then
             printf '%s\n' "$resolved"
             return 0
         fi
@@ -70,15 +70,19 @@ if [ ! -f "$CONSTRAINTS" ]; then
     echo "Missing reviewed release constraints: $CONSTRAINTS" >&2
     exit 2
 fi
+if [ ! -f "$LOCKFILE" ]; then
+    echo "Missing hash-bound release lock: $LOCKFILE" >&2
+    exit 2
+fi
 
 BUILD_PYTHON="$(select_build_python || true)"
 if [ -z "$BUILD_PYTHON" ]; then
-    echo "JR Bar requires Python 3.10+ to build the macOS package." >&2
-    echo "Install Homebrew Python 3.13 or set BUILD_PYTHON to a supported interpreter." >&2
+    echo "JR-Bar release packaging requires Python 3.12." >&2
+    echo "Install Homebrew Python 3.12 or set BUILD_PYTHON to that interpreter." >&2
     exit 2
 fi
 if ! VERSION="$("$BUILD_PYTHON" "$ROOT_DIR/scripts/validate_release_version.py")"; then
-    echo "Could not validate the JR Bar release version." >&2
+    echo "Could not validate the JR-Bar release version." >&2
     exit 2
 fi
 OUTPUT_PKG="$("$BUILD_PYTHON" "$ROOT_DIR/scripts/release_artifact_contract.py" \
@@ -146,12 +150,12 @@ if [ ! -x "$BUILD_PYTHON" ]; then
     echo "BUILD_PYTHON is missing or not executable: $BUILD_PYTHON" >&2
     exit 2
 fi
-"$BUILD_PYTHON" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' || {
-    echo "JR Bar requires Python 3.10+; got $($BUILD_PYTHON -V 2>&1)." >&2
+"$BUILD_PYTHON" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))' || {
+    echo "JR-Bar release packaging requires Python 3.12; got $($BUILD_PYTHON -V 2>&1)." >&2
     exit 2
 }
 
-echo "Building JR Bar $VERSION for $ARCH with $($BUILD_PYTHON -V 2>&1)"
+echo "Building JR-Bar $VERSION for $ARCH with $($BUILD_PYTHON -V 2>&1)"
 /bin/rm -rf "$BUILD_DIR"
 /bin/mkdir -p "$BUILD_DIR" "$DIST_DIR"
 /bin/mkdir -m 700 "$RAW_EVIDENCE_DIR"
@@ -163,17 +167,19 @@ export PYTHONHASHSEED=0
 export PYINSTALLER_CONFIG_DIR="$BUILD_DIR/pyinstaller-cache"
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT_DIR" show -s --format=%ct HEAD)}"
 "$BUILD_PYTHON" -m venv "$VENV_DIR"
-"$VENV_DIR/bin/python" -m pip install "pip==$PINNED_PIP"
 # --no-cache-dir is LOAD-BEARING: pip caches the built sidepulse wheel
 # BY VERSION, so every rebuild between version bumps could silently ship
 # a stale wheel from an older commit (it did: a deploy passed md5 parity
 # against its own stale build while the source had moved two commits).
 "$VENV_DIR/bin/python" -m pip install \
     --no-cache-dir \
-    --constraint "$CONSTRAINTS" \
+    --require-hashes \
     --only-binary=:all: \
-    "pyinstaller==$PINNED_PYINSTALLER" \
-    "$ROOT_DIR"
+    --requirement "$LOCKFILE"
+# pip 26 refuses a build constraint together with --no-build-isolation. The
+# reviewed runtime constraint still applies through PIP_CONSTRAINT, and every
+# build requirement is already installed from the hash-bound binary lock.
+env -u PIP_BUILD_CONSTRAINT "$VENV_DIR/bin/python" -m pip install "$ROOT_DIR" --no-deps --no-build-isolation
 "$VENV_DIR/bin/python" -m pip check
 LC_ALL=C "$VENV_DIR/bin/python" -m pip list --format=freeze \
     | /usr/bin/sort > "$ENVIRONMENT_SNAPSHOT"
@@ -187,6 +193,10 @@ LC_ALL=C "$VENV_DIR/bin/python" -m pip list --format=freeze \
     --specpath "$BUILD_DIR" \
     --collect-submodules Cocoa \
     --collect-data sidepulse.resources \
+    --copy-metadata sidepulse \
+    --hidden-import sidepulse.creator_micro_adapter \
+    --hidden-import sidepulse.creator_micro_hidapi \
+    --hidden-import hid \
     "$ROOT_DIR/packaging/sidepulse_entry.py"
 
 if [ -n "$SPARKLE_ARCHIVE" ]; then
@@ -217,6 +227,8 @@ fi
     /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$APP_PATH/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string $PRODUCT_DISPLAY_NAME" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
     /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $PRODUCT_DISPLAY_NAME" "$APP_PATH/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleName string $PRODUCT_DISPLAY_NAME" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :CFBundleName $PRODUCT_DISPLAY_NAME" "$APP_PATH/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string $MINIMUM_SUPPORTED_MACOS" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
     /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $MINIMUM_SUPPORTED_MACOS" "$APP_PATH/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :NSAppleEventsUsageDescription string $APPLE_EVENTS_USAGE_DESCRIPTION" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from sidepulse.settings_navigation import (
+    NATIVE_EFFECT_STUDIO_PAGE,
     NATIVE_USAGE_PAGE,
     SETTINGS_CATEGORIES,
     category_for_key,
@@ -11,6 +14,17 @@ from sidepulse.settings_navigation import (
     sidebar_items,
 )
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_weather_settings_disclose_separate_ip_location_consent() -> None:
+    source = (ROOT / "src/sidepulse/settings_window.py").read_text(encoding="utf-8")
+
+    assert '"Use network address for weather location"' in source
+    assert '"weather_ip_geolocation_enabled"' in source
+    assert "ipapi.co" in source
+    assert "Weather alerts stay off until you enter coordinates" in source
+
 
 def test_settings_navigation_has_eight_stable_categories() -> None:
     assert [category.label for category in SETTINGS_CATEGORIES] == [
@@ -18,12 +32,12 @@ def test_settings_navigation_has_eight_stable_categories() -> None:
         "Agents & Providers",
         "Usage",
         "Devices & Screen Bar",
-        "Appearance & Motion",
+        "Lighting",
         "Notifications & Focus",
         # The ambient half got its own front door -- filing calendar,
         # Reminders and weather under "Advanced" hid them (2026-08-21).
         "Today",
-        "Advanced & Diagnostics",
+        "Advanced",
     ]
     assert len(sidebar_items()) == 8
     assert len({category.key for category in SETTINGS_CATEGORIES}) == 8
@@ -48,6 +62,7 @@ def test_every_retained_pane_has_exactly_one_visible_home() -> None:
     assert len(pages) == len(set(pages))
     assert set(legacy_page_keys()) == {
         "profile",
+        "usage_activity",
         "agents",
         "installed_agents",
         "history",
@@ -56,6 +71,7 @@ def test_every_retained_pane_has_exactly_one_visible_home() -> None:
         "colors_screen_bar",
         "power",
         "color_studio",
+        NATIVE_EFFECT_STUDIO_PAGE,
         "animations",
         "notifications",
         "focus",
@@ -64,6 +80,18 @@ def test_every_retained_pane_has_exactly_one_visible_home() -> None:
         "debug",
     }
     assert NATIVE_USAGE_PAGE in pages
+
+
+def test_lighting_is_one_workspace_with_three_clear_subpages() -> None:
+    lighting = category_for_key("color_studio")
+
+    assert lighting.label == "Lighting"
+    assert [(page.key, page.label) for page in lighting.pages] == [
+        ("color_studio", "Colors"),
+        (NATIVE_EFFECT_STUDIO_PAGE, "Effects"),
+        ("animations", "Lid Programs"),
+    ]
+    assert category_for_key(NATIVE_EFFECT_STUDIO_PAGE) is lighting
 
 
 def test_category_lookup_accepts_category_and_child_keys() -> None:

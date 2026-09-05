@@ -1,4 +1,4 @@
-"""Waybar consumes only JR Bar's bounded, redacted local status projection."""
+"""Waybar consumes only JR-Bar's bounded, redacted local status projection."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def test_waybar_projection_is_stable_and_uses_only_aggregate_fields() -> None:
     assert projection == {
         "text": "JR failed 1",
         "tooltip": (
-            "JR Bar\n"
+            "JR-Bar\n"
             "Active: 1\n"
             "Waiting: 1\n"
             "Needs attention: 1\n"
@@ -203,7 +203,7 @@ def test_cli_emits_one_json_line_and_never_echoes_credentials_or_server_body() -
     assert json.loads(stdout.getvalue()) == {
         "class": ["sidepulse", "unavailable"],
         "text": "JR unavailable",
-        "tooltip": "JR Bar status is unavailable.",
+        "tooltip": "JR-Bar status is unavailable.",
     }
     assert stdout.getvalue().count("\n") == 1
     assert stderr.getvalue() == "sidepulse-waybar: local API unavailable\n"

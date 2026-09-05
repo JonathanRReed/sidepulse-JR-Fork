@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the supported JR Bar uninstaller removed only owned product state."""
+"""Verify the supported JR-Bar uninstaller removed only owned product state."""
 
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ def main() -> int:
         if args.app.exists() or args.app.is_symlink():
             raise ValueError("the supported uninstaller left the application installed")
         if args.receipt_dir.exists() or args.receipt_dir.is_symlink():
-            raise ValueError("the supported uninstaller left JR Bar setup receipts")
+            raise ValueError("the supported uninstaller left JR-Bar setup receipts")
         if args.cli_link.is_symlink():
             target = os.readlink(args.cli_link)
             if target == str(args.app / "Contents" / "MacOS" / "SidePulse"):
@@ -154,7 +154,7 @@ def main() -> int:
             kind="uninstall",
             tool="verify_uninstalled_candidate.py",
             input_path=args.pkg,
-            output_text="supported JR Bar uninstallation verified",
+            output_text="supported JR-Bar uninstallation verified",
             details={
                 "app_state": "removed",
                 "owned_cli_link_state": "removed-or-not-present",
@@ -171,7 +171,7 @@ def main() -> int:
     ) as exc:
         print(f"uninstall verification failed: {exc}", file=sys.stderr)
         return 1
-    print("supported JR Bar uninstallation verified")
+    print("supported JR-Bar uninstallation verified")
     return 0
 
 

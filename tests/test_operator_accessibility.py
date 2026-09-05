@@ -267,7 +267,7 @@ def _all_text(text: AccessibilityText) -> str:
 
 
 def test_accessibility_records_are_frozen_and_reject_blank_or_unbounded_text() -> None:
-    text = AccessibilityText("JR Bar", "No agents need attention", "Open JR Bar status")
+    text = AccessibilityText("JR-Bar", "No agents need attention", "Open JR-Bar status")
     focus = FocusSnapshot("agent-browser", "search", None, (3, 2), "agents")
     announcement = AccessibilityAnnouncement(
         "announcement:abc",
@@ -334,8 +334,8 @@ def test_status_item_has_stable_role_text_and_nonblank_value_for_every_glance(
 
     result = status_item_accessibility(state, _glance(semantic))
 
-    assert result.label == "JR Bar"
-    assert result.help == "Open JR Bar status"
+    assert result.label == "JR-Bar"
+    assert result.help == "Open JR-Bar status"
     assert expected_phrase in result.value
     assert result.value.strip()
     assert len(result.value) <= MAX_ACCESSIBILITY_VALUE_LENGTH
@@ -361,8 +361,8 @@ def test_status_item_preserves_stale_acknowledged_quiet_and_finite_cue_truth() -
         finite_cues=finite,
     )
 
-    assert result.label == "JR Bar"
-    assert result.help == "Open JR Bar status"
+    assert result.label == "JR-Bar"
+    assert result.help == "Open JR-Bar status"
     assert "Acknowledged locally" in result.value
     assert "Source stale" in result.value
     assert "Quiet presentation" in result.value

@@ -1,0 +1,14 @@
+# Third-party packages installed into the signed macOS application build.
+# Versions must match pyproject.toml and release-constraints.txt.
+pip==26.1.2
+setuptools==83.0.0
+wheel==0.47.0
+pyinstaller==6.21.0
+pyobjc-framework-Cocoa==12.2.1
+pyobjc-framework-Quartz==12.2.1
+pyobjc-framework-WebKit==12.2.1
+pyobjc-framework-EventKit==12.2.1
+keyring==25.7.0
+rleveldb==1.0.0
+ruamel.yaml==0.19.1
+hidapi==0.14.0

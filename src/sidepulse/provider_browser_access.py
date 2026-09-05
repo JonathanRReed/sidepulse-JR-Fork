@@ -82,6 +82,7 @@ def _consented_devin_session(
     consents,
     session_reader,
     source_instance_id: str = "default",
+    require_background_repair: bool = False,
 ):
     """Read only when one exact persisted Devin grant selects a profile."""
     matches = []
@@ -89,6 +90,8 @@ def _consented_devin_session(
         if consent.provider_id != "devin":
             continue
         if consent.source_instance_id != source_instance_id:
+            continue
+        if require_background_repair and not consent.background_repair:
             continue
         if not (
             consents.allows(
@@ -120,6 +123,32 @@ def _consented_devin_session(
     )
 
 
+def _load_consented_devin_session(
+    *,
+    source_instance_id: str = "default",
+    require_background_repair: bool = False,
+):
+    """Load one exact persisted grant, then read only its selected profile."""
+    try:
+        from pathlib import Path
+
+        from .browser_session_import import import_devin_session_from_profile
+        from .provider_browser_consent import load_browser_consents
+
+        loaded_consents = load_browser_consents()
+        if loaded_consents.read_only:
+            return None
+        return _consented_devin_session(
+            home=Path.home(),
+            consents=loaded_consents.store,
+            session_reader=import_devin_session_from_profile,
+            source_instance_id=source_instance_id,
+            require_background_repair=require_background_repair,
+        )
+    except Exception:
+        return None
+
+
 def _import_browser_session(
     provider_id: str,
     source_instance_id: str = "default",
@@ -135,24 +164,11 @@ def _import_browser_session(
     if provider_id != "devin":
         return None
     try:
-        from pathlib import Path
-
-        from .browser_session_import import import_devin_session_from_profile
-        from .provider_browser_consent import load_browser_consents
         from .provider_credential_store import ProviderCredentialStore
 
-        loaded_consents = load_browser_consents()
-        if loaded_consents.read_only:
-            return None
-        session = _consented_devin_session(
-            home=Path.home(),
-            consents=loaded_consents.store,
-            session_reader=import_devin_session_from_profile,
+        session = _load_consented_devin_session(
             source_instance_id=source_instance_id,
         )
-        if session is None:
-            from .browser_session_import import import_devin_session
-            session = import_devin_session(Path.home())
         if session is None:
             return None
         credential_store = ProviderCredentialStore()

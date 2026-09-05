@@ -377,7 +377,7 @@ def test_no_round_trip_yet_is_not_an_empty_answer() -> None:
         )
 
     assert unchecked == "No peers checked yet."
-    assert checked == "No other Macs are running JR Bar right now."
+    assert checked == "No other Macs are running JR-Bar right now."
     assert unchecked != checked
 
 

@@ -9,6 +9,16 @@ insert. The facade's build_menu wrapper is their only caller.
 from __future__ import annotations
 
 
+def _fail_closed_menu_projection_settings(state):
+    """Keep an unknown settings state from revealing cached account rows."""
+
+    hidden_instances = frozenset(
+        (snapshot.provider_id, snapshot.source_instance_id)
+        for snapshot in getattr(state, "snapshots", ())
+    )
+    return None, frozenset(), hidden_instances, None, True
+
+
 def menu_index(menu, title_prefix: str) -> int:
     for position in range(menu.numberOfItems()):
         if str(menu.itemAtIndex_(position).title() or "").startswith(title_prefix):
@@ -69,10 +79,10 @@ def remove_redundant_separators(menu) -> None:
 def _apply_meter_attributed_title(item, title: str, *, color=None):
     try:
         from AppKit import (
-            NSMutableAttributedString,
             NSFont,
             NSFontAttributeName,
             NSForegroundColorAttributeName,
+            NSMutableAttributedString,
         )
         base_font = NSFont.menuFontOfSize_(13.0)
         symbols_font = NSFont.fontWithName_size_("Apple Symbols", 13.0) or NSFont.fontWithName_size_("Menlo", 12.0)
@@ -131,6 +141,7 @@ def native_usage_menu_item(target):
         if type(settings) is not ProviderPresentationSettings:
             raise ValueError("provider usage settings are not ready")
         display = settings.menu_display
+        privacy_mode = settings.menu_display.privacy_mode
         hidden = settings.hidden_menu_providers()
         hidden_instances = settings.hidden_menu_instances()
         thresholds = {
@@ -138,11 +149,8 @@ def native_usage_menu_item(target):
             for preference in settings.providers
         }
     except Exception:
-        display, hidden, hidden_instances, thresholds = (
-            None,
-            frozenset(),
-            frozenset(),
-            None,
+        display, hidden, hidden_instances, thresholds, privacy_mode = (
+            _fail_closed_menu_projection_settings(state)
         )
     policies = getattr(target, "_sidepulse_provider_instance_policies", None)
     visual = (
@@ -150,6 +158,10 @@ def native_usage_menu_item(target):
         if type(policies) is ProviderInstancePolicyProjection
         else None
     )
+    try:
+        active_instances = frozenset(target._active_usage_instances())
+    except Exception:
+        active_instances = frozenset()
     projection = project_usage_menu(
         state,
         now=time.time(),
@@ -158,6 +170,8 @@ def native_usage_menu_item(target):
         hidden_instances=hidden_instances,
         thresholds=thresholds,
         visual=visual,
+        privacy_mode=privacy_mode,
+        active_instances=active_instances,
     )
     item = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         projection.title,
@@ -207,6 +221,10 @@ def native_usage_menu_item(target):
             None,
             "",
         )
+        if row.tooltip:
+            provider_item.setToolTip_(row.tooltip)
+        if row.accessibility_label:
+            provider_item.setAccessibilityLabel_(row.accessibility_label)
         provider_menu = _legacy.NSMenu.alloc().init()
         provider_menu.setAutoenablesItems_(False)
         lane_lines = getattr(row, "lane_lines", ())

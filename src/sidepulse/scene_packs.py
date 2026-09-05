@@ -1,6 +1,6 @@
 """Versioned, data-only Scene pack contracts.
 
-Scene packs may override policies for JR Bar's existing Scenes. They contain
+Scene packs may override policies for JR-Bar's existing Scenes. They contain
 only bounded JSON data and are never imported as Python modules or executed as
 callbacks.
 """
@@ -104,7 +104,7 @@ def _thaw_json(value: Any) -> Any:
 
 @dataclass(frozen=True, slots=True)
 class ScenePackEntry:
-    """One labeled policy override for an existing JR Bar Scene."""
+    """One labeled policy override for an existing JR-Bar Scene."""
 
     scene: Scene
     label: str

@@ -1,4 +1,4 @@
-"""Bounded Effect Studio previews through JR Bar's single hardware writer.
+"""Bounded Effect Studio previews through JR-Bar's single hardware writer.
 
 The adapter owns no settings and performs no direct device I/O. It validates
 one explicit preview plan, compiles data-only effect metadata through the

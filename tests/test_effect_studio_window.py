@@ -21,6 +21,7 @@ from sidepulse.effect_studio_window import (
     EffectStudioWindowController,
     load_effect_studio_catalog,
 )
+from sidepulse.product_identity import PRODUCT_DISPLAY_NAME
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -152,7 +153,7 @@ def test_native_window_shows_four_surfaces_scenarios_and_guarded_hardware(tmp_pa
 
     window = controller.open(store=store, physical_preview=preview, show=False)
 
-    assert window.title() == "JR Bar Effect Studio"
+    assert window.title() == f"{PRODUCT_DISPLAY_NAME} Effect Studio"
     assert tuple(controller.surface_status_fields) == tuple(StudioSurface)
     assert controller.scenario_popup.numberOfItems() == len(SyntheticScenario)
     assert controller.physical_preview_button.isEnabled() is False
@@ -335,8 +336,10 @@ def test_pack_management_actions_use_the_validated_owner_private_store(tmp_path)
 
 
 def test_native_studio_is_reachable_from_the_production_menu() -> None:
-    status_bar = ast.parse(
-        (ROOT / "src" / "sidepulse" / "status_bar.py").read_text(encoding="utf-8")
+    lighting = ast.parse(
+        (ROOT / "src" / "sidepulse" / "lighting_settings_pane.py").read_text(
+            encoding="utf-8"
+        )
     )
     production = ast.parse(
         (ROOT / "src" / "sidepulse" / "_status_bar_production.py").read_text(
@@ -345,7 +348,7 @@ def test_native_studio_is_reachable_from_the_production_menu() -> None:
     )
     menu_strings = {
         node.value
-        for node in ast.walk(status_bar)
+        for node in ast.walk(lighting)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     }
     methods = {
@@ -354,7 +357,7 @@ def test_native_studio_is_reachable_from_the_production_menu() -> None:
         if isinstance(node, ast.FunctionDef)
     }
 
-    assert "Effect Studio…" in menu_strings
+    assert "Open Effect Studio…" in menu_strings
     assert "openEffectStudio:" in menu_strings
     method = methods["openEffectStudio_"]
     calls = {

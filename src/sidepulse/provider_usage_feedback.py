@@ -21,6 +21,115 @@ from __future__ import annotations
 import time
 
 from .product_identity import PRODUCT_DISPLAY_NAME
+from .provider_reset_events import (
+    ResetChannel,
+    ResetChannelOutcome,
+    ResetChannelReceipt,
+)
+
+
+def _play_reset_sound() -> bool:
+    from AppKit import NSSound
+
+    sound = NSSound.soundNamed_("Glass")
+    return bool(sound is not None and sound.play())
+
+
+def deliver_reset_channels(
+    controller,
+    event,
+    channels,
+    *,
+    now: float,
+    monotonic_now: float,
+    log,
+    sound_player=None,
+) -> tuple[ResetChannelReceipt, ...]:
+    """Attempt each requested reset channel and report its own outcome."""
+    requested = tuple(channels)
+    quiet = False
+    try:
+        quiet_check = getattr(controller, "quiet_active", None)
+        quiet = bool(callable(quiet_check) and quiet_check())
+    except Exception:
+        quiet = True
+    overlay_available = bool(
+        getattr(getattr(controller, "settings", None), "virtual_status_device_enabled", False)
+    )
+    try:
+        hardware_available = bool(controller.has_connected_physical_device())
+    except Exception:
+        hardware_available = False
+    visual_requested = any(
+        channel in requested for channel in (ResetChannel.OVERLAY, ResetChannel.HARDWARE)
+    )
+    visual_available = overlay_available or hardware_available
+    if not quiet and visual_requested and visual_available:
+        from .celebrations import RESET_CELEBRATION_SECONDS
+
+        controller.quota_reset_celebration_provider = event.provider_id
+        controller.quota_reset_celebration_until = max(
+            float(getattr(controller, "quota_reset_celebration_until", 0.0) or 0.0),
+            monotonic_now + RESET_CELEBRATION_SECONDS,
+        )
+        try:
+            controller.schedule_event_refresh()
+        except Exception:
+            pass
+    receipts = []
+    for channel in requested:
+        try:
+            if channel is ResetChannel.OVERLAY:
+                outcome, reason = (
+                    (ResetChannelOutcome.SUPPRESSED, "quiet_active")
+                    if quiet
+                    else (
+                        (ResetChannelOutcome.DELIVERED, "effect_scheduled")
+                        if overlay_available
+                        else (ResetChannelOutcome.SUPPRESSED, "surface_unavailable")
+                    )
+                )
+            elif channel is ResetChannel.HARDWARE:
+                outcome, reason = (
+                    (ResetChannelOutcome.SUPPRESSED, "quiet_active")
+                    if quiet
+                    else (
+                        (ResetChannelOutcome.DELIVERED, "effect_scheduled")
+                        if hardware_available
+                        else (ResetChannelOutcome.SUPPRESSED, "surface_unavailable")
+                    )
+                )
+            elif channel is ResetChannel.NOTIFICATION:
+                from .provider_usage_platform import provider_descriptor
+
+                label = provider_descriptor(event.provider_id).label
+                event_label = getattr(event, "label", None)
+                if not event_label:
+                    event_label = f"{event.window_id} reset"
+                controller._notification_client_for_use().deliver(
+                    "quota.reset." + event.event_id.replace(":", "-"),
+                    PRODUCT_DISPLAY_NAME,
+                    f"{label} {event_label}, fresh window",
+                    {},
+                )
+                outcome, reason = ResetChannelOutcome.DELIVERED, "posted"
+            else:
+                if quiet:
+                    outcome, reason = ResetChannelOutcome.SUPPRESSED, "quiet_active"
+                else:
+                    player = sound_player or _play_reset_sound
+                    if player():
+                        outcome, reason = ResetChannelOutcome.DELIVERED, "played"
+                    else:
+                        outcome, reason = ResetChannelOutcome.FAILED, "sound_unavailable"
+        except Exception as exc:
+            outcome, reason = ResetChannelOutcome.FAILED, type(exc).__name__
+            try:
+                log(f"reset {channel.value} delivery: {exc}")
+            except Exception:
+                pass
+        receipts.append(ResetChannelReceipt(channel, outcome, reason, float(now)))
+    return tuple(receipts)
 
 
 def show_provider_usage_feedback(controller, message: str) -> None:

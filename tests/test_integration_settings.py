@@ -32,6 +32,7 @@ def test_integration_settings_round_trip_preserves_unknown_fields(
     updated = loaded.settings.with_enabled("t3code", True).with_t3code(
         base_dir="/tmp/t3",
         environment_id="local",
+        activity_statistics_enabled=True,
     )
 
     save_integration_settings(updated, target, loaded=loaded)
@@ -41,6 +42,7 @@ def test_integration_settings_round_trip_preserves_unknown_fields(
     assert document["t3code_enabled"] is True
     assert document["t3code_base_dir"] == "/tmp/t3"
     assert document["t3code_environment_id"] == "local"
+    assert document["t3code_activity_statistics_enabled"] is True
     assert not any(key.startswith("codexbar_") for key in document)
 
 
@@ -119,6 +121,7 @@ def test_t3_partial_update_does_not_clear_the_other_field() -> None:
     configured = load_integration_settings().settings.with_t3code(
         base_dir="/tmp/t3",
         environment_id="env-a",
+        activity_statistics_enabled=True,
     )
 
     base_updated = configured.with_t3code(base_dir="/tmp/t3-new")
@@ -128,6 +131,62 @@ def test_t3_partial_update_does_not_clear_the_other_field() -> None:
     assert base_updated.t3code_environment_id == "env-a"
     assert environment_updated.t3code_base_dir == "/tmp/t3"
     assert environment_updated.t3code_environment_id == "env-b"
+    assert base_updated.t3code_activity_statistics_enabled is True
+    assert environment_updated.t3code_activity_statistics_enabled is True
+
+
+def test_t3_activity_statistics_are_a_separate_default_off_setting() -> None:
+    settings = load_integration_settings().settings
+
+    assert settings.t3code_activity_statistics_enabled is False
+    assert settings.with_enabled("t3code", True).t3code_activity_statistics_enabled is False
+    assert settings.with_t3code(activity_statistics_enabled=True).t3code_activity_statistics_enabled is True
+
+
+def test_agent_deck_and_creator_micro_integrations_are_default_off() -> None:
+    settings = load_integration_settings().settings
+
+    assert settings.agent_deck_enabled is False
+    assert settings.agent_deck_snapshot_path is None
+    assert settings.creator_micro_enabled is False
+    assert settings.creator_micro_device_serial is None
+
+
+def test_agent_deck_and_creator_micro_settings_round_trip(tmp_path: Path) -> None:
+    target = tmp_path / "integrations.json"
+    loaded = load_integration_settings(target)
+    configured = loaded.settings.with_agent_deck(
+        enabled=True,
+        snapshot_path="/tmp/deck-snapshot.json",
+    ).with_creator_micro(enabled=True, device_serial="CM2-123")
+
+    save_integration_settings(configured, target, loaded=loaded)
+    restored = load_integration_settings(target).settings
+
+    assert restored.agent_deck_enabled is True
+    assert restored.agent_deck_snapshot_path == "/tmp/deck-snapshot.json"
+    assert restored.creator_micro_enabled is True
+    assert restored.creator_micro_device_serial == "CM2-123"
+
+
+def test_legacy_creator_micro_enablement_without_identity_fails_closed(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "integrations.json"
+    target.write_text(
+        json.dumps(
+            {
+                "settings_schema_version": 4,
+                "creator_micro_enabled": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    restored = load_integration_settings(target).settings
+
+    assert restored.creator_micro_enabled is False
+    assert restored.creator_micro_device_serial is None
 
 
 def test_malformed_integration_settings_fail_closed_read_only(

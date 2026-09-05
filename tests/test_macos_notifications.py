@@ -146,11 +146,11 @@ def test_delivery_requires_authorized_or_provisional_state() -> None:
         is NotificationAuthorizationState.NOT_DETERMINED
     )
 
-    assert denied_client.deliver("completion.a", "JR Bar", "Finished", {}) is False
+    assert denied_client.deliver("completion.a", "JR-Bar", "Finished", {}) is False
     assert (
         not_determined_client.deliver(
             "completion.a",
-            "JR Bar",
+            "JR-Bar",
             "Finished",
             {},
         )
@@ -173,7 +173,7 @@ def test_authorized_delivery_uses_stable_identifier_and_opaque_metadata(
 
     assert notification_client.deliver(
         "completion.semantic-01",
-        "JR Bar",
+        "JR-Bar",
         "A Codex session finished",
         {"action_token": "A" * 43},
     )
@@ -182,7 +182,7 @@ def test_authorized_delivery_uses_stable_identifier_and_opaque_metadata(
     request = center.notification_requests[0]
     assert request.identifier == "completion.semantic-01"
     assert request.trigger is None
-    assert request.content.title == "JR Bar"
+    assert request.content.title == "JR-Bar"
     assert request.content.body == "A Codex session finished"
     assert request.content.user_info == {"action_token": "A" * 43}
 
@@ -209,7 +209,7 @@ def test_delivery_uses_cached_authorization_without_blocking_the_caller() -> Non
     started_at = time.monotonic()
     accepted = notification_client.deliver(
         "completion.semantic-02",
-        "JR Bar",
+        "JR-Bar",
         "A Codex session finished",
         {"action_token": "B" * 43},
     )
@@ -236,7 +236,7 @@ def test_async_delivery_stays_active_until_duplicate_safe_completion_callback() 
 
     assert notification_client.deliver(
         "completion.async",
-        "JR Bar",
+        "JR-Bar",
         "A Codex session finished",
         {},
     )
@@ -259,7 +259,7 @@ def test_close_uses_its_deadline_to_wait_for_async_completion() -> None:
     )
     assert notification_client.deliver(
         "completion.close-wait",
-        "JR Bar",
+        "JR-Bar",
         "A Codex session finished",
         {},
     )
@@ -321,12 +321,12 @@ def test_explicit_request_reports_the_resolved_authorization_state() -> None:
 @pytest.mark.parametrize(
     ("identifier", "title", "body", "metadata"),
     [
-        ("completion.a", "JR Bar", "Finished", {"agent_id": "private"}),
+        ("completion.a", "JR-Bar", "Finished", {"agent_id": "private"}),
         ("completion.a", "Bearer secret", "Finished", {}),
         ("completion.a", "SidePulse", "Finished", {}),
-        ("completion.a", "JR Bar", "/Users/private/session", {}),
-        ("completion private", "JR Bar", "Finished", {}),
-        ("completion.a", "JR Bar", "Finished", {"action_token": "too-short"}),
+        ("completion.a", "JR-Bar", "/Users/private/session", {}),
+        ("completion private", "JR-Bar", "Finished", {}),
+        ("completion.a", "JR-Bar", "Finished", {"action_token": "too-short"}),
     ],
 )
 def test_delivery_rejects_private_or_unbounded_inputs(
@@ -352,7 +352,7 @@ def test_delivery_failure_exposes_only_product_owned_diagnostic() -> None:
 
     assert notification_client.deliver(
         "completion.a",
-        "JR Bar",
+        "JR-Bar",
         "A Codex session finished",
         {},
     )

@@ -382,7 +382,7 @@ def test_unmodified_and_reserved_keys_are_rejected_by_global_action_validation()
         assert received == []
         assert pane.recorder.accessibilityValue() == "Recording"
         assert pane.status_field.stringValue() == (
-            "That shortcut is reserved by JR Bar. Press another shortcut."
+            "That shortcut is reserved by JR-Bar. Press another shortcut."
         )
     finally:
         window.close()

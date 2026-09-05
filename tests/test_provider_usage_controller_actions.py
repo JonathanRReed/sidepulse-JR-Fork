@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 import sidepulse.provider_usage_controller_actions as actions
 from sidepulse import provider_usage_sync_cache as sync_cache
 from sidepulse.capacity_types import SourceKey
@@ -107,18 +109,26 @@ def test_connect_action_is_armed_before_instance_scoped_claude_flow(monkeypatch)
 
 
 def test_settings_snapshot_cache_projects_all_consumer_domains() -> None:
-    settings = default_provider_usage_settings().with_profile(
-        ProviderInstanceProfile(
-            ProviderInstanceKey("claude", "work"),
-            "Claude Work",
-            open_session_action="terminal",
+    settings = (
+        default_provider_usage_settings()
+        .with_profile(
+            ProviderInstanceProfile(
+                ProviderInstanceKey("claude", "work"),
+                "Claude Work",
+                open_session_action="terminal",
+            )
         )
+        .with_menu_flag("privacy_mode", True)
     )
     service_updates = []
+    privacy_updates = []
     controller = SimpleNamespace(
         _sidepulse_provider_usage_service=SimpleNamespace(
             note_settings_updated=service_updates.append,
-        )
+        ),
+        _sidepulse_provider_usage_window=SimpleNamespace(
+            set_privacy_mode=privacy_updates.append,
+        ),
     )
 
     actions.apply_provider_usage_settings_snapshot(
@@ -137,6 +147,7 @@ def test_settings_snapshot_cache_projects_all_consumer_domains() -> None:
         == "Claude Work"
     )
     assert service_updates == [settings]
+    assert privacy_updates == [True]
 
 
 def test_provider_menu_toggle_updates_only_the_exact_instance() -> None:
@@ -302,6 +313,40 @@ def test_profile_control_update_saves_only_the_exact_instance() -> None:
     assert updated.profile("claude").label == "Claude"
     assert writes == [(updated, loaded)]
     assert controller._sidepulse_provider_usage_settings_snapshot is updated
+
+
+def test_privacy_mode_rejects_profile_name_save_without_overwriting_alias() -> None:
+    settings = (
+        default_provider_usage_settings()
+        .with_profile(
+            ProviderInstanceProfile(
+                ProviderInstanceKey("claude", "work"),
+                "Client Claude",
+            )
+        )
+        .with_menu_flag("privacy_mode", True)
+    )
+    writes = []
+    sender = SimpleNamespace(
+        representedObject=lambda: {
+            "provider_id": "claude",
+            "source_instance_id": "work",
+            "field_key": "label",
+            "value": "Claude Account 2",
+        },
+        stringValue=lambda: "Claude Account 2",
+    )
+
+    with pytest.raises(ValueError, match="privacy mode"):
+        actions.update_provider_instance_profile(
+            SimpleNamespace(),
+            sender,
+            loader=lambda: SimpleNamespace(settings=settings),
+            saver=lambda value, *, loaded: writes.append((value, loaded)),
+        )
+
+    assert settings.profile("claude", "work").label == "Client Claude"
+    assert writes == []
 
 
 def test_profile_popup_update_reads_selected_exact_choice() -> None:

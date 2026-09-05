@@ -251,7 +251,7 @@ def _real_window_presentation(monkeypatch):
     )
 
 
-def test_alcove_idle_pulse_keeps_a_visible_floor_between_breaths() -> None:
+def test_alcove_idle_pulse_keeps_the_dark_gap_between_breaths() -> None:
     from sidepulse.virtual_device import VirtualLedView
 
     view = VirtualLedView.alloc().initWithFrame_(((0, 0), (213.0, 37.0)))
@@ -260,7 +260,7 @@ def test_alcove_idle_pulse_keeps_a_visible_floor_between_breaths() -> None:
 
     rendered = view._bracket_colors([(0.0, 0.0, 0.0, 0.0)] * 8)
 
-    assert all(color[3] > 0.0 for color in rendered)
+    assert rendered == [(0.0, 0.0, 0.0, 0.0)] * 8
 
 
 def test_explicit_off_program_remains_invisible_with_a_minimum_glow() -> None:
@@ -1196,6 +1196,17 @@ def test_reposition_submits_plain_alcove_request_and_applies_validated_center(
         virtual_device,
         "_alcove_window_values",
         lambda *_args: (99, 444.0, 0.0, 624.0),
+    )
+    device._alcove_window_probe = SimpleNamespace(
+        read=lambda screen_x, screen_width, now: (
+            None
+            if (values := virtual_device._alcove_window_values(screen_x, screen_width)) is None
+            else virtual_device.AlcoveWindowSnapshot(
+                values=values,
+                level=virtual_device.ABOVE_ALCOVE_WINDOW_LEVEL,
+            )
+        ),
+        invalidate=lambda: None,
     )
     # Following now preflights Screen Recording, and a denied preflight
     # correctly refuses to start a capture. Pin it: whether the machine
@@ -2148,6 +2159,28 @@ def test_alcove_relevance_wakes_from_a_cached_presence_read() -> None:
     quiet._alcove_relevant = False
     quiet._alcove_presence_probe = SimpleNamespace(running=lambda now: False)
     assert quiet._alcove_follow_relevant() is False
+
+
+def test_compact_mode_keeps_the_alcove_observation_schedule_alive() -> None:
+    """Compact changes bar geometry, not whether Alcove is observed."""
+    from sidepulse.runtime_scheduler import RuntimeFeature
+    from sidepulse.virtual_device import VirtualStatusDevice
+
+    device = VirtualStatusDevice.alloc().init()
+    device.window = SimpleNamespace(isVisible=lambda: True)
+    device.wraps_menu_bar = False
+    device.follow_alcove_width = True
+    device.wing_length_override = None
+    device._alcove_relevant = True
+
+    inputs = device.presentation_scheduler_inputs()
+    schedule = plan_presentation_schedule(inputs, now=time.monotonic())
+
+    assert inputs.alcove_enabled is True
+    assert any(
+        intent.feature is RuntimeFeature.ALCOVE_OBSERVATION
+        for intent in schedule.intents
+    )
 
 
 def test_compact_mode_width_follows_the_capsule_too() -> None:

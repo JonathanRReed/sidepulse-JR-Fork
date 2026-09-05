@@ -249,10 +249,16 @@ def test_compact_root_replaces_quiet_with_one_bounded_dnd_submenu(request):
     )
     root_items = [menu.itemAtIndex_(index) for index in range(menu.numberOfItems())]
     titled = [item for item in root_items if str(item.title() or "").strip()]
-    dnd = [item for item in titled if str(item.title()).startswith("DND:")]
+    quick = next(item for item in titled if item.title() == "Quick Settings")
+    quick_items = [
+        quick.submenu().itemAtIndex_(index)
+        for index in range(quick.submenu().numberOfItems())
+    ]
+    dnd = [item for item in quick_items if str(item.title()).startswith("DND:")]
 
     assert len(titled) <= 15
     assert len(dnd) == 1
+    assert not any(str(item.title()).startswith("DND:") for item in titled)
     assert str(dnd[0].title()) == "DND: Off"
     assert not any(
         str(item.title()) == "Quiet" or str(item.title()).startswith("End Quiet")
@@ -305,10 +311,15 @@ def test_compact_dnd_contextual_actions_are_visible_and_resolve(request):
         case.status_bar.STATE_IDLE,
         case.controller,
     )
-    dnd = next(
+    quick = next(
         menu.itemAtIndex_(index)
         for index in range(menu.numberOfItems())
-        if str(menu.itemAtIndex_(index).title()).startswith("DND:")
+        if menu.itemAtIndex_(index).title() == "Quick Settings"
+    )
+    dnd = next(
+        quick.submenu().itemAtIndex_(index)
+        for index in range(quick.submenu().numberOfItems())
+        if str(quick.submenu().itemAtIndex_(index).title()).startswith("DND:")
     )
     submenu = dnd.submenu()
     assert submenu is not None

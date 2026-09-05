@@ -1,4 +1,4 @@
-"""Pure scene policies for the JR Bar ambient display.
+"""Pure scene policies for the JR-Bar ambient display.
 
 Scenes are intentionally data only.  Runtime and AppKit layers can consume a
 validated :class:`ScenePolicy` without this module knowing about devices,

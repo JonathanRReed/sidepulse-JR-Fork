@@ -33,14 +33,29 @@ class IntakeProbeService:
         self._closed = False
         self._in_flight = False
         self._callbacks: list[Callable[[IntakeProbeResult], None]] = []
+        self._rerun_requested = False
+        self._rerun_callbacks: list[Callable[[IntakeProbeResult], None]] = []
 
-    def request(self, callback: Callable[[IntakeProbeResult], None]) -> int | None:
+    def request(
+        self,
+        callback: Callable[[IntakeProbeResult], None],
+        *,
+        force: bool = False,
+    ) -> int | None:
         if not callable(callback):
             raise ValueError("intake callback must be callable")
         with self._lock:
             if self._closed:
                 return None
             if self._in_flight:
+                if force:
+                    self._rerun_requested = True
+                    if callback not in self._rerun_callbacks:
+                        self._rerun_callbacks = [
+                            *self._rerun_callbacks[-(MAX_INTAKE_CALLBACKS - 1) :],
+                            callback,
+                        ]
+                    return self._generation + 1
                 if callback not in self._callbacks:
                     self._callbacks = [
                         *self._callbacks[-(MAX_INTAKE_CALLBACKS - 1) :],
@@ -64,6 +79,8 @@ class IntakeProbeService:
             self._closed = True
             self._generation += 1
             self._callbacks = []
+            self._rerun_requested = False
+            self._rerun_callbacks = []
 
     def _run(self, generation: int) -> None:
         try:
@@ -77,14 +94,29 @@ class IntakeProbeService:
                 INTAKE_REASON_UNAVAILABLE,
             )
         callbacks: tuple[Callable[[IntakeProbeResult], None], ...] = ()
+        rerun_generation: int | None = None
         with self._lock:
             current = not self._closed and generation == self._generation
-            self._in_flight = False
             if current:
                 callbacks = tuple(self._callbacks)
-            self._callbacks = []
+            if current and self._rerun_requested:
+                self._generation += 1
+                rerun_generation = self._generation
+                self._callbacks = self._rerun_callbacks
+                self._rerun_callbacks = []
+                self._rerun_requested = False
+            else:
+                self._in_flight = False
+                self._callbacks = []
         for callback in callbacks:
             try:
                 callback(result)
             except Exception:
                 pass
+        if rerun_generation is not None:
+            threading.Thread(
+                target=self._run,
+                args=(rerun_generation,),
+                name="SidePulseIntakeProbe",
+                daemon=True,
+            ).start()

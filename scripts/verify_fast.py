@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fast, fail-closed verification for ordinary JR Bar source changes."""
+"""Fast, fail-closed verification for ordinary JR-Bar source changes."""
 
 from __future__ import annotations
 
@@ -153,7 +153,7 @@ def run_steps(
         elapsed = time.perf_counter() - started
         if result.returncode != 0:
             print(
-                f"JR Bar fast gate stopped at {step.name} "
+                f"JR-Bar fast gate stopped at {step.name} "
                 f"after {elapsed:.2f}s (exit {result.returncode}).",
                 file=sys.stderr,
                 flush=True,
@@ -161,7 +161,7 @@ def run_steps(
             return int(result.returncode)
         print(f"    passed in {elapsed:.2f}s", flush=True)
     print(
-        f"JR Bar fast gate passed in {time.perf_counter() - gate_started:.2f}s.",
+        f"JR-Bar fast gate passed in {time.perf_counter() - gate_started:.2f}s.",
         flush=True,
     )
     return 0

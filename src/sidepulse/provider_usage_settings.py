@@ -40,6 +40,9 @@ class MenuUsageDisplay:
     #: Codex Bar parity: the tightest visible limit rides next to the
     #: menu-bar icon itself.
     show_menu_bar_percent: bool = True
+    #: Hide account aliases and email-shaped labels in menus, windows,
+    #: accessibility text, and screenshots.
+    privacy_mode: bool = False
 
     def __post_init__(self) -> None:
         if not all(
@@ -54,6 +57,7 @@ MENU_USAGE_DISPLAY_FLAGS = (
     "show_cost",
     "show_detail_lanes",
     "show_menu_bar_percent",
+    "privacy_mode",
 )
 
 
@@ -63,6 +67,10 @@ class ProviderPreference:
     enabled: bool
     browser_sources: bool
     reset_celebrations: bool = True
+    reset_overlay: bool = True
+    reset_hardware: bool = True
+    reset_notification: bool = True
+    reset_sound: bool = True
     threshold_remaining: float = 20.0
     options: tuple[tuple[str, str], ...] = ()
     #: Collection can stay on while the menu row is hidden -- "I track
@@ -107,6 +115,15 @@ class ProviderPreference:
             type(self.enabled) is not bool
             or type(self.browser_sources) is not bool
             or type(self.reset_celebrations) is not bool
+            or not all(
+                type(value) is bool
+                for value in (
+                    self.reset_overlay,
+                    self.reset_hardware,
+                    self.reset_notification,
+                    self.reset_sound,
+                )
+            )
             or type(self.menu_visible) is not bool
             or isinstance(self.threshold_remaining, bool)
             or not isinstance(self.threshold_remaining, (int, float))
@@ -327,6 +344,29 @@ class ProviderUsageSettings:
             )
         )
 
+    def with_reset_channel(
+        self,
+        provider_id: str,
+        channel: str,
+        enabled: bool,
+        *,
+        source_instance_id: str = DEFAULT_PROVIDER_INSTANCE_SOURCE_ID,
+    ) -> ProviderUsageSettings:
+        field = f"reset_{channel}"
+        if field not in {
+            "reset_overlay",
+            "reset_hardware",
+            "reset_notification",
+            "reset_sound",
+        } or type(enabled) is not bool:
+            raise ProviderUsageSettingsError("invalid reset channel setting")
+        return self._replace(
+            replace(
+                self.preference(provider_id, source_instance_id),
+                **{field: enabled},
+            )
+        )
+
     def with_threshold_remaining(
         self,
         provider_id: str,
@@ -508,6 +548,15 @@ def _preference_from_payload(
         "reset_celebrations",
         fallback.reset_celebrations,
     )
+    reset_channels = {
+        field: payload.get(field, getattr(fallback, field))
+        for field in (
+            "reset_overlay",
+            "reset_hardware",
+            "reset_notification",
+            "reset_sound",
+        )
+    }
     menu_visible = payload.get("menu_visible", fallback.menu_visible)
     threshold = payload.get("threshold_remaining", fallback.threshold_remaining)
     raw_options = payload.get("options", {})
@@ -537,6 +586,10 @@ def _preference_from_payload(
                 if type(reset_celebrations) is bool
                 else fallback.reset_celebrations
             ),
+            **{
+                field: value if type(value) is bool else getattr(fallback, field)
+                for field, value in reset_channels.items()
+            },
             threshold_remaining=threshold,
             options=options,
             menu_visible=(
@@ -715,6 +768,10 @@ def _settings_document(
             "enabled": preference.enabled,
             "browser_sources": preference.browser_sources,
             "reset_celebrations": preference.reset_celebrations,
+            "reset_overlay": preference.reset_overlay,
+            "reset_hardware": preference.reset_hardware,
+            "reset_notification": preference.reset_notification,
+            "reset_sound": preference.reset_sound,
             "threshold_remaining": preference.threshold_remaining,
             "options": dict(preference.options),
             "menu_visible": preference.menu_visible,

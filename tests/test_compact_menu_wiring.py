@@ -98,6 +98,18 @@ def test_root_menu_groups_devices_and_removes_permanent_tip() -> None:
     assert 'plan_by_key["devices"].title' in source
 
 
+def test_quick_settings_groups_screen_bar_lighting_dnd_and_all_settings() -> None:
+    source = _source()
+
+    assert "_install_quick_settings_menu(menu, target, inputs, plan_by_key)" in source
+    assert '"Screen Bar",' in source
+    assert '"Lighting…",' in source
+    assert '"openColorsWindow:",' in source
+    assert '_safe_title(item) == "Settings…"' in source
+    assert '_safe_title(item).startswith("DND:")' in source
+    assert "_install_effect_studio_action" not in source
+
+
 def test_compact_adapter_carries_typed_dnd_state_and_removes_legacy_quiet() -> None:
     source = _source()
 

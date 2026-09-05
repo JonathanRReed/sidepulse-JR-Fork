@@ -129,14 +129,14 @@ def build_sbom(
                 "components": [
                     {
                         "type": "application",
-                        "name": "JR Bar SBOM Generator",
+                        "name": "JR-Bar SBOM Generator",
                         "version": "1",
                     }
                 ]
             },
             "component": {
                 "type": "application",
-                "name": "JR Bar",
+                "name": "JR-Bar",
                 "version": application_version,
                 "bom-ref": f"pkg:github/JonathanRReed/sidepulse-JR-Fork@{application_version}",
                 "properties": [

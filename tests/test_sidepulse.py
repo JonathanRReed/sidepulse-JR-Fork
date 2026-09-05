@@ -399,10 +399,7 @@ class AgentMonitorTests(unittest.TestCase):
             plugin_path.write_text(plugin_path.read_text() + "// arbitrary edit\n")
             self.assertFalse(detect_opencode_plugin(home).exists)
 
-            plugin_path.write_text(
-                "// sidepulse-opencode-plugin-v1\n"
-                "const SIDEPULSE_HOOK_ARGS = Object.freeze([]);\n"
-            )
+            plugin_path.write_text("// sidepulse-opencode-plugin-v1\nconst SIDEPULSE_HOOK_ARGS = Object.freeze([]);\n")
             self.assertFalse(detect_opencode_plugin(home).exists)
 
     def test_opencode_plugin_installer_is_private_idempotent_and_preserves_config(self) -> None:
@@ -639,9 +636,7 @@ class AgentMonitorTests(unittest.TestCase):
                 "    capture.write(json.dumps({'args': sys.argv[1:], 'payload': json.loads(sys.stdin.read())}) + '\\n')\n"
             )
             capture_hook.chmod(0o700)
-            plugin_path.write_text(
-                opencode_plugin_source(capture_path, python_executable=sys.executable)
-            )
+            plugin_path.write_text(opencode_plugin_source(capture_path, python_executable=sys.executable))
             runner_path = base / "runner.mjs"
             runner_path.write_text(
                 """
@@ -762,8 +757,7 @@ for (const event of [
                                         {
                                             "type": "command",
                                             "command": (
-                                                "python hook_entry.py --provider devin "
-                                                f"--log {sidepulse_log};"
+                                                f"python hook_entry.py --provider devin --log {sidepulse_log};"
                                             ),
                                         },
                                     ]
@@ -824,10 +818,7 @@ for (const event of [
                                     "hooks": [
                                         {
                                             "type": "command",
-                                            "command": (
-                                                "agent-monitor hook-log --provider devin "
-                                                f"--log {log}"
-                                            ),
+                                            "command": (f"agent-monitor hook-log --provider devin --log {log}"),
                                         }
                                     ]
                                 }
@@ -969,10 +960,7 @@ for (const event of [
             self.assertEqual(claude_obj["session_id"], "xyz")
             self.assertNotIn("event", grok_obj)
             self.assertEqual(grok_obj["sessionId"], "grok-session")
-            self.assertTrue(
-                datetime.fromisoformat(codex_obj["logged_at"].replace("Z", "+00:00")).tzinfo
-                is not None
-            )
+            self.assertTrue(datetime.fromisoformat(codex_obj["logged_at"].replace("Z", "+00:00")).tzinfo is not None)
 
     def test_hook_payload_stamps_origin_from_vscode_environment(self) -> None:
         with patch.dict(os.environ, {"TERM_PROGRAM": "vscode"}, clear=True):
@@ -1293,9 +1281,7 @@ for (const event of [
             log = base / "codex.jsonl"
             lines = []
             base_epoch = datetime.now(timezone.utc).timestamp() - 100.0
-            for index, event_name in enumerate(
-                ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
-            ):
+            for index, event_name in enumerate(("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")):
                 lines.append(
                     json.dumps(
                         {
@@ -1339,10 +1325,7 @@ for (const event of [
                 )
 
             self.assertEqual(replayed, 2)
-            lifecycle_by_id = {
-                work.key.work_id.value: work.lifecycle
-                for work in monitor.operator_state.works
-            }
+            lifecycle_by_id = {work.key.work_id.value: work.lifecycle for work in monitor.operator_state.works}
             self.assertEqual(
                 lifecycle_by_id,
                 {
@@ -1491,9 +1474,7 @@ for (const event of [
             self.skipTest(str(exc))
 
         self.assertGreaterEqual(virtual_device.FRAME_RATE, 60.0)
-        self.assertAlmostEqual(
-            virtual_device.FRAME_INTERVAL, 1.0 / virtual_device.FRAME_RATE
-        )
+        self.assertAlmostEqual(virtual_device.FRAME_INTERVAL, 1.0 / virtual_device.FRAME_RATE)
         self.assertLess(virtual_device.IDLE_FRAME_RATE, virtual_device.FRAME_RATE)
         self.assertAlmostEqual(
             virtual_device.TARGET_SAMPLE_INTERVAL_VIEW_CONTRACT,
@@ -1506,9 +1487,7 @@ for (const event of [
         except (ImportError, SystemExit) as exc:
             self.skipTest(str(exc))
 
-        view = virtual_device.VirtualLedView.alloc().initWithFrame_(
-            ((0, 0), (220.0, 37.0))
-        )
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (220.0, 37.0)))
         view.setRenderFps_(60.0)
         self.assertAlmostEqual(view._target_sample_interval, 1.0 / 60.0)
         view.setRenderFps_(10.0)
@@ -1546,9 +1525,7 @@ for (const event of [
         # at the gentle cadence rather than transition framerate: a slow
         # breathe looks identical there and running it at 60-120Hz was
         # the app's single largest CPU draw.
-        self.assertLess(
-            device._frame_interval_current, 1.0 / virtual_device.IDLE_FRAME_RATE
-        )
+        self.assertLess(device._frame_interval_current, 1.0 / virtual_device.IDLE_FRAME_RATE)
         self.assertAlmostEqual(
             device._frame_interval_current,
             1.0 / virtual_device.GENTLE_MOTION_FPS,
@@ -1605,9 +1582,7 @@ for (const event of [
                 self.added = []
                 self.removed = []
 
-            def addObserver_selector_name_object_(
-                self, observer, selector, name, obj
-            ):
+            def addObserver_selector_name_object_(self, observer, selector, name, obj):
                 self.added.append((observer, selector, name, obj))
 
             def removeObserver_name_object_(self, observer, name, obj):
@@ -1722,9 +1697,7 @@ for (const event of [
             def drawInRect_angle_(self, rect, angle):
                 gradient_draws.append((rect, angle))
 
-        view = virtual_device.VirtualLedView.alloc().initWithFrame_(
-            ((0, 0), (220.0, 37.0))
-        )
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (220.0, 37.0)))
         with (
             patch.object(
                 virtual_device,
@@ -1737,9 +1710,7 @@ for (const event of [
                 side_effect=lambda *args: fallback_fills.append(args),
             ),
         ):
-            view._draw_wing_riser(
-                None, (1.0, 0.2, 0.1, 1.0), 0.0, 6.0, 37.0
-            )
+            view._draw_wing_riser(None, (1.0, 0.2, 0.1, 1.0), 0.0, 6.0, 37.0)
 
         self.assertEqual(len(gradient_draws), 2)
         self.assertEqual(fallback_fills, [])
@@ -1751,9 +1722,7 @@ for (const event of [
             self.skipTest(str(exc))
 
         fallback_fills = []
-        view = virtual_device.VirtualLedView.alloc().initWithFrame_(
-            ((0, 0), (220.0, 37.0))
-        )
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (220.0, 37.0)))
         with (
             patch.object(
                 virtual_device,
@@ -1766,9 +1735,7 @@ for (const event of [
                 side_effect=lambda *args: fallback_fills.append(args),
             ),
         ):
-            view._draw_wing_riser(
-                None, (1.0, 0.2, 0.1, 1.0), 0.0, 6.0, 37.0
-            )
+            view._draw_wing_riser(None, (1.0, 0.2, 0.1, 1.0), 0.0, 6.0, 37.0)
 
         self.assertLessEqual(len(fallback_fills), 24)
         self.assertLess(len(fallback_fills), 96)
@@ -1787,9 +1754,7 @@ for (const event of [
                 cls.allocations += 1
                 return cls()
 
-            def initWithColors_atLocations_colorSpace_(
-                self, _colors, _locations, _color_space
-            ):
+            def initWithColors_atLocations_colorSpace_(self, _colors, _locations, _color_space):
                 return self
 
             def drawInRect_angle_(self, _rect, _angle):
@@ -1797,9 +1762,7 @@ for (const event of [
 
         frames = 120
         builder_calls = 0
-        view = virtual_device.VirtualLedView.alloc().initWithFrame_(
-            ((0, 0), (220.0, 37.0))
-        )
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (220.0, 37.0)))
         cache = view._riser_gradient_cache
         original_get_or_build = cache.get_or_build
 
@@ -1821,19 +1784,13 @@ for (const event of [
                     0.80 - 0.06 * phase,
                     0.70 + 0.10 * phase,
                 )
-                view._draw_wing_riser(
-                    None, edge_color, 0.0, 6.0, 37.0, outer_on_left=True
-                )
-                view._draw_wing_riser(
-                    None, edge_color, 214.0, 220.0, 37.0, outer_on_left=False
-                )
+                view._draw_wing_riser(None, edge_color, 0.0, 6.0, 37.0, outer_on_left=True)
+                view._draw_wing_riser(None, edge_color, 214.0, 220.0, 37.0, outer_on_left=False)
 
-        # 9, not the 16 this asserted while the draw path raised every
-        # channel to LED_GAMMA: that curve stretched the low end of the sweep
-        # across more of the 32 quantisation buckets. Fewer builds for the
-        # same sweep is better reuse, which is what the test is guarding.
-        self.assertEqual(builder_calls, 9)
-        self.assertEqual(Gradient.allocations, 18)
+        # The draw path may reuse even more buckets as its uniform layer
+        # calibration changes. This is a cache ceiling, not a golden image.
+        self.assertLessEqual(builder_calls, 9)
+        self.assertEqual(Gradient.allocations, builder_calls * 2)
         self.assertLess(Gradient.allocations, frames * 2)
 
     def test_compact_mode_keeps_the_same_frame_as_normal_mode(self) -> None:
@@ -2126,9 +2083,7 @@ for (const event of [
         right_edge_color = virtual_device.blended_led_color_at_x(colors, notch_width, led_width)
         self.assertEqual(left_edge_color, right_edge_color)
 
-        view = virtual_device.VirtualLedView.alloc().initWithFrame_(
-            ((0, 0), (notch_width + 2.0 * wing_offset, 37.0))
-        )
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (notch_width + 2.0 * wing_offset, 37.0)))
         view.setHasNotch_(True)
         view.setNotchWidth_(notch_width)
         view.setState_brightness_(virtual_device.LedDisplayState.DONE, 255)
@@ -2167,32 +2122,17 @@ for (const event of [
         self.assertEqual(virtual_device.wing_width_for_screen(screen, 300.0), 0.0)
 
     def test_bracket_style_auto_mirrors_leds_when_a_crowd_is_lit(self) -> None:
-        # "The screen bar isn't showing the same effect as the light
-        # bar": with 2+ lit LEDs the bracket must render the SAME
-        # per-LED colors (the relay ripple travels the underline); the
-        # identity collapse stays only for the lone-agent case where a
-        # spatial bracket would be mostly dark.
+        # Auto preserves each LED even when only the moving head is lit.
         try:
             from sidepulse import virtual_device
         except (ImportError, SystemExit) as exc:
             self.skipTest(str(exc))
         view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (400.0, 37.0)))
-        # Alphas at/above the legibility floor pass through unchanged;
-        # the dim 0.05 rest glow gets boosted to the floor (the bracket
-        # is a status surface -- see _legibility_boost).
         crowd = [(0.2, 0.5, 1.0, 1.0), (1.0, 0.4, 0.7, 1.0)] + [(0.05, 0.02, 0.02, 0.05)] * 6
         rendered = view._bracket_colors(crowd)
-        self.assertEqual(rendered[:2], crowd[:2])
-        self.assertGreaterEqual(rendered[2][3], 0.17)
+        self.assertEqual(rendered, crowd)
         lone = [(0.2, 0.5, 1.0, 1.0)] + [(0.0, 0.0, 0.0, 0.0)] * 7
-        # Hysteresis: right after a crowd frame, a briefly-dark frame
-        # STAYS spatial -- Relay's resting glow sits at the lit
-        # threshold and flickering to identity made the bar "cycle
-        # between colors" as the spotlight moved.
         self.assertEqual(view._bracket_colors(lone), lone)
-        view._bracket_spatial_hold_until = 0.0
-        collapsed = view._bracket_colors(lone)
-        self.assertEqual(len(set(collapsed)), 1)
         # Explicit styles override auto in both directions.
         view.setBracketStyle_("spatial")
         self.assertEqual(view._bracket_colors(lone), lone)
@@ -2223,9 +2163,7 @@ for (const event of [
         self.assertAlmostEqual(red, 0.2, places=5)
         self.assertAlmostEqual(blue, 1.0, places=5)
         self.assertEqual(alpha, 1.0)
-        self.assertEqual(
-            view._bar_identity_color([(0.0, 0.0, 0.0, 0.0)] * 8), (0.0, 0.0, 0.0, 0.0)
-        )
+        self.assertEqual(view._bar_identity_color([(0.0, 0.0, 0.0, 0.0)] * 8), (0.0, 0.0, 0.0, 0.0))
 
     def test_wings_only_mode_renders_without_raising(self) -> None:
         # The Alcove-aware wrap draws just the bracket (wings + risers)
@@ -2236,9 +2174,7 @@ for (const event of [
             self.skipTest(str(exc))
 
         notch_width, wing_offset = 624.0, 90.0
-        view = virtual_device.VirtualLedView.alloc().initWithFrame_(
-            ((0, 0), (notch_width + 2.0 * wing_offset, 37.0))
-        )
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (notch_width + 2.0 * wing_offset, 37.0)))
         view.setHasNotch_(True)
         view.setNotchWidth_(notch_width)
         view.setWingsOnlyMode_(True)
@@ -2342,27 +2278,19 @@ for (const event of [
             1.0,
         )
         self.assertGreater(
-            virtual_device.blended_led_color_at_x(
-                colors, target_center - led_width, led_width
-            )[1],
+            virtual_device.blended_led_color_at_x(colors, target_center - led_width, led_width)[1],
             0.0,
         )
         self.assertGreater(
-            virtual_device.blended_led_color_at_x(
-                colors, target_center + led_width, led_width
-            )[1],
+            virtual_device.blended_led_color_at_x(colors, target_center + led_width, led_width)[1],
             0.0,
         )
         self.assertAlmostEqual(
-            virtual_device.blended_led_color_at_x(
-                colors, target_center - led_width * 1.5, led_width
-            )[1],
+            virtual_device.blended_led_color_at_x(colors, target_center - led_width * 1.5, led_width)[1],
             0.0,
         )
         self.assertAlmostEqual(
-            virtual_device.blended_led_color_at_x(
-                colors, target_center + led_width * 1.5, led_width
-            )[1],
+            virtual_device.blended_led_color_at_x(colors, target_center + led_width * 1.5, led_width)[1],
             0.0,
         )
 
@@ -2381,8 +2309,7 @@ for (const event of [
                 provider="claude",
                 agent_id="claude:session:b64a0d4b",
                 display_name=(
-                    "functions: allow me to chose timeframe "
-                    "http://localhost:5001/pkuhar-com/us-central... (b64a0d4b)"
+                    "functions: allow me to chose timeframe http://localhost:5001/pkuhar-com/us-central... (b64a0d4b)"
                 ),
                 mode=AgentMode.WORKING,
                 updated_at=datetime.now(timezone.utc),
@@ -2424,9 +2351,7 @@ for (const event of [
             if submenu.itemAtIndex_(index).title()
         ]
         custom_view_count = sum(
-            1
-            for index in range(submenu.numberOfItems())
-            if submenu.itemAtIndex_(index).view() is not None
+            1 for index in range(submenu.numberOfItems()) if submenu.itemAtIndex_(index).view() is not None
         )
 
         self.assertIn("Brightness 50%", titles)
@@ -2511,14 +2436,8 @@ for (const event of [
 
         mailbox_items = find_mailbox_item(menu)
         self.assertEqual(len(mailbox_items), 1)
-        hardware_title = next(
-            title
-            for title in titles
-            if title.startswith("Hardware ·") or title == "Hardware"
-        )
-        self.assertLess(
-            items.index(mailbox_items[0]), titles.index(hardware_title)
-        )
+        hardware_title = next(title for title in titles if title.startswith("Hardware ·") or title == "Hardware")
+        self.assertLess(items.index(mailbox_items[0]), titles.index(hardware_title))
         # The whole physical concern lives under ONE root row now:
         # devices, brightness, keep-awake, calibration -- not four
         # top-level items.
@@ -2526,23 +2445,18 @@ for (const event of [
         self.assertNotIn("Brightness", by_title)
         hardware_menu = by_title[hardware_title].submenu()
         self.assertIsNotNone(hardware_menu)
-        hardware_titles = {
-            hardware_menu.itemAtIndex_(index).title()
-            for index in range(hardware_menu.numberOfItems())
-        }
+        hardware_titles = {hardware_menu.itemAtIndex_(index).title() for index in range(hardware_menu.numberOfItems())}
         self.assertIn("Keep Awake With Lid Closed", hardware_titles)
         self.assertIn("Brightness", hardware_titles)
         keep_awake_item = next(
             hardware_menu.itemAtIndex_(index)
             for index in range(hardware_menu.numberOfItems())
-            if hardware_menu.itemAtIndex_(index).title()
-            == "Keep Awake With Lid Closed"
+            if hardware_menu.itemAtIndex_(index).title() == "Keep Awake With Lid Closed"
         )
         submenu = keep_awake_item.submenu()
         self.assertIsNotNone(submenu)
         sub_items = {
-            submenu.itemAtIndex_(index).title(): submenu.itemAtIndex_(index)
-            for index in range(submenu.numberOfItems())
+            submenu.itemAtIndex_(index).title(): submenu.itemAtIndex_(index) for index in range(submenu.numberOfItems())
         }
         self.assertEqual(sub_items["Never"].state(), 0)
         self.assertEqual(sub_items["When Agents Work"].state(), 1)
@@ -2594,10 +2508,7 @@ for (const event of [
             for index in range(mailbox.submenu().numberOfItems())
             if mailbox.submenu().itemAtIndex_(index).title() == "Recent"
         )
-        recent_titles = [
-            recent.itemAtIndex_(index).title()
-            for index in range(recent.numberOfItems())
-        ]
+        recent_titles = [recent.itemAtIndex_(index).title() for index in range(recent.numberOfItems())]
         self.assertIn(status_bar.native_session_menu_title(status), recent_titles)
 
     def test_lid_animation_program_uses_device_brightness(self) -> None:
@@ -2628,9 +2539,7 @@ for (const event of [
             last_battery_snapshot=object(),
             reset_led_controllers_for_display_change=lambda: calls.append(("reset", None)),
             active_led_display_kind=lambda snapshot: "agent",
-            sync_leds=lambda mode, snapshot, display: calls.append(
-                ("sync", (mode, snapshot, display))
-            ),
+            sync_leds=lambda mode, snapshot, display: calls.append(("sync", (mode, snapshot, display))),
             refresh_=lambda sender: calls.append(("refresh", sender)),
         )
 
@@ -2667,7 +2576,7 @@ for (const event of [
                 # assert across the full control map.
                 target.ensure_all_settings_panes()
 
-        self.assertEqual(window.title(), "JR Bar Settings: Profile")
+        self.assertEqual(window.title(), "JR-Bar Settings: Profile")
         self.assertIn("devin_session_opener", target.settings_fields)
         self.assertIn("closed_animation_program", target.settings_fields)
         self.assertIn("closed_animation_duration", target.settings_fields)
@@ -2685,7 +2594,7 @@ for (const event of [
 
         window = status_bar.build_setup_window(target)
 
-        self.assertEqual(window.title(), "Welcome to JR Bar")
+        self.assertEqual(window.title(), f"Welcome to {status_bar.PRODUCT_DISPLAY_NAME}")
         self.assertIn("launch", target.setup_buttons)
         self.assertIn("eject_guard", target.setup_buttons)
         self.assertIn("eject_guard_uninstall", target.setup_buttons)
@@ -2701,6 +2610,23 @@ for (const event of [
         for provider in status_bar.HOOK_PROVIDERS:
             self.assertIn(f"setup_{provider}_status", target.setup_fields)
             self.assertIn(f"setup_{provider}_install", target.setup_buttons)
+        # First display is software-only and permission-free. System helpers,
+        # physical hardware, and optional integrations require an explicit click.
+        for key in ("launch", "eject_guard", "sleep_helper"):
+            self.assertEqual(target.setup_buttons[key].state(), 0)
+        for key in (
+            "screen_bar",
+            "privacy_mode",
+            "reset_celebrations",
+            "matched_lighting",
+            "sleep_dimming",
+            "idle_off",
+            "configure_physical_devices",
+            "configure_t3",
+            "configure_alcove",
+            "configure_agent_deck",
+        ):
+            self.assertIn(key, target.setup_buttons)
 
     def test_first_launch_setup_window_only_shows_until_completed(self) -> None:
         try:
@@ -2709,11 +2635,7 @@ for (const event of [
             self.skipTest(str(exc))
 
         self.assertTrue(status_bar.should_show_setup_window(AgentMonitorSettings()))
-        self.assertFalse(
-            status_bar.should_show_setup_window(
-                AgentMonitorSettings(setup_screen_completed=True)
-            )
-        )
+        self.assertFalse(status_bar.should_show_setup_window(AgentMonitorSettings(setup_screen_completed=True)))
 
     def test_setup_terminal_installer_opens_command_file(self) -> None:
         try:
@@ -2816,17 +2738,17 @@ for (const event of [
             config.write_text(
                 "\n".join(
                     [
-                        '[features]',
-                        'js_repl = false',
-                        '',
-                        '[[hooks.PreToolUse]]',
-                        '[[hooks.PreToolUse.hooks]]',
+                        "[features]",
+                        "js_repl = false",
+                        "",
+                        "[[hooks.PreToolUse]]",
+                        "[[hooks.PreToolUse.hooks]]",
                         'type = "command"',
                         f"command = '''echo old >> {log}'''",
-                        '',
-                        '[hooks.state]',
+                        "",
+                        "[hooks.state]",
                         'source = "keep-me"',
-                        '',
+                        "",
                     ]
                 )
             )
@@ -2840,7 +2762,7 @@ for (const event of [
             self.assertTrue(result.changed)
             text = config.read_text()
             self.assertIn("hooks = true", text)
-            self.assertIn('[hooks.state]', text)
+            self.assertIn("[hooks.state]", text)
             self.assertIn('source = "keep-me"', text)
             self.assertIn("sidepulse.hook_client", text)
             self.assertIn("--provider codex", text)
@@ -3055,9 +2977,7 @@ for (const event of [
                                         },
                                         {
                                             "type": "command",
-                                            "command": (
-                                                f"python hook_entry.py --provider claude --log {log}"
-                                            ),
+                                            "command": (f"python hook_entry.py --provider claude --log {log}"),
                                         },
                                         {
                                             "type": "command",
@@ -3079,11 +2999,7 @@ for (const event of [
 
             self.assertTrue(result.changed)
             data = json.loads(config.read_text())
-            commands = [
-                hook["command"]
-                for entry in data["hooks"]["PreToolUse"]
-                for hook in entry["hooks"]
-            ]
+            commands = [hook["command"] for entry in data["hooks"]["PreToolUse"] for hook in entry["hooks"]]
             self.assertIn("echo keep >> /tmp/other.log", commands)
             self.assertIn(f"jq -c . >> {log}", commands)
             self.assertTrue(any("sidepulse.hook_client" in command for command in commands))
@@ -3114,10 +3030,7 @@ for (const event of [
                                         },
                                         {
                                             "type": "command",
-                                            "command": (
-                                                "agent-monitor hook-log --provider grok "
-                                                f"--log {log}"
-                                            ),
+                                            "command": (f"agent-monitor hook-log --provider grok --log {log}"),
                                         },
                                     ],
                                 }
@@ -3135,11 +3048,7 @@ for (const event of [
 
             self.assertTrue(result.changed)
             data = json.loads(config.read_text())
-            pre_tool_commands = [
-                hook["command"]
-                for entry in data["hooks"]["PreToolUse"]
-                for hook in entry["hooks"]
-            ]
+            pre_tool_commands = [hook["command"] for entry in data["hooks"]["PreToolUse"] for hook in entry["hooks"]]
             self.assertIn("echo keep >> /tmp/other.log", pre_tool_commands)
             self.assertIn(f"jq -c . >> {log}", pre_tool_commands)
             self.assertTrue(any("--provider grok" in command for command in pre_tool_commands))
@@ -3156,9 +3065,7 @@ for (const event of [
             config = base / "hooks.json"
             log = base / "cursor.jsonl"
             other = {"command": "/usr/local/bin/other-tool-hook"}
-            config.write_text(
-                json.dumps({"version": 1, "hooks": {"beforeShellExecution": [dict(other)]}})
-            )
+            config.write_text(json.dumps({"version": 1, "hooks": {"beforeShellExecution": [dict(other)]}}))
 
             first = install_cursor_hooks(log, config, python_executable="python3")
             second = install_cursor_hooks(log, config, python_executable="python3")
@@ -3337,11 +3244,7 @@ for (const event of [
             second = install_devin_hooks(log, config, python_executable="python3")
 
             data = json.loads(config.read_text())
-            commands = [
-                hook["command"]
-                for entry in data["hooks"]["PreToolUse"]
-                for hook in entry["hooks"]
-            ]
+            commands = [hook["command"] for entry in data["hooks"]["PreToolUse"] for hook in entry["hooks"]]
             self.assertTrue(first.changed)
             self.assertIsNotNone(first.backup_path)
             self.assertFalse(second.changed)
@@ -3356,8 +3259,7 @@ for (const event of [
             config = base / "config.json"
             log = base / "devin.jsonl"
             agent_deck_commands = {
-                event: f"bun /tmp/agent-deck-hook.ts --log {log} --event {event}"
-                for event in DEVIN_EVENTS
+                event: f"bun /tmp/agent-deck-hook.ts --log {log} --event {event}" for event in DEVIN_EVENTS
             }
             source_command = f"python hook_entry.py --provider devin --log {log}"
             packaged_command = f"agent-monitor hook-log --provider devin --log {log}"
@@ -3432,11 +3334,7 @@ for (const event of [
             result = uninstall_devin_hooks(log, config)
 
             data = json.loads(config.read_text())
-            commands = [
-                hook["command"]
-                for entry in data.get("hooks", {}).get("Stop", [])
-                for hook in entry["hooks"]
-            ]
+            commands = [hook["command"] for entry in data.get("hooks", {}).get("Stop", []) for hook in entry["hooks"]]
             self.assertTrue(result.changed)
             self.assertEqual(commands, [agent_deck])
 
@@ -3446,19 +3344,7 @@ for (const event of [
             config = base / "config.json"
             log = base / "devin.jsonl"
             config.write_text(
-                json.dumps(
-                    {
-                        "hooks": {
-                            "Stop": [
-                                {
-                                    "hooks": [
-                                        {"type": "command", "command": "echo keep-agent-deck"}
-                                    ]
-                                }
-                            ]
-                        }
-                    }
-                )
+                json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo keep-agent-deck"}]}]}})
             )
             install_devin_hooks(log, config, python_executable="python3")
 
@@ -3529,11 +3415,7 @@ for (const event of [
 
             self.assertTrue(result.changed)
             data = json.loads(config.read_text())
-            commands = [
-                hook["command"]
-                for entry in data["hooks"]["PreToolUse"]
-                for hook in entry["hooks"]
-            ]
+            commands = [hook["command"] for entry in data["hooks"]["PreToolUse"] for hook in entry["hooks"]]
             self.assertEqual(commands, ["echo keep >> /tmp/other.log"])
             self.assertEqual(data["permissions"]["allow"], ["Bash(date)"])
 
@@ -3568,11 +3450,7 @@ for (const event of [
 
             self.assertTrue(result.changed)
             data = json.loads(config.read_text())
-            commands = [
-                hook["command"]
-                for entry in data["hooks"]["PreToolUse"]
-                for hook in entry["hooks"]
-            ]
+            commands = [hook["command"] for entry in data["hooks"]["PreToolUse"] for hook in entry["hooks"]]
             self.assertEqual(commands, ["echo keep >> /tmp/other.log"])
 
     def test_detect_grok_config_reads_managed_hook_file(self) -> None:
@@ -3601,9 +3479,7 @@ for (const event of [
         status_bar_foreground = parser.parse_args(["status-bar", "--foreground"])
         grok_install = parser.parse_args(["install", "grok"])
         grok_hook_log = parser.parse_args(["hook-log", "--provider", "grok", "--log", "/tmp/grok.jsonl"])
-        grok_hook_client = parser.parse_args(
-            ["hook-client", "--provider", "grok", "--log", "/tmp/grok.jsonl"]
-        )
+        grok_hook_client = parser.parse_args(["hook-client", "--provider", "grok", "--log", "/tmp/grok.jsonl"])
 
         self.assertEqual(install.provider, "all")
         self.assertEqual(grok_install.provider, "grok")
@@ -3625,9 +3501,7 @@ for (const event of [
         parser = build_parser(prog="sidepulse agent-monitor")
 
         install = parser.parse_args(["install", "devin", "--devin-log", "/tmp/devin.jsonl"])
-        hook_log = parser.parse_args(
-            ["hook-log", "--provider", "devin", "--log", "/tmp/devin.jsonl"]
-        )
+        hook_log = parser.parse_args(["hook-log", "--provider", "devin", "--log", "/tmp/devin.jsonl"])
 
         self.assertEqual(install.provider, "devin")
         self.assertEqual(install.devin_log, Path("/tmp/devin.jsonl"))
@@ -3677,8 +3551,18 @@ for (const event of [
     def test_sidepulse_sdejectguard_command_shape(self) -> None:
         parser = cli_module.build_sidepulse_parser()
 
-        start = parser.parse_args(["sdejectguard", "start"])
-        interactive = parser.parse_args(["sdejectguard", "start", "-it", "--scope", "user"])
+        start = parser.parse_args(["sdejectguard", "start", "--volume-uuid", "A1B2-C3D4"])
+        interactive = parser.parse_args(
+            [
+                "sdejectguard",
+                "start",
+                "-it",
+                "--scope",
+                "user",
+                "--volume-uuid",
+                "A1B2-C3D4",
+            ]
+        )
         stop = parser.parse_args(["sdejectguard", "stop", "--scope", "system"])
         uninstall = parser.parse_args(["sdejectguard", "uninstall", "--scope", "user", "--dry-run"])
         logs = parser.parse_args(["sdejectguard", "logs", "--lines", "12", "--follow"])
@@ -3700,7 +3584,16 @@ for (const event of [
 
     def test_sidepulse_sdejectguard_start_uses_launchd_installer(self) -> None:
         parser = cli_module.build_sidepulse_parser()
-        args = parser.parse_args(["sdejectguard", "start", "--scope", "user"])
+        args = parser.parse_args(
+            [
+                "sdejectguard",
+                "start",
+                "--scope",
+                "user",
+                "--volume-uuid",
+                "A1B2-C3D4",
+            ]
+        )
         guard_result = SimpleNamespace(
             dry_run=False,
             changed=True,
@@ -3719,11 +3612,25 @@ for (const event of [
             result = cli_module.cmd_sidepulse_sdejectguard_start(args)
 
         self.assertEqual(result, 0)
-        install.assert_called_once_with(scope="user", dry_run=False)
+        install.assert_called_once_with(
+            scope="user",
+            dry_run=False,
+            volume_uuid="A1B2-C3D4",
+        )
 
     def test_sidepulse_sdejectguard_start_interactive_runs_foreground(self) -> None:
         parser = cli_module.build_sidepulse_parser()
-        args = parser.parse_args(["sdejectguard", "start", "-it", "--scope", "user"])
+        args = parser.parse_args(
+            [
+                "sdejectguard",
+                "start",
+                "-it",
+                "--scope",
+                "user",
+                "--volume-uuid",
+                "A1B2-C3D4",
+            ]
+        )
 
         with patch(
             "sidepulse.sd_eject_guard_launch.run_sd_eject_guard_interactive",
@@ -3732,7 +3639,7 @@ for (const event of [
             result = cli_module.cmd_sidepulse_sdejectguard_start(args)
 
         self.assertEqual(result, 0)
-        run.assert_called_once_with(scope="user")
+        run.assert_called_once_with(scope="user", volume_uuid="A1B2-C3D4")
 
     def test_sidepulse_sdejectguard_stop_calls_guard_stop(self) -> None:
         parser = cli_module.build_sidepulse_parser()
@@ -3787,7 +3694,6 @@ for (const event of [
                 "user",
             ]
         )
-
         self.assertEqual(default.command, "setup")
         self.assertEqual(default.provider, "all")
         self.assertEqual(default.sd_eject_guard_scope, "auto")
@@ -3798,9 +3704,9 @@ for (const event of [
         self.assertTrue(codex_only.no_status_bar)
         self.assertTrue(codex_only.dry_run)
 
-    def test_sidepulse_setup_installs_hooks_guard_and_status_bar(self) -> None:
+    def test_sidepulse_setup_installs_hooks_guard_and_status_bar_when_guard_is_requested(self) -> None:
         parser = cli_module.build_sidepulse_parser()
-        args = parser.parse_args(["setup"])
+        args = parser.parse_args(["setup", "--sd-eject-guard"])
         codex_result = SimpleNamespace(
             provider="codex",
             config_path=Path("/tmp/codex.toml"),
@@ -3895,7 +3801,7 @@ for (const event of [
                 "kiro",
             ],
         )
-        guard.assert_called_once_with(scope="auto", dry_run=False)
+        guard.assert_called_once_with(scope="auto", dry_run=False, volume_uuid=None)
         launch.assert_called_once_with(start=True)
 
     def test_sidepulse_setup_no_status_bar_still_installs_guard(self) -> None:
@@ -3930,7 +3836,7 @@ for (const event of [
             result = cli_module.cmd_sidepulse_setup(args)
 
         self.assertEqual(result, 0)
-        guard.assert_called_once_with(scope="user", dry_run=False)
+        guard.assert_called_once_with(scope="user", dry_run=False, volume_uuid=None)
         launch.assert_not_called()
 
     def test_sidepulse_write_decodes_escaped_newlines_and_writes_leds_file(self) -> None:
@@ -4029,9 +3935,7 @@ for (const event of [
         with tempfile.TemporaryDirectory() as tmp:
             device = Path(tmp) / "SidePulseDot"
             device.mkdir()
-            result = cli_module.sidepulse_main(
-                ["write", r"off\n#FF00FF pulse", "--device", str(device)]
-            )
+            result = cli_module.sidepulse_main(["write", r"off\n#FF00FF pulse", "--device", str(device)])
 
             self.assertEqual(result, 0)
             self.assertEqual((device / "LEDS.LED").read_text(), "off\n#FF00FF pulse")
@@ -4060,11 +3964,7 @@ for (const event of [
         # eases to the floor rather than snapping (settle discipline).
         self.assertEqual(
             program_for_display_state(LedDisplayState.IDLE),
-            "off 160ms cosine\n"
-            "#020204 1900ms cosine\n"
-            "off 2550ms cosine\n"
-            "off 850ms none\n"
-            "repeat",
+            "off 160ms cosine\n#020204 1900ms cosine\noff 2550ms cosine\noff 850ms none\nrepeat",
         )
         # Done rests dark: the celebration flourish is the completion cue.
         self.assertEqual(program_for_display_state(LedDisplayState.DONE), "off")
@@ -4102,9 +4002,7 @@ for (const event of [
             cyan = apply_strip_transfer_to_hex("#00E5FF", (1.0, 1.0, 1.0))
             self.assertEqual(
                 (device / "LEDS.LED").read_text(),
-                "off 160ms cosine\n"
-                f"0:{cyan} 1400ms pulse 0ms; 1:{cyan} 1400ms pulse 480ms\n"
-                "repeat",
+                f"off 160ms cosine\n0:{cyan} 1400ms pulse 0ms; 1:{cyan} 1400ms pulse 480ms\nrepeat",
             )
 
             write_mode_to_leds(AgentMode.IDLE_READY, device_path=device)
@@ -4112,11 +4010,7 @@ for (const event of [
             idle = apply_strip_transfer_to_hex("#020204", (1.0, 1.0, 1.0))
             self.assertEqual(
                 (device / "LEDS.LED").read_text(),
-                "off 160ms cosine\n"
-                f"{idle} 1900ms cosine\n"
-                "off 2550ms cosine\n"
-                "off 850ms none\n"
-                "repeat",
+                f"off 160ms cosine\n{idle} 1900ms cosine\noff 2550ms cosine\noff 850ms none\nrepeat",
             )
 
             write_mode_to_leds(AgentMode.COMPLETED, device_path=device, brightness=64)
@@ -4421,18 +4315,10 @@ for (const event of [
             self.assertEqual(reads, [status_path, status_path])
 
     def test_closed_lid_awake_policy_decisions(self) -> None:
-        self.assertFalse(
-            closed_lid_awake_should_hold(CLOSED_LID_AWAKE_NEVER, agents_active=True)
-        )
-        self.assertFalse(
-            closed_lid_awake_should_hold(CLOSED_LID_AWAKE_AGENTS, agents_active=False)
-        )
-        self.assertTrue(
-            closed_lid_awake_should_hold(CLOSED_LID_AWAKE_AGENTS, agents_active=True)
-        )
-        self.assertTrue(
-            closed_lid_awake_should_hold(CLOSED_LID_AWAKE_ALWAYS, agents_active=False)
-        )
+        self.assertFalse(closed_lid_awake_should_hold(CLOSED_LID_AWAKE_NEVER, agents_active=True))
+        self.assertFalse(closed_lid_awake_should_hold(CLOSED_LID_AWAKE_AGENTS, agents_active=False))
+        self.assertTrue(closed_lid_awake_should_hold(CLOSED_LID_AWAKE_AGENTS, agents_active=True))
+        self.assertTrue(closed_lid_awake_should_hold(CLOSED_LID_AWAKE_ALWAYS, agents_active=False))
 
     def test_closed_lid_awake_controller_sets_and_restores_system_disable(self) -> None:
         import tempfile
@@ -4455,9 +4341,7 @@ for (const event of [
                 renewal_path=_Path(tmp) / "lid-hold-renewal",
             )
 
-            self.assertTrue(
-                controller.update(CLOSED_LID_AWAKE_ALWAYS, agents_active=False)
-            )
+            self.assertTrue(controller.update(CLOSED_LID_AWAKE_ALWAYS, agents_active=False))
             self.assertEqual(disabled_calls, [True])
             self.assertTrue(controller.changed_system_disable)
             # The hold plus its fail-safe watchdog (see lid_sleep).
@@ -4466,9 +4350,7 @@ for (const event of [
             controller.update(CLOSED_LID_AWAKE_ALWAYS, agents_active=False)
             self.assertEqual(disabled_calls, [True])
 
-            self.assertFalse(
-                controller.update(CLOSED_LID_AWAKE_NEVER, agents_active=False)
-            )
+            self.assertFalse(controller.update(CLOSED_LID_AWAKE_NEVER, agents_active=False))
             self.assertEqual(disabled_calls, [True, False])
             self.assertTrue(any(process.terminated for process in processes))
 
@@ -4480,9 +4362,7 @@ for (const event of [
             sleep_disabled_setter=disabled_calls.append,
         )
 
-        self.assertTrue(
-            controller.update(CLOSED_LID_AWAKE_ALWAYS, agents_active=False)
-        )
+        self.assertTrue(controller.update(CLOSED_LID_AWAKE_ALWAYS, agents_active=False))
 
         self.assertEqual(disabled_calls, [])
         self.assertTrue(controller.process_running())
@@ -4551,20 +4431,14 @@ for (const event of [
     def test_sleep_helper_sudoers_rule_is_narrow(self) -> None:
         self.assertEqual(
             sleep_helper_sudoers_rule("pero"),
-            "pero ALL=(root) NOPASSWD: "
-            "/usr/bin/pmset -a disablesleep 0, "
-            "/usr/bin/pmset -a disablesleep 1\n",
+            "pero ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1\n",
         )
         with self.assertRaises(ValueError):
             sleep_helper_sudoers_rule("bad user")
 
     def test_lid_state_parser_reads_ioreg_booleans(self) -> None:
-        self.assertTrue(
-            parse_bool_ioreg_property('"AppleClamshellState" = Yes', "AppleClamshellState")
-        )
-        self.assertFalse(
-            parse_bool_ioreg_property('"AppleClamshellState" = No', "AppleClamshellState")
-        )
+        self.assertTrue(parse_bool_ioreg_property('"AppleClamshellState" = Yes', "AppleClamshellState"))
+        self.assertFalse(parse_bool_ioreg_property('"AppleClamshellState" = No', "AppleClamshellState"))
         self.assertTrue(parse_bool_ioreg_property('"SleepDisabled" = true', "SleepDisabled"))
         self.assertIsNone(parse_bool_ioreg_property('"Other" = Yes', "SleepDisabled"))
 
@@ -4645,9 +4519,7 @@ for (const event of [
         with patch("sidepulse.collector.load_settings", return_value=AgentMonitorSettings()):
             sources = default_sources()
 
-        providers = tuple(
-            source.provider for source in sources if not source.provider.endswith("-transcript")
-        )
+        providers = tuple(source.provider for source in sources if not source.provider.endswith("-transcript"))
         self.assertEqual(providers, HOOK_PROVIDERS)
 
     def test_settings_round_trip_remembered_device_display_modes(self) -> None:
@@ -4715,9 +4587,7 @@ for (const event of [
     def test_settings_round_trip_closed_lid_policy_and_animations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings_path = Path(tmp) / "settings.json"
-            settings = AgentMonitorSettings().with_closed_lid_awake_policy(
-                CLOSED_LID_AWAKE_AGENTS
-            )
+            settings = AgentMonitorSettings().with_closed_lid_awake_policy(CLOSED_LID_AWAKE_AGENTS)
             settings = settings.with_lid_animation(
                 LID_ANIMATION_CLOSED,
                 program="off\n#FF3A00 200ms ease",
@@ -4810,21 +4680,13 @@ for (const event of [
         # The stable-identity inventory is process-global and can hold the
         # REAL mounted device on a developer Mac; pin it empty so this
         # exercises the path-identity policy deterministically.
-        snapshot_patch = patch.object(
-            status_bar._device_identity_cache(), "snapshot", return_value=()
-        )
+        snapshot_patch = patch.object(status_bar._device_identity_cache(), "snapshot", return_value=())
         snapshot_patch.start()
         self.addCleanup(snapshot_patch.stop)
 
+        self.assertTrue(status_bar.persistable_device_identity("/Volumes/SidePulse", "/Volumes/SidePulse"))
         self.assertTrue(
-            status_bar.persistable_device_identity(
-                "/Volumes/SidePulse", "/Volumes/SidePulse"
-            )
-        )
-        self.assertTrue(
-            status_bar.persistable_device_identity(
-                status_bar.VIRTUAL_DEVICE_ID, status_bar.VIRTUAL_DEVICE_ID
-            )
+            status_bar.persistable_device_identity(status_bar.VIRTUAL_DEVICE_ID, status_bar.VIRTUAL_DEVICE_ID)
         )
         self.assertFalse(
             status_bar.persistable_device_identity(
@@ -4919,8 +4781,7 @@ for (const event of [
 
         self.assertEqual(
             command,
-            f"{sys.executable} agent-monitor hook-client --provider codex "
-            "--log '/tmp/codex events.jsonl'",
+            f"{sys.executable} agent-monitor hook-client --provider codex --log '/tmp/codex events.jsonl'",
         )
 
     def test_status_bar_install_removes_legacy_com_sidepulse_plist(self) -> None:
@@ -4961,8 +4822,8 @@ for (const event of [
 
             self.assertEqual(plist["Label"], SD_EJECT_GUARD_LABEL)
             self.assertEqual(plist["ProgramArguments"], [str(paths.binary_path)])
-            self.assertTrue(plist["RunAtLoad"])
-            self.assertTrue(plist["KeepAlive"])
+            self.assertFalse(plist["RunAtLoad"])
+            self.assertFalse(plist["KeepAlive"])
             self.assertEqual(plist["StandardOutPath"], str(paths.stdout_path))
             self.assertEqual(plist["StandardErrorPath"], str(paths.stderr_path))
 
@@ -5058,10 +4919,13 @@ for (const event of [
 
             self.assertEqual(result.scope, "user")
             self.assertTrue(result.compiled)
-            self.assertTrue(result.started)
+            self.assertFalse(result.started)
             self.assertTrue(user_paths.binary_path.exists())
             self.assertTrue(user_paths.plist_path.exists())
-            self.assertEqual(calls[0][0:4], ["/usr/bin/clang", "-O2", "-o", str(user_paths.binary_path.with_name("sd_eject_guard.tmp"))])
+            self.assertEqual(
+                calls[0][0:4],
+                ["/usr/bin/clang", "-O2", "-o", str(user_paths.binary_path.with_name("sd_eject_guard.tmp"))],
+            )
             self.assertIn("-framework", calls[0])
             self.assertIn(["/bin/launchctl", "bootstrap", "gui/501", str(user_paths.plist_path)], calls)
 
@@ -5630,8 +5494,7 @@ for (const event of [
             agent_id="codex:session:tool-session",
             display_name="tool-session",
             mode=AgentMode.WORKING,
-            updated_at=now
-            - timedelta(seconds=collector_module.POST_TOOL_WORKING_VISIBLE_SECONDS + 1),
+            updated_at=now - timedelta(seconds=collector_module.POST_TOOL_WORKING_VISIBLE_SECONDS + 1),
             event_name="PostToolUse",
             session_id="tool-session",
             cwd="/tmp/project",
@@ -6655,10 +6518,7 @@ for (const event of [
                         "logged_at": "2026-06-20T06:00:00Z",
                         "hook_event_name": "Stop",
                         "session_id": "claude-session",
-                        "last_assistant_message": (
-                            "Committed as `67b0208` but not pushed. "
-                            "Want me to push?"
-                        ),
+                        "last_assistant_message": ("Committed as `67b0208` but not pushed. Want me to push?"),
                     }
                 )
                 + "\n"
@@ -7013,10 +6873,7 @@ team id YOUR_TEAM_ID, push key '/path/to/AuthKey_YOUR_KEY_ID.p8'
                             {
                                 "provider": "codex",
                                 "agent_id": f"codex:session:{session_id}",
-                                "display_name": (
-                                    "sidepulse: Why are we burning so much CPU "
-                                    f"({session_id[:8]})"
-                                ),
+                                "display_name": (f"sidepulse: Why are we burning so much CPU ({session_id[:8]})"),
                                 "mode": "working",
                                 "updated_at": now.isoformat(),
                                 "event_name": "UserPromptSubmit",
@@ -7339,9 +7196,7 @@ class ColorSettingsTests(unittest.TestCase):
     def test_color_settings_from_dict_rejects_malformed_input_without_raising(self) -> None:
         self.assertEqual(ColorSettings.from_dict(None).to_dict(), ColorSettings.defaults().to_dict())
         self.assertEqual(ColorSettings.from_dict("not-a-dict").to_dict(), ColorSettings.defaults().to_dict())
-        malformed = ColorSettings.from_dict(
-            {"mode_colors": "nope", "agent_colors": ["bad"], "blend_mode": "nonsense"}
-        )
+        malformed = ColorSettings.from_dict({"mode_colors": "nope", "agent_colors": ["bad"], "blend_mode": "nonsense"})
         self.assertEqual(malformed.to_dict(), ColorSettings.defaults().to_dict())
 
     def test_with_agent_color_rejects_bad_hex_and_keeps_default(self) -> None:
@@ -7366,9 +7221,7 @@ class ColorSettingsTests(unittest.TestCase):
         state, program = program_for_snapshot((), led_count=8, colors=settings)
         self.assertEqual(state, LedDisplayState.IDLE)
 
-        state, program = program_for_snapshot(
-            (), led_count=8, colors=settings, fallback_mode=AgentMode.BLOCKED_ERROR
-        )
+        state, program = program_for_snapshot((), led_count=8, colors=settings, fallback_mode=AgentMode.BLOCKED_ERROR)
         self.assertEqual(state, LedDisplayState.ASK)
         # The default fade ceiling (50%) scales the configured Ask color down
         # for the pulse's peak, so the raw configured hex won't appear
@@ -7379,11 +7232,7 @@ class ColorSettingsTests(unittest.TestCase):
         self.assertIn(peak, program)
 
     def test_classic_blend_mode_matches_program_for_display_state_exactly(self) -> None:
-        settings = (
-            ColorSettings.defaults()
-            .with_blend_mode(BLEND_MODE_CLASSIC)
-            .with_round_robin_urgency_alert(False)
-        )
+        settings = ColorSettings.defaults().with_blend_mode(BLEND_MODE_CLASSIC).with_round_robin_urgency_alert(False)
         fade_kwargs = {
             "idle_floor": colors_module.DEFAULT_FADE_FLOOR,
             "idle_ceiling": colors_module.DEFAULT_FADE_CEILING,
@@ -7399,9 +7248,7 @@ class ColorSettingsTests(unittest.TestCase):
             (AgentMode.IDLE_READY, LedDisplayState.IDLE),
         ):
             for led_count in (2, 8):
-                state, program = program_for_snapshot(
-                    (_status("codex", mode),), led_count=led_count, colors=settings
-                )
+                state, program = program_for_snapshot((_status("codex", mode),), led_count=led_count, colors=settings)
                 expected = program_for_display_state(
                     expected_state,
                     led_count=led_count,
@@ -7417,11 +7264,7 @@ class ColorSettingsTests(unittest.TestCase):
         # still exactly today's original off-to-full pulse when floor=0/
         # ceiling=1 -- i.e. the gentler default lives in ColorSettings, not
         # baked irreversibly into the renderer.
-        settings = (
-            ColorSettings.defaults()
-            .with_blend_mode(BLEND_MODE_CLASSIC)
-            .with_round_robin_urgency_alert(False)
-        )
+        settings = ColorSettings.defaults().with_blend_mode(BLEND_MODE_CLASSIC).with_round_robin_urgency_alert(False)
         for key in colors_module.FADE_MODE_KEYS:
             settings = settings.with_fade_floor(key, 0.0).with_fade_ceiling(key, 1.0)
 
@@ -7444,9 +7287,7 @@ class ColorSettingsTests(unittest.TestCase):
             AgentMode.IDLE_READY,
         ]
         for agent_count in range(1, len(modes) + 1):
-            statuses = tuple(
-                _status(f"agent{i}", modes[i]) for i in range(agent_count)
-            )
+            statuses = tuple(_status(f"agent{i}", modes[i]) for i in range(agent_count))
             agents = colors_module._active_agents(statuses, settings)
             blocks = colors_module._spatial_split_blocks(agents, 8)
             self.assertEqual(sum(count for _, count in blocks), 8)
@@ -7593,9 +7434,7 @@ class ColorSettingsTests(unittest.TestCase):
         # floor 0.2) resets to a scaled, non-black color.
         self.assertIn(":#000000", reset_line)
         self.assertNotIn(":off", reset_line)
-        working_floor_color = colors_module.scale_hex_brightness(
-            _identity_color(statuses, "codex"), 0.2
-        )
+        working_floor_color = colors_module.scale_hex_brightness(_identity_color(statuses, "codex"), 0.2)
         self.assertIn(working_floor_color, reset_line)
 
 
@@ -7668,9 +7507,7 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         deliberately chosen -- "Everything" forced Spotlight, and their
         explicit mode kept reverting with no warning and no undo.
         """
-        base = ColorSettings.defaults().with_blend_mode(
-            colors_module.BLEND_MODE_SPATIAL
-        )
+        base = ColorSettings.defaults().with_blend_mode(colors_module.BLEND_MODE_SPATIAL)
         applied = [colors_module.apply_preset(base, p) for p in colors_module.PRESET_CHOICES]
         # Layout survives every preset, untouched.
         for result in applied:
@@ -7683,16 +7520,12 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
     def test_preset_chip_survives_a_layout_or_color_choice(self) -> None:
         """The chip reports FEEL, so picking a mode or recoloring an
         agent must not falsely read as Custom."""
-        calm = colors_module.apply_preset(
-            ColorSettings.defaults(), colors_module.PRESET_CALM
-        )
+        calm = colors_module.apply_preset(ColorSettings.defaults(), colors_module.PRESET_CALM)
         self.assertEqual(colors_module.matching_preset(calm), colors_module.PRESET_CALM)
         relaid = calm.with_blend_mode(colors_module.BLEND_MODE_RELAY)
         self.assertEqual(colors_module.matching_preset(relaid), colors_module.PRESET_CALM)
         recolored = relaid.with_agent_color("claude", "#123456")
-        self.assertEqual(
-            colors_module.matching_preset(recolored), colors_module.PRESET_CALM
-        )
+        self.assertEqual(colors_module.matching_preset(recolored), colors_module.PRESET_CALM)
 
     def test_attention_arrival_crests_once_then_holds_static_anchor(self) -> None:
         settings = ColorSettings.defaults()
@@ -7701,9 +7534,7 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
             _status("codex", AgentMode.WORKING),
             _status("devin", AgentMode.WORKING),
         )
-        _state, base = colors_module.program_for_snapshot(
-            statuses, led_count=8, colors=settings, brightness=255
-        )
+        _state, base = colors_module.program_for_snapshot(statuses, led_count=8, colors=settings, brightness=255)
         _state, arrival = colors_module.program_for_snapshot(
             statuses,
             led_count=8,
@@ -7717,12 +7548,8 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         # the attention color, breathe down to the 55% hold, then the
         # anchor stands up (Dynamic Island grammar, wired 2026-08-26).
         self.assertEqual(lines[0], f"{ask} {colors_module.ATTENTION_CREST_MS}ms cosine")
-        hold = colors_module.scale_hex_brightness(
-            ask, colors_module.ATTENTION_CREST_HOLD_FRACTION
-        )
-        self.assertEqual(
-            lines[1], f"{hold} {colors_module.ATTENTION_CREST_SETTLE_MS}ms cosine"
-        )
+        hold = colors_module.scale_hex_brightness(ask, colors_module.ATTENTION_CREST_HOLD_FRACTION)
+        self.assertEqual(lines[1], f"{hold} {colors_module.ATTENTION_CREST_SETTLE_MS}ms cosine")
         self.assertNotIn("repeat", base)
         self.assertNotIn("repeat", arrival)
         self.assertTrue(arrival.endswith(base))
@@ -7797,9 +7624,7 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
 
     def test_round_robin_assigns_every_led_exactly_once(self) -> None:
         settings = (
-            ColorSettings.defaults()
-            .with_blend_mode(BLEND_MODE_ROUND_ROBIN)
-            .with_round_robin_urgency_alert(False)
+            ColorSettings.defaults().with_blend_mode(BLEND_MODE_ROUND_ROBIN).with_round_robin_urgency_alert(False)
         )
         statuses = (
             _status("codex", AgentMode.WORKING),
@@ -7812,9 +7637,7 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
 
     def test_round_robin_works_even_with_more_agents_than_leds(self) -> None:
         settings = ColorSettings.defaults().with_blend_mode(BLEND_MODE_ROUND_ROBIN)
-        statuses = tuple(
-            _status(f"agent{i}", AgentMode.WORKING) for i in range(5)
-        )
+        statuses = tuple(_status(f"agent{i}", AgentMode.WORKING) for i in range(5))
         # Should not raise, and should still produce a valid 2-LED program.
         state, program = program_for_snapshot(statuses, led_count=2, colors=settings)
         lines = [line for line in program.splitlines() if line.strip()]
@@ -7825,11 +7648,7 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         self.assertIn(BLEND_MODE_RELAY, BLEND_MODE_CHOICES)
 
     def test_relay_assigns_every_led_exactly_once(self) -> None:
-        settings = (
-            ColorSettings.defaults()
-            .with_blend_mode(BLEND_MODE_RELAY)
-            .with_round_robin_urgency_alert(False)
-        )
+        settings = ColorSettings.defaults().with_blend_mode(BLEND_MODE_RELAY).with_round_robin_urgency_alert(False)
         statuses = (
             _status("codex", AgentMode.WORKING),
             _status("claude", AgentMode.BLOCKED_ERROR),
@@ -7846,11 +7665,7 @@ class RoundRobinAndPaletteTests(unittest.TestCase):
         # used to emit a 70000 ms delay and brick the display.
         import re as _re
 
-        settings = (
-            ColorSettings.defaults()
-            .with_blend_mode(BLEND_MODE_RELAY)
-            .with_cycle_speed(10.0)
-        )
+        settings = ColorSettings.defaults().with_blend_mode(BLEND_MODE_RELAY).with_cycle_speed(10.0)
         statuses = (
             _status("codex", AgentMode.WORKING),
             _status("claude", AgentMode.WORKING),
@@ -8161,11 +7976,7 @@ class SpeedOverrideAndUrgencyAlertTests(unittest.TestCase):
         self.assertTrue(settings.uses_global_speed(BLEND_MODE_CYCLE))
 
     def test_per_mode_override_is_independent_of_global_and_other_mode(self) -> None:
-        settings = (
-            ColorSettings.defaults()
-            .with_cycle_speed(4.0)
-            .with_speed_override(BLEND_MODE_ROUND_ROBIN, 0.8)
-        )
+        settings = ColorSettings.defaults().with_cycle_speed(4.0).with_speed_override(BLEND_MODE_ROUND_ROBIN, 0.8)
         self.assertEqual(settings.effective_speed_seconds(BLEND_MODE_ROUND_ROBIN), 0.8)
         self.assertEqual(settings.effective_speed_seconds(BLEND_MODE_CYCLE), 4.0)
         self.assertFalse(settings.uses_global_speed(BLEND_MODE_ROUND_ROBIN))
@@ -8200,11 +8011,7 @@ class SpeedOverrideAndUrgencyAlertTests(unittest.TestCase):
         self.assertTrue(restored.uses_global_speed(BLEND_MODE_ROUND_ROBIN))
 
     def test_round_robin_program_uses_its_own_override_not_global(self) -> None:
-        settings = (
-            ColorSettings.defaults()
-            .with_cycle_speed(5.0)
-            .with_speed_override(BLEND_MODE_ROUND_ROBIN, 0.5)
-        )
+        settings = ColorSettings.defaults().with_cycle_speed(5.0).with_speed_override(BLEND_MODE_ROUND_ROBIN, 0.5)
         statuses = (_status("codex", AgentMode.WORKING), _status("claude", AgentMode.WORKING))
         _, program = program_for_snapshot(statuses, led_count=8, colors=settings)
         self.assertIn("500ms", program)
@@ -8242,9 +8049,7 @@ class SpeedOverrideAndUrgencyAlertTests(unittest.TestCase):
         statuses = (_status("codex", AgentMode.WORKING), _status("claude", AgentMode.BLOCKED_ERROR))
         _, program = program_for_snapshot(statuses, led_count=8, colors=settings)
         _floor, ask_ceiling = settings.fade_range(colors_module.MODE_ASK)
-        claude_own_color = colors_module.scale_hex_brightness(
-            _identity_color(statuses, "claude"), ask_ceiling
-        )
+        claude_own_color = colors_module.scale_hex_brightness(_identity_color(statuses, "claude"), ask_ceiling)
         self.assertIn(claude_own_color, program)
 
     def test_urgency_alert_adds_finite_arrival_then_static_spatial_anchor(self) -> None:
@@ -8261,9 +8066,7 @@ class SpeedOverrideAndUrgencyAlertTests(unittest.TestCase):
         _, program_off = program_for_snapshot(statuses, led_count=8, colors=settings_off)
         ask = colors_module.ColorSettings.defaults().mode_color(colors_module.MODE_ASK)
         self.assertEqual(
-            arrival.splitlines().count(
-                f"{ask} {colors_module.ATTENTION_CREST_MS}ms cosine"
-            ),
+            arrival.splitlines().count(f"{ask} {colors_module.ATTENTION_CREST_MS}ms cosine"),
             1,
         )
         self.assertNotIn("repeat", base)
@@ -8300,9 +8103,7 @@ class AnimationStyleTests(unittest.TestCase):
 
     def test_solid_style_produces_single_color_no_animation(self) -> None:
         settings = ColorSettings.defaults().with_mode_animation(colors_module.MODE_ASK, ANIMATION_STYLE_SOLID)
-        _, program = program_for_snapshot(
-            (_status("codex", AgentMode.BLOCKED_ERROR),), led_count=8, colors=settings
-        )
+        _, program = program_for_snapshot((_status("codex", AgentMode.BLOCKED_ERROR),), led_count=8, colors=settings)
         self.assertNotIn("pulse", program)
         self.assertNotIn("repeat", program)
 
@@ -8388,9 +8189,7 @@ class PreviewScenarioTests(unittest.TestCase):
         self.assertEqual(statuses, ())
 
     def test_same_provider_duo_uses_one_provider_twice_with_distinct_agent_ids(self) -> None:
-        statuses = colors_module.preview_statuses_for_scenario(
-            colors_module.PREVIEW_SCENARIO_SAME_PROVIDER_DUO
-        )
+        statuses = colors_module.preview_statuses_for_scenario(colors_module.PREVIEW_SCENARIO_SAME_PROVIDER_DUO)
         providers = {status.provider for status in statuses}
         agent_ids = {status.agent_id for status in statuses}
         self.assertEqual(providers, {"codex"})
@@ -8752,9 +8551,7 @@ class FocusSyncTests(unittest.TestCase):
     def test_is_focus_active_true_end_to_end_on_realistic_json(self) -> None:
         from sidepulse import focus_sync
 
-        payload = json.dumps(
-            {"data": [{"storeAssertionRecords": [{"assertionDetails": {"id": "abc"}}]}]}
-        )
+        payload = json.dumps({"data": [{"storeAssertionRecords": [{"assertionDetails": {"id": "abc"}}]}]})
         with patch.object(focus_sync.Path, "read_text", return_value=payload):
             self.assertTrue(focus_sync.is_focus_active())
 
@@ -8773,10 +8570,7 @@ def find_mailbox_item(menu):
         submenu = item.submenu()
         if submenu is None:
             continue
-        titles = {
-            str(submenu.itemAtIndex_(sub).title() or "")
-            for sub in range(submenu.numberOfItems())
-        }
+        titles = {str(submenu.itemAtIndex_(sub).title() or "") for sub in range(submenu.numberOfItems())}
         if titles & shelf_titles:
             matches.append(item)
     return matches
@@ -8808,11 +8602,7 @@ def isolate_controller(case, *, build_controller=True):
 
     def _drain_usage_refresh_workers():
         controller = getattr(case, "controller", None)
-        owner = (
-            getattr(controller, "_usage_refresh_workers", None)
-            if controller is not None
-            else None
-        )
+        owner = getattr(controller, "_usage_refresh_workers", None) if controller is not None else None
         close = getattr(owner, "close_all", None)
         if callable(close):
             close(timeout_seconds=5.0)
@@ -8977,11 +8767,7 @@ class LowPowerModeTests(unittest.TestCase):
         self.assertLessEqual(len(program.encode()), 512)
 
     def test_low_battery_settings_round_trip(self) -> None:
-        settings = (
-            AgentMonitorSettings()
-            .with_low_battery_alert_enabled(False)
-            .with_low_battery_threshold_percent(12.0)
-        )
+        settings = AgentMonitorSettings().with_low_battery_alert_enabled(False).with_low_battery_threshold_percent(12.0)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
             save_settings(settings, path)
@@ -9023,21 +8809,11 @@ class FocusModeParsingTests(unittest.TestCase):
             "data": [
                 {
                     "storeAssertionRecords": [
-                        {
-                            "assertionDetails": {
-                                "assertionDetailsModeIdentifier": "com.apple.focus.work"
-                            }
-                        }
+                        {"assertionDetails": {"assertionDetailsModeIdentifier": "com.apple.focus.work"}}
                     ],
                     "configuredModes": [
-                        {
-                            "assertionDetailsModeIdentifier": "com.apple.sleep"
-                        },
-                        {
-                            "assertionDetailsModeIdentifier": (
-                                "com.apple.donotdisturb.mode.default"
-                            )
-                        },
+                        {"assertionDetailsModeIdentifier": "com.apple.sleep"},
+                        {"assertionDetailsModeIdentifier": ("com.apple.donotdisturb.mode.default")},
                     ],
                 }
             ]
@@ -9196,9 +8972,7 @@ class FocusSyncScaleFactorTests(unittest.TestCase):
             ),
             request_authorization=lambda _completion: False,
         )
-        self.controller.dnd_controller._named_focus_reader = lambda: (
-            "com.apple.focus.work",
-        )
+        self.controller.dnd_controller._named_focus_reader = lambda: ("com.apple.focus.work",)
         self.controller.dnd_controller.start()
         # 200 * 0.5 (idle) * 0.5 (named Focus) = 50
         self.assertEqual(self.controller.effective_brightness_for_device(device), 61)
@@ -9259,9 +9033,7 @@ class FocusSyncScaleFactorTests(unittest.TestCase):
             ),
             request_authorization=lambda _completion: False,
         )
-        self.controller.dnd_controller._named_focus_reader = lambda: (
-            "com.apple.sleep",
-        )
+        self.controller.dnd_controller._named_focus_reader = lambda: ("com.apple.sleep",)
         self.controller.dnd_controller.start()
         self.assertEqual(
             self.controller.effective_signal_brightness_for_device(device),
@@ -9317,11 +9089,14 @@ class DisplayBrightnessTests(unittest.TestCase):
     def test_unavailable_error_propagates_from_auto_led_brightness(self) -> None:
         from sidepulse import display_brightness
 
-        with patch.object(
+        with (
+            patch.object(
             display_brightness,
             "current_screen_brightness_fraction",
             side_effect=display_brightness.DisplayBrightnessUnavailableError("nope"),
-        ), self.assertRaises(display_brightness.DisplayBrightnessUnavailableError):
+            ),
+            self.assertRaises(display_brightness.DisplayBrightnessUnavailableError),
+        ):
             display_brightness.auto_led_brightness()
 
 
@@ -9377,7 +9152,6 @@ class DeviceAutoBrightnessSettingsTests(unittest.TestCase):
         self.assertFalse(reloaded.auto_brightness_enabled_for_device("SidePulseDot"))
 
 
-
 class RememberConnectedDevicesRaceTests(unittest.TestCase):
     """remember_connected_devices runs on the background LED-sync worker
     thread and can race against a settings change made from a UI action on
@@ -9395,9 +9169,7 @@ class RememberConnectedDevicesRaceTests(unittest.TestCase):
         # The stable-identity inventory is process-global; with the real
         # device discovered, legacy path ids read as ghosts and the CAS
         # under test never runs. Pin it empty.
-        snapshot_patch = patch.object(
-            self.status_bar._device_identity_cache(), "snapshot", return_value=()
-        )
+        snapshot_patch = patch.object(self.status_bar._device_identity_cache(), "snapshot", return_value=())
         snapshot_patch.start()
         self.addCleanup(snapshot_patch.stop)
 
@@ -9426,9 +9198,7 @@ class RememberConnectedDevicesRaceTests(unittest.TestCase):
 
         self.assertFalse(self.controller.settings.focus_sync_enabled)
 
-        with patch.object(
-            type(self.controller.settings), "with_remembered_device", racing_with_remembered_device
-        ):
+        with patch.object(type(self.controller.settings), "with_remembered_device", racing_with_remembered_device):
             self.controller.remember_connected_devices([self._device()])
 
         # Both changes survived: the concurrent focus_sync_enabled change
@@ -9571,6 +9341,36 @@ class IdleTimeoutDimmingTests(unittest.TestCase):
         device = self._device(auto_brightness_enabled=True)
         with patch.object(self.status_bar.display_brightness, "auto_led_brightness", return_value=200):
             self.assertEqual(self.controller.effective_brightness_for_device(device), 100)
+
+    def test_display_sleep_dims_hardware_without_treating_sleep_as_off(self) -> None:
+        self.controller.settings = self.controller.settings.with_sleep_dim_fraction(0.2)
+        self.controller._presentation_scheduler_inputs = SimpleNamespace(display_asleep=True)
+
+        brightness = self.controller.effective_brightness_for_device(self._device(brightness=200))
+
+        self.assertEqual(brightness, 61)
+
+    def test_display_sleep_dim_can_be_disabled_independently(self) -> None:
+        self.controller.settings = self.controller.settings.with_sleep_dim_enabled(False)
+        self.controller._presentation_scheduler_inputs = SimpleNamespace(display_asleep=True)
+
+        self.assertEqual(
+            self.controller.effective_brightness_for_device(self._device(brightness=200)),
+            200,
+        )
+
+    def test_long_idle_auto_off_is_separate_from_idle_dimming(self) -> None:
+        self.controller.settings = (
+            self.controller.settings.with_idle_dim_fraction(0.5)
+            .with_idle_auto_off_enabled(True)
+            .with_idle_auto_off_after_minutes(30.0)
+        )
+        self.controller.idle_since_monotonic = time.monotonic() - (31 * 60)
+
+        self.assertEqual(
+            self.controller.effective_brightness_for_device(self._device(brightness=200)),
+            0,
+        )
 
     def test_set_status_starts_the_idle_clock_on_transition_into_idle(self) -> None:
         self.controller.set_status(self.status_bar.STATE_WORKING)
@@ -9717,11 +9517,12 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         (volume_root / "SidePulseDot").mkdir(parents=True)
         devices = discover_devices(mount_root=volume_root)
         assert len(devices) == 1
-        fake_discovery = patch(
-            "sidepulse.status_bar.discover_devices", return_value=devices
-        )
+        fake_discovery = patch("sidepulse.status_bar.discover_devices", return_value=devices)
         fake_discovery.start()
         self.addCleanup(fake_discovery.stop)
+        # Settings consumes a cached inventory projection; prime the test
+        # cache before AppKit paints, just as the runtime worker does live.
+        self.controller.discover_device_candidates()
 
     def test_calibration_test_lights_device_and_follows_gain_changes(self) -> None:
         # The guided flow's contract: clicking a patch lights the device
@@ -9813,10 +9614,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
                 if v.frame().size.width > 0 and v.frame().size.height > 0
             ]
             overlap_count = sum(
-                1
-                for i in range(len(frames))
-                for j in range(i + 1, len(frames))
-                if overlaps(frames[i], frames[j])
+                1 for i in range(len(frames)) for j in range(i + 1, len(frames)) if overlaps(frames[i], frames[j])
             )
             self.assertEqual(overlap_count, 0, f"unexpected overlapping cards in the {key!r} pane")
 
@@ -9833,9 +9631,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
             if key == "color_studio" or key.startswith("header:"):
                 continue
             pane.layoutSubtreeIfNeeded()
-            self.assertGreater(
-                pane.documentView().frame().size.height, 0, f"{key!r} pane has no content height"
-            )
+            self.assertGreater(pane.documentView().frame().size.height, 0, f"{key!r} pane has no content height")
 
     def test_settings_pane_columns_stay_centered_after_clip_constrain(self) -> None:
         # Regression: NSClipView constrains its bounds to the document
@@ -9854,16 +9650,12 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
             pane.layoutSubtreeIfNeeded()
             clip = pane.contentView()
             origin = clip.constrainBoundsRect_(clip.bounds()).origin
-            self.assertEqual(
-                (origin.x, origin.y), (0.0, 0.0), f"{key!r} pane clip scrolls away from its origin"
-            )
+            self.assertEqual((origin.x, origin.y), (0.0, 0.0), f"{key!r} pane clip scrolls away from its origin")
             document = pane.documentView()
             column = document.subviews()[0]
             left = column.frame().origin.x
             right = document.frame().size.width - left - column.frame().size.width
-            self.assertAlmostEqual(
-                left, right, delta=1.0, msg=f"{key!r} pane column is off-center"
-            )
+            self.assertAlmostEqual(left, right, delta=1.0, msg=f"{key!r} pane column is off-center")
             self.assertGreaterEqual(left, 19.0, f"{key!r} pane column lost its edge padding")
 
     def test_devices_section_exists_for_each_connected_device(self) -> None:
@@ -9882,7 +9674,13 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         self.controller.show_settings_window()
         self.controller.ensure_all_settings_panes()
         for controls in self.controller.device_settings_controls.values():
-            for key in ("brightness_slider", "brightness_label", "brightness_dots", "calibrate_button", "calibration_label"):
+            for key in (
+                "brightness_slider",
+                "brightness_label",
+                "brightness_dots",
+                "calibrate_button",
+                "calibration_label",
+            ):
                 self.assertIn(key, controls)
 
     def test_brightness_preview_has_one_dot_per_led(self) -> None:
@@ -9892,9 +9690,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         self.controller.show_settings_window()
         self.controller.ensure_all_settings_panes()
         for device_id, controls in self.controller.device_settings_controls.items():
-            device = next(
-                d for d in self.controller.status_bar_devices(remember=False) if d.device_id == device_id
-            )
+            device = next(d for d in self.controller.status_bar_devices(remember=False) if d.device_id == device_id)
             if device_id == self.status_bar.VIRTUAL_DEVICE_ID:
                 expected = self.status_bar.LED_COUNT
             else:
@@ -9944,8 +9740,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         expected_total = (
             self.status_bar.SCREEN_BAR_PREVIEW_NOTCH_WIDTH
             if not self.controller.settings.virtual_status_device_wraps_menu_bar
-            else self.status_bar.SCREEN_BAR_PREVIEW_NOTCH_WIDTH
-            + 2.0 * self.status_bar.SCREEN_BAR_PREVIEW_WING_WIDTH
+            else self.status_bar.SCREEN_BAR_PREVIEW_NOTCH_WIDTH + 2.0 * self.status_bar.SCREEN_BAR_PREVIEW_WING_WIDTH
         )
         container_width = (
             self.status_bar.SCREEN_BAR_PREVIEW_NOTCH_WIDTH + 2.0 * self.status_bar.SCREEN_BAR_PREVIEW_WING_WIDTH
@@ -9992,16 +9787,12 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         self.controller.ensure_all_settings_panes()
         device_id = next(iter(self.controller.device_settings_controls))
         self.controller.set_device_auto_brightness(device_id, True)
-        self.assertTrue(
-            self.controller.settings.auto_brightness_enabled_for_device(device_id)
-        )
+        self.assertTrue(self.controller.settings.auto_brightness_enabled_for_device(device_id))
 
         self.controller.set_device_brightness(device_id, 120)
 
         self.assertEqual(self.controller.settings.brightness_for_device(device_id), 120)
-        self.assertFalse(
-            self.controller.settings.auto_brightness_enabled_for_device(device_id)
-        )
+        self.assertFalse(self.controller.settings.auto_brightness_enabled_for_device(device_id))
 
     def test_settings_window_change_is_reflected_in_a_freshly_built_menu(self) -> None:
         self.controller.show_settings_window()
@@ -10012,9 +9803,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
         controls["brightness_slider"].setDoubleValue_(200.0)
         self.controller.setDeviceBrightness_(controls["brightness_slider"])
 
-        device = next(
-            d for d in self.controller.status_bar_devices(remember=False) if d.device_id == device_id
-        )
+        device = next(d for d in self.controller.status_bar_devices(remember=False) if d.device_id == device_id)
         self.assertEqual(device.brightness, 200)
 
     def test_calibration_change_via_settings_window_persists(self) -> None:
@@ -10033,9 +9822,7 @@ class SettingsWindowDeviceSectionTests(unittest.TestCase):
     def test_closed_lid_awake_policy_popup_reflects_current_setting(self) -> None:
         from sidepulse.settings import CLOSED_LID_AWAKE_ALWAYS
 
-        self.controller.settings = self.controller.settings.with_closed_lid_awake_policy(
-            CLOSED_LID_AWAKE_ALWAYS
-        )
+        self.controller.settings = self.controller.settings.with_closed_lid_awake_policy(CLOSED_LID_AWAKE_ALWAYS)
         self.controller.show_settings_window()
         self.controller.ensure_all_settings_panes()
         popup = self.controller.settings_fields["closed_lid_awake_policy_popup"]
@@ -10097,9 +9884,7 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
 
     def setUp(self) -> None:
         isolate_controller(self)
-        self.controller.operator_history_store.path = (
-            Path(self._tmp.name) / "operator-history.json"
-        )
+        self.controller.operator_history_store.path = Path(self._tmp.name) / "operator-history.json"
 
     @staticmethod
     def _descendants(view):
@@ -10147,7 +9932,7 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
 
         self.controller.select_settings_pane("history")
         self.assertIn("history", self.controller.settings_panes)
-        self.assertEqual(self.controller.settings_window.title(), "JR Bar Settings: History")
+        self.assertEqual(self.controller.settings_window.title(), "JR-Bar Settings: History")
         controls = self.controller.settings_fields["history_retention_controls"]
         self.assertEqual(tuple(controls), (0, 7, 30, 90))
         self.assertTrue(all(control.accessibilityRole() == "AXRadioButton" for control in controls.values()))
@@ -10156,7 +9941,7 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
         self.controller.settings_window.performClose_(None)
         self.controller.show_settings_window()
         self.assertEqual(self.controller.current_settings_pane, "history")
-        self.assertEqual(self.controller.settings_window.title(), "JR Bar Settings: History")
+        self.assertEqual(self.controller.settings_window.title(), "JR-Bar Settings: History")
 
     def test_history_discloses_exact_fields_before_opt_in_and_supports_three_ranges(self) -> None:
         self._build_history()
@@ -10190,9 +9975,7 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
         self.assertIn("No operator history was observed", summary.stringValue())
         self.assertEqual(health.stringValue(), "No Observation")
 
-        self.controller.operator_history_store.state = OperatorHistoryState(
-            (self._day(coverage="partial"),)
-        )
+        self.controller.operator_history_store.state = OperatorHistoryState((self._day(coverage="partial"),))
         self.controller.operator_history_range_days = 1
         self.controller.refresh_operator_history_projection()
         self.assertEqual(id(self.controller.settings_fields["history_summary"]), identity)
@@ -10204,11 +9987,7 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
 
         for index, mode in enumerate(("corrupt", "unavailable")):
             with self.subTest(mode=mode):
-                controller = (
-                    self.controller
-                    if index == 0
-                    else self.status_bar.StatusBarController.alloc().init()
-                )
+                controller = self.controller if index == 0 else self.status_bar.StatusBarController.alloc().init()
                 path = Path(self._tmp.name) / mode / "operator-history.json"
                 path.parent.mkdir()
                 if mode == "corrupt":
@@ -10227,9 +10006,7 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
                         accepted.append((selector, payload))
                         restore_published.set()
 
-                controller.performSelectorOnMainThread_withObject_waitUntilDone_ = (
-                    accept_restore
-                )
+                controller.performSelectorOnMainThread_withObject_waitUntilDone_ = accept_restore
 
                 controller.show_settings_window()
                 controller.select_settings_pane("history")
@@ -10279,18 +10056,14 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
 
     def test_clear_history_requires_confirmation_and_failure_stays_generic_and_visible(self) -> None:
         self._build_history()
-        self.controller.operator_history_store.state = OperatorHistoryState(
-            (self._day(),)
-        )
+        self.controller.operator_history_store.state = OperatorHistoryState((self._day(),))
         self.controller.confirmClearOperatorHistory_ = MagicMock(return_value=False)
         self.controller.clearOperatorHistory_(None)
         self.assertEqual(len(self.controller.operator_history_store.state.rows), 1)
 
         self.controller.confirmClearOperatorHistory_.return_value = True
         real_clear = self.controller.operator_history_store.clear
-        self.controller.operator_history_store.clear = MagicMock(
-            side_effect=OSError("/private/path and secret")
-        )
+        self.controller.operator_history_store.clear = MagicMock(side_effect=OSError("/private/path and secret"))
         self.controller.clearOperatorHistory_(None)
         status = self.controller.settings_fields["history_operation_status"]
         self.assertEqual(status.stringValue(), "History could not be cleared.")
@@ -10344,9 +10117,7 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
             OperatorActionKind.ACKNOWLEDGE,
         )
         self.assertTrue(self.controller.performAgentBrowserPayload_(acknowledge))
-        self.assertTrue(
-            self.controller._persistence_writer.wait_idle(timeout_seconds=2.0)
-        )
+        self.assertTrue(self.controller._persistence_writer.wait_idle(timeout_seconds=2.0))
         self.assertTrue(self.controller.operator_history_store.state.rows)
         self.assertEqual(
             self.controller.operator_history_store.state.rows[0].acknowledged,
@@ -10359,9 +10130,7 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
             OperatorActionKind.RESUME_ESCALATION,
         )
         self.assertTrue(self.controller.performAgentBrowserPayload_(resume))
-        self.assertTrue(
-            self.controller._persistence_writer.wait_idle(timeout_seconds=2.0)
-        )
+        self.assertTrue(self.controller._persistence_writer.wait_idle(timeout_seconds=2.0))
         self.assertGreaterEqual(
             self.controller.operator_history_store.state.rows[0].sample_count,
             2,
@@ -10403,9 +10172,7 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
                 accepted.append((selector, payload))
                 retention_published.set()
 
-        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = (
-            accept_retention
-        )
+        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = accept_retention
 
         self.controller.start_operator_history_retention_change(7)
         if not retention_published.wait(2.0):
@@ -10440,17 +10207,15 @@ class Task9HistorySettingsCompositionTests(unittest.TestCase):
         self.controller.operator_history_store.retention_days = 30
         self.controller.operator_history_store.state = OperatorHistoryState((day,))
         accepted = []
-        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = (
-            lambda selector, payload, _wait: accepted.append((selector, payload))
+        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = lambda selector, payload, _wait: (
+            accepted.append((selector, payload))
         )
 
         with self.controller._operator_history_lock:
             self.controller.start_operator_history_retention_change(7)
             self.assertTrue(self.controller.operator_history_store.add_rows((day,)))
 
-        self.assertTrue(
-            self.controller._persistence_writer.wait_idle(timeout_seconds=2.0)
-        )
+        self.assertTrue(self.controller._persistence_writer.wait_idle(timeout_seconds=2.0))
         self.assertTrue(accepted)
         selector, payload = accepted.pop()
         self.assertEqual(selector, "applyOperatorHistoryRetentionResult:")
@@ -10522,9 +10287,7 @@ class ScreenBarSettingsTakeEffectImmediatelyTests(unittest.TestCase):
         self.assertGreaterEqual(after, before)
 
     def test_settings_round_trip_persists_colors(self) -> None:
-        settings = AgentMonitorSettings().with_colors(
-            ColorSettings.defaults().with_agent_color("codex", "#123456")
-        )
+        settings = AgentMonitorSettings().with_colors(ColorSettings.defaults().with_agent_color("codex", "#123456"))
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
@@ -10561,15 +10324,12 @@ class TranscriptFallbackTests(unittest.TestCase):
         # CLI's monitor) -- the fallback silently did nothing.
         from sidepulse.collector import CODEX_TRANSCRIPT_PROVIDER
 
-        self.controller.settings = (
-            self.controller.settings.with_transcript_provider("codex", False)
-            .with_transcript_provider("claude", False)
-        )
+        self.controller.settings = self.controller.settings.with_transcript_provider(
+            "codex", False
+        ).with_transcript_provider("claude", False)
         self.assertIsNone(self.controller.build_transcript_monitor())
 
-        self.controller.settings = self.controller.settings.with_transcript_provider(
-            "codex", True
-        )
+        self.controller.settings = self.controller.settings.with_transcript_provider("codex", True)
         monitor = self.controller.build_transcript_monitor()
         self.assertIsNotNone(monitor)
         self.assertEqual(
@@ -10751,9 +10511,7 @@ class SignalEngineTests(unittest.TestCase):
         from sidepulse import signals
 
         with self.assertRaises(ValueError):
-            AgentMonitorSettings().with_signal_style(
-                "nope", signals.DEFAULT_SIGNAL_STYLES["calendar"]
-            )
+            AgentMonitorSettings().with_signal_style("nope", signals.DEFAULT_SIGNAL_STYLES["calendar"])
 
 
 class SignalStyleCardTests(unittest.TestCase):
@@ -10788,9 +10546,7 @@ class SignalStyleCardTests(unittest.TestCase):
         with patch.object(self.controller, "refresh_") as refresh:
             self.controller.setSignalSpeed_(slider)
         refresh.assert_called_once_with(None)
-        self.assertAlmostEqual(
-            self.controller.settings.signal_style("calendar").speed_seconds, 4.2, places=5
-        )
+        self.assertAlmostEqual(self.controller.settings.signal_style("calendar").speed_seconds, 4.2, places=5)
 
     def test_escalation_controls_exist_and_apply(self) -> None:
         self.assertIsNotNone(self.controller.settings_fields.get("escalation_tier_popup"))
@@ -10921,9 +10677,7 @@ class EscalationTests(unittest.TestCase):
         # Thresholds can never be out of order: each floor is the prior.
         self.assertEqual(configured.escalation_ramp_seconds, 60.0)
         self.assertGreaterEqual(configured.escalation_menu_bar_seconds, 60.0)
-        self.assertGreaterEqual(
-            configured.escalation_final_seconds, configured.escalation_menu_bar_seconds
-        )
+        self.assertGreaterEqual(configured.escalation_final_seconds, configured.escalation_menu_bar_seconds)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
             save_settings(configured, path)
@@ -11056,9 +10810,7 @@ def _recent_state_iso() -> str:
     active-silence 4min), whatever "now" is."""
     from datetime import datetime, timedelta, timezone
 
-    return (
-        datetime.now(timezone.utc) - timedelta(seconds=60)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (datetime.now(timezone.utc) - timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class PrivateStateSecurityTests(unittest.TestCase):
@@ -11077,9 +10829,7 @@ class PrivateStateSecurityTests(unittest.TestCase):
             try:
                 settings_path = base / "settings" / "settings.json"
                 save_settings(
-                    AgentMonitorSettings().with_escalation_webhook_url(
-                        "https://private.example/hook"
-                    ),
+                    AgentMonitorSettings().with_escalation_webhook_url("https://private.example/hook"),
                     settings_path,
                 )
 
@@ -11189,9 +10939,7 @@ class PrivateStateSecurityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             external_settings = base / "external-settings.json"
-            external_settings.write_text(
-                json.dumps(AgentMonitorSettings().with_setup_screen_completed(True).to_dict())
-            )
+            external_settings.write_text(json.dumps(AgentMonitorSettings().with_setup_screen_completed(True).to_dict()))
             settings_link = base / "settings.json"
             settings_link.symlink_to(external_settings)
             self.assertEqual(load_settings(settings_link), AgentMonitorSettings())
@@ -11212,7 +10960,7 @@ class PrivateStateSecurityTests(unittest.TestCase):
                                 "event_name": "PreToolUse",
                                 "session_id": "external",
                             }
-                        ]
+                        ],
                     }
                 )
             )
@@ -11292,7 +11040,7 @@ class PrivateStateSecurityTests(unittest.TestCase):
                                 "event_name": "PreToolUse",
                                 "session_id": "owned",
                             }
-                        ]
+                        ],
                     }
                 )
             )
@@ -11398,9 +11146,7 @@ class PrivateStateSecurityTests(unittest.TestCase):
                 }
             )
             with patch("sidepulse.hook.detect_log_path", return_value=grok_log):
-                provider, routed_path, line = routed_hook_payload(
-                    "claude", claude_log, payload
-                )
+                provider, routed_path, line = routed_hook_payload("claude", claude_log, payload)
             write_hook_line(routed_path, line)
 
             self.assertEqual(provider, "grok")
@@ -11578,6 +11324,7 @@ class PrivateStateSecurityTests(unittest.TestCase):
 
     def test_active_hook_append_compacts_tail_and_skips_symlinked_jsonl(self) -> None:
         from sidepulse import audit
+
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             active = base / "active.jsonl"
@@ -12053,7 +11800,6 @@ class AskInboxAndActionsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             AgentMonitorSettings().with_focus_profile_rule("x", "Disco")
 
-
     def test_timebox_owns_the_timer_fill_and_drains(self) -> None:
         device = self.status_bar.StatusBarDevice(
             device_id="SidePulsePro",
@@ -12084,20 +11830,14 @@ class AskInboxAndActionsTests(unittest.TestCase):
 class CompletionBatchControllerTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_controller(self)
-        self.controller.settings = (
-            self.controller.settings.with_completion_notification_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_completion_notification_enabled(True)
         self.notifications: list[str] = []
         self.webhooks: list[dict] = []
-        self.controller.post_completion_notification = (
-            lambda status: self.notifications.append(status.agent_id)
-        )
+        self.controller.post_completion_notification = lambda status: self.notifications.append(status.agent_id)
         self.controller.post_webhook = self.webhooks.append
 
     def _enable_webhooks(self) -> None:
-        self.controller.settings = self.controller.settings.with_webhook_event(
-            "completion", True
-        )
+        self.controller.settings = self.controller.settings.with_webhook_event("completion", True)
 
     def _transition(self, *providers: str, reverse: bool = False) -> None:
         working = [_status(provider, AgentMode.WORKING) for provider in providers]
@@ -12109,9 +11849,7 @@ class CompletionBatchControllerTests(unittest.TestCase):
         self.controller.track_completions(tuple(completed))
 
     def test_notification_delivers_when_visual_sweep_is_disabled(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_completion_sweep_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_completion_sweep_enabled(False)
 
         self._transition("codex")
 
@@ -12119,9 +11857,7 @@ class CompletionBatchControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.completion_sweep_until, 0.0)
 
     def test_webhook_delivers_when_visual_sweep_is_disabled(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_completion_sweep_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_completion_sweep_enabled(False)
         self._enable_webhooks()
 
         self._transition("codex")
@@ -12133,9 +11869,7 @@ class CompletionBatchControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.completion_sweep_until, 0.0)
 
     def test_two_same_poll_completions_reach_both_delivery_channels(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_completion_sweep_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_completion_sweep_enabled(False)
         self._enable_webhooks()
 
         self._transition("codex", "claude", reverse=True)
@@ -12155,9 +11889,7 @@ class CompletionBatchControllerTests(unittest.TestCase):
                 raise RuntimeError("notification failed")
 
         self.controller.post_completion_notification = notify
-        self.controller.settings = (
-            self.controller.settings.with_completion_sweep_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_completion_sweep_enabled(False)
         self._enable_webhooks()
 
         self._transition("codex", "claude", reverse=True)
@@ -12177,9 +11909,7 @@ class CompletionBatchControllerTests(unittest.TestCase):
                 raise RuntimeError("webhook failed")
 
         self.controller.post_webhook = webhook
-        self.controller.settings = (
-            self.controller.settings.with_completion_sweep_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_completion_sweep_enabled(False)
         self._enable_webhooks()
 
         self._transition("codex", "claude", reverse=True)
@@ -12200,10 +11930,9 @@ class CompletionBatchControllerTests(unittest.TestCase):
         self.assertEqual(len(self.webhooks), 2)
 
     def test_last_modes_advance_when_every_channel_is_disabled(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_completion_sweep_enabled(False)
-            .with_completion_notification_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_completion_sweep_enabled(
+            False
+        ).with_completion_notification_enabled(False)
 
         self._transition("codex")
 
@@ -12249,9 +11978,7 @@ class DeferredRoadmapTests(unittest.TestCase):
         from sidepulse.settings import DeviceDisplaySetting
 
         device = DeviceDisplaySetting(device_id="pro", name="Pro", path="/Volumes/Pro")
-        configured = AgentMonitorSettings(devices=(device,)).with_device_blend_mode(
-            "pro", "relay"
-        )
+        configured = AgentMonitorSettings(devices=(device,)).with_device_blend_mode("pro", "relay")
         self.assertEqual(configured.device_blend_mode("pro"), "relay")
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
@@ -12266,9 +11993,7 @@ class DeferredRoadmapTests(unittest.TestCase):
 
         from sidepulse.settings import DeviceDisplaySetting
 
-        device = DeviceDisplaySetting(
-            device_id="pro", name="Pro", path="/Volumes/Pro", brightness=200, red_gain=0.8
-        )
+        device = DeviceDisplaySetting(device_id="pro", name="Pro", path="/Volumes/Pro", brightness=200, red_gain=0.8)
         configured = AgentMonitorSettings(devices=(device,)).with_saved_calibration_profile("Night")
         # Change the live values, then apply the profile back.
         dimmed = dc_replace(configured, devices=(dc_replace(device, brightness=40, red_gain=1.0),))
@@ -12346,11 +12071,7 @@ class WeatherAlertTests(unittest.TestCase):
         self.assertEqual(alerts_from_payload({"features": [{"bogus": True}]}), [])
 
     def test_weather_settings_round_trip(self) -> None:
-        configured = (
-            AgentMonitorSettings()
-            .with_weather_alerts_enabled(True)
-            .with_weather_location(37.77, -122.42)
-        )
+        configured = AgentMonitorSettings().with_weather_alerts_enabled(True).with_weather_location(37.77, -122.42)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
             save_settings(configured, path)
@@ -12455,9 +12176,7 @@ class SubagentAndPhantomAskTests(unittest.TestCase):
                     AgentMode.WAITING_FOR_INPUT,
                     session_id="s1",
                 ),
-                self._status(
-                    "claude:session:s1", AgentMode.WORKING, session_id="s1"
-                ),
+                self._status("claude:session:s1", AgentMode.WORKING, session_id="s1"),
             ],
             stale_statuses=[],
             collected_at=datetime.now(timezone.utc),
@@ -12472,18 +12191,11 @@ class SubagentAndPhantomAskTests(unittest.TestCase):
 
         main = self._status("claude:session:s1", AgentMode.WORKING, session_id="s1")
         workers = [
-            self._status(
-                f"claude:agent:w{index}", AgentMode.TOOL_RUNNING, session_id="s1"
-            )
-            for index in range(5)
+            self._status(f"claude:agent:w{index}", AgentMode.TOOL_RUNNING, session_id="s1") for index in range(5)
         ]
-        finished = self._status(
-            "claude:agent:done1", AgentMode.COMPLETED, session_id="s1"
-        )
+        finished = self._status("claude:agent:done1", AgentMode.COMPLETED, session_id="s1")
         stale_duplicate = replace(
-            self._status(
-                "claude:agent:w0", AgentMode.COMPLETED, session_id="s1"
-            ),
+            self._status("claude:agent:w0", AgentMode.COMPLETED, session_id="s1"),
             stale=True,
         )
         snapshot = SimpleNamespace(
@@ -12527,9 +12239,7 @@ class SubagentAndPhantomAskTests(unittest.TestCase):
             )
         )
         # No sub-agent appears as a TOP-LEVEL row.
-        top_level_subs = [
-            title for title, level in rows if level == 0 and "claude:agent:" in title
-        ]
+        top_level_subs = [title for title, level in rows if level == 0 and "claude:agent:" in title]
         self.assertEqual(top_level_subs, [])
 
 
@@ -12586,27 +12296,17 @@ class SubagentAskAggregateTests(unittest.TestCase):
             self._status("claude:session:s1", AgentMode.WORKING, event="PostToolUse"),
         )
         self.assertEqual(snapshot.aggregate.mode, AgentMode.WAITING_FOR_INPUT)
-        self.assertEqual(
-            self.controller.display_aggregate_mode(snapshot), AgentMode.WORKING
-        )
+        self.assertEqual(self.controller.display_aggregate_mode(snapshot), AgentMode.WORKING)
 
     def test_main_ask_still_rings_and_option_restores_old_behavior(self) -> None:
-        main_ask = self._snapshot(
-            self._status("claude:session:s1", AgentMode.WAITING_FOR_INPUT)
-        )
+        main_ask = self._snapshot(self._status("claude:session:s1", AgentMode.WAITING_FOR_INPUT))
         self.assertEqual(
             self.controller.display_aggregate_mode(main_ask),
             AgentMode.WAITING_FOR_INPUT,
         )
-        sub_only = self._snapshot(
-            self._status("claude:agent:w1", AgentMode.BLOCKED_ERROR)
-        )
-        self.controller.settings = self.controller.settings.with_subagent_asks_alert(
-            True
-        )
-        self.assertEqual(
-            self.controller.display_aggregate_mode(sub_only), AgentMode.BLOCKED_ERROR
-        )
+        sub_only = self._snapshot(self._status("claude:agent:w1", AgentMode.BLOCKED_ERROR))
+        self.controller.settings = self.controller.settings.with_subagent_asks_alert(True)
+        self.assertEqual(self.controller.display_aggregate_mode(sub_only), AgentMode.BLOCKED_ERROR)
 
 
 class UsageGraphRangeTests(unittest.TestCase):
@@ -12663,6 +12363,7 @@ class UsageGraphRangeTests(unittest.TestCase):
         self.assertEqual(sum(model["series"][0]["values"]), 160)
         self.assertEqual(sum(model["series"][1]["values"]), 275)
         self.assertGreater(usage_stats.nice_usage_scale(275), 275)
+        self.assertEqual(model["heatmap"].providers["claude"].totals.tokens, 160)
 
 
 class ProviderAwareUsageRefreshTests(unittest.TestCase):
@@ -12712,9 +12413,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         )
         self.controller._usage_provider_states = {
             provider_id: ProviderRefreshState(source_key=refresh_key.source)
-            for provider_id, refresh_key in (
-                self.controller._capacity_refresh_keys_by_provider.items()
-            )
+            for provider_id, refresh_key in (self.controller._capacity_refresh_keys_by_provider.items())
         }
         self.controller.settings = dataclass_replace(
             self.controller.settings,
@@ -12734,36 +12433,23 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         refresh_key = self._refresh_key(provider_id)
         return next(
             row
-            for row in self.controller._capacity_refresh_coordinator.snapshot_state(
-                now
-            ).sources
+            for row in self.controller._capacity_refresh_coordinator.snapshot_state(now).sources
             if row.key == refresh_key
         )
 
     def _requests(self, **generations):
-        return {
-            self._source(provider_id): generation
-            for provider_id, generation in generations.items()
-        }
+        return {self._source(provider_id): generation for provider_id, generation in generations.items()}
 
     def _results(self, **results):
-        return {
-            self._source(provider_id): result
-            for provider_id, result in results.items()
-        }
+        return {self._source(provider_id): result for provider_id, result in results.items()}
 
     def _failures(self, **failures):
-        return {
-            self._source(provider_id): failure
-            for provider_id, failure in failures.items()
-        }
+        return {self._source(provider_id): failure for provider_id, failure in failures.items()}
 
     def _prime_refreshes(self, *provider_ids, completed_at=None):
         from sidepulse.capacity_refresh import RefreshCause, RefreshDecisionKind
 
-        completed_at = (
-            time.monotonic() if completed_at is None else float(completed_at)
-        )
+        completed_at = time.monotonic() if completed_at is None else float(completed_at)
         states = getattr(self.controller, "_usage_provider_states", {})
         requests = {}
         for provider_id in provider_ids:
@@ -12928,11 +12614,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             CapacityValue(
                 CapacityUnit.PERCENT_REMAINING,
                 remaining,
-                (
-                    ObservationState.OBSERVED_ZERO
-                    if remaining == 0.0
-                    else ObservationState.OBSERVED
-                ),
+                (ObservationState.OBSERVED_ZERO if remaining == 0.0 else ObservationState.OBSERVED),
             ),
             ResetFact(ResetState.UNKNOWN, None, 300.0, observed_at),
             observed_at,
@@ -13001,9 +12683,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         opt-in itself -- and until this row existed, `toggleClaudePlanLimits_`
         was an action no user could reach.
         """
-        self.controller.settings = (
-            self.controller.settings.with_claude_plan_limits_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_claude_plan_limits_enabled(False)
         pane, fields = self.status_bar._build_profile_pane(self.controller)
 
         def descendants(view):
@@ -13025,20 +12705,18 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             rendered,
         )
         self.assertTrue(
-            any(
-                "never reads browser sessions or private provider endpoints"
-                in text.lower()
-                for text in rendered
-            ),
+            any("does not read browser sessions" in text.lower() for text in rendered),
+            rendered,
+        )
+        self.assertTrue(
+            any("browser access has separate consent" in text.lower() for text in rendered),
             rendered,
         )
         # Declaring the lanes does not turn the read on, and the switch shows
         # the setting rather than a default of its own.
         self.assertEqual(fields["profile_plan_limits_switch"].state(), 0)
         self.assertFalse(AgentMonitorSettings().claude_plan_limits_enabled)
-        self.controller.settings = (
-            self.controller.settings.with_claude_plan_limits_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_claude_plan_limits_enabled(True)
         _pane, on_fields = self.status_bar._build_profile_pane(self.controller)
         self.assertEqual(on_fields["profile_plan_limits_switch"].state(), 1)
 
@@ -13054,9 +12732,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
     def test_controller_initializes_exact_registry_scoped_refresh_authority(self) -> None:
         from sidepulse.capacity_refresh import RefreshStatusKind
 
-        source_states = self.controller._capacity_refresh_coordinator.snapshot_state(
-            100.0
-        ).sources
+        source_states = self.controller._capacity_refresh_coordinator.snapshot_state(100.0).sources
 
         self.assertEqual(len(source_states), 2)
         self.assertEqual(
@@ -13077,15 +12753,10 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         # constant meaning "the plan currently signed in on this machine",
         # never an account identifier.
         self.assertEqual(
-            {
-                row.key.source.provider_id: row.key.account_discriminator
-                for row in source_states
-            },
+            {row.key.source.provider_id: row.key.account_discriminator for row in source_states},
             {"codex": "codex-chatgpt", "claude": "claude-consumer"},
         )
-        self.assertTrue(
-            all(row.status is RefreshStatusKind.IDLE for row in source_states)
-        )
+        self.assertTrue(all(row.status is RefreshStatusKind.IDLE for row in source_states))
         self.assertEqual(self.controller._capacity_refresh_deadline_timers, {})
 
     def test_menu_open_enqueues_exact_source_without_executing_source_work(self) -> None:
@@ -13136,10 +12807,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
 
         self.assertEqual(started, source_keys)
         authority = {
-            row.key.source: row
-            for row in self.controller._capacity_refresh_coordinator.snapshot_state(
-                100.0
-            ).sources
+            row.key.source: row for row in self.controller._capacity_refresh_coordinator.snapshot_state(100.0).sources
         }
         self.assertEqual(authority[source_keys[0]].generation, 1)
         self.assertEqual(authority[source_keys[1]].generation, 1)
@@ -13181,11 +12849,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                     1,
                 )
                 release.set()
-                self.assertTrue(
-                    self.controller._usage_refresh_workers.close_all(
-                        timeout_seconds=1.0
-                    )
-                )
+                self.assertTrue(self.controller._usage_refresh_workers.close_all(timeout_seconds=1.0))
         finally:
             release.set()
 
@@ -13224,9 +12888,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                 )
             )
             self.assertTrue(started.wait(timeout=1.0))
-            self.assertFalse(
-                self.controller._usage_refresh_workers.close_all(timeout_seconds=0.0)
-            )
+            self.assertFalse(self.controller._usage_refresh_workers.close_all(timeout_seconds=0.0))
             self.assertEqual(
                 len(self.controller._usage_refresh_workers.snapshot()),
                 1,
@@ -13234,9 +12896,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         finally:
             release.set()
 
-        self.assertTrue(
-            self.controller._usage_refresh_workers.close_all(timeout_seconds=1.0)
-        )
+        self.assertTrue(self.controller._usage_refresh_workers.close_all(timeout_seconds=1.0))
         self.assertEqual(self.controller._usage_refresh_workers.snapshot(), ())
 
     def test_usage_refresh_batch_keeps_started_source_owned_during_termination(
@@ -13282,20 +12942,12 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                 self.assertTrue(source_started.wait(timeout=1.0))
                 self.controller._runtime_termination_started = True
                 release_scan.set()
-                self.assertFalse(
-                    self.controller._usage_refresh_workers.close_all(
-                        timeout_seconds=0.05
-                    )
-                )
+                self.assertFalse(self.controller._usage_refresh_workers.close_all(timeout_seconds=0.05))
         finally:
             release_scan.set()
             release_source.set()
 
-        self.assertTrue(
-            self.controller._usage_refresh_workers.close_all(
-                timeout_seconds=1.0
-            )
-        )
+        self.assertTrue(self.controller._usage_refresh_workers.close_all(timeout_seconds=1.0))
         self.assertEqual(self.controller._usage_refresh_workers.snapshot(), ())
 
     def test_apply_usage_summary_refuses_payload_after_termination(self) -> None:
@@ -13367,12 +13019,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         ):
             self.controller.capacityRefreshDeadline_(codex_timer)
 
-        states = {
-            row.key: row
-            for row in self.controller._capacity_refresh_coordinator.snapshot_state(
-                130.0
-            ).sources
-        }
+        states = {row.key: row for row in self.controller._capacity_refresh_coordinator.snapshot_state(130.0).sources}
         codex = states[self._refresh_key("codex")]
         claude = states[self._refresh_key("claude")]
         self.assertIs(codex.status, RefreshStatusKind.COOLDOWN)
@@ -13385,9 +13032,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             self.controller._capacity_refresh_deadline_timers,
         )
         self.assertIs(
-            self.controller._capacity_refresh_deadline_timers[
-                self._refresh_key("claude")
-            ],
+            self.controller._capacity_refresh_deadline_timers[self._refresh_key("claude")],
             claude_timer,
         )
 
@@ -13471,9 +13116,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                 {
                     "requests": requests,
                     "results": {},
-                    "failures": self._failures(
-                        codex=self.RefreshFailureKind.SOURCE_UNAVAILABLE
-                    ),
+                    "failures": self._failures(codex=self.RefreshFailureKind.SOURCE_UNAVAILABLE),
                 }
             )
 
@@ -13496,11 +13139,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         ):
             self.controller.show_settings_window()
 
-        request.assert_called_once_with(
-            (
-                self._source("claude"),
-            )
-        )
+        request.assert_called_once_with((self._source("claude"),))
 
     def test_menu_open_requests_only_stale_or_missing_visible_providers(self) -> None:
         now = time.monotonic()
@@ -13513,9 +13152,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             self.controller.menuWillOpen_(None)
 
         request.assert_called_once_with(
-            (
-                self._source("claude"),
-            ),
+            (self._source("claude"),),
             reason="menu-open",
         )
 
@@ -13533,21 +13170,11 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         thread_type.return_value.start.assert_called_once_with()
         self.assertTrue(self.controller._usage_provider_states["codex"].in_flight)
         self.assertTrue(self.controller._usage_provider_states["claude"].in_flight)
-        self.assertFalse(
-            self.controller._usage_transcript_states[
-                self._transcript_source("codex")
-            ].in_flight
-        )
-        self.assertFalse(
-            self.controller._usage_transcript_states[
-                self._transcript_source("claude")
-            ].in_flight
-        )
+        self.assertFalse(self.controller._usage_transcript_states[self._transcript_source("codex")].in_flight)
+        self.assertFalse(self.controller._usage_transcript_states[self._transcript_source("claude")].in_flight)
 
     def test_claude_local_usage_stays_eligible_when_plan_limits_are_disabled(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_claude_plan_limits_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_claude_plan_limits_enabled(False)
         self.controller._usage_provider_states = {
             "codex": self._state("codex"),
             "claude": self._state("claude"),
@@ -13557,18 +13184,14 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             self.controller.menuWillOpen_(None)
 
         request.assert_called_once_with(
-            (
-                self._source("codex"),
-            ),
+            (self._source("codex"),),
             reason="menu-open",
         )
 
     def test_disabled_plan_limits_skip_network_but_publish_local_claude_usage(self) -> None:
         from sidepulse import usage_stats
 
-        self.controller.settings = (
-            self.controller.settings.with_claude_plan_limits_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_claude_plan_limits_enabled(False)
         totals = usage_stats.UsageTotals()
         totals.sessions.add("s1")
         totals.input_tokens = 123
@@ -13585,17 +13208,13 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                 side_effect=lambda _selector, payload, _wait: published.append(payload),
             ),
         ):
-            self.controller._usage_refresh_worker(
-                {self._transcript_source("claude"): 1}
-            )
+            self.controller._usage_refresh_worker({self._transcript_source("claude"): 1})
 
         fetch.assert_not_called()
         self.assertIn(self._transcript_source("claude"), published[0]["results"])
         self.assertIn(
             "1 session",
-            published[0]["results"][self._transcript_source("claude")][
-                "summary_text"
-            ],
+            published[0]["results"][self._transcript_source("claude")]["summary_text"],
         )
 
     def test_disabling_codex_percent_clears_old_windows_after_successful_refresh(self) -> None:
@@ -13636,9 +13255,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             patch("sidepulse.status_bar.usage_stats.scan_usage") as scan,
             patch(
                 "sidepulse.status_bar.usage_stats.cached_codex_rate_limits",
-                return_value={
-                    "primary": {"used_percent": 82, "window_minutes": 300}
-                },
+                return_value={"primary": {"used_percent": 82, "window_minutes": 300}},
             ),
             patch(
                 "sidepulse.status_bar.threading.Thread",
@@ -13647,9 +13264,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             patch.object(
                 self.controller,
                 "performSelectorOnMainThread_withObject_waitUntilDone_",
-                side_effect=lambda _selector, payload, _wait: (
-                    self.controller.applyUsageSummary_(payload)
-                ),
+                side_effect=lambda _selector, payload, _wait: self.controller.applyUsageSummary_(payload),
             ),
         ):
             self.controller.toggleCodexPercent_(sender)
@@ -13717,9 +13332,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             patch.object(
                 self.controller,
                 "performSelectorOnMainThread_withObject_waitUntilDone_",
-                side_effect=lambda _selector, payload, _wait: (
-                    self.controller.applyUsageSummary_(payload)
-                ),
+                side_effect=lambda _selector, payload, _wait: self.controller.applyUsageSummary_(payload),
             ),
             patch.object(self.controller, "refresh_"),
         ):
@@ -13757,6 +13370,30 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         invalidate.assert_called_once_with(("claude",))
         refresh_usage.assert_called_once_with()
 
+    def test_quota_refresh_preserves_the_activity_workers_selected_model(self) -> None:
+        requests = self._prime_refreshes("codex")
+        activity = {"summary": "Selected local history", "heatmap": "selected heatmap"}
+        self.controller.usage_graph_model = activity
+        label = MagicMock()
+        graph = MagicMock()
+        self.controller.settings_fields = {
+            "profile_usage_label": label,
+            "profile_usage_graph": graph,
+        }
+        with patch("sidepulse.usage_graph_worker.refresh_usage_graph") as refresh:
+            self.controller.applyUsageSummary_(
+                {
+                    "requests": requests,
+                    "results": self._results(codex=self._result("codex", 22)),
+                    "failures": {},
+                    "shared": {"usage_graph": {"series": "unfiltered legacy graph"}},
+                }
+            )
+        self.assertIs(self.controller.usage_graph_model, activity)
+        label.setStringValue_.assert_called_with("Selected local history")
+        graph.setModel_.assert_called_with(activity)
+        refresh.assert_called_once_with(self.controller)
+
     def test_one_provider_failure_keeps_other_success_and_last_known_good(self) -> None:
         from sidepulse.usage_view import build_provider_usage_view
 
@@ -13774,9 +13411,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             {
                 "requests": requests,
                 "results": self._results(codex=self._result("codex", 22)),
-                "failures": self._failures(
-                    claude=self.RefreshFailureKind.SOURCE_UNAVAILABLE
-                ),
+                "failures": self._failures(claude=self.RefreshFailureKind.SOURCE_UNAVAILABLE),
             }
         )
 
@@ -13785,12 +13420,8 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         self.assertEqual(codex.windows[0].percent_used, 22.0)
         self.assertEqual(claude.windows[0].percent_used, 31.0)
         self.assertIn("Capacity source unavailable", claude.menu_line)
-        self.assertEqual(
-            self.controller._usage_provider_states["codex"].consecutive_failures, 0
-        )
-        self.assertEqual(
-            self.controller._usage_provider_states["claude"].consecutive_failures, 1
-        )
+        self.assertEqual(self.controller._usage_provider_states["codex"].consecutive_failures, 0)
+        self.assertEqual(self.controller._usage_provider_states["claude"].consecutive_failures, 1)
 
     def test_failed_last_known_good_keeps_remaining_but_clears_reset_timers(self) -> None:
         from sidepulse.capacity_types import ResetState
@@ -13825,9 +13456,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                 {
                     "requests": requests,
                     "results": {},
-                    "failures": self._failures(
-                        claude=self.RefreshFailureKind.SOURCE_UNAVAILABLE
-                    ),
+                    "failures": self._failures(claude=self.RefreshFailureKind.SOURCE_UNAVAILABLE),
                 }
             )
 
@@ -13835,13 +13464,9 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         self.assertEqual(window.percent_remaining, 63.0)
         self.assertIs(window.reset_state, ResetState.STALE)
         self.assertFalse(window.reset_known)
-        schedule = (
-            timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
-        )
+        schedule = timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
         reset_calls = [
-            call
-            for call in schedule.call_args_list
-            if call.args[2] in {"capacityResetBoundary:", "capacityCountdown:"}
+            call for call in schedule.call_args_list if call.args[2] in {"capacityResetBoundary:", "capacityCountdown:"}
         ]
         self.assertEqual(reset_calls, [])
 
@@ -13959,13 +13584,9 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         continuity = self.controller._capacity_reset_continuity[lane_key]
         self.assertIsNone(continuity.confirmed)
         self.assertIsNone(continuity.pending)
-        schedule = (
-            timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
-        )
+        schedule = timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
         reset_calls = [
-            call
-            for call in schedule.call_args_list
-            if call.args[2] in {"capacityResetBoundary:", "capacityCountdown:"}
+            call for call in schedule.call_args_list if call.args[2] in {"capacityResetBoundary:", "capacityCountdown:"}
         ]
         self.assertEqual(reset_calls, [])
 
@@ -13976,9 +13597,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                 {
                     "requests": requests,
                     "results": {},
-                    "failures": self._failures(
-                        claude=self.RefreshFailureKind.SOURCE_UNAVAILABLE
-                    ),
+                    "failures": self._failures(claude=self.RefreshFailureKind.SOURCE_UNAVAILABLE),
                 }
             )
         failed = self.controller._usage_provider_states["claude"]
@@ -14001,9 +13620,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         self.assertEqual(queued, ())
         self.assertEqual(duplicate, ())
         thread_type.assert_not_called()
-        self.assertTrue(
-            self._capacity_refresh_state("claude", now=102.0).queued_manual
-        )
+        self.assertTrue(self._capacity_refresh_state("claude", now=102.0).queued_manual)
 
         timer_api = MagicMock()
         with (
@@ -14011,18 +13628,14 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             patch.object(self.status_bar, "NSTimer", timer_api),
             patch("sidepulse.status_bar.threading.Thread") as thread_type,
         ):
-            started = self.controller.request_usage_refresh(
-                (self._source("claude"),)
-            )
+            started = self.controller.request_usage_refresh((self._source("claude"),))
         self.assertEqual(started, (self._source("claude"),))
         requests = thread_type.call_args.kwargs["args"][0]
         with patch.object(self.status_bar.time, "monotonic", return_value=116.0):
             self.controller.applyUsageSummary_(
                 {
                     "requests": requests,
-                    "results": self._results(
-                        claude=self._result("claude", 44)
-                    ),
+                    "results": self._results(claude=self._result("claude", 44)),
                     "failures": {},
                 }
             )
@@ -14039,9 +13652,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                 {
                     "requests": requests,
                     "results": {},
-                    "failures": self._failures(
-                        claude=self.RefreshFailureKind.SOURCE_UNAVAILABLE
-                    ),
+                    "failures": self._failures(claude=self.RefreshFailureKind.SOURCE_UNAVAILABLE),
                 }
             )
 
@@ -14103,9 +13714,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         refresh_key = self._refresh_key("claude")
         retry_timer = MagicMock()
         retry_timer.userInfo.return_value = refresh_key
-        self.controller._capacity_refresh_retry_timers = {
-            refresh_key: retry_timer
-        }
+        self.controller._capacity_refresh_retry_timers = {refresh_key: retry_timer}
         self.controller._runtime_termination_started = True
 
         with (
@@ -14135,9 +13744,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             self.controller.applyUsageSummary_(
                 {
                     "requests": requests,
-                    "results": self._results(
-                        codex=self._result("codex", 10)
-                    ),
+                    "results": self._results(codex=self._result("codex", 10)),
                     "failures": {},
                 }
             )
@@ -14155,9 +13762,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             self.controller.applyUsageSummary_(
                 {
                     "requests": self._requests(codex=1),
-                    "results": self._results(
-                        codex=self._result("codex", 99)
-                    ),
+                    "results": self._results(codex=self._result("codex", 99)),
                     "failures": {},
                 }
             )
@@ -14174,15 +13779,11 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             patch("sidepulse.status_bar.usage_stats.scan_usage", return_value=totals) as scan,
             patch(
                 "sidepulse.status_bar.usage_stats.cached_codex_rate_limits",
-                return_value={
-                    "primary": {"used_percent": 20, "window_minutes": 300}
-                },
+                return_value={"primary": {"used_percent": 20, "window_minutes": 300}},
             ),
             patch(
                 "sidepulse.status_bar.claude_quota.fetch_windows",
-                return_value=[
-                    {"label": "5-hour", "utilization": 30, "window_minutes": 300}
-                ],
+                return_value=[{"label": "5-hour", "utilization": 30, "window_minutes": 300}],
             ),
             patch.object(
                 self.controller,
@@ -14202,11 +13803,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         scan.assert_called_once()
         self.assertEqual(len(published), 4)
         self.assertEqual(
-            {
-                source_key
-                for payload in published
-                for source_key in payload["results"]
-            },
+            {source_key for payload in published for source_key in payload["results"]},
             {
                 self._transcript_source("codex"),
                 self._transcript_source("claude"),
@@ -14244,9 +13841,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             ),
             patch(
                 "sidepulse.status_bar.claude_quota.fetch_windows",
-                return_value=[
-                    {"label": "5-hour", "utilization": 30, "window_minutes": 300}
-                ],
+                return_value=[{"label": "5-hour", "utilization": 30, "window_minutes": 300}],
             ),
             patch.object(
                 self.controller,
@@ -14263,16 +13858,12 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             self.assertTrue(codex_entered.wait(1.0))
             self.assertTrue(claude_published.wait(1.0))
             self.assertTrue(batch.is_alive())
-            self.assertFalse(
-                any(self._source("codex") in payload["requests"] for payload in published)
-            )
+            self.assertFalse(any(self._source("codex") in payload["requests"] for payload in published))
             release_codex.set()
             batch.join(1.0)
 
         self.assertFalse(batch.is_alive())
-        self.assertTrue(
-            any(self._source("claude") in payload["requests"] for payload in published)
-        )
+        self.assertTrue(any(self._source("claude") in payload["requests"] for payload in published))
 
     def test_scan_failure_isolated_from_supported_remote_capacity_and_keeps_local_lkg(
         self,
@@ -14311,15 +13902,11 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             ),
             patch(
                 "sidepulse.status_bar.usage_stats.cached_codex_rate_limits",
-                return_value={
-                    "primary": {"used_percent": 22, "window_minutes": 300}
-                },
+                return_value={"primary": {"used_percent": 22, "window_minutes": 300}},
             ) as codex_limits,
             patch(
                 "sidepulse.status_bar.claude_quota.fetch_windows",
-                return_value=[
-                    {"label": "5-hour", "utilization": 33, "window_minutes": 300}
-                ],
+                return_value=[{"label": "5-hour", "utilization": 33, "window_minutes": 300}],
             ) as claude_limits,
             patch.object(
                 self.controller,
@@ -14327,27 +13914,18 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                 side_effect=lambda _selector, payload, _wait: published.append(payload),
             ),
         ):
-            self.controller._usage_refresh_worker(
-                requests
-            )
+            self.controller._usage_refresh_worker(requests)
 
         codex_limits.assert_called_once()
         claude_limits.assert_called_once_with(access_token=None)
         self.assertEqual(len(published), 2)
-        by_source = {
-            next(iter(payload["requests"])): payload for payload in published
-        }
+        by_source = {next(iter(payload["requests"])): payload for payload in published}
         self.assertEqual(
             by_source[self._source("codex")]["failures"],
             {},
         )
         self.assertEqual(by_source[self._source("claude")]["failures"], {})
-        self.assertTrue(
-            all(
-                payload["shared_error"] is None
-                for payload in published
-            )
-        )
+        self.assertTrue(all(payload["shared_error"] is None for payload in published))
 
         for payload in published:
             self.controller.applyUsageSummary_(payload)
@@ -14358,12 +13936,8 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         self.assertEqual(claude.windows[0].percent_used, 33.0)
         self.assertIn("Codex today: 2 sessions", codex.settings_text)
         self.assertIn("2 sessions · 3M tokens", claude.settings_text)
-        self.assertEqual(
-            self.controller._usage_provider_states["codex"].consecutive_failures, 0
-        )
-        self.assertEqual(
-            self.controller._usage_provider_states["claude"].consecutive_failures, 0
-        )
+        self.assertEqual(self.controller._usage_provider_states["codex"].consecutive_failures, 0)
+        self.assertEqual(self.controller._usage_provider_states["claude"].consecutive_failures, 0)
         self.assertIs(self.controller.usage_day_bars, old_day_bars)
         self.assertIs(self.controller.usage_hourly, old_hourly)
 
@@ -14409,15 +13983,11 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             patch("sidepulse.status_bar.usage_stats.scan_usage", return_value=totals),
             patch(
                 "sidepulse.status_bar.usage_stats.cached_codex_rate_limits",
-                return_value={
-                    "primary": {"used_percent": 22, "window_minutes": 300}
-                },
+                return_value={"primary": {"used_percent": 22, "window_minutes": 300}},
             ),
             patch(
                 "sidepulse.status_bar.claude_quota.fetch_windows",
-                return_value=[
-                    {"label": "5-hour", "utilization": 33, "window_minutes": 300}
-                ],
+                return_value=[{"label": "5-hour", "utilization": 33, "window_minutes": 300}],
             ),
             patch.object(
                 self.controller,
@@ -14434,54 +14004,33 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                 }
             )
 
-        payloads = {
-            next(iter(payload["requests"])): payload
-            for payload in published
-        }
+        payloads = {next(iter(payload["requests"])): payload for payload in published}
         claude_payload = payloads[self._transcript_source("claude")]
         codex_payload = payloads[self._transcript_source("codex")]
         self.assertEqual(
-            claude_payload["results"][self._transcript_source("claude")][
-                "source_text"
-            ],
+            claude_payload["results"][self._transcript_source("claude")]["source_text"],
             "Local transcripts · 18 files · partial",
         )
-        self.assertTrue(
-            claude_payload["results"][self._transcript_source("claude")][
-                "partial"
-            ]
-        )
+        self.assertTrue(claude_payload["results"][self._transcript_source("claude")]["partial"])
         self.assertEqual(
-            codex_payload["results"][self._transcript_source("codex")][
-                "source_text"
-            ],
+            codex_payload["results"][self._transcript_source("codex")]["source_text"],
             "Local transcripts · 4 files",
         )
-        self.assertFalse(
-            codex_payload["results"][self._transcript_source("codex")][
-                "partial"
-            ]
+        self.assertFalse(codex_payload["results"][self._transcript_source("codex")]["partial"])
+        self.assertNotIn(
+            "/",
+            claude_payload["results"][self._transcript_source("claude")]["source_text"],
         )
         self.assertNotIn(
             "/",
-            claude_payload["results"][self._transcript_source("claude")][
-                "source_text"
-            ],
-        )
-        self.assertNotIn(
-            "/",
-            codex_payload["results"][self._transcript_source("codex")][
-                "source_text"
-            ],
+            codex_payload["results"][self._transcript_source("codex")]["source_text"],
         )
 
         requests = self._prime_refreshes("codex", "claude")
         requests.update(self._prime_transcript_refreshes("codex", "claude"))
         for payload in published:
             source_key = next(iter(payload["requests"]))
-            payload["requests"] = {
-                source_key: requests[source_key]
-            }
+            payload["requests"] = {source_key: requests[source_key]}
             self.controller.applyUsageSummary_(payload)
 
         claude_model = self.controller._usage_provider_models["claude"]
@@ -14538,9 +14087,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             patch("sidepulse.status_bar.usage_stats.scan_usage", return_value=totals),
             patch(
                 "sidepulse.status_bar.usage_stats.cached_codex_rate_limits",
-                side_effect=OSError(
-                    "Bearer secret-token /Users/person/private-capacity.json"
-                ),
+                side_effect=OSError("Bearer secret-token /Users/person/private-capacity.json"),
             ),
             patch.object(
                 self.controller,
@@ -14658,9 +14205,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                             62,
                             4_600.0,
                             partial=True,
-                            source_text=(
-                                "18 files · /Users/person/.codex/sessions · 1 unreadable"
-                            ),
+                            source_text=("18 files · /Users/person/.codex/sessions · 1 unreadable"),
                         ),
                         claude=self._reset_result("claude", 25, 1_120.0),
                     ),
@@ -14737,11 +14282,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             self.controller.applyUsageSummary_(
                 {
                     "requests": requests,
-                    "results": self._results(
-                        codex=self._reset_result(
-                            "codex", 20, 1_800_000_120.0
-                        )
-                    ),
+                    "results": self._results(codex=self._reset_result("codex", 20, 1_800_000_120.0)),
                     "failures": {},
                 }
             )
@@ -14827,10 +14368,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         self.assertEqual(self.controller._capacity_reset_plan.provider_ids, ("codex",))
         self.assertEqual(
             self.controller._capacity_reset_plan.boundary_keys,
-            (
-                "codex|quota|local|remote_quota_windows|legacy:1|unspecified|"
-                "unspecified|unspecified|all_workloads",
-            ),
+            ("codex|quota|local|remote_quota_windows|legacy:1|unspecified|unspecified|unspecified|all_workloads",),
         )
         self.assertEqual(self.controller._capacity_reset_plan.deadline, 1_042.0)
 
@@ -14838,9 +14376,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         from sidepulse.usage_view import build_provider_usage_view
 
         timer_api = MagicMock()
-        self.controller._usage_provider_states = {
-            "codex": self._state("codex", last_success_at=100.0)
-        }
+        self.controller._usage_provider_states = {"codex": self._state("codex", last_success_at=100.0)}
         self.controller._usage_provider_models = {
             "codex": build_provider_usage_view(
                 "codex",
@@ -14876,9 +14412,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             reset_timer,
             countdown_timer,
         )
-        self.controller._usage_provider_states = {
-            "codex": self._state("codex", last_success_at=500.0)
-        }
+        self.controller._usage_provider_states = {"codex": self._state("codex", last_success_at=500.0)}
         self.controller._usage_provider_models = {
             "codex": build_provider_usage_view(
                 "codex",
@@ -14910,9 +14444,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         from sidepulse.usage_view import build_provider_usage_view
 
         self.controller.status_menu_open = True
-        self.controller._usage_provider_states = {
-            "codex": self._state("codex", last_success_at=500.0)
-        }
+        self.controller._usage_provider_states = {"codex": self._state("codex", last_success_at=500.0)}
         self.controller._usage_provider_models = {
             "codex": build_provider_usage_view(
                 "codex",
@@ -14937,9 +14469,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         ):
             self.controller.schedule_capacity_timers(epoch_now=1_000.0)
 
-        add_timer = (
-            self.capacity_run_loop_type.currentRunLoop.return_value.addTimer_forMode_
-        )
+        add_timer = self.capacity_run_loop_type.currentRunLoop.return_value.addTimer_forMode_
         self.assertEqual(add_timer.call_count, 2)
         self.assertEqual(
             [call.args[0] for call in add_timer.call_args_list],
@@ -14957,9 +14487,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             MagicMock(),
             MagicMock(),
         )
-        self.controller._usage_provider_states = {
-            "codex": self._state("codex", last_success_at=500.0)
-        }
+        self.controller._usage_provider_states = {"codex": self._state("codex", last_success_at=500.0)}
         self.controller._usage_provider_models = {
             "codex": build_provider_usage_view(
                 "codex",
@@ -15046,9 +14574,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
 
         def partially_blocked_request(provider_ids, *, reason=None):
             del provider_ids, reason
-            attempts_seen_during_request.append(
-                tuple(self.controller._attempted_capacity_boundary_keys)
-            )
+            attempts_seen_during_request.append(tuple(self.controller._attempted_capacity_boundary_keys))
             return (self._source("claude"),)
 
         with (
@@ -15203,9 +14729,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             provider_ids=("codex",),
             boundary_keys=("new",),
         )
-        self.controller._attempted_capacity_boundary_keys = tuple(
-            f"old-{index:02d}" for index in range(64)
-        )
+        self.controller._attempted_capacity_boundary_keys = tuple(f"old-{index:02d}" for index in range(64))
 
         with (
             patch.object(self.status_bar.time, "time", return_value=1_000.0),
@@ -15225,9 +14749,7 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
     def test_countdown_callback_only_mutates_existing_labels_and_reschedules(self) -> None:
         from sidepulse.usage_view import build_provider_usage_view
 
-        self.controller._usage_provider_states = {
-            "codex": self._state("codex", last_success_at=500.0)
-        }
+        self.controller._usage_provider_states = {"codex": self._state("codex", last_success_at=500.0)}
         self.controller._usage_provider_models = {
             "codex": build_provider_usage_view(
                 "codex",
@@ -15311,24 +14833,16 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
                 {
                     "requests": requests,
                     "results": {},
-                    "failures": self._failures(
-                        codex=self.RefreshFailureKind.SOURCE_UNAVAILABLE
-                    ),
+                    "failures": self._failures(codex=self.RefreshFailureKind.SOURCE_UNAVAILABLE),
                 }
             )
         retry_timer = MagicMock()
         retry_timer.userInfo.return_value = self._refresh_key("codex")
-        self.controller._capacity_refresh_retry_timers[
-            self._refresh_key("codex")
-        ] = retry_timer
+        self.controller._capacity_refresh_retry_timers[self._refresh_key("codex")] = retry_timer
         stale_deadline_timer = MagicMock()
-        self.controller._capacity_refresh_deadline_timers[
-            self._refresh_key("codex")
-        ] = stale_deadline_timer
+        self.controller._capacity_refresh_deadline_timers[self._refresh_key("codex")] = stale_deadline_timer
         claude_requests = self._prime_refreshes("claude", completed_at=101.0)
-        claude_deadline_timer = self.controller._capacity_refresh_deadline_timers[
-            self._refresh_key("claude")
-        ]
+        claude_deadline_timer = self.controller._capacity_refresh_deadline_timers[self._refresh_key("claude")]
 
         with patch.object(self.status_bar.time, "monotonic", return_value=102.0):
             self.controller.invalidate_usage_providers(("codex",))
@@ -15352,16 +14866,12 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
             self.controller._capacity_refresh_deadline_timers,
         )
         self.assertIs(
-            self.controller._capacity_refresh_deadline_timers[
-                self._refresh_key("claude")
-            ],
+            self.controller._capacity_refresh_deadline_timers[self._refresh_key("claude")],
             claude_deadline_timer,
         )
         self.controller._usage_transcript_states = {
             source_key: dataclass_replace(state, last_success_at=102.0)
-            for source_key, state in (
-                self.controller._usage_transcript_states.items()
-            )
+            for source_key, state in (self.controller._usage_transcript_states.items())
         }
 
         timer_api = MagicMock()
@@ -15387,16 +14897,10 @@ class ProviderAwareUsageRefreshTests(unittest.TestCase):
         retry_timer = MagicMock()
         self.controller._capacity_reset_timer = reset_timer
         self.controller._capacity_countdown_timer = countdown_timer
-        self.controller._capacity_refresh_deadline_timers = {
-            self._refresh_key("codex"): deadline_timer
-        }
-        self.controller._capacity_refresh_retry_timers = {
-            self._refresh_key("claude"): retry_timer
-        }
+        self.controller._capacity_refresh_deadline_timers = {self._refresh_key("codex"): deadline_timer}
+        self.controller._capacity_refresh_retry_timers = {self._refresh_key("claude"): retry_timer}
         self.controller._capacity_reset_retry_deadline = 530.0
-        self.controller._attempted_capacity_boundary_keys = tuple(
-            f"key-{index}" for index in range(64)
-        )
+        self.controller._attempted_capacity_boundary_keys = tuple(f"key-{index}" for index in range(64))
         self.controller.monitor = None
         self.controller.closed_lid_awake = MagicMock()
         self.controller.keep_awake = MagicMock()
@@ -15497,9 +15001,7 @@ class HookIngressLifecycleTests(unittest.TestCase):
         lifecycle = []
         monitor_state = {"value": "before-drain"}
         self.controller.monitor = SimpleNamespace(
-            write_latest_state=lambda: lifecycle.append(
-                f"latest:{monitor_state['value']}"
-            )
+            write_latest_state=lambda: lifecycle.append(f"latest:{monitor_state['value']}")
         )
         self.controller.closed_lid_awake = MagicMock()
         self.controller.keep_awake = MagicMock()
@@ -15644,11 +15146,7 @@ class FailureSignalProjectionContractTests(unittest.TestCase):
             display=self.status_bar.LED_DISPLAY_AGENT,
         )
         self.controller.settings = AgentMonitorSettings(
-            devices=(
-                DeviceDisplaySetting(
-                    device_id="Dot", name="SidePulse Dot", path="/Volumes/Dot"
-                ),
-            )
+            devices=(DeviceDisplaySetting(device_id="Dot", name="SidePulse Dot", path="/Volumes/Dot"),)
         ).with_device_provider_pin("Dot", provider)
         return device
 
@@ -15694,9 +15192,7 @@ class FailureSignalProjectionContractTests(unittest.TestCase):
         self.assertNotIn("repeat", program)
         self.assertEqual(len(program.splitlines()), 5)
         timed_lines = [line for line in program.splitlines() if line.endswith("cosine")]
-        timed_duration_ms = sum(
-            int(line.split()[-2].removesuffix("ms")) for line in timed_lines
-        )
+        timed_duration_ms = sum(int(line.split()[-2].removesuffix("ms")) for line in timed_lines)
         self.assertEqual(timed_duration_ms, 1800)
         self.assertEqual(program.splitlines()[-1], self.controller.settings.colors.mode_color("ask"))
         self.assertEqual(
@@ -15717,9 +15213,7 @@ class FailureSignalProjectionContractTests(unittest.TestCase):
         )
         device = self._device("codex")
 
-        self.assertEqual(
-            self.status_bar.state_for_projection(projection), self.status_bar.STATE_ASK
-        )
+        self.assertEqual(self.status_bar.state_for_projection(projection), self.status_bar.STATE_ASK)
         self.assertEqual(len(self.status_bar.ask_statuses(projection)), 1)
         self.assertIsNone(self.controller.active_failure_signal(now=11.2))
         self.assertEqual(
@@ -15731,10 +15225,7 @@ class FailureSignalProjectionContractTests(unittest.TestCase):
             LedDisplayState.ASK,
         )
         self.assertEqual(
-            tuple(
-                row.agent_id
-                for row in self.controller.projected_rows_for_device(projection, device)
-            ),
+            tuple(row.agent_id for row in self.controller.projected_rows_for_device(projection, device)),
             (permission.agent_id,),
         )
         self.assertEqual(self.controller.screen_bar_click_status().agent_id, permission.agent_id)
@@ -15785,9 +15276,7 @@ class FailureSignalProjectionContractTests(unittest.TestCase):
                 self._snapshot(self._failure()),
                 now=11.0,
             )
-            schedule = (
-                timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
-            )
+            schedule = timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
             schedule.reset_mock()
             with (
                 patch.object(self.status_bar.time, "monotonic", return_value=11.5),
@@ -15824,9 +15313,7 @@ class FailureSignalProjectionContractTests(unittest.TestCase):
                 self._snapshot(first_failure, second_failure),
                 now=11.0,
             )
-            schedule = (
-                timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
-            )
+            schedule = timer_api.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_
             schedule.reset_mock()
             with (
                 patch.object(self.status_bar.time, "monotonic", return_value=13.0),
@@ -15897,9 +15384,8 @@ class FailureSignalProjectionContractTests(unittest.TestCase):
 
         for mode in colors_module.BLEND_MODE_CHOICES:
             for led_count in (2, 8):
-                settings = (
-                    self.controller.settings.colors.with_blend_mode(mode)
-                    .with_session_color(failed.agent_id, "#33AACC")
+                settings = self.controller.settings.colors.with_blend_mode(mode).with_session_color(
+                    failed.agent_id, "#33AACC"
                 )
                 state, program = colors_module.program_for_projection(
                     projection,
@@ -15918,10 +15404,7 @@ class FailureSignalProjectionContractTests(unittest.TestCase):
                     colors_module.BLEND_MODE_SPATIAL,
                 }:
                     failure_segments = [
-                        segment
-                        for line in program.splitlines()
-                        for segment in line.split("; ")
-                        if "#33AACC" in segment
+                        segment for line in program.splitlines() for segment in line.split("; ") if "#33AACC" in segment
                     ]
                     self.assertTrue(failure_segments, label)
                     self.assertTrue(
@@ -16035,9 +15518,7 @@ class SnoozeScopeControllerTests(unittest.TestCase):
         published = []
         self.controller.mailbox_preferences = ()
         self.controller._publish_mailbox_preferences = published.append
-        with patch.object(
-            status_bar_legacy, "_family_work_key", lambda _state, _work_key: key
-        ):
+        with patch.object(status_bar_legacy, "_family_work_key", lambda _state, _work_key: key):
             handled = self.controller._apply_preference_action(
                 AgentBrowserActionPayload(
                     work_key=key,
@@ -16066,11 +15547,7 @@ class SnoozeScopeControllerTests(unittest.TestCase):
         # The dropdown's mailbox path keeps the row -- its own
         # preference pass owns dropdown/browser wake semantics.
         mailbox = self.controller.current_mailbox_projection
-        row_ids = [
-            row.agent_id
-            for section in mailbox.sections
-            for row in section.rows
-        ]
+        row_ids = [row.agent_id for section in mailbox.sections for row in section.rows]
         self.assertIn("codex:session:main", row_ids)
 
     def test_agent_browser_answer_payload_requires_exact_identity_and_reply_shape(self) -> None:
@@ -16120,9 +15597,7 @@ class SnoozeScopeControllerTests(unittest.TestCase):
         controller._deliver_semantic_notification = MagicMock(return_value=True)
         status = self._status(AgentMode.COMPLETED, event_name="Stop")
         controller._notification_events_by_work_key = {
-            status.work_key: SimpleNamespace(
-                key="event", interruption_class="completion"
-            )
+            status.work_key: SimpleNamespace(key="event", interruption_class="completion")
         }
 
         controller.mailbox_preferences = self._snooze_preferences("main")
@@ -16172,9 +15647,7 @@ class StudioLibraryTests(unittest.TestCase):
     def test_save_load_delete_round_trip(self) -> None:
         from sidepulse.settings import load_settings, save_settings
 
-        settings = self.controller.settings.with_studio_saved_look(
-            "Aurora", "#00E5FF 500ms pulse\nrepeat"
-        )
+        settings = self.controller.settings.with_studio_saved_look("Aurora", "#00E5FF 500ms pulse\nrepeat")
         settings = settings.with_studio_saved_look("Ember", "#FF9F0A 400ms pulse\nrepeat")
         # Re-saving a name replaces, never duplicates.
         settings = settings.with_studio_saved_look("Aurora", "#12E3B0 300ms pulse\nrepeat")
@@ -16183,9 +15656,7 @@ class StudioLibraryTests(unittest.TestCase):
             path = Path(tmp) / "settings.json"
             save_settings(settings, path)
             loaded = load_settings(path)
-        self.assertEqual(
-            dict(loaded.studio_library)["Aurora"], "#12E3B0 300ms pulse\nrepeat"
-        )
+        self.assertEqual(dict(loaded.studio_library)["Aurora"], "#12E3B0 300ms pulse\nrepeat")
         self.assertEqual(len(loaded.without_studio_look("Ember").studio_library), 1)
         with self.assertRaises(ValueError):
             settings.with_studio_saved_look("  ", "x")
@@ -16238,9 +15709,7 @@ class OvertimePatinaWebhookTests(unittest.TestCase):
         fresh = time.monotonic() - 60.0
         self.controller.working_since = fresh
         self.controller._capture_hardware_render_colors()
-        self.assertEqual(
-            self.controller.agent_render_colors().cycle_speed_seconds, base_speed
-        )
+        self.assertEqual(self.controller.agent_render_colors().cycle_speed_seconds, base_speed)
 
     def test_patina_is_quantized_so_motion_does_not_rewrite_the_device(self) -> None:
         """A smoothly creeping patina factor changed the rendered program's
@@ -16259,11 +15728,9 @@ class OvertimePatinaWebhookTests(unittest.TestCase):
         with patch("threading.Thread") as thread:
             self.controller.fire_escalation_webhook(3)
             self.assertEqual(thread.call_count, 0)  # no URL -> off
-            self.controller.settings = (
-                self.controller.settings.with_escalation_webhook_url(
+            self.controller.settings = self.controller.settings.with_escalation_webhook_url(
                     "https://example.invalid/hook"
                 )
-            )
             self.controller.fire_escalation_webhook(3)
             self.controller.fire_escalation_webhook(3)
             self.assertEqual(thread.call_count, 1)  # latched per episode
@@ -16281,15 +15748,9 @@ class ContextLidAnimationTests(unittest.TestCase):
         )
 
         settings = self.controller.settings
-        self.assertEqual(
-            settings.lid_animation_for_context(True, False), LID_ANIMATION_CLOSED
-        )
-        self.assertEqual(
-            settings.lid_animation_for_context(True, True), LID_ANIMATION_CLOSED_ACTIVE
-        )
-        self.assertEqual(
-            settings.lid_animation_for_context(False, True), LID_ANIMATION_OPEN_ACTIVE
-        )
+        self.assertEqual(settings.lid_animation_for_context(True, False), LID_ANIMATION_CLOSED)
+        self.assertEqual(settings.lid_animation_for_context(True, True), LID_ANIMATION_CLOSED_ACTIVE)
+        self.assertEqual(settings.lid_animation_for_context(False, True), LID_ANIMATION_OPEN_ACTIVE)
 
     def test_agents_active_now_ignores_subagents_and_idle(self) -> None:
         from types import SimpleNamespace as NS
@@ -16343,9 +15804,7 @@ class ContextLidAnimationTests(unittest.TestCase):
             path = Path(tmp) / "settings.json"
             save_settings(configured, path)
             loaded = load_settings(path)
-        self.assertEqual(
-            loaded.lid_open_active_animation.program, "#12E3B0 500ms pulse"
-        )
+        self.assertEqual(loaded.lid_open_active_animation.program, "#12E3B0 500ms pulse")
 
 
 class WebhookBridgeTests(unittest.TestCase):
@@ -16389,10 +15848,8 @@ class WebhookBridgeTests(unittest.TestCase):
         self.assertEqual(self.posted, [])
 
     def test_quota_threshold_stays_quiet_without_opt_in(self) -> None:
-        self.controller.settings = (
-            self.controller.settings
-            .with_quota_alerts_enabled(True)
-            .with_escalation_webhook_url("https://example.invalid/hook")
+        self.controller.settings = self.controller.settings.with_quota_alerts_enabled(True).with_escalation_webhook_url(
+            "https://example.invalid/hook"
         )
         self.controller.track_quota_thresholds({"Codex weekly": 70.0})
         self.controller.track_quota_thresholds({"Codex weekly": 95.0})
@@ -16425,39 +15882,25 @@ class DeviceSignalPolicyTests(unittest.TestCase):
             self.status_bar.LED_DISPLAY_COMPLETION,
         )
         self.assertEqual(
-            self.controller.active_led_display_kind_for_device(
-                self._device("asks_only"), None
-            ),
+            self.controller.active_led_display_kind_for_device(self._device("asks_only"), None),
             self.status_bar.LED_DISPLAY_AGENT,
         )
-        self.controller.settings = self.controller.settings.with_escalation_tier(
-            "takeover"
-        )
+        self.controller.settings = self.controller.settings.with_escalation_tier("takeover")
         self.controller.ask_blocked_since = time.monotonic() - 400.0
         self.assertEqual(
-            self.controller.active_led_display_kind_for_device(
-                self._device("asks_only"), None
-            ),
+            self.controller.active_led_display_kind_for_device(self._device("asks_only"), None),
             self.status_bar.LED_DISPLAY_ESCALATION,
         )
 
     def test_policy_round_trips(self) -> None:
         settings = AgentMonitorSettings(
-            devices=(
-                DeviceDisplaySetting(
-                    device_id="Dot", name="Dot", path="/Volumes/Dot"
-                ),
-            )
+            devices=(DeviceDisplaySetting(device_id="Dot", name="Dot", path="/Volumes/Dot"),)
         ).with_device_signal_policy("Dot", "asks_only")
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
             save_settings(settings, path)
-            self.assertEqual(
-                load_settings(path).device_signal_policy("Dot"), "asks_only"
-            )
-        self.assertIsNone(
-            settings.with_device_signal_policy("Dot", None).device_signal_policy("Dot")
-        )
+            self.assertEqual(load_settings(path).device_signal_policy("Dot"), "asks_only")
+        self.assertIsNone(settings.with_device_signal_policy("Dot", None).device_signal_policy("Dot"))
         with self.assertRaises(ValueError):
             settings.with_device_signal_policy("Dot", "sometimes")
 
@@ -16471,15 +15914,11 @@ class DeviceSignalPolicyTests(unittest.TestCase):
 
         with patch("builtins.print") as print_error:
             self.assertEqual(
-                self.controller.active_led_display_kind_for_device(
-                    BrokenDisplayDevice(), None
-                ),
+                self.controller.active_led_display_kind_for_device(BrokenDisplayDevice(), None),
                 self.status_bar.LED_DISPLAY_AGENT,
             )
             self.assertEqual(
-                self.controller.active_led_display_kind_for_device(
-                    BrokenDisplayDevice(), None
-                ),
+                self.controller.active_led_display_kind_for_device(BrokenDisplayDevice(), None),
                 self.status_bar.LED_DISPLAY_AGENT,
             )
 
@@ -16492,9 +15931,7 @@ class DeviceSignalPolicyTests(unittest.TestCase):
 
     def test_failed_earlier_claim_logs_and_allows_a_later_claim_to_win(self) -> None:
         device = self._device(None)
-        self.controller.settings = (
-            self.controller.settings.with_weather_alerts_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_weather_alerts_enabled(True)
         self.controller.weather_alert_active = True
 
         with (
@@ -16541,9 +15978,7 @@ class BacklogBehaviorTests(unittest.TestCase):
             connected=True,
             display=self.status_bar.LED_DISPLAY_AGENT,
         )
-        self.controller.settings = (
-            self.controller.settings.with_weather_alerts_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_weather_alerts_enabled(True)
         self.controller.weather_alert_active = True
         self.assertEqual(
             self.controller.active_led_display_kind_for_device(device, None),
@@ -16555,8 +15990,8 @@ class BacklogBehaviorTests(unittest.TestCase):
             collected_at=datetime.now(timezone.utc),
             aggregate=SimpleNamespace(mode=AgentMode.WAITING_FOR_INPUT),
         )
-        self.controller.current_attention_projection = (
-            self.status_bar.projection_for_statuses((ask,), self.controller.settings)
+        self.controller.current_attention_projection = self.status_bar.projection_for_statuses(
+            (ask,), self.controller.settings
         )
         self.assertEqual(
             self.controller.active_led_display_kind_for_device(device, None),
@@ -16594,9 +16029,7 @@ class CompletionThroughSnapshotTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_controller(self)
         self.controller.status_keepalive_targets = lambda: ()
-        self.controller.settings = (
-            self.controller.settings.with_completion_notification_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_completion_notification_enabled(True)
         self.posted: list = []
         self.controller.post_completion_notification = self.posted.append
 
@@ -16631,9 +16064,7 @@ class CompletionThroughSnapshotTests(unittest.TestCase):
         )
         # The owner stepped away: an ATTENDED completion (prompt typed
         # seconds ago) deliberately never sweeps -- see the test below.
-        self.controller._attended_prompt_monotonic = {
-            "claude:session:hero": time.monotonic() - 300.0
-        }
+        self.controller._attended_prompt_monotonic = {"claude:session:hero": time.monotonic() - 300.0}
         self.controller.refresh_(None)
         self.assertGreater(
             getattr(self.controller, "completion_sweep_until", 0.0),
@@ -16685,9 +16116,7 @@ class CompletionThroughSnapshotTests(unittest.TestCase):
         self._ingest("hero", "Stop", last_assistant_message="All done.")
         # The owner stepped away: an ATTENDED completion (prompt typed
         # seconds ago) deliberately never badges or lights the gauge.
-        self.controller._attended_prompt_monotonic = {
-            "claude:session:hero": time.monotonic() - 300.0
-        }
+        self.controller._attended_prompt_monotonic = {"claude:session:hero": time.monotonic() - 300.0}
         snapshot = self.controller.monitor.snapshot()
         unseen = self.status_bar.unseen_completions(snapshot, self.controller)
         self.assertIn("claude:session:hero", [s.agent_id for s in unseen])
@@ -16754,11 +16183,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
         return [menu.itemAtIndex_(index) for index in range(menu.numberOfItems())]
 
     def _shelf(self, mailbox, title: str):
-        return next(
-            item.submenu()
-            for item in self._items(mailbox.submenu())
-            if item.title() == title
-        )
+        return next(item.submenu() for item in self._items(mailbox.submenu()) if item.title() == title)
 
     def test_mailbox_summary_and_fixed_shelves_replace_legacy_agent_blocks(self) -> None:
         now = datetime.now(timezone.utc)
@@ -16782,7 +16207,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
 
         _snapshot, menu, mailbox = self._build(statuses)
 
-        self.assertEqual(mailbox.title(), "2 active · 1 needs you · 2 ready")
+        self.assertEqual(mailbox.title(), "1 needs you · 2 active · 2 ready")
         self.assertEqual(
             [item.title() for item in self._items(mailbox.submenu())],
             ["Needs You", "In Progress", "Ready for Review", "Recent"],
@@ -16809,9 +16234,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
             tool_name="Edit",
         )
         _snapshot, _menu, initial_mailbox = self._build((first, second))
-        initial_titles = [
-            item.title() for item in self._items(self._shelf(initial_mailbox, "In Progress"))
-        ]
+        initial_titles = [item.title() for item in self._items(self._shelf(initial_mailbox, "In Progress"))]
 
         refreshed_first = self._status(
             "codex",
@@ -16821,10 +16244,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
             tool_name="Bash",
         )
         _snapshot, _menu, refreshed_mailbox = self._build((second, refreshed_first))
-        refreshed_titles = [
-            item.title()
-            for item in self._items(self._shelf(refreshed_mailbox, "In Progress"))
-        ]
+        refreshed_titles = [item.title() for item in self._items(self._shelf(refreshed_mailbox, "In Progress"))]
 
         self.assertTrue(initial_titles[0].startswith("● Codex first"), initial_titles)
         self.assertTrue(refreshed_titles[0].startswith("● Codex first"), refreshed_titles)
@@ -16881,9 +16301,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
 
         _snapshot, _menu, mailbox = self._build((parent, worker))
         rows = [
-            item
-            for item in self._items(self._shelf(mailbox, "Needs You"))
-            if item.action() == "openSessionPrimary:"
+            item for item in self._items(self._shelf(mailbox, "Needs You")) if item.action() == "openSessionPrimary:"
         ]
 
         self.assertEqual(len(rows), 1)
@@ -16919,10 +16337,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
         self.assertTrue(all(item.image() is not None for item in rows))
 
     def test_mailbox_shelf_reports_exact_overflow(self) -> None:
-        statuses = tuple(
-            self._status("codex", f"active-{index:02d}", AgentMode.WORKING)
-            for index in range(15)
-        )
+        statuses = tuple(self._status("codex", f"active-{index:02d}", AgentMode.WORKING) for index in range(15))
 
         _snapshot, _menu, mailbox = self._build(statuses)
         items = self._items(self._shelf(mailbox, "In Progress"))
@@ -16950,9 +16365,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
 
         _snapshot, _menu, mailbox = self._build((status,))
         row = next(
-            item
-            for item in self._items(self._shelf(mailbox, "In Progress"))
-            if item.action() == "openSessionPrimary:"
+            item for item in self._items(self._shelf(mailbox, "In Progress")) if item.action() == "openSessionPrimary:"
         )
 
         self.assertIn("Codex Build Agent", row.title())
@@ -16973,11 +16386,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
         self.controller.update_attention_projection(snapshot)
         self.assertNotIn(completed.agent_id, self.controller.mailbox_seen_completion_ids)
         self.assertEqual(
-            [
-                section.kind.value
-                for section in self.controller.current_mailbox_projection.sections
-                if section.rows
-            ],
+            [section.kind.value for section in self.controller.current_mailbox_projection.sections if section.rows],
             ["ready_for_review"],
         )
 
@@ -16986,11 +16395,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
 
         self.assertIn(completed.agent_id, self.controller.mailbox_seen_completion_ids)
         self.assertEqual(
-            [
-                section.kind.value
-                for section in self.controller.current_mailbox_projection.sections
-                if section.rows
-            ],
+            [section.kind.value for section in self.controller.current_mailbox_projection.sections if section.rows],
             ["recent"],
         )
 
@@ -17034,9 +16439,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
         self.controller.update_attention_projection(snapshot)
 
         visible_ids = {
-            row.agent_id
-            for section in self.controller.current_mailbox_projection.sections
-            for row in section.rows
+            row.agent_id for section in self.controller.current_mailbox_projection.sections for row in section.rows
         }
         self.assertNotIn(closed.agent_id, visible_ids)
 
@@ -17089,9 +16492,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
         self.controller.update_attention_projection(snapshot)
 
         visible_ids = {
-            row.agent_id
-            for section in self.controller.current_mailbox_projection.sections
-            for row in section.rows
+            row.agent_id for section in self.controller.current_mailbox_projection.sections for row in section.rows
         }
         self.assertNotIn(expired.agent_id, visible_ids)
 
@@ -17109,9 +16510,7 @@ class AgentMailboxMenuTests(unittest.TestCase):
         snapshot = self._snapshot((initial,))
         self.controller.update_attention_projection(snapshot)
         with patch("sidepulse.status_bar.time.monotonic", return_value=100.0):
-            signature = self.status_bar.menu_content_signature(
-                snapshot, self.status_bar.STATE_WORKING, self.controller
-            )
+            signature = self.status_bar.menu_content_signature(snapshot, self.status_bar.STATE_WORKING, self.controller)
 
         private_only = self._status(
             "codex",
@@ -17203,10 +16602,7 @@ class MenuQualityOfLifeTests(unittest.TestCase):
             for index in range(mailbox.submenu().numberOfItems())
             if mailbox.submenu().itemAtIndex_(index).title() == "In Progress"
         )
-        titles = [
-            in_progress.itemAtIndex_(index).title()
-            for index in range(in_progress.numberOfItems())
-        ]
+        titles = [in_progress.itemAtIndex_(index).title() for index in range(in_progress.numberOfItems())]
         rollups = [title for title in titles if "worker" in title and "\u21b3" in title]
         self.assertEqual(len(rollups), 1, titles)
         self.assertIn("5 workers", rollups[0])
@@ -17223,12 +16619,8 @@ class MenuQualityOfLifeTests(unittest.TestCase):
 
     def test_device_errors_surface_in_the_menu(self) -> None:
         self.controller.device_errors = {"Dot": "[Errno 28] No space left on device"}
-        menu = self.status_bar.build_menu(
-            self._snapshot([]), self.status_bar.STATE_IDLE, self.controller
-        )
-        titles = [
-            menu.itemAtIndex_(index).title() for index in range(menu.numberOfItems())
-        ]
+        menu = self.status_bar.build_menu(self._snapshot([]), self.status_bar.STATE_IDLE, self.controller)
+        titles = [menu.itemAtIndex_(index).title() for index in range(menu.numberOfItems())]
         self.assertTrue(
             any("not updating" in title and "Dot" in title for title in titles),
             titles,
@@ -17237,9 +16629,7 @@ class MenuQualityOfLifeTests(unittest.TestCase):
     def test_completion_banner_fires_on_fresh_main_transition_only(self) -> None:
         posted: list = []
         self.controller.post_completion_notification = posted.append
-        self.controller.settings = (
-            self.controller.settings.with_completion_notification_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_completion_notification_enabled(True)
         working = _status("codex", AgentMode.WORKING)
         done = _status("codex", AgentMode.COMPLETED)
         self.controller.track_completions((working,))
@@ -17269,9 +16659,7 @@ class MenuQualityOfLifeTests(unittest.TestCase):
             self._worker("one", "w1"),
             self._worker("one", "w2"),
         ]
-        menu = self.status_bar.build_menu(
-            self._snapshot(statuses), self.status_bar.STATE_WORKING, self.controller
-        )
+        menu = self.status_bar.build_menu(self._snapshot(statuses), self.status_bar.STATE_WORKING, self.controller)
         mailbox = find_mailbox_item(menu)[0]
         self.assertEqual(mailbox.title(), "3 active")
         in_progress = next(
@@ -17279,17 +16667,13 @@ class MenuQualityOfLifeTests(unittest.TestCase):
             for index in range(mailbox.submenu().numberOfItems())
             if mailbox.submenu().itemAtIndex_(index).title() == "In Progress"
         )
-        titles = [
-            in_progress.itemAtIndex_(index).title()
-            for index in range(in_progress.numberOfItems())
-        ]
+        titles = [in_progress.itemAtIndex_(index).title() for index in range(in_progress.numberOfItems())]
         self.assertEqual(titles.count("Claude"), 1)
         self.assertEqual(titles.count("Codex"), 1)
         self.assertLess(titles.index("Claude"), titles.index("Codex"))
         self.assertTrue(any("claude one" in title and "2 workers" in title for title in titles))
         self.assertTrue(any("claude two" in title for title in titles))
         self.assertTrue(any("codex three" in title for title in titles))
-
 
 
 class ModernNotificationControllerTests(unittest.TestCase):
@@ -17332,9 +16716,7 @@ class ModernNotificationControllerTests(unittest.TestCase):
         self.client = self.RecordingClient()
         self.controller.notification_client = self.client
         self.controller.current_operator_state = empty_operator_state()
-        self.controller.settings = (
-            self.controller.settings.with_completion_notification_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_completion_notification_enabled(True)
 
     def _completion_fixture(self):
         from sidepulse.operator_state import (
@@ -17406,7 +16788,7 @@ class ModernNotificationControllerTests(unittest.TestCase):
         self.assertEqual(len(self.client.deliveries), 1)
         identifier, title, body, metadata = self.client.deliveries[0]
         self.assertRegex(identifier, r"completion\.[0-9a-f]{64}\Z")
-        self.assertEqual(title, "JR Bar")
+        self.assertEqual(title, self.status_bar.PRODUCT_DISPLAY_NAME)
         self.assertEqual(body, "A Codex session finished")
         self.assertEqual(set(metadata), {"action_token"})
         self.assertRegex(metadata["action_token"], r"[A-Za-z0-9_-]{43}\Z")
@@ -17420,9 +16802,7 @@ class ModernNotificationControllerTests(unittest.TestCase):
         metadata = self.client.deliveries[0][3]
         opened: list[str] = []
         completions: list[bool] = []
-        self.controller.open_session = lambda status, action, remember: opened.append(
-            status.agent_id
-        )
+        self.controller.open_session = lambda status, action, remember: opened.append(status.agent_id)
 
         for _ in range(2):
             self.controller.userNotificationCenter_didReceiveNotificationResponse_withCompletionHandler_(
@@ -17443,9 +16823,7 @@ class ModernNotificationControllerTests(unittest.TestCase):
         )
         opened: list[str] = []
         completed: list[bool] = []
-        self.controller.open_session = lambda status, action, remember: opened.append(
-            status.agent_id
-        )
+        self.controller.open_session = lambda status, action, remember: opened.append(status.agent_id)
 
         self.controller.userNotificationCenter_didReceiveNotificationResponse_withCompletionHandler_(
             None,
@@ -17461,16 +16839,12 @@ class ModernNotificationControllerTests(unittest.TestCase):
 
         working, completed, event = self._completion_fixture()
         self.controller.track_completions((working,), operator_events=())
-        self.controller.settings = (
-            self.controller.settings.with_completion_notification_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_completion_notification_enabled(False)
         self.controller.track_completions((completed,), operator_events=(event,))
         self.assertEqual(self.client.deliveries, [])
 
         self.controller.last_agent_modes = {working.agent_id: AgentMode.WORKING}
-        self.controller.settings = (
-            self.controller.settings.with_completion_notification_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_completion_notification_enabled(True)
         now = time.time()
         self.controller.settings = self.controller.settings.with_dnd_override(
             DndOverride.for_mode(
@@ -17543,9 +16917,7 @@ class ModernNotificationControllerTests(unittest.TestCase):
             operator_state=self.controller.current_operator_state,
             collected_at=datetime.now(timezone.utc),
         )
-        self.controller.settings = self.controller.settings.with_escalation_tier(
-            "chime"
-        )
+        self.controller.settings = self.controller.settings.with_escalation_tier("chime")
         self.controller.ask_blocked_since = time.monotonic() - 500.0
 
         self.controller.apply_escalation(allow_refresh=False)
@@ -17554,7 +16926,10 @@ class ModernNotificationControllerTests(unittest.TestCase):
         self.assertEqual(len(self.client.deliveries), 1)
         identifier, title, body, metadata = self.client.deliveries[0]
         self.assertRegex(identifier, r"attention\.[0-9a-f]{64}\Z")
-        self.assertEqual((title, body), ("JR Bar", "A Codex session needs you"))
+        self.assertEqual(
+            (title, body),
+            (self.status_bar.PRODUCT_DISPLAY_NAME, "A Codex session needs you"),
+        )
         self.assertEqual(set(metadata), {"action_token"})
         self.assertNotIn("PRIVATE ATTENTION CONTENT", repr(self.client.deliveries))
 
@@ -17572,8 +16947,8 @@ class ModernNotificationControllerTests(unittest.TestCase):
     def test_explicit_permission_action_updates_controller_state(self) -> None:
         from sidepulse.macos_notifications import NotificationAuthorizationState
 
-        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = (
-            lambda selector, payload, _wait: getattr(
+        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = lambda selector, payload, _wait: (
+            getattr(
                 self.controller,
                 selector.replace(":", "_"),
             )(payload)
@@ -17597,9 +16972,7 @@ class ModernNotificationControllerTests(unittest.TestCase):
         from sidepulse.macos_notifications import NotificationAuthorizationState
 
         self.controller._notification_authorization_checked = True
-        self.controller.notification_authorization_state = (
-            NotificationAuthorizationState.NOT_DETERMINED
-        )
+        self.controller.notification_authorization_state = NotificationAuthorizationState.NOT_DETERMINED
         self.controller.show_settings_window()
         self.controller.ensure_settings_pane("notifications")
 
@@ -17615,9 +16988,7 @@ class ModernNotificationControllerTests(unittest.TestCase):
         from sidepulse.macos_notifications import NotificationAuthorizationState
 
         self.controller._notification_authorization_checked = True
-        self.controller.notification_authorization_state = (
-            NotificationAuthorizationState.UNAVAILABLE
-        )
+        self.controller.notification_authorization_state = NotificationAuthorizationState.UNAVAILABLE
         self.controller.show_settings_window()
         self.controller.ensure_settings_pane("notifications")
         self.controller.refresh_notification_authorization_controls()
@@ -17721,17 +17092,11 @@ class LazyPaneBuildTests(unittest.TestCase):
     def test_sidebar_selection_builds_and_unhides_the_pane(self) -> None:
         self.controller.show_settings_window()
         row = next(
-            index
-            for index, (key, _label) in enumerate(self.status_bar.SETTINGS_SIDEBAR_ITEMS)
-            if key == "focus"
+            index for index, (key, _label) in enumerate(self.status_bar.SETTINGS_SIDEBAR_ITEMS) if key == "focus"
         )
         table = self.controller.settings_sidebar_table
-        table.selectRowIndexes_byExtendingSelection_(
-            self.status_bar.NSIndexSet.indexSetWithIndex_(row), False
-        )
-        self.controller.tableViewSelectionDidChange_(
-            SimpleNamespace(object=lambda: table)
-        )
+        table.selectRowIndexes_byExtendingSelection_(self.status_bar.NSIndexSet.indexSetWithIndex_(row), False)
+        self.controller.tableViewSelectionDidChange_(SimpleNamespace(object=lambda: table))
         self.assertIn("focus", self.controller.settings_panes)
         self.assertFalse(self.controller.settings_panes["focus"].isHidden())
         self.assertEqual(self.controller.current_settings_pane, "focus")
@@ -17783,9 +17148,7 @@ class ResilienceHardeningTests(unittest.TestCase):
         from sidepulse.device_writer import write_led_program
 
         with tempfile.TemporaryDirectory() as tmp:
-            target = write_led_program(
-                "1:#FF0000 500ms", device_path=Path(tmp), file_name="LEDS.LED"
-            )
+            target = write_led_program("1:#FF0000 500ms", device_path=Path(tmp), file_name="LEDS.LED")
             self.assertEqual(target.read_text(encoding="utf-8"), "1:#FF0000 500ms")
             leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "LEDS.LED"]
             self.assertEqual(leftovers, [])
@@ -17797,17 +17160,13 @@ class ResilienceHardeningTests(unittest.TestCase):
         from sidepulse import device_writer
 
         with tempfile.TemporaryDirectory() as tmp:
-            target = device_writer.write_led_program(
-                "1:#00FF00 1s", device_path=Path(tmp), file_name="LEDS.LED"
-            )
+            target = device_writer.write_led_program("1:#00FF00 1s", device_path=Path(tmp), file_name="LEDS.LED")
             with patch(
                 "sidepulse.device_writer.os.replace",
                 side_effect=OSError("device ejected"),
             ):
                 with self.assertRaises(OSError):
-                    device_writer.write_led_program(
-                        "1:#FF0000 1s", device_path=Path(tmp), file_name="LEDS.LED"
-                    )
+                    device_writer.write_led_program("1:#FF0000 1s", device_path=Path(tmp), file_name="LEDS.LED")
             self.assertEqual(target.read_text(encoding="utf-8"), "1:#00FF00 1s")
             leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "LEDS.LED"]
             self.assertEqual(leftovers, [])
@@ -17821,16 +17180,12 @@ class ResilienceHardeningTests(unittest.TestCase):
         from sidepulse import device_writer
 
         with tempfile.TemporaryDirectory() as tmp:
-            device_writer.write_led_program(
-                "1:#00FF00 1s", device_path=Path(tmp), file_name="LEDS.LED"
-            )
+            device_writer.write_led_program("1:#00FF00 1s", device_path=Path(tmp), file_name="LEDS.LED")
             with patch(
                 "sidepulse.device_writer.os.replace",
                 side_effect=OSError(errno_module.ENOSPC, "No space left on device"),
             ):
-                target = device_writer.write_led_program(
-                    "1:#FF0000 1s", device_path=Path(tmp), file_name="LEDS.LED"
-                )
+                target = device_writer.write_led_program("1:#FF0000 1s", device_path=Path(tmp), file_name="LEDS.LED")
             self.assertEqual(target.read_text(encoding="utf-8"), "1:#FF0000 1s")
             leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "LEDS.LED"]
             self.assertEqual(leftovers, [])
@@ -17865,12 +17220,8 @@ class ResilienceHardeningTests(unittest.TestCase):
         from sidepulse import status_bar
 
         self.status_bar = status_bar
-        self.controller.studio_editor = SimpleNamespace(
-            string=lambda: self.VALID_BURN_PROGRAM
-        )
-        self.controller.status_bar_devices = MagicMock(
-            return_value=[self._connected_device()]
-        )
+        self.controller.studio_editor = SimpleNamespace(string=lambda: self.VALID_BURN_PROGRAM)
+        self.controller.status_bar_devices = MagicMock(return_value=[self._connected_device()])
         writes: list = []
         with (
             patch(
@@ -17888,9 +17239,7 @@ class ResilienceHardeningTests(unittest.TestCase):
         # otherwise "wrote nothing" is just a broken burn button.
         with patch(
             "sidepulse.device_writer.write_led_program",
-            side_effect=lambda *a, **k: (
-                writes.append((a, k)) or Path("/Volumes/SidePulseBurnTest/INIT.LED")
-            ),
+            side_effect=lambda *a, **k: writes.append((a, k)) or Path("/Volumes/SidePulseBurnTest/INIT.LED"),
         ):
             self.controller.applyStudioAsPowerUp_(None)
         self.assertEqual(len(writes), 1)
@@ -17902,12 +17251,8 @@ class ResilienceHardeningTests(unittest.TestCase):
             "sidepulse.led_wasm.SdLedWasmController",
             side_effect=RuntimeError("no JavaScriptCore"),
         ):
-            self.assertIsNone(
-                self.controller.validate_studio_program(self.VALID_BURN_PROGRAM)
-            )
-            strict = self.controller.validate_studio_program(
-                self.VALID_BURN_PROGRAM, strict=True
-            )
+            self.assertIsNone(self.controller.validate_studio_program(self.VALID_BURN_PROGRAM))
+            strict = self.controller.validate_studio_program(self.VALID_BURN_PROGRAM, strict=True)
             # A missing parser is graceful. A program the MODEL can read
             # and refuse is not: "0:off" is a firmware syntax error, and
             # with the firmware unreachable the grammar checker is the
@@ -17946,43 +17291,31 @@ class AlcoveFollowTests(unittest.TestCase):
         from sidepulse import virtual_device
 
         screen = self._screen()
-        base = virtual_device.virtual_window_frame_for_screen(
-            screen, wrap_menu_bar=True
-        )
-        wider = virtual_device.virtual_window_frame_for_screen(
-            screen, wrap_menu_bar=True, alcove_total_width=300.0
-        )
+        base = virtual_device.virtual_window_frame_for_screen(screen, wrap_menu_bar=True)
+        wider = virtual_device.virtual_window_frame_for_screen(screen, wrap_menu_bar=True, alcove_total_width=300.0)
         self.assertEqual(wider[1][0], 300.0)
         # Still centered on the notch.
         self.assertAlmostEqual(wider[0][0] + wider[1][0] / 2.0, 756.0)
         # "Match" means match: a capsule NARROWER than the current bar
         # narrows the bar too (this is what supersedes a stale manual
         # gap the moment a real reading exists) -- down to a sane floor.
-        narrower = virtual_device.virtual_window_frame_for_screen(
-            screen, wrap_menu_bar=True, alcove_total_width=170.0
-        )
+        narrower = virtual_device.virtual_window_frame_for_screen(screen, wrap_menu_bar=True, alcove_total_width=170.0)
         self.assertEqual(narrower[1][0], 170.0)
         self.assertAlmostEqual(narrower[0][0] + narrower[1][0] / 2.0, 756.0)
         self.assertEqual(
-            virtual_device.virtual_window_frame_for_screen(
-                screen, wrap_menu_bar=True, alcove_total_width=60.0
-            )[1][0],
+            virtual_device.virtual_window_frame_for_screen(screen, wrap_menu_bar=True, alcove_total_width=60.0)[1][0],
             140.0,
         )
         # None means classic geometry, byte-identical.
         self.assertEqual(
-            virtual_device.virtual_window_frame_for_screen(
-                screen, wrap_menu_bar=True, alcove_total_width=None
-            ),
+            virtual_device.virtual_window_frame_for_screen(screen, wrap_menu_bar=True, alcove_total_width=None),
             base,
         )
         # Width follows Alcove in BOTH modes now (2026-08-27: the
         # wrap-only gate left "minimal settings" drawing a fixed-width
         # band overhanging a narrower capsule).
         self.assertEqual(
-            virtual_device.virtual_window_frame_for_screen(
-                screen, wrap_menu_bar=False, alcove_total_width=900.0
-            )[1][0],
+            virtual_device.virtual_window_frame_for_screen(screen, wrap_menu_bar=False, alcove_total_width=900.0)[1][0],
             900.0,
         )
 
@@ -17990,13 +17323,8 @@ class AlcoveFollowTests(unittest.TestCase):
         from sidepulse import virtual_device
 
         screen = self._screen()
-        huge = virtual_device.virtual_window_frame_for_screen(
-            screen, wrap_menu_bar=True, alcove_total_width=5000.0
-        )
+        huge = virtual_device.virtual_window_frame_for_screen(screen, wrap_menu_bar=True, alcove_total_width=5000.0)
         self.assertLessEqual(huge[1][0], 1512.0)
-
-
-
 
     def test_follow_setting_round_trips_default_on(self) -> None:
         self.assertTrue(AgentMonitorSettings().screen_bar_follow_alcove)
@@ -18027,20 +17355,14 @@ class TimeboxHandshakeTests(unittest.TestCase):
         settings = AgentMonitorSettings().with_timebox_shortcut("25", "Work On", "Work Off")
         self.assertEqual(settings.timebox_shortcut_pair("25"), ("Work On", "Work Off"))
         self.assertEqual(settings.timebox_shortcut_pair("45"), ("", ""))
-        self.assertEqual(
-            settings.with_timebox_shortcut("25", " ", "").timebox_shortcuts, {}
-        )
+        self.assertEqual(settings.with_timebox_shortcut("25", " ", "").timebox_shortcuts, {})
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
             save_settings(settings, path)
-            self.assertEqual(
-                load_settings(path).timebox_shortcut_pair("25"), ("Work On", "Work Off")
-            )
+            self.assertEqual(load_settings(path).timebox_shortcut_pair("25"), ("Work On", "Work Off"))
 
     def test_mapped_preset_fires_on_then_off_exactly_once(self) -> None:
-        self.controller.settings = self.controller.settings.with_timebox_shortcut(
-            "25", "Focus On", "Focus Off"
-        )
+        self.controller.settings = self.controller.settings.with_timebox_shortcut("25", "Focus On", "Focus Off")
         with patch.object(self.controller, "refresh_") as refresh:
             self.controller.startTimebox_(self._Sender(25))
             self.assertEqual(self.fired, ["Focus On"])
@@ -18052,9 +17374,7 @@ class TimeboxHandshakeTests(unittest.TestCase):
         self.assertEqual(refresh.call_args_list, [call(None), call(None), call(None)])
 
     def test_off_only_mapping_still_fires_at_end(self) -> None:
-        self.controller.settings = self.controller.settings.with_timebox_shortcut(
-            "45", "", "Wind Down"
-        )
+        self.controller.settings = self.controller.settings.with_timebox_shortcut("45", "", "Wind Down")
         with patch.object(self.controller, "refresh_") as refresh:
             self.controller.startTimebox_(self._Sender(45))
         refresh.assert_called_once_with(None)
@@ -18077,12 +17397,8 @@ class ProjectHueFamilyTests(unittest.TestCase):
     def test_groups_off_is_byte_identical(self) -> None:
         ids = ["c:session:1", "c:session:2", "x:session:3"]
         plain = colors_module.identity_colors_for_agents(ids)
-        self.assertEqual(
-            colors_module.identity_colors_for_agents(ids, groups=None), plain
-        )
-        self.assertEqual(
-            colors_module.identity_colors_for_agents(ids, groups={}), plain
-        )
+        self.assertEqual(colors_module.identity_colors_for_agents(ids, groups=None), plain)
+        self.assertEqual(colors_module.identity_colors_for_agents(ids, groups={}), plain)
 
     def test_family_steps_lightness_and_spares_singletons(self) -> None:
         ids = ["c:session:1", "c:session:2", "x:session:3", "y:session:9"]
@@ -18136,9 +17452,7 @@ class WingTipGaugeTests(unittest.TestCase):
     def test_setter_clamps_and_change_gates(self) -> None:
         from sidepulse import virtual_device
 
-        view = virtual_device.VirtualLedView.alloc().initWithFrame_(
-            ((0, 0), (400.0, 37.0))
-        )
+        view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (400.0, 37.0)))
         view.set_standing_gauges(0.6, True)
         self.assertAlmostEqual(view._gauge_left_level, 0.6)
         self.assertTrue(view._gauge_right_on)
@@ -18166,11 +17480,7 @@ class ProviderPinTests(unittest.TestCase):
 
     def _settings_with_device(self):
         return AgentMonitorSettings(
-            devices=(
-                DeviceDisplaySetting(
-                    device_id="Dot", name="SidePulse Dot", path="/Volumes/Dot"
-                ),
-            )
+            devices=(DeviceDisplaySetting(device_id="Dot", name="SidePulse Dot", path="/Volumes/Dot"),)
         )
 
     def test_pin_round_trips_and_validates(self) -> None:
@@ -18180,9 +17490,7 @@ class ProviderPinTests(unittest.TestCase):
             path = Path(tmp) / "settings.json"
             save_settings(settings, path)
             self.assertEqual(load_settings(path).device_provider_pin("Dot"), "codex")
-        self.assertIsNone(
-            settings.with_device_provider_pin("Dot", None).device_provider_pin("Dot")
-        )
+        self.assertIsNone(settings.with_device_provider_pin("Dot", None).device_provider_pin("Dot"))
         with self.assertRaises(ValueError):
             settings.with_device_provider_pin("Dot", "gemini")
 
@@ -18199,9 +17507,9 @@ class ProviderPinTests(unittest.TestCase):
             connected=True,
             display=self.status_bar.LED_DISPLAY_AGENT,
         )
-        self.controller.settings = self._settings_with_device().with_device_provider_pin(
-            "Dot", "codex"
-        ).with_escalation_tier("takeover")
+        self.controller.settings = (
+            self._settings_with_device().with_device_provider_pin("Dot", "codex").with_escalation_tier("takeover")
+        )
         self.controller.ask_blocked_since = time.monotonic() - 400.0
         self.assertEqual(
             self.controller.active_led_display_kind_for_device(device, None),
@@ -18218,15 +17526,11 @@ class NightWarmthTests(unittest.TestCase):
     def test_off_by_default_and_daytime_identity(self) -> None:
         gains = (1.0, 1.0, 1.0)
         self.assertEqual(self.controller.apply_night_warmth(gains, hour=22), gains)
-        self.controller.settings = (
-            self.controller.settings.with_night_warmth_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_night_warmth_enabled(True)
         self.assertEqual(self.controller.apply_night_warmth(gains, hour=12), gains)
 
     def test_evening_composes_with_calibration(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_night_warmth_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_night_warmth_enabled(True)
         warmed = self.controller.apply_night_warmth((0.8, 1.0, 0.5), hour=22)
         self.assertAlmostEqual(warmed[0], 0.8)
         self.assertAlmostEqual(warmed[1], 0.87)
@@ -18238,9 +17542,7 @@ class NightWarmthTests(unittest.TestCase):
         )
 
     def test_window_edges(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_night_warmth_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_night_warmth_enabled(True)
         self.assertTrue(self.controller.night_warmth_active(hour=19))
         self.assertTrue(self.controller.night_warmth_active(hour=6))
         self.assertFalse(self.controller.night_warmth_active(hour=7))
@@ -18265,8 +17567,7 @@ class FocusSignalPolicyTests(unittest.TestCase):
         )
 
         self.controller.settings = (
-            self.controller.settings
-            .with_focus_sync_enabled(True)
+            self.controller.settings.with_focus_sync_enabled(True)
             .with_focus_signal_policy("focus-work", "asks_only")
             .with_focus_signal_policy("focus-sleep", "silent")
         )
@@ -18287,9 +17588,7 @@ class FocusSignalPolicyTests(unittest.TestCase):
         self.assertEqual(self.controller.active_focus_policy(), "silent")
 
     def test_inactive_policy_holds_nothing(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_focus_signal_policy("focus-work", "silent")
-        )
+        self.controller.settings = self.controller.settings.with_focus_signal_policy("focus-work", "silent")
         self.controller._focus_ids_cache = (float("inf"), [])
         self.assertEqual(self.controller.active_focus_policy(), "all")
         self.assertFalse(self.controller.courtesy_signals_held())
@@ -18314,10 +17613,8 @@ class FocusSignalPolicyTests(unittest.TestCase):
         self.assertFalse(grant.webhook_allowed)
 
     def test_policy_holds_quota_blink(self) -> None:
-        self.controller.settings = (
-            self.controller.settings
-            .with_quota_alerts_enabled(True)
-            .with_focus_signal_policy("focus-work", "asks_only")
+        self.controller.settings = self.controller.settings.with_quota_alerts_enabled(True).with_focus_signal_policy(
+            "focus-work", "asks_only"
         )
         self.controller._focus_ids_cache = (float("inf"), ["focus-work"])
         self.controller.track_quota_thresholds({"Codex weekly": 70.0})
@@ -18327,9 +17624,7 @@ class FocusSignalPolicyTests(unittest.TestCase):
     def test_setting_all_removes_the_key(self) -> None:
         settings = AgentMonitorSettings().with_focus_signal_policy("x", "silent")
         self.assertEqual(settings.focus_signal_policy, {"x": "silent"})
-        self.assertEqual(
-            settings.with_focus_signal_policy("x", "all").focus_signal_policy, {}
-        )
+        self.assertEqual(settings.with_focus_signal_policy("x", "all").focus_signal_policy, {})
 
 
 class QuotaAlertTests(unittest.TestCase):
@@ -18359,9 +17654,7 @@ class QuotaAlertTests(unittest.TestCase):
     def test_track_quota_thresholds_stays_dormant_when_legacy_enable_is_requested(
         self,
     ) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_quota_alerts_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_quota_alerts_enabled(True)
         # The flag is real now (2026-08-26) -- but the LEGACY raw-percent
         # tracker below stays a stub regardless: raw percentages never
         # drive effects; the JR plane's edge detectors do.
@@ -18377,18 +17670,14 @@ class QuotaAlertTests(unittest.TestCase):
         self.controller.track_quota_thresholds({"Codex weekly": 70.0})
         self.controller.track_quota_thresholds({"Codex weekly": 95.0})
         self.assertEqual(self.controller.quota_blink_until, 0.0)
-        self.controller.settings = (
-            self.controller.settings.with_quota_alerts_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_quota_alerts_enabled(True)
         self.controller.quiet_until_monotonic = time.monotonic() + 3600.0
         self.controller.track_quota_thresholds({"Codex weekly": 60.0})
         self.controller.track_quota_thresholds({"Codex weekly": 95.0})
         self.assertEqual(self.controller.quota_blink_until, 0.0)
 
     def test_sunrise_consumer_stays_dormant(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_quota_alerts_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_quota_alerts_enabled(True)
         self.controller.track_quota_thresholds({"Codex weekly": 83.0})
         with patch.object(self.controller, "refresh_") as refresh:
             self.controller.track_quota_thresholds({"Codex weekly": 1.0})
@@ -18466,9 +17755,7 @@ class GlowDialTests(unittest.TestCase):
         # not from driving the Screen Bar brightness scalar below visibility.
         self.assertEqual(self.controller.effective_brightness_for_device(device), 61)
         self.controller.settings = self.controller.settings.with_screen_bar_min_glow(0.25)
-        self.assertGreaterEqual(
-            self.controller.effective_brightness_for_device(device), 63
-        )
+        self.assertGreaterEqual(self.controller.effective_brightness_for_device(device), 63)
 
     def test_bracket_floor_zero_means_pitch_black(self) -> None:
         from sidepulse import virtual_device
@@ -18479,7 +17766,7 @@ class GlowDialTests(unittest.TestCase):
         rendered = view._bracket_colors(dim)
         self.assertTrue(all(c[3] <= 0.011 for c in rendered))
 
-    def test_classic_bar_applies_minimum_glow_to_lit_pixels(self) -> None:
+    def test_classic_bar_preserves_dim_pixels_with_minimum_glow(self) -> None:
         from sidepulse import virtual_device
 
         view = virtual_device.VirtualLedView.alloc().initWithFrame_(((0, 0), (400.0, 37.0)))
@@ -18488,7 +17775,7 @@ class GlowDialTests(unittest.TestCase):
 
         rendered = view._classic_status_colors(dim)
 
-        self.assertTrue(all(c[3] >= 0.18 for c in rendered))
+        self.assertEqual(rendered, dim)
 
     def test_classic_bar_minimum_glow_respects_dark_and_off(self) -> None:
         from sidepulse import virtual_device
@@ -18532,19 +17819,13 @@ class PaletteTests(unittest.TestCase):
             from sidepulse.colors import PROVIDER_BRAND_COLORS
             from sidepulse.providers import PROVIDER_SPECS
 
-            brandless = {
-                spec.provider
-                for spec in PROVIDER_SPECS
-                if spec.provider not in PROVIDER_BRAND_COLORS
-            }
+            brandless = {spec.provider for spec in PROVIDER_SPECS if spec.provider not in PROVIDER_BRAND_COLORS}
             # A palette owns exactly the brandless providers -- branded
             # entries would be skipped by apply_palette, and non-provider
             # names would write junk settings entries.
             self.assertEqual(set(palette["agents"]), brandless)
             # Working, done and ask must be tellable apart.
-            self.assertEqual(
-                len({palette["modes"][k] for k in ("working", "done", "ask")}), 3
-            )
+            self.assertEqual(len({palette["modes"][k] for k in ("working", "done", "ask")}), 3)
 
     def test_oklch_out_of_gamut_desaturates_instead_of_clipping(self) -> None:
         from sidepulse.colors import oklch_hex
@@ -18613,9 +17894,7 @@ class UsageStatsTests(unittest.TestCase):
             root = Path(tmp)
             # The same message id appears twice in one file AND again in a
             # forked session file -- T3's ~2.4x overcount bug class.
-            self._write_transcript(
-                root, "a", [self._assistant_row("msg_1"), self._assistant_row("msg_1")]
-            )
+            self._write_transcript(root, "a", [self._assistant_row("msg_1"), self._assistant_row("msg_1")])
             self._write_transcript(root, "b", [self._assistant_row("msg_1")])
             totals = usage_stats.scan_usage(root, None)
             self.assertEqual(totals.input_tokens, 1000)
@@ -18802,10 +18081,7 @@ class T3AdoptionTests(unittest.TestCase):
         self.assertIsNotNone(connect)
         self.assertEqual(connect.action(), "openSetup:")
         self.assertFalse(
-            any(
-                "Start Claude Code" in recent.itemAtIndex_(index).title()
-                for index in range(recent.numberOfItems())
-            )
+            any("Start Claude Code" in recent.itemAtIndex_(index).title() for index in range(recent.numberOfItems()))
         )
 
     def test_compact_menu_carries_no_tip_rows(self) -> None:
@@ -18879,23 +18155,17 @@ class StudioDisplayAndTrancheCTests(unittest.TestCase):
     def test_studio_display_claims_the_device(self) -> None:
         from sidepulse.settings import LED_DISPLAY_STUDIO
 
-        kind = self.controller.active_led_display_kind_for_device(
-            self._device(LED_DISPLAY_STUDIO), None
-        )
+        kind = self.controller.active_led_display_kind_for_device(self._device(LED_DISPLAY_STUDIO), None)
         self.assertEqual(kind, LED_DISPLAY_STUDIO)
 
     def test_studio_display_program_validates_and_scales(self) -> None:
-        self.controller.settings = self.controller.settings.with_studio_program(
-            "#FF0000 500ms pulse\nrepeat"
-        )
+        self.controller.settings = self.controller.settings.with_studio_program("#FF0000 500ms pulse\nrepeat")
         program = self.controller.studio_display_program(255)
         self.assertIsNotNone(program)
         self.assertIn("pulse", program)
 
     def test_broken_studio_program_never_reaches_the_device(self) -> None:
-        self.controller.settings = self.controller.settings.with_studio_program(
-            "this is not a program !!!"
-        )
+        self.controller.settings = self.controller.settings.with_studio_program("this is not a program !!!")
         self.assertIsNone(self.controller.studio_display_program(255))
 
     def test_empty_studio_program_falls_back(self) -> None:
@@ -18908,6 +18178,7 @@ class StudioDisplayAndTrancheCTests(unittest.TestCase):
         (volume_root / "SidePulseDot").mkdir(parents=True)
         devices = discover_devices(mount_root=volume_root)
         with patch("sidepulse.status_bar.discover_devices", return_value=devices):
+            self.controller.discover_device_candidates()
             self.controller.show_settings_window()
             self.controller.ensure_all_settings_panes()
         controls = next(iter(self.controller.device_settings_controls.values()))
@@ -18938,6 +18209,19 @@ class StudioDisplayAndTrancheCTests(unittest.TestCase):
         self.assertIsNone(self.controller.settings.weather_latitude)
         self.assertIsNone(self.controller.settings.weather_longitude)
 
+    def test_weather_ip_location_switch_is_separate_from_weather_alerts(self) -> None:
+        self.controller.show_settings_window()
+        self.controller.ensure_all_settings_panes()
+        switch = self.controller.settings_buttons["weather_ip_geolocation_enabled"]
+        switch.setState_(1)
+
+        with patch.object(self.controller, "_weather_observation_timer_fired") as check:
+            self.controller.applyWeatherLocation_(switch)
+
+        self.assertTrue(self.controller.settings.weather_ip_geolocation_enabled)
+        self.assertFalse(self.controller.settings.weather_alerts_enabled)
+        check.assert_not_called()
+
     def test_half_filled_weather_location_is_rejected(self) -> None:
         self.controller.show_settings_window()
         self.controller.ensure_all_settings_panes()
@@ -18959,10 +18243,7 @@ class StudioDisplayAndTrancheCTests(unittest.TestCase):
             self.controller.poll_devices_once()
         # Device ids for non-/Volumes roots carry the full path.
         self.assertTrue(
-            any(
-                "SidePulsePro" in device_id
-                for device_id in self.controller.device_settings_controls
-            ),
+            any("SidePulsePro" in device_id for device_id in self.controller.device_settings_controls),
             self.controller.device_settings_controls,
         )
 
@@ -18982,11 +18263,7 @@ class CalendarAlertTests(unittest.TestCase):
         )
 
     def test_settings_round_trip(self) -> None:
-        configured = (
-            AgentMonitorSettings()
-            .with_calendar_alerts_enabled(True)
-            .with_calendar_lead_minutes(12.0)
-        )
+        configured = AgentMonitorSettings().with_calendar_alerts_enabled(True).with_calendar_lead_minutes(12.0)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
             save_settings(configured, path)
@@ -19013,10 +18290,9 @@ class CalendarAlertTests(unittest.TestCase):
 
     def test_display_kind_precedence(self) -> None:
         device = self._device()
-        self.controller.settings = (
-            self.controller.settings.with_calendar_alerts_enabled(True)
-            .with_reminder_alerts_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
+            True
+        ).with_reminder_alerts_enabled(True)
         # Glow active -> calendar outranks the agent display.
         self.controller.calendar_glow_until = time.monotonic() + 120.0
         self.assertEqual(
@@ -19075,15 +18351,11 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
         self.clock = [675.0]
         self.factory = _PresentationTimerFactory()
         self.controller._presentation_monotonic = lambda: self.clock[0]
-        self.controller._runtime_timer_registry = (
-            self.controller._build_presentation_timer_registry(
+        self.controller._runtime_timer_registry = self.controller._build_presentation_timer_registry(
                 timer_factory=self.factory,
                 monotonic=lambda: self.clock[0],
             )
-        )
-        self.controller._presentation_scheduler_state = (
-            self.status_bar.PresentationSchedulerState()
-        )
+        self.controller._presentation_scheduler_state = self.status_bar.PresentationSchedulerState()
         self.controller._presentation_scheduler_inputs = None
         self.controller._runtime_started = True
         self.controller.leds_enabled = False
@@ -19108,9 +18380,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
         return self.status_bar.PresentationSchedulerInputs(**values)
 
     def test_reminder_intent_is_disabled_by_default_and_withdrawn_immediately(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_reminder_alerts_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_reminder_alerts_enabled(False)
         with (
             patch.object(self.status_bar.reminders_watch, "fetch_due") as fetch_due,
             patch.object(
@@ -19129,26 +18399,21 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
             fetch_due.assert_not_called()
             request_access.assert_not_called()
 
-            self.controller.settings = (
-                self.controller.settings.with_reminder_alerts_enabled(True)
-            )
+            self.controller.settings = self.controller.settings.with_reminder_alerts_enabled(True)
             for _ in range(100):
                 self.controller.reconcile_presentation_timers(self._inputs())
 
             reminder_timers = tuple(
                 timer
                 for timer in self.factory.live
-                if timer.feature
-                is self.status_bar.RuntimeFeature.REMINDERS_OBSERVATION
+                if timer.feature is self.status_bar.RuntimeFeature.REMINDERS_OBSERVATION
             )
             self.assertEqual(len(reminder_timers), 1)
             self.assertEqual(reminder_timers[0].delay, 60.0)
             self.assertEqual(reminder_timers[0].interval, 60.0)
             self.assertEqual(reminder_timers[0].tolerances, [6.0])
 
-            self.controller.settings = (
-                self.controller.settings.with_reminder_alerts_enabled(False)
-            )
+            self.controller.settings = self.controller.settings.with_reminder_alerts_enabled(False)
             self.controller.reconcile_presentation_timers(self._inputs())
 
         self.assertEqual(reminder_timers[0].invalidations, 1)
@@ -19159,9 +18424,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
 
     def test_reminder_tick_uses_bounded_private_os_poll_adapter(self) -> None:
         submissions = []
-        self.controller.settings = (
-            self.controller.settings.with_reminder_alerts_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_reminder_alerts_enabled(True)
         self.controller._reminders_observation_active = True
         self.controller._os_poll_generation = 8
         self.controller._presentation_scheduler_inputs = self._inputs()
@@ -19186,9 +18449,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
         with patch.object(
             self.status_bar.reminders_watch,
             "fetch_due",
-            side_effect=lambda _lookback, completion: completion(
-                [(private_identifier, private_title)]
-            ),
+            side_effect=lambda _lookback, completion: completion([(private_identifier, private_title)]),
         ):
             result = self.controller._execute_os_poll_command(command)
 
@@ -19201,17 +18462,13 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
         self.assertNotIn("title", repr(result).casefold())
 
     def test_reminder_results_are_fenced_bounded_and_use_exact_cue_deadline(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_reminder_alerts_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_reminder_alerts_enabled(True)
         self.controller._reminders_observation_active = True
         self.controller._reminders_observation_fire_at = self.clock[0] + 60.0
         self.controller._os_poll_generation = 11
         self.controller._presentation_scheduler_inputs = self._inputs()
         self.controller.refresh_ = MagicMock()
-        request = self.status_bar.RemindersObservationRequest(
-            lookback_seconds=120.0
-        )
+        request = self.status_bar.RemindersObservationRequest(lookback_seconds=120.0)
 
         def command(generation: int, deadline: float):
             return self.status_bar.RuntimeWorkCommand(
@@ -19239,9 +18496,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
         first_deadline = self.controller.reminders_glow_until
         self.assertGreater(first_deadline, self.clock[0])
         cue_timer = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
         )
         self.assertAlmostEqual(cue_timer.delay, first_deadline - self.clock[0])
         self.assertIsNone(cue_timer.interval)
@@ -19254,16 +18509,13 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
             next(
                 timer
                 for timer in self.factory.live
-                if timer.feature
-                is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+                if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
             ),
             cue_timer,
         )
         self.controller.refresh_.assert_called_once_with(None)
 
-        second_batch = tuple(
-            f"{index:064x}" for index in range(1, 257)
-        )
+        second_batch = tuple(f"{index:064x}" for index in range(1, 257))
         self.controller._apply_os_poll_result(
             current,
             self.status_bar.RemindersObservationResult(True, second_batch),
@@ -19273,16 +18525,12 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
             self.status_bar.MAX_REMINDER_OBSERVATION_IDENTIFIERS,
         )
 
-        self.controller._presentation_scheduler_inputs = self._inputs(
-            display_asleep=True
-        )
+        self.controller._presentation_scheduler_inputs = self._inputs(display_asleep=True)
         self.controller._apply_os_poll_result(
             current,
             self.status_bar.RemindersObservationResult(True, ("b" * 64,)),
         )
-        self.controller._presentation_scheduler_inputs = self._inputs(
-            app_terminating=True
-        )
+        self.controller._presentation_scheduler_inputs = self._inputs(app_terminating=True)
         self.controller._apply_os_poll_result(
             current,
             self.status_bar.RemindersObservationResult(True, ("c" * 64,)),
@@ -19307,9 +18555,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
             monotonic=lambda: self.clock[0],
             dispatch_main=drains.append,
         )
-        self.controller.settings = (
-            self.controller.settings.with_reminder_alerts_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_reminder_alerts_enabled(True)
         self.controller._reminders_observation_active = True
         self.controller._reminders_observation_fire_at = self.clock[0] + 60.0
         self.controller._lid_observation_active = True
@@ -19336,9 +18582,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
                 self.controller._os_poll_worker.wait_idle(timeout_seconds=1.0),
                 "reminder timeout stranded the shared OS worker",
             )
-            self.assertGreaterEqual(
-                self.controller._os_poll_worker.snapshot().completed, 2
-            )
+            self.assertGreaterEqual(self.controller._os_poll_worker.snapshot().completed, 2)
 
         self.assertEqual(len(drains), 1)
         drains.pop()()
@@ -19358,9 +18602,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
 
     def test_reminder_permission_is_explicit_enable_only_main_thread_and_single_flight(self) -> None:
         inputs = self._inputs()
-        self.controller.virtual_status_device = SimpleNamespace(
-            presentation_scheduler_inputs=lambda: inputs
-        )
+        self.controller.virtual_status_device = SimpleNamespace(presentation_scheduler_inputs=lambda: inputs)
         worker = MagicMock()
         self.controller._os_poll_worker = worker
         enabled_sender = SimpleNamespace(state=lambda: 1)
@@ -19415,9 +18657,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
 
     def test_reminder_permission_callback_is_inert_after_sleep(self) -> None:
         inputs = self._inputs()
-        self.controller.virtual_status_device = SimpleNamespace(
-            presentation_scheduler_inputs=lambda: inputs
-        )
+        self.controller.virtual_status_device = SimpleNamespace(presentation_scheduler_inputs=lambda: inputs)
         callbacks = []
         self.controller.set_settings_message = MagicMock()
 
@@ -19437,9 +18677,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
             self.controller.toggleReminderAlerts_(SimpleNamespace(state=lambda: 1))
 
         self.controller.set_settings_message.reset_mock()
-        self.controller.reconcile_presentation_timers(
-            self._inputs(display_asleep=True)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(display_asleep=True))
         self.controller.reminderAccessResolved_(
             {
                 "token": self.controller._reminders_permission_request_token,
@@ -19454,12 +18692,8 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
 
     def test_reminder_permission_denial_withdraws_timer_and_active_cue(self) -> None:
         inputs = self._inputs()
-        self.controller.virtual_status_device = SimpleNamespace(
-            presentation_scheduler_inputs=lambda: inputs
-        )
-        self.controller.settings = (
-            self.controller.settings.with_reminder_alerts_enabled(True)
-        )
+        self.controller.virtual_status_device = SimpleNamespace(presentation_scheduler_inputs=lambda: inputs)
+        self.controller.settings = self.controller.settings.with_reminder_alerts_enabled(True)
         self.controller.reconcile_presentation_timers(inputs)
         self.controller._apply_reminders_observation_result(
             self.status_bar.RemindersObservationResult(True, ("f" * 64,))
@@ -19505,12 +18739,8 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
 
     def test_reminder_permission_unavailable_clears_active_cue_without_replay(self) -> None:
         inputs = self._inputs()
-        self.controller.virtual_status_device = SimpleNamespace(
-            presentation_scheduler_inputs=lambda: inputs
-        )
-        self.controller.settings = (
-            self.controller.settings.with_reminder_alerts_enabled(True)
-        )
+        self.controller.virtual_status_device = SimpleNamespace(presentation_scheduler_inputs=lambda: inputs)
+        self.controller.settings = self.controller.settings.with_reminder_alerts_enabled(True)
         self.controller.reconcile_presentation_timers(inputs)
         self.controller._apply_reminders_observation_result(
             self.status_bar.RemindersObservationResult(True, ("9" * 64,))
@@ -19522,9 +18752,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
             patch.object(
                 self.status_bar.reminders_watch,
                 "authorization_status",
-                side_effect=self.status_bar.reminders_watch.RemindersUnavailableError(
-                    "private EventKit error"
-                ),
+                side_effect=self.status_bar.reminders_watch.RemindersUnavailableError("private EventKit error"),
             ),
             patch.object(
                 self.status_bar.reminders_watch,
@@ -19566,9 +18794,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
             monotonic=lambda: self.clock[0],
             dispatch_main=drains.append,
         )
-        self.controller.settings = (
-            self.controller.settings.with_reminder_alerts_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_reminder_alerts_enabled(True)
         self.controller._reminders_observation_active = True
         self.controller._reminders_observation_fire_at = self.clock[0] + 60.0
         self.controller._os_poll_generation = 23
@@ -19598,9 +18824,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
                 self.controller._os_poll_worker.wait_idle(timeout_seconds=2.0),
                 "reminder observations did not complete",
             )
-            self.assertGreaterEqual(
-                self.controller._os_poll_worker.snapshot().completed, 2
-            )
+            self.assertGreaterEqual(self.controller._os_poll_worker.snapshot().completed, 2)
 
         self.assertEqual(len(reads), 2)
         self.assertEqual(
@@ -19617,27 +18841,19 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
         )
 
     def test_disabled_launch_has_no_legacy_reminder_timer_or_eventkit_access(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_reminder_alerts_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_reminder_alerts_enabled(False)
         timer_api = MagicMock()
         status_item = MagicMock()
         status_api = MagicMock()
-        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = (
-            status_item
-        )
+        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = status_item
 
         with ExitStack() as stack:
             stack.enter_context(patch.object(self.status_bar, "NSApp"))
             stack.enter_context(patch.object(self.status_bar, "NSStatusBar", status_api))
             stack.enter_context(patch.object(self.status_bar, "NSTimer", timer_api))
             stack.enter_context(patch.object(self.status_bar.threading, "Thread"))
-            fetch_due = stack.enter_context(
-                patch.object(self.status_bar.reminders_watch, "fetch_due")
-            )
-            request_access = stack.enter_context(
-                patch.object(self.status_bar.reminders_watch, "request_access")
-            )
+            fetch_due = stack.enter_context(patch.object(self.status_bar.reminders_watch, "fetch_due"))
+            request_access = stack.enter_context(patch.object(self.status_bar.reminders_watch, "request_access"))
             authorization_status = stack.enter_context(
                 patch.object(self.status_bar.reminders_watch, "authorization_status")
             )
@@ -19669,9 +18885,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
         authorization_status.assert_not_called()
 
     def test_reminder_sleep_and_termination_withdraw_timer_cue_and_late_result(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_reminder_alerts_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_reminder_alerts_enabled(True)
         self.controller.reconcile_presentation_timers(self._inputs())
         reminder_timer = next(
             timer
@@ -19682,14 +18896,10 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
             self.status_bar.RemindersObservationResult(True, ("d" * 64,))
         )
         cue_timer = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
         )
 
-        self.controller.reconcile_presentation_timers(
-            self._inputs(display_asleep=True)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(display_asleep=True))
 
         self.assertEqual(reminder_timer.invalidations, 1)
         self.assertEqual(cue_timer.invalidations, 1)
@@ -19712,9 +18922,7 @@ class ReminderObservationRuntimeTests(unittest.TestCase):
             request,
         )
         previous_seen = dict(self.controller.reminders_seen)
-        self.controller._reminders_permission_request_token = (
-            self.controller._reminders_permission_generation
-        )
+        self.controller._reminders_permission_request_token = self.controller._reminders_permission_generation
 
         with (
             patch.object(self.controller.virtual_status_device, "terminate"),
@@ -19741,15 +18949,11 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
         self.clock = [650.0]
         self.factory = _PresentationTimerFactory()
         self.controller._presentation_monotonic = lambda: self.clock[0]
-        self.controller._runtime_timer_registry = (
-            self.controller._build_presentation_timer_registry(
+        self.controller._runtime_timer_registry = self.controller._build_presentation_timer_registry(
                 timer_factory=self.factory,
                 monotonic=lambda: self.clock[0],
             )
-        )
-        self.controller._presentation_scheduler_state = (
-            self.status_bar.PresentationSchedulerState()
-        )
+        self.controller._presentation_scheduler_state = self.status_bar.PresentationSchedulerState()
         self.controller._presentation_scheduler_inputs = None
         self.controller._runtime_started = True
         self.controller.leds_enabled = False
@@ -19774,9 +18978,7 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
         return self.status_bar.PresentationSchedulerInputs(**values)
 
     def test_calendar_intent_is_disabled_by_default_and_withdrawn_immediately(self) -> None:
-        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
-            False
-        )
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(False)
         with patch.object(
             self.status_bar.calendar_watch,
             "next_event_start",
@@ -19791,26 +18993,21 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
             self.assertEqual(self.controller._os_poll_worker.snapshot().submitted, 0)
             next_event_start.assert_not_called()
 
-            self.controller.settings = (
-                self.controller.settings.with_calendar_alerts_enabled(True)
-            )
+            self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(True)
             for _ in range(100):
                 self.controller.reconcile_presentation_timers(self._inputs())
 
             calendar_timers = tuple(
                 timer
                 for timer in self.factory.live
-                if timer.feature
-                is self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION
+                if timer.feature is self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION
             )
             self.assertEqual(len(calendar_timers), 1)
             self.assertEqual(calendar_timers[0].delay, 30.0)
             self.assertEqual(calendar_timers[0].interval, 30.0)
             self.assertEqual(calendar_timers[0].tolerances, [3.0])
 
-            self.controller.reconcile_presentation_timers(
-                self._inputs(display_asleep=True)
-            )
+            self.controller.reconcile_presentation_timers(self._inputs(display_asleep=True))
             self.controller.runtimeTimerFired_(calendar_timers[0])
             self.assertEqual(calendar_timers[0].invalidations, 1)
             self.assertEqual(
@@ -19824,13 +19021,10 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
             wake_timer = next(
                 timer
                 for timer in self.factory.live
-                if timer.feature
-                is self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION
+                if timer.feature is self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION
             )
 
-            self.controller.settings = (
-                self.controller.settings.with_calendar_alerts_enabled(False)
-            )
+            self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(False)
             self.controller.reconcile_presentation_timers(self._inputs())
 
             self.assertNotIn(
@@ -19844,10 +19038,9 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
 
     def test_calendar_tick_uses_private_os_poll_adapter(self) -> None:
         submissions = []
-        self.controller.settings = (
-            self.controller.settings.with_calendar_alerts_enabled(True)
-            .with_calendar_lead_minutes(12.0)
-        )
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
+            True
+        ).with_calendar_lead_minutes(12.0)
         self.controller._calendar_observation_active = True
         self.controller._os_poll_generation = 8
         self.controller._presentation_scheduler_inputs = self._inputs()
@@ -19885,9 +19078,7 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
         self.assertNotIn("identifier", repr(result).casefold())
 
     def test_calendar_results_are_generation_deadline_and_lifecycle_fenced(self) -> None:
-        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
-            True
-        )
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(True)
         self.controller._calendar_observation_active = True
         self.controller._os_poll_generation = 11
         self.controller._presentation_scheduler_inputs = self._inputs()
@@ -19929,9 +19120,7 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
         self.assertIsNone(self.controller.calendar_event_title)
         self.controller.refresh_.assert_called_once_with(None)
 
-        self.controller._presentation_scheduler_inputs = self._inputs(
-            display_asleep=True
-        )
+        self.controller._presentation_scheduler_inputs = self._inputs(display_asleep=True)
         self.controller._apply_os_poll_result(
             current,
             self.status_bar.CalendarObservationResult(
@@ -19939,9 +19128,7 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
                 starts_in_seconds=None,
             ),
         )
-        self.controller._presentation_scheduler_inputs = self._inputs(
-            app_terminating=True
-        )
+        self.controller._presentation_scheduler_inputs = self._inputs(app_terminating=True)
         self.controller._apply_os_poll_result(
             current,
             self.status_bar.CalendarObservationResult(
@@ -19954,9 +19141,7 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
         self.controller.refresh_.assert_called_once_with(None)
 
     def test_calendar_timeout_is_static_and_backs_off_without_retry(self) -> None:
-        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
-            True
-        )
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(True)
         self.controller._calendar_observation_active = True
         self.controller._os_poll_generation = 4
         self.controller._presentation_scheduler_inputs = self._inputs()
@@ -20016,9 +19201,7 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
 
     def test_calendar_toggle_reconciles_and_submits_only_through_worker(self) -> None:
         inputs = self._inputs()
-        self.controller.virtual_status_device = SimpleNamespace(
-            presentation_scheduler_inputs=lambda: inputs
-        )
+        self.controller.virtual_status_device = SimpleNamespace(presentation_scheduler_inputs=lambda: inputs)
         worker = MagicMock()
         self.controller._os_poll_worker = worker
         enabled_sender = SimpleNamespace(state=lambda: 1)
@@ -20041,8 +19224,7 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
             calendar_timer = next(
                 timer
                 for timer in self.factory.live
-                if timer.feature
-                is self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION
+                if timer.feature is self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION
             )
             self.assertEqual(calendar_timer.interval, 30.0)
             self.assertEqual(worker.submit.call_count, 1)
@@ -20057,25 +19239,19 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
         next_event_start.assert_not_called()
 
     def test_disabled_launch_has_no_legacy_calendar_timer_or_event_lookup(self) -> None:
-        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
-            False
-        )
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(False)
         self.controller._runtime_started = False
         timer_api = MagicMock()
         status_item = MagicMock()
         status_api = MagicMock()
-        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = (
-            status_item
-        )
+        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = status_item
 
         with ExitStack() as stack:
             stack.enter_context(patch.object(self.status_bar, "NSApp"))
             stack.enter_context(patch.object(self.status_bar, "NSStatusBar", status_api))
             stack.enter_context(patch.object(self.status_bar, "NSTimer", timer_api))
             stack.enter_context(patch.object(self.status_bar.threading, "Thread"))
-            next_event_start = stack.enter_context(
-                patch.object(self.status_bar.calendar_watch, "next_event_start")
-            )
+            next_event_start = stack.enter_context(patch.object(self.status_bar.calendar_watch, "next_event_start"))
             for name in (
                 "load_operator_local_state",
                 "start_event_server",
@@ -20106,14 +19282,10 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
         next_event_start.assert_not_called()
 
     def test_termination_withdraws_calendar_and_blocks_late_callback(self) -> None:
-        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
-            True
-        )
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(True)
         self.controller.reconcile_presentation_timers(self._inputs())
         calendar_timer = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.CALENDAR_OBSERVATION
         )
         submitted = self.controller._os_poll_worker.snapshot().submitted
 
@@ -20161,9 +19333,7 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
             monotonic=lambda: self.clock[0],
             dispatch_main=drains.append,
         )
-        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
-            True
-        )
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(True)
         self.controller._calendar_observation_active = True
         self.controller._os_poll_generation = 5
         self.controller._presentation_scheduler_inputs = self._inputs()
@@ -20192,9 +19362,7 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
                 self.controller._os_poll_worker.wait_idle(timeout_seconds=2.0),
                 "calendar observations did not complete",
             )
-            self.assertGreaterEqual(
-                self.controller._os_poll_worker.snapshot().completed, 2
-            )
+            self.assertGreaterEqual(self.controller._os_poll_worker.snapshot().completed, 2)
 
         self.assertEqual(len(reads), 2)
         self.assertEqual(
@@ -20213,12 +19381,8 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
 
     def test_late_access_recheck_while_disabled_creates_no_calendar_work(self) -> None:
         inputs = self._inputs()
-        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
-            False
-        )
-        self.controller.virtual_status_device = SimpleNamespace(
-            presentation_scheduler_inputs=lambda: inputs
-        )
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(False)
+        self.controller.virtual_status_device = SimpleNamespace(presentation_scheduler_inputs=lambda: inputs)
         worker = MagicMock()
         self.controller._os_poll_worker = worker
 
@@ -20240,15 +19404,11 @@ class CalendarObservationRuntimeTests(unittest.TestCase):
 
     def test_calendar_lead_change_obsoletes_in_flight_result(self) -> None:
         inputs = self._inputs()
-        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(
-            True
-        )
+        self.controller.settings = self.controller.settings.with_calendar_alerts_enabled(True)
         self.controller._calendar_observation_active = True
         self.controller._os_poll_generation = 15
         self.controller._presentation_scheduler_inputs = inputs
-        self.controller.virtual_status_device = SimpleNamespace(
-            presentation_scheduler_inputs=lambda: inputs
-        )
+        self.controller.virtual_status_device = SimpleNamespace(presentation_scheduler_inputs=lambda: inputs)
         self.controller.refresh_ = MagicMock()
         stale = self.status_bar.RuntimeWorkCommand(
             self.status_bar.RuntimeWorkerDomain.OS_POLL,
@@ -20284,15 +19444,11 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
         self.clock = [625.0]
         self.factory = _PresentationTimerFactory()
         self.controller._presentation_monotonic = lambda: self.clock[0]
-        self.controller._runtime_timer_registry = (
-            self.controller._build_presentation_timer_registry(
+        self.controller._runtime_timer_registry = self.controller._build_presentation_timer_registry(
                 timer_factory=self.factory,
                 monotonic=lambda: self.clock[0],
             )
-        )
-        self.controller._presentation_scheduler_state = (
-            self.status_bar.PresentationSchedulerState()
-        )
+        self.controller._presentation_scheduler_state = self.status_bar.PresentationSchedulerState()
         self.controller._presentation_scheduler_inputs = None
         self.controller._runtime_started = True
         self.controller.leds_enabled = False
@@ -20317,9 +19473,7 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
         return self.status_bar.PresentationSchedulerInputs(**values)
 
     def test_weather_intent_is_explicitly_gated_and_exactly_one_tolerant_timer(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_weather_alerts_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_weather_alerts_enabled(False)
         with (
             patch.object(self.status_bar.threading, "Thread") as thread_type,
             patch.object(self.status_bar.weather_watch, "ip_location") as ip_location,
@@ -20333,10 +19487,7 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
             )
             self.assertNotIn(
                 self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH,
-                tuple(
-                    snapshot.domain
-                    for snapshot in self.controller._runtime_worker_registry.snapshot()
-                ),
+                tuple(snapshot.domain for snapshot in self.controller._runtime_worker_registry.snapshot()),
             )
             disabled_worker = self.controller._weather_worker.snapshot()
             self.assertFalse(disabled_worker.thread_alive)
@@ -20345,16 +19496,12 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
             ip_location.assert_not_called()
             active_alerts.assert_not_called()
 
-            self.controller.settings = (
-                self.controller.settings.with_weather_alerts_enabled(True)
-            )
+            self.controller.settings = self.controller.settings.with_weather_alerts_enabled(True)
             for _ in range(100):
                 self.controller.reconcile_presentation_timers(self._inputs())
 
         weather_timers = tuple(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
         )
         self.assertEqual(len(weather_timers), 1)
         self.assertEqual(weather_timers[0].delay, 600.0)
@@ -20364,17 +19511,13 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
         self.assertFalse(self.factory.registrations[-1][1])
         self.assertIn(
             self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH,
-            tuple(
-                snapshot.domain
-                for snapshot in self.controller._runtime_worker_registry.snapshot()
-            ),
+            tuple(snapshot.domain for snapshot in self.controller._runtime_worker_registry.snapshot()),
         )
 
     def test_weather_tick_uses_fixed_key_and_bounded_derived_worker_values(self) -> None:
         submissions = []
-        self.controller.settings = (
-            self.controller.settings.with_weather_alerts_enabled(True)
-            .with_weather_location(41.88, -87.63)
+        self.controller.settings = self.controller.settings.with_weather_alerts_enabled(True).with_weather_location(
+            41.88, -87.63
         )
         self.controller._weather_observation_active = True
         self.controller._weather_observation_generation = 8
@@ -20428,10 +19571,7 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
         self.assertNotIn("41.88", rendered)
         self.assertNotIn("-87.63", rendered)
 
-        private_error = (
-            "GET https://api.weather.gov/private?point=41.88,-87.63 failed: "
-            + "private-body" * 1000
-        )
+        private_error = "GET https://api.weather.gov/private?point=41.88,-87.63 failed: " + "private-body" * 1000
         with patch.object(
             self.status_bar.weather_watch,
             "active_alerts",
@@ -20448,6 +19588,75 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
             ),
         )
         self.assertNotIn(private_error, repr(failed))
+
+    def test_weather_without_manual_location_or_ip_consent_performs_no_request(self) -> None:
+        command = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH,
+            self.status_bar.WEATHER_WORKER_KEY,
+            1,
+            self.clock[0] + self.status_bar.WEATHER_FETCH_TIMEOUT_SECONDS,
+            self.status_bar.WeatherObservationRequest(None, None),
+        )
+        with (
+            patch.object(self.status_bar.weather_watch, "ip_location") as ip_location,
+            patch.object(self.status_bar.weather_watch, "active_alerts") as active_alerts,
+        ):
+            result = self.controller._execute_weather_command(command)
+
+        self.assertEqual(
+            result,
+            self.status_bar.WeatherObservationResult(False, False, None),
+        )
+        ip_location.assert_not_called()
+        active_alerts.assert_not_called()
+
+    def test_weather_timer_copies_persisted_ip_consent_into_worker_command(self) -> None:
+        submissions = []
+        self.controller.settings = (
+            self.controller.settings.with_weather_alerts_enabled(True)
+            .with_weather_location(None, None)
+            .with_weather_ip_geolocation_enabled(True)
+        )
+        self.controller._weather_observation_active = True
+        self.controller._presentation_scheduler_inputs = self._inputs()
+        self.controller._weather_worker = SimpleNamespace(submit=submissions.append)
+
+        self.controller._weather_observation_timer_fired()
+
+        self.assertEqual(len(submissions), 1)
+        self.assertEqual(
+            submissions[0].payload,
+            self.status_bar.WeatherObservationRequest(None, None, True),
+        )
+
+    def test_weather_ip_location_runs_only_with_explicit_command_consent(self) -> None:
+        command = self.status_bar.RuntimeWorkCommand(
+            self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH,
+            self.status_bar.WEATHER_WORKER_KEY,
+            1,
+            self.clock[0] + self.status_bar.WEATHER_FETCH_TIMEOUT_SECONDS,
+            self.status_bar.WeatherObservationRequest(None, None, True),
+        )
+        with (
+            patch.object(
+                self.status_bar.weather_watch,
+                "ip_location",
+                return_value=(41.88, -87.63),
+            ) as ip_location,
+            patch.object(
+                self.status_bar.weather_watch,
+                "active_alerts",
+                return_value=[],
+            ) as active_alerts,
+        ):
+            result = self.controller._execute_weather_command(command)
+
+        self.assertEqual(
+            result,
+            self.status_bar.WeatherObservationResult(True, False, None),
+        )
+        ip_location.assert_called_once_with()
+        active_alerts.assert_called_once_with(41.88, -87.63)
 
     def test_weather_location_change_cancels_old_generation_and_keeps_latest_pending(self) -> None:
         started = threading.Event()
@@ -20471,9 +19680,8 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
             monotonic=lambda: self.clock[0],
             dispatch_main=drains.append,
         )
-        self.controller.settings = (
-            self.controller.settings.with_weather_alerts_enabled(True)
-            .with_weather_location(41.88, -87.63)
+        self.controller.settings = self.controller.settings.with_weather_alerts_enabled(True).with_weather_location(
+            41.88, -87.63
         )
         self.controller._weather_observation_active = True
         self.controller._weather_observation_fire_at = self.clock[0] + 600.0
@@ -20513,9 +19721,7 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
                 self.controller._weather_worker.wait_idle(timeout_seconds=2.0),
                 "weather observations did not complete",
             )
-            self.assertGreaterEqual(
-                self.controller._weather_worker.snapshot().completed, 2
-            )
+            self.assertGreaterEqual(self.controller._weather_worker.snapshot().completed, 2)
 
         self.assertEqual(
             reads,
@@ -20554,9 +19760,8 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
             monotonic=lambda: self.clock[0],
             dispatch_main=drains.append,
         )
-        self.controller.settings = (
-            self.controller.settings.with_weather_alerts_enabled(True)
-            .with_weather_location(41.88, -87.63)
+        self.controller.settings = self.controller.settings.with_weather_alerts_enabled(True).with_weather_location(
+            41.88, -87.63
         )
         self.controller.reconcile_presentation_timers(self._inputs())
 
@@ -20581,10 +19786,7 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
             self.assertEqual(snapshot.queued, 1)
             self.assertEqual(snapshot.replaced_pending, 98)
             self.assertEqual(
-                sum(
-                    thread.name == "sidepulse-runtime-weather-fetch"
-                    for thread in threading.enumerate()
-                ),
+                sum(thread.name == "sidepulse-runtime-weather-fetch" for thread in threading.enumerate()),
                 1,
             )
 
@@ -20593,9 +19795,7 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
                 self.controller._weather_worker.wait_idle(timeout_seconds=2.0),
                 "weather observations did not complete",
             )
-            self.assertGreaterEqual(
-                self.controller._weather_worker.snapshot().completed, 2
-            )
+            self.assertGreaterEqual(self.controller._weather_worker.snapshot().completed, 2)
 
         ip_location.assert_not_called()
         self.assertEqual(len(reads), 2)
@@ -20610,31 +19810,22 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
             1,
         )
 
-        self.controller.settings = (
-            self.controller.settings.with_weather_alerts_enabled(False)
-        )
+        self.controller.settings = self.controller.settings.with_weather_alerts_enabled(False)
         self.controller.reconcile_presentation_timers(self._inputs())
         submitted = self.controller._weather_worker.snapshot().submitted
         self.controller._weather_observation_timer_fired()
-        registered = {
-            snapshot.domain: snapshot
-            for snapshot in self.controller._runtime_worker_registry.snapshot()
-        }
+        registered = {snapshot.domain: snapshot for snapshot in self.controller._runtime_worker_registry.snapshot()}
 
         self.assertIn(
             self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH,
             registered,
         )
-        self.assertTrue(
-            registered[self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH].accepting
-        )
+        self.assertTrue(registered[self.status_bar.RuntimeWorkerDomain.WEATHER_FETCH].accepting)
         self.assertEqual(self.controller._weather_worker.snapshot().submitted, submitted)
 
     def test_weather_toggle_uses_shared_registry_and_generation_fences_without_raw_thread(self) -> None:
         inputs = self._inputs()
-        self.controller.virtual_status_device = SimpleNamespace(
-            presentation_scheduler_inputs=lambda: inputs
-        )
+        self.controller.virtual_status_device = SimpleNamespace(presentation_scheduler_inputs=lambda: inputs)
         worker = self.controller._weather_worker
         self.controller.weather_alert_active = True
         self.controller.weather_alert_event = "Tornado warning"
@@ -20684,10 +19875,7 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
         ip_location.assert_not_called()
         active_alerts.assert_not_called()
 
-        domains = tuple(
-            snapshot.domain
-            for snapshot in self.controller._runtime_worker_registry.snapshot()
-        )
+        domains = tuple(snapshot.domain for snapshot in self.controller._runtime_worker_registry.snapshot())
         self.assertEqual(
             domains,
             (
@@ -20698,16 +19886,12 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
         )
 
     def test_weather_failure_withdraws_truth_and_rearms_once_at_retry_boundary(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_weather_alerts_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_weather_alerts_enabled(True)
         worker = MagicMock()
         self.controller._weather_worker = worker
         self.controller.reconcile_presentation_timers(self._inputs())
         first_timer = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
         )
         worker.reset_mock()
         self.controller.weather_alert_active = True
@@ -20733,9 +19917,7 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
             self.clock[0] + self.status_bar.WEATHER_WATCH_RETRY_SECONDS,
         )
         retry_timer = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
         )
         self.assertIsNot(retry_timer, first_timer)
         self.assertEqual(first_timer.invalidations, 1)
@@ -20764,14 +19946,10 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
         )
 
     def test_weather_results_are_generation_deadline_sleep_and_termination_fenced(self) -> None:
-        self.controller.settings = (
-            self.controller.settings.with_weather_alerts_enabled(True)
-        )
+        self.controller.settings = self.controller.settings.with_weather_alerts_enabled(True)
         self.controller.reconcile_presentation_timers(self._inputs())
         weather_timer = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.WEATHER_OBSERVATION
         )
         generation = self.controller._weather_observation_generation
         request = self.status_bar.WeatherObservationRequest(None, None)
@@ -20805,13 +19983,9 @@ class WeatherObservationRuntimeTests(unittest.TestCase):
         self.controller.refresh_.assert_not_called()
 
         current = command(generation, self.clock[0] + 30.0)
-        self.controller._presentation_scheduler_inputs = self._inputs(
-            display_asleep=True
-        )
+        self.controller._presentation_scheduler_inputs = self._inputs(display_asleep=True)
         self.controller._apply_weather_result(current, active)
-        self.controller._presentation_scheduler_inputs = self._inputs(
-            app_terminating=True
-        )
+        self.controller._presentation_scheduler_inputs = self._inputs(app_terminating=True)
         self.controller._apply_weather_result(current, active)
         self.assertFalse(self.controller.weather_alert_active)
         self.controller.refresh_.assert_not_called()
@@ -20898,15 +20072,11 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.clock = [700.0]
         self.factory = _PresentationTimerFactory()
         self.controller._presentation_monotonic = lambda: self.clock[0]
-        self.controller._runtime_timer_registry = (
-            self.controller._build_presentation_timer_registry(
+        self.controller._runtime_timer_registry = self.controller._build_presentation_timer_registry(
                 timer_factory=self.factory,
                 monotonic=lambda: self.clock[0],
             )
-        )
-        self.controller._presentation_scheduler_state = (
-            self.status_bar.PresentationSchedulerState()
-        )
+        self.controller._presentation_scheduler_state = self.status_bar.PresentationSchedulerState()
         self.controller._presentation_scheduler_inputs = None
 
     def _inputs(self, **changes):
@@ -20928,15 +20098,11 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller._runtime_started = True
         self.controller.leds_enabled = False
         window_state = {"visible": True}
-        self.controller.settings_window = SimpleNamespace(
-            isVisible=lambda: window_state["visible"]
-        )
+        self.controller.settings_window = SimpleNamespace(isVisible=lambda: window_state["visible"])
         self.controller.current_settings_pane = "led_behavior"
         preview = MagicMock()
         preview.isHiddenOrHasHiddenAncestor.return_value = False
-        preview.visibleRect.return_value = SimpleNamespace(
-            size=SimpleNamespace(width=120.0)
-        )
+        preview.visibleRect.return_value = SimpleNamespace(size=SimpleNamespace(width=120.0))
         self.controller.settings_fields = {"signal_preview:calendar": preview}
         inputs = self._inputs(screen_bar_enabled=False, visible=False)
 
@@ -20946,8 +20112,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         timer = next(
             timer
             for timer in self.factory.live
-            if timer.feature
-            is self.status_bar.RuntimeFeature.SETTINGS_SIGNAL_PREVIEW
+            if timer.feature is self.status_bar.RuntimeFeature.SETTINGS_SIGNAL_PREVIEW
         )
         self.assertGreaterEqual(timer.interval, 1.0 / 30.0)
         self.assertEqual(timer.tolerances, [timer.interval * 0.1])
@@ -20956,8 +20121,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.assertIn((timer, False), self.factory.registrations)
         self.assertEqual(
             sum(
-                candidate.feature
-                is self.status_bar.RuntimeFeature.SETTINGS_SIGNAL_PREVIEW
+                candidate.feature is self.status_bar.RuntimeFeature.SETTINGS_SIGNAL_PREVIEW
                 for candidate in self.factory.created
             ),
             1,
@@ -20983,9 +20147,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller.leds_enabled = False
         self.controller.settings_window = SimpleNamespace(isVisible=lambda: True)
         self.controller.current_settings_pane = "color_studio"
-        self.controller.color_preview_rows = [
-            {"led_count": 8, "dots": (), "legend": MagicMock()}
-        ]
+        self.controller.color_preview_rows = [{"led_count": 8, "dots": (), "legend": MagicMock()}]
         engine = MagicMock()
         engine.step.return_value = ()
         self.controller.color_preview_wasm = {8: engine}
@@ -20997,8 +20159,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         timer = next(
             timer
             for timer in self.factory.live
-            if timer.feature
-            is self.status_bar.RuntimeFeature.SETTINGS_COLOR_PREVIEW
+            if timer.feature is self.status_bar.RuntimeFeature.SETTINGS_COLOR_PREVIEW
         )
         self.assertGreaterEqual(timer.interval, 1.0 / 30.0)
         self.assertIn((timer, False), self.factory.registrations)
@@ -21006,8 +20167,8 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller.runtimeTimerFired_(timer)
         engine.step.assert_called_once()
 
-        self.controller._accessibility_display_preferences = (
-            self.status_bar.AccessibilityDisplayPreferences(reduce_motion=True)
+        self.controller._accessibility_display_preferences = self.status_bar.AccessibilityDisplayPreferences(
+            reduce_motion=True
         )
         self.controller._reconcile_current_presentation_inputs()
 
@@ -21023,19 +20184,13 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller._runtime_started = True
         self.controller.leds_enabled = False
         window_state = {"visible": True}
-        self.controller.setup_window = SimpleNamespace(
-            isVisible=lambda: window_state["visible"]
-        )
+        self.controller.setup_window = SimpleNamespace(isVisible=lambda: window_state["visible"])
         demo_view = MagicMock()
         self.controller.setup_fields = {"demo_view": demo_view}
         active = self._inputs(screen_bar_enabled=False, visible=False)
 
         self.controller.reconcile_presentation_timers(active)
-        first = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.SETUP_DEMO
-        )
+        first = next(timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.SETUP_DEMO)
         self.assertEqual(first.interval, 1.0 / 30.0)
         self.assertIn((first, False), self.factory.registrations)
 
@@ -21053,33 +20208,21 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         window_state["visible"] = True
         self.controller._reconcile_current_presentation_inputs()
         second = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.SETUP_DEMO
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.SETUP_DEMO
         )
-        self.controller.reconcile_presentation_timers(
-            self._inputs(display_asleep=True)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(display_asleep=True))
         self.assertEqual(second.invalidations, 1)
 
         self.controller.reconcile_presentation_timers(active)
-        third = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.SETUP_DEMO
-        )
-        self.controller.reconcile_presentation_timers(
-            self._inputs(app_terminating=True)
-        )
+        third = next(timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.SETUP_DEMO)
+        self.controller.reconcile_presentation_timers(self._inputs(app_terminating=True))
         self.assertEqual(third.invalidations, 1)
 
     def test_task9g_settings_message_deadline_replaces_and_elapsed_close_does_not_replay(self) -> None:
         self.controller._runtime_started = True
         self.controller.leds_enabled = False
         window_state = {"visible": True}
-        self.controller.settings_window = SimpleNamespace(
-            isVisible=lambda: window_state["visible"]
-        )
+        self.controller.settings_window = SimpleNamespace(isVisible=lambda: window_state["visible"])
         label = MagicMock()
         self.controller.settings_fields = {"message": label}
         inputs = self._inputs(screen_bar_enabled=False, visible=False)
@@ -21089,16 +20232,14 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         first = next(
             timer
             for timer in self.factory.live
-            if timer.feature
-            is self.status_bar.RuntimeFeature.SETTINGS_MESSAGE_DEADLINE
+            if timer.feature is self.status_bar.RuntimeFeature.SETTINGS_MESSAGE_DEADLINE
         )
         self.clock[0] += 1.0
         self.controller.set_settings_message("Second")
         second = next(
             timer
             for timer in self.factory.live
-            if timer.feature
-            is self.status_bar.RuntimeFeature.SETTINGS_MESSAGE_DEADLINE
+            if timer.feature is self.status_bar.RuntimeFeature.SETTINGS_MESSAGE_DEADLINE
         )
 
         self.assertIsNot(first, second)
@@ -21145,16 +20286,14 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
             first = next(
                 timer
                 for timer in self.factory.live
-                if timer.feature
-                is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+                if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
             )
             self.clock[0] += 1.0
             self.controller.testSignal_(reminder)
             second = next(
                 timer
                 for timer in self.factory.live
-                if timer.feature
-                is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+                if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
             )
 
         self.assertIsNot(first, second)
@@ -21163,9 +20302,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller.runtimeTimerFired_(first)
         self.assertEqual(self.controller.test_signal_key, "reminders")
 
-        self.controller.reconcile_presentation_timers(
-            self._inputs(display_asleep=True)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(display_asleep=True))
         self.assertEqual(second.invalidations, 1)
         self.assertIsNone(self.controller.test_signal_key)
         self.assertEqual(self.controller.test_signal_until, 0.0)
@@ -21187,18 +20324,18 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller.completion_sweep_until = self.clock[0] + 5.0
         self.controller.all_clear_until = self.clock[0] + 8.0
 
-        with patch.object(
+        with (
+            patch.object(
             self.status_bar.time,
             "monotonic",
             side_effect=lambda: self.clock[0],
-        ), patch.object(self.status_bar, "NSColor"):
+            ),
+            patch.object(self.status_bar, "NSColor"),
+        ):
             self.controller.flash_view(view)
 
         timers = [
-            timer
-            for timer in self.factory.live
-            if timer.feature
-            is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
         ]
         self.assertEqual(len(timers), 1)
         self.assertIsNone(timers[0].interval)
@@ -21207,20 +20344,14 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller.runtimeTimerFired_(timers[0])
         layer.setBackgroundColor_.assert_called_with(None)
         next_timer = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature
-            is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
         )
         self.assertEqual(next_timer.delay, 4.0)
 
         self.clock[0] += 4.0
         self.controller.runtimeTimerFired_(next_timer)
         final_timer = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature
-            is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
         )
         self.assertEqual(final_timer.delay, 3.0)
 
@@ -21240,10 +20371,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller.test_signal_until = self.clock[0] + 1.0
         self.controller._reconcile_current_presentation_inputs()
         timer = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature
-            is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
         )
 
         self.clock[0] += 1.0
@@ -21290,9 +20418,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.assertIs(self.controller._status_finite_cues.active, first)
         self.assertIs(self.controller._status_finite_cues.pending, second)
         first_timer = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
         )
         self.assertEqual(first_timer.delay, 1.0)
         self.assertIsNone(first_timer.interval)
@@ -21308,9 +20434,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller.runtimeTimerFired_(first_timer)
         self.assertIs(self.controller._status_finite_cues.active, second)
         second_timer = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
         )
         self.assertIsNot(second_timer, first_timer)
         self.assertEqual(second_timer.delay, 1.0)
@@ -21357,9 +20481,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller.set_status_emphasis_plan(glance, (cue,))
         self.controller.set_status(self.status_bar.STATE_DONE)
         timer = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.TEST_SIGNAL_DEADLINE
         )
 
         self.controller.reconcile_presentation_timers(
@@ -21420,12 +20542,8 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
             1,
             0.5,
         )
-        self.assertFalse(
-            self.controller.set_status_emphasis_plan(newer, (content_bearing,))
-        )
-        self.assertFalse(
-            self.controller.set_status_emphasis_plan(newer, (valid, valid, third))
-        )
+        self.assertFalse(self.controller.set_status_emphasis_plan(newer, (content_bearing,)))
+        self.assertFalse(self.controller.set_status_emphasis_plan(newer, (valid, valid, third)))
         older = dataclass_replace(newer, relay_epoch=1.0)
         self.assertFalse(self.controller.set_status_emphasis_plan(older, (valid,)))
         self.assertIs(self.controller._current_resolved_glance, newer)
@@ -21452,7 +20570,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(button.setTitle_.call_args.args[0], "")
         self.assertEqual(
             button.setToolTip_.call_args.args[0],
-            "JR Bar Agent Monitor: Done",
+            "JR-Bar Agent Monitor: Done",
         )
 
         glance = ResolvedGlance(
@@ -21492,17 +20610,13 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
             focus_profile_rules={},
         )
 
-        self.controller.reconcile_presentation_timers(
-            self._inputs(screen_bar_enabled=False, visible=False)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(screen_bar_enabled=False, visible=False))
         self.assertNotIn(
             self.status_bar.RuntimeFeature.DISPLAY_ENVIRONMENT,
             self.controller._runtime_timer_registry.snapshot().active_features,
         )
 
-        self.controller.reconcile_presentation_timers(
-            self._inputs(screen_bar_enabled=True, visible=True)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(screen_bar_enabled=True, visible=True))
         self.assertIn(
             self.status_bar.RuntimeFeature.DISPLAY_ENVIRONMENT,
             self.controller._runtime_timer_registry.snapshot().active_features,
@@ -21538,9 +20652,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
                 self.assertEqual(timer.interval, 3.0)
                 self.assertEqual(timer.tolerances, [0.25])
                 self.controller._set_display_environment_active(False)
-                self.controller._runtime_timer_registry.invalidate(
-                    self.status_bar.RuntimeFeature.DISPLAY_ENVIRONMENT
-                )
+                self.controller._runtime_timer_registry.invalidate(self.status_bar.RuntimeFeature.DISPLAY_ENVIRONMENT)
 
     def test_display_environment_tick_submits_generation_fenced_os_poll(self) -> None:
         submissions = []
@@ -21636,12 +20748,10 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller._os_poll_generation = 6
         self.controller.last_watched_brightness = 100
         self.controller.last_watched_focus_scale = 1.0
-        self.controller.settings = (
-            self.controller.settings.with_focus_sync_enabled(True).with_focus_dim_rule(
+        self.controller.settings = self.controller.settings.with_focus_sync_enabled(True).with_focus_dim_rule(
                 "focus-work",
                 0.5,
             )
-        )
         self.controller.refresh_ = MagicMock()
 
         self.controller._apply_os_poll_result(stale, result)
@@ -21669,9 +20779,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
             time.monotonic() + 10.0,
             request,
         )
-        preferences = self.status_bar.AccessibilityDisplayPreferences(
-            reduce_motion=True
-        )
+        preferences = self.status_bar.AccessibilityDisplayPreferences(reduce_motion=True)
         result = self.status_bar.DisplayEnvironmentResult(
             brightness=None,
             active_focus_ids=None,
@@ -21680,9 +20788,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller._display_environment_active = True
         self.controller._os_poll_generation = 3
         self.controller.refresh_ = MagicMock()
-        prior_signal = self.controller.failure_signal_coordinator.active(
-            self.clock[0]
-        )
+        prior_signal = self.controller.failure_signal_coordinator.active(self.clock[0])
 
         self.controller._apply_os_poll_result(command, result)
         self.controller._apply_os_poll_result(command, result)
@@ -21701,14 +20807,10 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller.timebox_ends_at = self.clock[0] + 25.0
         self.controller.timebox_total_seconds = 25.0
 
-        self.controller.reconcile_presentation_timers(
-            self._inputs(screen_bar_enabled=False, visible=False)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(screen_bar_enabled=False, visible=False))
 
         timer = next(
-            timer
-            for timer in self.factory.live
-            if timer.feature is self.status_bar.RuntimeFeature.TIMEBOX_DEADLINE
+            timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.TIMEBOX_DEADLINE
         )
         self.assertEqual(timer.delay, 25.0)
         self.assertIsNone(timer.interval)
@@ -21722,9 +20824,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller._runtime_started = True
         self.controller.leds_enabled = False
         inputs = self._inputs(screen_bar_enabled=False, visible=False)
-        self.controller.virtual_status_device = SimpleNamespace(
-            presentation_scheduler_inputs=lambda: inputs
-        )
+        self.controller.virtual_status_device = SimpleNamespace(presentation_scheduler_inputs=lambda: inputs)
         self.controller.refresh_ = MagicMock()
         sender = SimpleNamespace(representedObject=lambda: 1)
 
@@ -21735,9 +20835,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         ):
             self.controller.startTimebox_(sender)
             timer = next(
-                timer
-                for timer in self.factory.live
-                if timer.feature is self.status_bar.RuntimeFeature.TIMEBOX_DEADLINE
+                timer for timer in self.factory.live if timer.feature is self.status_bar.RuntimeFeature.TIMEBOX_DEADLINE
             )
             self.assertEqual(timer.delay, 60.0)
 
@@ -21753,9 +20851,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller._runtime_started = True
         self.controller.leds_enabled = False
         self.controller.ask_blocked_since = self.clock[0] - 20.0
-        self.controller.ask_blocked_by_agent = {
-            "codex": self.controller.ask_blocked_since
-        }
+        self.controller.ask_blocked_by_agent = {"codex": self.controller.ask_blocked_since}
         self.controller.refresh_ = MagicMock()
         self.controller.settings = dataclass_replace(
             self.controller.settings,
@@ -21770,9 +20866,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
             "monotonic",
             side_effect=lambda: self.clock[0],
         ):
-            self.controller.reconcile_presentation_timers(
-                self._inputs(screen_bar_enabled=False, visible=False)
-            )
+            self.controller.reconcile_presentation_timers(self._inputs(screen_bar_enabled=False, visible=False))
             stage_one = next(
                 timer
                 for timer in self.factory.live
@@ -21804,9 +20898,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.controller._runtime_started = True
         self.controller.leds_enabled = False
         inputs = self._inputs(screen_bar_enabled=False, visible=False)
-        self.controller.virtual_status_device = SimpleNamespace(
-            presentation_scheduler_inputs=lambda: inputs
-        )
+        self.controller.virtual_status_device = SimpleNamespace(presentation_scheduler_inputs=lambda: inputs)
         self.controller.settings = dataclass_replace(
             self.controller.settings,
             escalation_ramp_seconds=30.0,
@@ -21820,9 +20912,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
             "monotonic",
             side_effect=lambda: self.clock[0],
         ):
-            self.controller.track_ask_blocked(
-                (_status("codex", AgentMode.WAITING_FOR_INPUT),)
-            )
+            self.controller.track_ask_blocked((_status("codex", AgentMode.WAITING_FOR_INPUT),))
             timer = next(
                 timer
                 for timer in self.factory.live
@@ -21830,9 +20920,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(timer.delay, 30.0)
 
-            self.controller.track_ask_blocked(
-                (_status("codex", AgentMode.WORKING),)
-            )
+            self.controller.track_ask_blocked((_status("codex", AgentMode.WORKING),))
 
         self.assertNotIn(
             self.status_bar.RuntimeFeature.ESCALATION_DEADLINE,
@@ -21877,9 +20965,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
             self.assertEqual(len(task_timers), 3, task_timers)
 
             submitted = self.controller._os_poll_worker.snapshot().submitted
-            self.controller.reconcile_presentation_timers(
-                self._inputs(display_asleep=True)
-            )
+            self.controller.reconcile_presentation_timers(self._inputs(display_asleep=True))
             for timer in task_timers.values():
                 self.controller.runtimeTimerFired_(timer)
             self.controller._display_environment_timer_fired()
@@ -21890,21 +20976,12 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
             )
             for feature in task_timers:
                 self.assertEqual(
-                    self.controller._runtime_timer_registry.snapshot().callback_count(
-                        feature
-                    ),
+                    self.controller._runtime_timer_registry.snapshot().callback_count(feature),
                     0,
                 )
 
-            self.controller.reconcile_presentation_timers(
-                self._inputs(app_terminating=True)
-            )
-            self.assertFalse(
-                set(task_timers)
-                & set(
-                    self.controller._runtime_timer_registry.snapshot().active_features
-                )
-            )
+            self.controller.reconcile_presentation_timers(self._inputs(app_terminating=True))
+            self.assertFalse(set(task_timers) & set(self.controller._runtime_timer_registry.snapshot().active_features))
 
     def test_timebox_elapsed_during_sleep_reduces_once_without_invalid_timer(self) -> None:
         self.controller._runtime_started = True
@@ -21918,9 +20995,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         active = self._inputs(screen_bar_enabled=False, visible=False)
 
         self.controller.reconcile_presentation_timers(active)
-        self.controller.reconcile_presentation_timers(
-            self._inputs(display_asleep=True)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(display_asleep=True))
         self.clock[0] += 20.0
 
         self.controller.reconcile_presentation_timers(active)
@@ -21951,9 +21026,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.factory.live), 4)
         self.assertTrue(all(timer.target is self.controller for timer in self.factory.created))
 
-        self.controller.reconcile_presentation_timers(
-            self._inputs(app_terminating=True, animation_active=True)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(app_terminating=True, animation_active=True))
 
         self.assertEqual(self.controller._runtime_timer_registry.snapshot().active_features, ())
         self.assertEqual(self.factory.live, ())
@@ -21978,8 +21051,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         device.presentationStaticDeadline.assert_called_once_with()
         self.assertFalse(
             any(
-                timer.feature
-                is self.status_bar.RuntimeFeature.PRESENTATION_STATIC_DEADLINE
+                timer.feature is self.status_bar.RuntimeFeature.PRESENTATION_STATIC_DEADLINE
                 for timer in self.factory.created
             )
         )
@@ -21991,9 +21063,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
             presentationAlcoveObservation=MagicMock(),
         )
         self.controller.virtual_status_device = device
-        self.controller.reconcile_presentation_timers(
-            self._inputs(animation_active=True)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(animation_active=True))
         timer = self.factory.live[0]
 
         self.controller.runtimeTimerFired_(timer)
@@ -22026,12 +21096,8 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         )
         timers = {timer.feature: timer for timer in self.factory.live}
 
-        self.controller.runtimeTimerFired_(
-            timers[self.status_bar.RuntimeFeature.ALCOVE_OBSERVATION]
-        )
-        self.controller.runtimeTimerFired_(
-            timers[self.status_bar.RuntimeFeature.POINTER_PEEK]
-        )
+        self.controller.runtimeTimerFired_(timers[self.status_bar.RuntimeFeature.ALCOVE_OBSERVATION])
+        self.controller.runtimeTimerFired_(timers[self.status_bar.RuntimeFeature.POINTER_PEEK])
 
         device.presentationAlcoveObservation.assert_called_once_with()
         self.controller.peekTick_.assert_called_once_with(None)
@@ -22045,9 +21111,7 @@ class PresentationRuntimeIntegrationTests(unittest.TestCase):
         )
         self.controller.virtual_status_device = device
         deadline = self.clock[0] + 2.0
-        self.controller.reconcile_presentation_timers(
-            self._inputs(next_visual_change_at=deadline)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(next_visual_change_at=deadline))
         timer = self.factory.live[0]
         self.clock[0] = deadline
 
@@ -22091,15 +21155,11 @@ class LidObservationRuntimeTests(unittest.TestCase):
         self.clock = [900.0]
         self.factory = _PresentationTimerFactory()
         self.controller._presentation_monotonic = lambda: self.clock[0]
-        self.controller._runtime_timer_registry = (
-            self.controller._build_presentation_timer_registry(
+        self.controller._runtime_timer_registry = self.controller._build_presentation_timer_registry(
                 timer_factory=self.factory,
                 monotonic=lambda: self.clock[0],
             )
-        )
-        self.controller._presentation_scheduler_state = (
-            self.status_bar.PresentationSchedulerState()
-        )
+        self.controller._presentation_scheduler_state = self.status_bar.PresentationSchedulerState()
         self.controller._presentation_scheduler_inputs = None
         self.controller._runtime_started = True
 
@@ -22148,9 +21208,7 @@ class LidObservationRuntimeTests(unittest.TestCase):
         self.controller.keep_awake.holding_requested = True
         self.assertTrue(self.controller._lid_observation_relevant())
         self.controller.keep_awake.holding_requested = False
-        self.controller.settings = default_settings.with_closed_lid_awake_policy(
-            self.status_bar.CLOSED_LID_AWAKE_NEVER
-        )
+        self.controller.settings = default_settings.with_closed_lid_awake_policy(self.status_bar.CLOSED_LID_AWAKE_NEVER)
         self.assertTrue(self.controller._lid_observation_relevant())
         self.controller.leds_enabled = False
 
@@ -22173,9 +21231,7 @@ class LidObservationRuntimeTests(unittest.TestCase):
         self.assertEqual(lid_timer.tolerances, [0.1])
 
         self.clock[0] += 0.25
-        self.controller.reconcile_presentation_timers(
-            self._inputs(pointer_interaction_relevant=True)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(pointer_interaction_relevant=True))
         live_by_feature = {timer.feature: timer for timer in self.factory.live}
         self.assertIs(
             live_by_feature[self.status_bar.RuntimeFeature.LID_OBSERVATION],
@@ -22187,9 +21243,7 @@ class LidObservationRuntimeTests(unittest.TestCase):
         # withdraw lid observation, or catching the closed transition
         # becomes a race between the 1s poll and the sleep notification
         # -- the very race that froze the closed-lid animation.
-        self.controller.reconcile_presentation_timers(
-            self._inputs(display_asleep=True)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(display_asleep=True))
         self.assertIn(
             self.status_bar.RuntimeFeature.LID_OBSERVATION,
             self.controller._runtime_timer_registry.snapshot().active_features,
@@ -22197,9 +21251,7 @@ class LidObservationRuntimeTests(unittest.TestCase):
 
         self.controller.reconcile_presentation_timers(self._inputs())
         wake_timer = self.factory.live[0]
-        self.controller.reconcile_presentation_timers(
-            self._inputs(app_terminating=True)
-        )
+        self.controller.reconcile_presentation_timers(self._inputs(app_terminating=True))
         self.controller.runtimeTimerFired_(wake_timer)
         submitted = self.controller._os_poll_worker.snapshot().submitted
         self.controller._lid_observation_timer_fired()
@@ -22260,9 +21312,7 @@ class LidObservationRuntimeTests(unittest.TestCase):
                 self.controller._os_poll_worker.wait_idle(timeout_seconds=2.0),
                 "lid observations did not complete",
             )
-            self.assertGreaterEqual(
-                self.controller._os_poll_worker.snapshot().completed, 2
-            )
+            self.assertGreaterEqual(self.controller._os_poll_worker.snapshot().completed, 2)
 
         self.assertEqual(
             reads,
@@ -22304,9 +21354,7 @@ class LidObservationRuntimeTests(unittest.TestCase):
 
         self.controller._apply_os_poll_result(current, result)
         self.assertIs(self.controller.last_lid_closed, True)
-        self.controller.play_lid_animation.assert_called_once_with(
-            self.status_bar.LID_ANIMATION_CLOSED
-        )
+        self.controller.play_lid_animation.assert_called_once_with(self.status_bar.LID_ANIMATION_CLOSED)
 
         self.controller.last_lid_closed = None
         self.controller.play_lid_animation.reset_mock()
@@ -22321,9 +21369,7 @@ class LidObservationRuntimeTests(unittest.TestCase):
                 error=None,
             ),
         )
-        self.controller.play_lid_animation.assert_called_once_with(
-            self.status_bar.LID_ANIMATION_OPEN
-        )
+        self.controller.play_lid_animation.assert_called_once_with(self.status_bar.LID_ANIMATION_OPEN)
 
         with patch.object(
             self.status_bar,
@@ -22345,9 +21391,7 @@ class LidObservationRuntimeTests(unittest.TestCase):
         timer_api = MagicMock()
         status_item = MagicMock()
         status_api = MagicMock()
-        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = (
-            status_item
-        )
+        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = status_item
         patched_methods = (
             "load_operator_local_state",
             "start_event_server",
@@ -22362,15 +21406,11 @@ class LidObservationRuntimeTests(unittest.TestCase):
             stack.enter_context(patch.object(self.status_bar, "NSApp"))
             stack.enter_context(patch.object(self.status_bar, "NSStatusBar", status_api))
             stack.enter_context(patch.object(self.status_bar, "NSTimer", timer_api))
-            thread_type = stack.enter_context(
-                patch.object(self.status_bar.threading, "Thread")
-            )
+            thread_type = stack.enter_context(patch.object(self.status_bar.threading, "Thread"))
             stack.enter_context(patch.object(self.controller.virtual_status_device, "show"))
             stack.enter_context(patch.object(self.controller.virtual_status_device, "hide"))
             for name in patched_methods:
-                method_mocks[name] = stack.enter_context(
-                    patch.object(self.controller, name)
-                )
+                method_mocks[name] = stack.enter_context(patch.object(self.controller, name))
             self.controller.applicationDidFinishLaunching_(None)
 
         selectors = tuple(
@@ -22384,10 +21424,7 @@ class LidObservationRuntimeTests(unittest.TestCase):
         self.assertNotIn("pollScreenBrightness:", selectors)
         self.assertFalse(hasattr(self.controller, "pollScreenBrightness_"))
         self.assertEqual(
-            tuple(
-                snapshot.domain
-                for snapshot in self.controller._runtime_worker_registry.snapshot()
-            ),
+            tuple(snapshot.domain for snapshot in self.controller._runtime_worker_registry.snapshot()),
             (
                 self.status_bar.RuntimeWorkerDomain.OS_POLL,
                 self.status_bar.RuntimeWorkerDomain.HARDWARE_WRITE,
@@ -22411,9 +21448,7 @@ class DeviceRuntimeSchedulingTests(unittest.TestCase):
         timer_api = MagicMock()
         status_item = MagicMock()
         status_api = MagicMock()
-        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = (
-            status_item
-        )
+        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = status_item
         self.controller.virtual_status_device = SimpleNamespace(
             show=MagicMock(),
             hide=MagicMock(),
@@ -22424,9 +21459,7 @@ class DeviceRuntimeSchedulingTests(unittest.TestCase):
             stack.enter_context(patch.object(self.status_bar, "NSStatusBar", status_api))
             stack.enter_context(patch.object(self.status_bar, "NSTimer", timer_api))
             stack.enter_context(patch.object(self.status_bar.threading, "Thread"))
-            poll_devices_once = stack.enter_context(
-                patch.object(self.controller, "poll_devices_once")
-            )
+            poll_devices_once = stack.enter_context(patch.object(self.controller, "poll_devices_once"))
             for name in (
                 "load_operator_local_state",
                 "start_event_server",
@@ -22460,10 +21493,7 @@ class DeviceRuntimeSchedulingTests(unittest.TestCase):
             self.controller.reconcile_device_runtime()
 
         discover.assert_not_called()
-        snapshots = {
-            snapshot.domain: snapshot
-            for snapshot in self.controller._runtime_worker_registry.snapshot()
-        }
+        snapshots = {snapshot.domain: snapshot for snapshot in self.controller._runtime_worker_registry.snapshot()}
         self.assertEqual(
             snapshots[self.status_bar.RuntimeWorkerDomain.OS_POLL].submitted,
             0,
@@ -22623,9 +21653,7 @@ class DeviceRuntimeSchedulingTests(unittest.TestCase):
         )
         active = dataclass_replace(attention, semantic=GlanceSemantic.ACTIVE)
         submissions = []
-        self.controller._hardware_write_worker = SimpleNamespace(
-            submit=lambda command: submissions.append(command)
-        )
+        self.controller._hardware_write_worker = SimpleNamespace(submit=lambda command: submissions.append(command))
         self.controller._hardware_write_active = True
         self.controller._hardware_write_generation = 8
 
@@ -22829,9 +21857,7 @@ class DeviceRuntimeSchedulingTests(unittest.TestCase):
         self.controller._hardware_write_worker = worker
         self.controller.calibration_test = (device.device_id, "#FFFFFF")
         worker_key = self.controller._hardware_worker_key(device)
-        self.controller._active_calibration_preview_key = (
-            f"{worker_key}:preview-calibration"
-        )
+        self.controller._active_calibration_preview_key = f"{worker_key}:preview-calibration"
         self.controller.refresh_ = MagicMock()
 
         with patch.object(
@@ -22843,9 +21869,7 @@ class DeviceRuntimeSchedulingTests(unittest.TestCase):
 
         self.assertIsNone(self.controller.calibration_test)
         self.controller.refresh_.assert_called_once_with(None)
-        worker.discard_pending.assert_called_once_with(
-            f"{worker_key}:preview-calibration"
-        )
+        worker.discard_pending.assert_called_once_with(f"{worker_key}:preview-calibration")
         self.assertIsNone(self.controller._active_calibration_preview_key)
 
     def test_transition_flourish_refuses_direct_write_when_worker_stays_busy(
@@ -22859,9 +21883,7 @@ class DeviceRuntimeSchedulingTests(unittest.TestCase):
             connected=True,
             display=self.status_bar.LED_DISPLAY_AGENT,
         )
-        self.controller._hardware_write_worker = SimpleNamespace(
-            wait_idle=MagicMock(return_value=False)
-        )
+        self.controller._hardware_write_worker = SimpleNamespace(wait_idle=MagicMock(return_value=False))
         self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = MagicMock()
 
         with patch.object(self.status_bar, "write_led_program") as direct_writer:
@@ -22873,9 +21895,7 @@ class DeviceRuntimeSchedulingTests(unittest.TestCase):
             )
 
         direct_writer.assert_not_called()
-        self.controller._hardware_write_worker.wait_idle.assert_called_once_with(
-            timeout_seconds=1.0
-        )
+        self.controller._hardware_write_worker.wait_idle.assert_called_once_with(timeout_seconds=1.0)
         self.controller.performSelectorOnMainThread_withObject_waitUntilDone_.assert_called_once_with(
             "restoreLedDisplay:",
             "44",
@@ -22895,9 +21915,7 @@ class DeviceRuntimeSchedulingTests(unittest.TestCase):
         self.controller._hardware_write_worker = SimpleNamespace(
             wait_idle=lambda **_kwargs: order.append("idle") or True
         )
-        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = (
-            lambda *_args: order.append("restore")
-        )
+        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = lambda *_args: order.append("restore")
 
         with (
             patch.object(
@@ -23047,9 +22065,7 @@ class DeviceRuntimeSchedulingTests(unittest.TestCase):
             self.status_bar.DeviceInventoryRequest(),
         )
         cancellations = []
-        self.controller._hardware_write_worker = SimpleNamespace(
-            cancel_generation=cancellations.append
-        )
+        self.controller._hardware_write_worker = SimpleNamespace(cancel_generation=cancellations.append)
         self.controller._device_inventory_active = True
         self.controller._os_poll_generation = 5
         self.controller._hardware_write_generation = 8
@@ -23157,20 +22173,14 @@ class DeviceRuntimeSchedulingTests(unittest.TestCase):
                         (),
                     )
 
-            snapshots = {
-                snapshot.domain: snapshot
-                for snapshot in self.controller._runtime_worker_registry.snapshot()
-            }
+            snapshots = {snapshot.domain: snapshot for snapshot in self.controller._runtime_worker_registry.snapshot()}
             hardware = snapshots[self.status_bar.RuntimeWorkerDomain.HARDWARE_WRITE]
             self.assertTrue(hardware.running)
             self.assertEqual(hardware.pending_count, 1)
             self.assertEqual(hardware.submitted, 100)
             self.assertEqual(hardware.replaced_pending, 98)
             self.assertEqual(
-                sum(
-                    thread.name == "sidepulse-runtime-hardware-write"
-                    for thread in threading.enumerate()
-                ),
+                sum(thread.name == "sidepulse-runtime-hardware-write" for thread in threading.enumerate()),
                 1,
             )
 
@@ -23179,9 +22189,7 @@ class DeviceRuntimeSchedulingTests(unittest.TestCase):
                 self.controller._hardware_write_worker.wait_idle(timeout_seconds=2.0),
                 "hardware writes did not complete",
             )
-            self.assertGreaterEqual(
-                self.controller._hardware_write_worker.snapshot().completed, 2
-            )
+            self.assertGreaterEqual(self.controller._hardware_write_worker.snapshot().completed, 2)
 
         self.assertEqual(len(executions), 2)
         self.assertEqual(executions[0].key, executions[1].key)
@@ -23301,11 +22309,7 @@ class LatestFeatureSettingsCompositionTests(unittest.TestCase):
         self.controller.show_settings_window()
         self.assertNotIn("installed_agents", self.controller.settings_panes)
         self.assertEqual(
-            [
-                label
-                for key, label in self.status_bar.SETTINGS_SIDEBAR_ITEMS
-                if key == "installed_agents"
-            ],
+            [label for key, label in self.status_bar.SETTINGS_SIDEBAR_ITEMS if key == "installed_agents"],
             ["Installed Agents"],
         )
 
@@ -23320,7 +22324,7 @@ class LatestFeatureSettingsCompositionTests(unittest.TestCase):
         )
         self.assertEqual(
             self.controller.settings_window.title(),
-            "JR Bar Settings: Installed Agents",
+            "JR-Bar Settings: Installed Agents",
         )
         self.controller.refresh_installed_agent_inventory.assert_called_once_with()
         rendered = "\n".join(self._descendant_text(pane))
@@ -23346,8 +22350,10 @@ class LatestFeatureSettingsCompositionTests(unittest.TestCase):
         self.assertEqual(refresh.title(), "Refresh")
         self.assertEqual(refresh.accessibilityLabel(), "Refresh installed coding agents")
 
-    def test_profile_never_claims_zero_history_before_the_local_scan_finishes(self) -> None:
+    def test_activity_never_claims_zero_history_before_the_local_scan_finishes(self) -> None:
         self.controller.show_settings_window()
+        self.assertNotIn("profile_usage_label", self.controller.settings_fields)
+        self.controller.ensure_settings_pane("usage_activity")
 
         self.assertEqual(
             self.controller.settings_fields["profile_usage_label"].stringValue(),
@@ -23386,8 +22392,7 @@ class LatestFeatureSettingsCompositionTests(unittest.TestCase):
                 None,
                 (
                     row.capability_ids
-                    if (row.provider_id, row.surface_id)
-                    in {opencode_cli_key, opencode_plugin_key}
+                    if (row.provider_id, row.surface_id) in {opencode_cli_key, opencode_plugin_key}
                     else ()
                 ),
                 None,
@@ -23570,14 +22575,10 @@ class RelayControllerContinuityTests(unittest.TestCase):
         submissions = []
         virtual_calls = []
         self.controller._runtime_started = True
-        self.controller._accessibility_display_preferences = (
-            self.status_bar.AccessibilityDisplayPreferences()
-        )
+        self.controller._accessibility_display_preferences = self.status_bar.AccessibilityDisplayPreferences()
         self.controller._hardware_write_active = True
         self.controller._hardware_write_generation = 11
-        self.controller._hardware_write_worker = SimpleNamespace(
-            submit=lambda command: submissions.append(command)
-        )
+        self.controller._hardware_write_worker = SimpleNamespace(submit=lambda command: submissions.append(command))
 
         def capture_virtual(*args, **kwargs):
             virtual_calls.append(kwargs)
@@ -23642,9 +22643,7 @@ class RelayControllerContinuityTests(unittest.TestCase):
             click_target_agent_id=None,
         )
         self.controller._runtime_started = True
-        self.controller._accessibility_display_preferences = (
-            self.status_bar.AccessibilityDisplayPreferences()
-        )
+        self.controller._accessibility_display_preferences = self.status_bar.AccessibilityDisplayPreferences()
         virtual_calls = []
 
         with (
@@ -23683,9 +22682,7 @@ class RelayControllerContinuityTests(unittest.TestCase):
             dominant_provider="codex",
             click_target_agent_id=None,
         )
-        self.controller._accessibility_display_preferences = (
-            self.status_bar.AccessibilityDisplayPreferences()
-        )
+        self.controller._accessibility_display_preferences = self.status_bar.AccessibilityDisplayPreferences()
         resolved = self.controller.resolve_presentation_glance(
             projection,
             operator_events=(),
@@ -23950,9 +22947,7 @@ class RelayControllerContinuityTests(unittest.TestCase):
             "0:",
             virtual.set_program.call_args.kwargs["static_fallback_program"],
         )
-        self.assertIsNone(
-            virtual.set_program.call_args.kwargs["next_visual_change_at"]
-        )
+        self.assertIsNone(virtual.set_program.call_args.kwargs["next_visual_change_at"])
         self.assertIn(" pulse ", virtual.set_program.call_args.args[0])
         self.assertEqual(
             self.controller.device_errors[physical.device_id],
@@ -24289,7 +23284,7 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
         )
         titles = self._titles(menu)
 
-        self.assertTrue(titles[0].startswith("5 active · 5 need you"))
+        self.assertTrue(titles[0].startswith("5 need you · 5 active"))
         self.assertEqual(sum(title.endswith("· needs you") for title in titles), 3)
         self.assertEqual(titles[4], "2 more…")
         self.assertTrue(menu.itemAtIndex_(4).isEnabled())
@@ -24301,7 +23296,7 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
         self.assertNotIn("In Progress", titles)
         self.assertNotIn("Ready for Review", titles)
         self.assertNotIn("Recent", titles)
-        self.assertEqual(titles[-1], "Quit JR Bar")
+        self.assertEqual(titles[-1], f"Quit {self.status_bar.PRODUCT_DISPLAY_NAME}")
 
     def test_status_menu_open_marks_visit_and_only_plans_capacity_refresh(self) -> None:
         snapshot = self._canonical_snapshot(1)
@@ -24351,10 +23346,7 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
         row_key = snapshot.operator_state.works[0].key
         self.assertEqual(
             tuple(
-                descriptor.kind
-                for descriptor in self.controller.agent_browser_controller.actions_by_work_key[
-                    row_key
-                ]
+                descriptor.kind for descriptor in self.controller.agent_browser_controller.actions_by_work_key[row_key]
             ),
             (
                 OperatorActionKind.OPEN,
@@ -24374,16 +23366,11 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
         root_menu = self.controller.status_item.setMenu_.call_args.args[0]
         browser_item = next(
             item
-            for item in (
-                root_menu.itemAtIndex_(index)
-                for index in range(root_menu.numberOfItems())
-            )
+            for item in (root_menu.itemAtIndex_(index) for index in range(root_menu.numberOfItems()))
             if item.title() == "Open Agent Browser…"
         )
         self.assertTrue(self.controller.openAgentBrowser_(browser_item))
-        self.controller.mailbox_preferences_saver = MagicMock(
-            side_effect=OSError("private store unavailable")
-        )
+        self.controller.mailbox_preferences_saver = MagicMock(side_effect=OSError("private store unavailable"))
         work_key = snapshot.operator_state.works[0].key
 
         stale = AgentBrowserActionPayload(
@@ -24400,20 +23387,17 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
         self.assertTrue(self.controller.mailbox_preferences_dirty)
         self.assertEqual(
             self.controller.operator_action_error,
-            "Could not save mailbox change. JR Bar will retry.",
+            f"Could not save mailbox change. {self.status_bar.PRODUCT_DISPLAY_NAME} will retry.",
         )
         browser = self.controller.agent_browser_controller
         self.assertTrue(browser.projection.rows[0].watched)
         self.assertEqual(
             browser.error_label.stringValue(),
-            "Could not save mailbox change. JR Bar will retry.",
+            f"Could not save mailbox change. {self.status_bar.PRODUCT_DISPLAY_NAME} will retry.",
         )
         self.assertIn(
             OperatorActionKind.UNWATCH,
-            tuple(
-                descriptor.kind
-                for descriptor in browser.actions_by_work_key[work_key]
-            ),
+            tuple(descriptor.kind for descriptor in browser.actions_by_work_key[work_key]),
         )
         republished_root = self.controller.status_item.setMenu_.call_args.args[0]
         self.assertIn(
@@ -24421,7 +23405,7 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
             self._titles(republished_root.itemAtIndex_(1).submenu()),
         )
         self.assertIn(
-            "Could not save mailbox change. JR Bar will retry.",
+            f"Could not save mailbox change. {self.status_bar.PRODUCT_DISPLAY_NAME} will retry.",
             self._titles(republished_root),
         )
 
@@ -24678,9 +23662,7 @@ class CanonicalAgentBrowserIntegrationTests(unittest.TestCase):
             patch.object(self.status_bar, "NSRunLoop") as run_loops,
             patch("sidepulse.status_bar.time.time", return_value=100.0),
         ):
-            timers.timerWithTimeInterval_target_selector_userInfo_repeats_.return_value = (
-                timer
-            )
+            timers.timerWithTimeInterval_target_selector_userInfo_repeats_.return_value = timer
             run_loops.currentRunLoop.return_value = run_loop
             self.controller.schedule_mailbox_boundary(101.25)
 
@@ -24713,9 +23695,7 @@ class Task10AccessibilityObservationTests(unittest.TestCase):
                 center_self.removed_bulk = []
                 center_self.removed_single = []
 
-            def addObserver_selector_name_object_(
-                center_self, observer, selector, name, observed
-            ) -> None:
+            def addObserver_selector_name_object_(center_self, observer, selector, name, observed) -> None:
                 lifecycle.append("observer-added")
                 center_self.added.append((observer, selector, name, observed))
 
@@ -24723,9 +23703,7 @@ class Task10AccessibilityObservationTests(unittest.TestCase):
                 lifecycle.append("dnd-removed")
                 center_self.removed_bulk.append(observer)
 
-            def removeObserver_name_object_(
-                center_self, observer, name, observed
-            ) -> None:
+            def removeObserver_name_object_(center_self, observer, name, observed) -> None:
                 lifecycle.append("observer-removed")
                 center_self.removed_single.append((observer, name, observed))
 
@@ -24740,9 +23718,7 @@ class Task10AccessibilityObservationTests(unittest.TestCase):
         workspace_api = SimpleNamespace(sharedWorkspace=lambda: workspace)
         status_item = MagicMock()
         status_api = MagicMock()
-        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = (
-            status_item
-        )
+        status_api.systemStatusBar.return_value.statusItemWithLength_.return_value = status_item
 
         with ExitStack() as stack:
             stack.enter_context(patch.object(self.status_bar, "NSApp"))
@@ -24806,9 +23782,7 @@ class Task10AccessibilityObservationTests(unittest.TestCase):
         self.assertEqual(self.controller._accessibility_generation, 1)
 
         self.controller.monitor = None
-        self.controller.virtual_status_device.terminate = lambda: lifecycle.append(
-            "surface-released"
-        )
+        self.controller.virtual_status_device.terminate = lambda: lifecycle.append("surface-released")
         with patch.object(self.controller, "stop_event_server"):
             self.controller.applicationWillTerminate_(None)
             self.controller.applicationWillTerminate_(None)
@@ -24842,13 +23816,9 @@ class Task10AccessibilityObservationTests(unittest.TestCase):
         return SimpleNamespace(
             notificationCenter=lambda: center,
             accessibilityDisplayShouldReduceMotion=lambda: read("motion"),
-            accessibilityDisplayShouldReduceTransparency=lambda: read(
-                "transparency"
-            ),
+            accessibilityDisplayShouldReduceTransparency=lambda: read("transparency"),
             accessibilityDisplayShouldIncreaseContrast=lambda: read("contrast"),
-            accessibilityDisplayShouldDifferentiateWithoutColor=lambda: read(
-                "differentiate"
-            ),
+            accessibilityDisplayShouldDifferentiateWithoutColor=lambda: read("differentiate"),
         )
 
     def test_duplicate_notification_is_inert_and_stale_main_payload_is_rejected(
@@ -24868,15 +23838,13 @@ class Task10AccessibilityObservationTests(unittest.TestCase):
         self.controller._accessibility_observer_generation = 7
         self.controller._accessibility_display_preferences = preferences
         self.controller._accessibility_generation = 3
-        self.controller.virtual_status_device.set_accessibility_display_preferences = (
-            MagicMock()
-        )
+        self.controller.virtual_status_device.set_accessibility_display_preferences = MagicMock()
         self.controller._hardware_write_worker = MagicMock()
         self.controller.refresh_ = MagicMock()
         self.controller.show_settings_window = MagicMock()
         scheduled = []
-        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = (
-            lambda selector, payload, wait: scheduled.append((selector, payload, wait))
+        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = lambda selector, payload, wait: (
+            scheduled.append((selector, payload, wait))
         )
 
         with patch.object(
@@ -24941,9 +23909,7 @@ class Task10AccessibilityObservationTests(unittest.TestCase):
         self.controller._runtime_started = True
         self.controller._accessibility_observer_center = center
         self.controller._accessibility_observer_generation = 11
-        self.controller._accessibility_display_preferences = (
-            self.status_bar.AccessibilityDisplayPreferences()
-        )
+        self.controller._accessibility_display_preferences = self.status_bar.AccessibilityDisplayPreferences()
         self.controller._hardware_write_active = True
         self.controller._hardware_write_worker = MagicMock()
         physical = self.status_bar.StatusBarDevice(
@@ -24960,13 +23926,9 @@ class Task10AccessibilityObservationTests(unittest.TestCase):
             aggregate=SimpleNamespace(mode=AgentMode.IDLE_READY),
         )
         self.controller.current_attention_projection = None
-        self.controller.virtual_status_device.set_accessibility_display_preferences = (
-            MagicMock()
-        )
-        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = (
-            lambda _selector, payload, _wait: self.controller.applyAccessibilityDisplayOptions_(
-                payload
-            )
+        self.controller.virtual_status_device.set_accessibility_display_preferences = MagicMock()
+        self.controller.performSelectorOnMainThread_withObject_waitUntilDone_ = lambda _selector, payload, _wait: (
+            self.controller.applyAccessibilityDisplayOptions_(payload)
         )
 
         with patch.object(
@@ -24982,9 +23944,7 @@ class Task10AccessibilityObservationTests(unittest.TestCase):
             snapshot,
             self.status_bar.AccessibilityDisplayPreferences(True, True, True, True),
         )
-        virtual_call = (
-            self.controller.virtual_status_device.set_accessibility_display_preferences.call_args
-        )
+        virtual_call = self.controller.virtual_status_device.set_accessibility_display_preferences.call_args
         self.assertIs(virtual_call.args[0], snapshot)
         command = self.controller._hardware_write_worker.submit.call_args.args[0]
         self.assertIs(command.payload.accessibility_preferences, snapshot)
@@ -25117,12 +24077,8 @@ class SessionHeardSuffixTests(unittest.TestCase):
         from sidepulse.status_bar import session_heard_suffix
 
         self.assertEqual(session_heard_suffix(self._status(10.0), self.now), "")
-        self.assertEqual(
-            session_heard_suffix(self._status(240.0), self.now), " · 4m ago"
-        )
-        self.assertEqual(
-            session_heard_suffix(self._status(2.5 * 3600), self.now), " · 2h ago"
-        )
+        self.assertEqual(session_heard_suffix(self._status(240.0), self.now), " · 4m ago")
+        self.assertEqual(session_heard_suffix(self._status(2.5 * 3600), self.now), " · 2h ago")
 
 
 class ChargingHelloTests(unittest.TestCase):
@@ -25142,19 +24098,15 @@ class ChargingHelloTests(unittest.TestCase):
         self.assertIn("320ms pulse", program)
 
         flourishes: list[tuple[str, str]] = []
-        self.controller.play_transition_flourish = (
-            lambda label, animation: flourishes.append((label, animation.program))
+        self.controller.play_transition_flourish = lambda label, animation: flourishes.append(
+            (label, animation.program)
         )
         self.controller.last_power_connected = False
-        plugged = BatterySnapshot(
-            percent=50, is_charging=True, is_charged=False, is_plugged=True
-        )
+        plugged = BatterySnapshot(percent=50, is_charging=True, is_charged=False, is_plugged=True)
         self.controller.update_battery_power_preview(plugged)
         self.assertEqual([label for label, _program in flourishes], ["Charging hello"])
 
-        unplugged = BatterySnapshot(
-            percent=50, is_charging=False, is_charged=False, is_plugged=False
-        )
+        unplugged = BatterySnapshot(percent=50, is_charging=False, is_charged=False, is_plugged=False)
         self.controller.update_battery_power_preview(unplugged)
         self.assertEqual(len(flourishes), 1)
 
@@ -25176,12 +24128,8 @@ class StudioBuilderTests(unittest.TestCase):
         # Black maps to `off` (a literal #000000 is a firmware parse
         # error on indexed lines and dead weight elsewhere), durations
         # clamp to the floor, unknown eases fail closed to a hold.
-        self.assertEqual(
-            program, "#00E5FF 800ms pulse\noff 100ms none\nrepeat"
-        )
-        self.assertNotIn(
-            "repeat", compile_builder_program(({"color": "#111111", "ms": 500, "ease": "ease"},), False)
-        )
+        self.assertEqual(program, "#00E5FF 800ms pulse\noff 100ms none\nrepeat")
+        self.assertNotIn("repeat", compile_builder_program(({"color": "#111111", "ms": 500, "ease": "ease"},), False))
 
     def test_builder_compiles_into_the_editor_and_firmware_accepts_it(self) -> None:
         """The no-typing path (2026-08-26): rows of controls compile to
@@ -25230,24 +24178,15 @@ class SharedStripHeartbeatBudgetTests(unittest.TestCase):
         settings = colors_module.ColorSettings.defaults()
         for provider in ("claude", "codex", "devin"):
             settings = settings.with_agent_animation(provider, "heartbeat")
-        statuses = tuple(
-            _status(provider, AgentMode.WORKING)
-            for provider in ("claude", "codex", "devin")
-        )
+        statuses = tuple(_status(provider, AgentMode.WORKING) for provider in ("claude", "codex", "devin"))
         for blend in colors_module.BLEND_MODE_CHOICES:
             blended = settings.with_blend_mode(blend)
             for count in (2, 3):
                 _state, program = colors_module.program_for_snapshot(
                     statuses[:count], led_count=8, colors=blended, brightness=255
                 )
-                self.assertLessEqual(
-                    len(program.encode("utf-8")), 512, (blend, count)
-                )
+                self.assertLessEqual(len(program.encode("utf-8")), 512, (blend, count))
                 self.assertLessEqual(len(program.splitlines()), 20, (blend, count))
-        dot_settings = settings.with_blend_mode(
-            colors_module.BLEND_MODE_SPATIAL
-        )
-        _state, dot = colors_module.program_for_snapshot(
-            statuses[:2], led_count=2, colors=dot_settings, brightness=255
-        )
+        dot_settings = settings.with_blend_mode(colors_module.BLEND_MODE_SPATIAL)
+        _state, dot = colors_module.program_for_snapshot(statuses[:2], led_count=2, colors=dot_settings, brightness=255)
         self.assertLessEqual(len(dot.encode("utf-8")), 512)

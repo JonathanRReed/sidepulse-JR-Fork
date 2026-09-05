@@ -8,7 +8,7 @@ SOURCE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV_DIR="$INSTALL_ROOT/venv"
 
 if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))'; then
-    echo "JR Bar requires Python 3.10+. Set PYTHON_BIN to a supported interpreter." >&2
+    echo "JR-Bar requires Python 3.10+. Set PYTHON_BIN to a supported interpreter." >&2
     exit 2
 fi
 
@@ -24,6 +24,6 @@ for command in sidepulse agent-monitor agent-status-bar; do
     ln -sfn "$VENV_DIR/bin/$command" "$BIN_DIR/$command"
 done
 
-printf '%s\n' "JR Bar installed in $VENV_DIR"
+printf '%s\n' "JR-Bar installed in $VENV_DIR"
 printf '%s\n' "Commands linked in $BIN_DIR"
 printf '%s\n' "Run: $BIN_DIR/sidepulse setup"

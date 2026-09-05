@@ -23,6 +23,8 @@ from pathlib import Path
 
 from . import usage_percent_history, usage_stats
 from .providers import default_state_dir
+from .t3_compat import T3ReadOnlyPolicy, _open_read_only, t3_database_path
+from .usage_heatmap import build_usage_heatmap
 
 _IN_FLIGHT_ATTR = "_usage_graph_worker_in_flight"
 _RESCAN_PENDING_ATTR = "_usage_graph_rescan_pending"
@@ -33,6 +35,16 @@ _LAST_BUILD_ATTR = "_usage_graph_last_build"
 #: switches used to re-pay the full transcript scan (~9s warm, ~30s
 #: cold, all of it GIL time the menus feel) for identical inputs.
 _MODEL_REUSE_SECONDS = 60.0
+T3_MAX_ACTIVITY_RECORDS = 10_000
+T3_MAX_ACTIVITY_PAYLOAD_BYTES = 64 * 1024
+T3_MAX_ACTIVITY_TOTAL_BYTES = 4 * 1024 * 1024
+T3_MAX_ACTIVITY_IDENTIFIER_BYTES = 1_024
+T3_MAX_ACTIVITY_TIMESTAMP_BYTES = 128
+T3_SQLITE_MAX_VALUE_BYTES = 128 * 1024
+T3_MAX_ACTIVITY_QUERY_STEPS = 2_000_000
+T3_ACTIVITY_QUERY_PROGRESS_INTERVAL = 1_000
+T3_ACTIVITY_QUERY_TIMEOUT_SECONDS = 0.5
+API_EQUIVALENT_COST_DISCLOSURE = "API-equivalent estimate, not subscription spend"
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,25 +112,136 @@ def _scan_opencode_records(db_path: Path, since_epoch: float) -> list[tuple]:
     return records
 
 
-def _scan_t3code_records(db_path: Path, since_epoch: float) -> list[tuple]:
+def _scan_t3code_records(
+    db_path: Path,
+    since_epoch: float,
+    *,
+    maximum_records: int = T3_MAX_ACTIVITY_RECORDS,
+    maximum_payload_bytes: int = T3_MAX_ACTIVITY_PAYLOAD_BYTES,
+    maximum_total_payload_bytes: int = T3_MAX_ACTIVITY_TOTAL_BYTES,
+    maximum_query_steps: int = T3_MAX_ACTIVITY_QUERY_STEPS,
+    query_timeout_seconds: float = T3_ACTIVITY_QUERY_TIMEOUT_SECONDS,
+    monotonic: Callable[[], float] = time.monotonic,
+    coverage_reporter: Callable[[str], None] | None = None,
+) -> list[tuple]:
     if not db_path.is_file():
+        if coverage_reporter is not None:
+            coverage_reporter("missing")
         return []
     records = []
+    con = None
+    coverage_status = "complete"
     try:
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        con = _open_read_only(db_path)
+        con.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, T3_SQLITE_MAX_VALUE_BYTES)
+        limit = min(T3_MAX_ACTIVITY_RECORDS, max(1, int(maximum_records)))
+        payload_limit = min(T3_MAX_ACTIVITY_PAYLOAD_BYTES, max(1, int(maximum_payload_bytes)))
+        total_limit = min(T3_MAX_ACTIVITY_TOTAL_BYTES, max(1, int(maximum_total_payload_bytes)))
+        query_step_limit = min(
+            T3_MAX_ACTIVITY_QUERY_STEPS,
+            max(T3_ACTIVITY_QUERY_PROGRESS_INTERVAL, int(maximum_query_steps)),
+        )
+        deadline = monotonic() + min(
+            T3_ACTIVITY_QUERY_TIMEOUT_SECONDS,
+            max(0.001, float(query_timeout_seconds)),
+        )
+        progress_calls = 0
+
+        def query_budget_exhausted() -> int:
+            nonlocal progress_calls
+            progress_calls += 1
+            return int(
+                progress_calls * T3_ACTIVITY_QUERY_PROGRESS_INTERVAL > query_step_limit
+                or monotonic() >= deadline
+            )
+
+        con.set_progress_handler(query_budget_exhausted, T3_ACTIVITY_QUERY_PROGRESS_INTERVAL)
+        iso_since = (
+            datetime.fromtimestamp(since_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+            if since_epoch > 0
+            else ""
+        )
+        range_clause = " AND created_at >= ?" if since_epoch > 0 else ""
+        range_values = (iso_since,) if since_epoch > 0 else ()
+        oversized = con.execute(
+            "SELECT 1 FROM projection_thread_activities "
+            f"WHERE kind = ?{range_clause} AND ("
+            "length(CAST(activity_id AS BLOB)) > ? OR "
+            "length(CAST(thread_id AS BLOB)) > ? OR "
+            "length(CAST(created_at AS BLOB)) > ? OR "
+            "length(CAST(payload_json AS BLOB)) > ?) LIMIT 1",
+            (
+                "task.completed",
+                *range_values,
+                T3_MAX_ACTIVITY_IDENTIFIER_BYTES,
+                T3_MAX_ACTIVITY_IDENTIFIER_BYTES,
+                T3_MAX_ACTIVITY_TIMESTAMP_BYTES,
+                payload_limit,
+            ),
+        ).fetchone()
+        if oversized is not None:
+            coverage_status = "partial"
         if since_epoch > 0:
-            iso_since = datetime.fromtimestamp(since_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
             cursor = con.execute(
-                "SELECT activity_id, thread_id, created_at, payload_json FROM projection_thread_activities WHERE created_at >= ? AND payload_json LIKE ?",
-                (iso_since, '%"usage"%'),
+                "SELECT rowid, activity_id, thread_id, created_at "
+                "FROM projection_thread_activities "
+                "WHERE kind = ? AND created_at >= ? "
+                "AND length(CAST(activity_id AS BLOB)) <= ? "
+                "AND length(CAST(thread_id AS BLOB)) <= ? "
+                "AND length(CAST(created_at AS BLOB)) <= ? "
+                "AND length(CAST(payload_json AS BLOB)) <= ? AND payload_json LIKE ? "
+                "ORDER BY created_at DESC, activity_id DESC LIMIT ?",
+                (
+                    "task.completed",
+                    iso_since,
+                    T3_MAX_ACTIVITY_IDENTIFIER_BYTES,
+                    T3_MAX_ACTIVITY_IDENTIFIER_BYTES,
+                    T3_MAX_ACTIVITY_TIMESTAMP_BYTES,
+                    payload_limit,
+                    '%"usage"%',
+                    limit + 1,
+                ),
             )
         else:
             cursor = con.execute(
-                "SELECT activity_id, thread_id, created_at, payload_json FROM projection_thread_activities WHERE payload_json LIKE ?",
-                ('%"usage"%',),
+                "SELECT rowid, activity_id, thread_id, created_at "
+                "FROM projection_thread_activities "
+                "WHERE kind = ? "
+                "AND length(CAST(activity_id AS BLOB)) <= ? "
+                "AND length(CAST(thread_id AS BLOB)) <= ? "
+                "AND length(CAST(created_at AS BLOB)) <= ? "
+                "AND length(CAST(payload_json AS BLOB)) <= ? AND payload_json LIKE ? "
+                "ORDER BY created_at DESC, activity_id DESC LIMIT ?",
+                (
+                    "task.completed",
+                    T3_MAX_ACTIVITY_IDENTIFIER_BYTES,
+                    T3_MAX_ACTIVITY_IDENTIFIER_BYTES,
+                    T3_MAX_ACTIVITY_TIMESTAMP_BYTES,
+                    payload_limit,
+                    '%"usage"%',
+                    limit + 1,
+                ),
             )
-        for row in cursor:
-            aid, tid, cat, payload_str = row
+        payload_bytes_read = 0
+        for index, row in enumerate(cursor):
+            if index >= limit:
+                coverage_status = "partial"
+                break
+            rowid, aid, tid, cat = row
+            payload_row = con.execute(
+                "SELECT payload_json, length(CAST(payload_json AS BLOB)) "
+                "FROM projection_thread_activities "
+                "WHERE rowid = ? AND length(CAST(payload_json AS BLOB)) <= ?",
+                (rowid, payload_limit),
+            ).fetchone()
+            if payload_row is None:
+                coverage_status = "partial"
+                continue
+            payload_str, payload_bytes = payload_row
+            payload_bytes_read += int(payload_bytes or 0)
+            if payload_bytes_read > total_limit:
+                coverage_status = "partial"
+                break
             try:
                 data = json.loads(payload_str)
                 usage = data.get("usage")
@@ -137,11 +260,43 @@ def _scan_t3code_records(db_path: Path, since_epoch: float) -> list[tuple]:
                     continue
                 records.append(("t3code", tid, "t3code", epoch, inp, 0, 0, out, f"t3code:{aid}"))
             except Exception:
-                pass
-        con.close()
+                coverage_status = "partial"
+    except sqlite3.DataError:
+        coverage_status = "partial"
+    except sqlite3.OperationalError as error:
+        coverage_status = "partial" if "interrupted" in str(error).lower() else "failed"
     except Exception:
-        pass
+        coverage_status = "partial" if records else "failed"
+    finally:
+        if con is not None:
+            con.close()
+        if coverage_reporter is not None:
+            coverage_reporter(coverage_status)
     return records
+
+
+def scan_t3_activity_statistics(
+    policy: T3ReadOnlyPolicy,
+    since_epoch: float,
+    *,
+    path_resolver: Callable[[Path | str | None], Path] = t3_database_path,
+    scanner: Callable[[Path, float], list[tuple]] | None = None,
+    coverage_reporter: Callable[[str], None] | None = None,
+) -> list[tuple]:
+    """Read optional T3 activity only after both admission checks pass."""
+    if not policy.may_scan_activity_statistics:
+        return []
+    database = path_resolver(policy.base_dir)
+    if scanner is not None:
+        records = scanner(database, since_epoch)
+        if coverage_reporter is not None:
+            coverage_reporter("complete")
+        return records
+    return _scan_t3code_records(
+        database,
+        since_epoch,
+        coverage_reporter=coverage_reporter,
+    )
 
 
 def _scan_antigravity_records(gemini_dir: Path, since_epoch: float) -> list[tuple]:
@@ -170,8 +325,9 @@ def _scan_antigravity_records(gemini_dir: Path, since_epoch: float) -> list[tupl
                 epoch = dt.timestamp()
                 if epoch < since_epoch:
                     continue
-                est_tokens = steps * 350
-                records.append(("antigravity", cid, "gemini", epoch, est_tokens, 0, 0, 0, f"antigravity:{cid}"))
+                # A step count proves activity, not tokens or API-equivalent
+                # spend. These rows are used only for session-day counts.
+                records.append(("antigravity", cid, "gemini", epoch, 0, 0, 0, 0, f"antigravity:{cid}"))
             except Exception:
                 pass
         con.close()
@@ -179,61 +335,56 @@ def _scan_antigravity_records(gemini_dir: Path, since_epoch: float) -> list[tupl
         pass
     return records
 
-def _build_payload(settings) -> tuple[dict, str | None]:
+def _build_payload(
+    settings,
+    *,
+    t3_policy: T3ReadOnlyPolicy | None = None,
+) -> tuple[dict, str | None]:
     """(chart model, scan summary line) for the CURRENT metric."""
     settings = _settings_snapshot(settings)
     days = settings.usage_graph_days
     mode = settings.usage_display_mode
-    if mode == "percent":
-        return (
-            usage_percent_history.shared_percent_graph_model(
-                days=days,
-                period_label=usage_stats.usage_period_label(days),
-            ),
-            None,
-        )
+    provider_ids = tuple(settings.usage_graph_providers)
     period_start = _period_start(days)
     totals = usage_stats.scan_usage(
         Path.home() / ".claude" / "projects",
         default_state_dir() / "usage-scan-cache.json",
         since_epoch=period_start.timestamp(),
         codex_root=Path.home() / ".codex" / "sessions",
+        provider_ids=provider_ids,
     )
-    opencode_records = _scan_opencode_records(
-        Path.home() / ".local" / "share" / "opencode" / "opencode.db",
-        period_start.timestamp(),
+    opencode_records = (
+        _scan_opencode_records(
+            Path.home() / ".local" / "share" / "opencode" / "opencode.db",
+            period_start.timestamp(),
+        )
+        if "opencode" in provider_ids
+        else []
     )
-    t3code_records = _scan_t3code_records(
-        Path.home() / ".t3" / "userdata" / "state.sqlite",
-        period_start.timestamp(),
-    )
-    antigravity_records = _scan_antigravity_records(
-        Path.home() / ".gemini",
-        period_start.timestamp(),
+    t3_coverage: list[str] = []
+    t3code_records = (
+        scan_t3_activity_statistics(
+            t3_policy,
+            period_start.timestamp(),
+            coverage_reporter=t3_coverage.append,
+        )
+        if t3_policy is not None and t3_policy.may_scan_activity_statistics
+        else []
     )
     totals.records.extend(opencode_records)
     totals.records.extend(t3code_records)
-    totals.records.extend(antigravity_records)
 
-    provider_ids = tuple(settings.usage_graph_providers)
-    for rec in totals.records:
-        rec_provider = rec[0]
-        if rec_provider not in provider_ids:
-            provider_ids = provider_ids + (rec_provider,)
+    # T3 statistics have their own explicit opt-in, separate from the provider
+    # switches. Merely discovering another source must not re-enable its line.
+    if t3_coverage and "t3code" not in provider_ids:
+        provider_ids = (*provider_ids, "t3code")
+    records = [record for record in totals.records if record[0] in provider_ids]
 
     extra_sessions: dict[str, dict[str, int]] | None = None
     if mode == "sessions":
-        # Sessions is the one metric EVERY watched provider can answer:
-        # the hook ledgers record session_start for grok, devin, and
-        # friends. Chart whoever has data, not just the transcript two.
+        # Hook ledgers can supply daily session counts without token records.
         from .session_history import ledger_session_days
 
-        try:
-            from .providers import HOOK_PROVIDERS
-
-            registry_ids = tuple(HOOK_PROVIDERS)
-        except Exception:
-            registry_ids = provider_ids
         try:
             # default_state_dir() already ENDS in agent-monitor; the
             # doubled path looked in .../agent-monitor/agent-monitor and
@@ -242,53 +393,94 @@ def _build_payload(settings) -> tuple[dict, str | None]:
             extra_sessions = ledger_session_days(
                 default_state_dir(),
                 since_epoch=period_start.timestamp(),
-                provider_ids=registry_ids,
+                provider_ids=provider_ids,
             )
         except Exception:
-            extra_sessions = None
-        if extra_sessions:
-            provider_ids = provider_ids + tuple(
-                provider_id
-                for provider_id in extra_sessions
-                if provider_id not in provider_ids
-            )
-    model = usage_stats.usage_graph_model(
-        totals.records,
-        days=days,
-        metric=mode,
-        provider_ids=provider_ids,
-        extra_sessions=extra_sessions,
+            extra_sessions = {}
+        if "antigravity" in provider_ids:
+            activity_days: dict[str, set[str]] = {}
+            for record in _scan_antigravity_records(Path.home() / ".gemini", period_start.timestamp()):
+                day = datetime.fromtimestamp(record[3]).date().isoformat()
+                activity_days.setdefault(day, set()).add(record[1])
+            counts = extra_sessions.setdefault("antigravity", {})
+            for day, sessions in activity_days.items():
+                counts[day] = max(counts.get(day, 0), len(sessions))
+    if mode == "percent":
+        model = usage_percent_history.shared_percent_graph_model(
+            days=days,
+            period_label=usage_stats.usage_period_label(days),
+        )
+        model = {
+            **model,
+            "series": tuple(series for series in model["series"] if series["provider_id"] in provider_ids),
+            "heatmap": build_usage_heatmap(records, days=days, provider_ids=provider_ids),
+        }
+    else:
+        model = usage_stats.usage_graph_model(
+            records,
+            days=days,
+            metric=mode,
+            provider_ids=provider_ids,
+            extra_sessions=extra_sessions,
+        )
+    heatmap = model["heatmap"]
+    if mode == "cost":
+        model = {**model, "cost_semantics": "api_equivalent_estimate"}
+    partial_provider_ids = tuple(
+        provider_id
+        for provider_id in provider_ids
+        if provider_id == "t3code"
+        and t3_coverage
+        and t3_coverage[-1] != "complete"
     )
-    claude_tokens = (
-        totals.input_tokens + totals.cached_input_tokens + totals.output_tokens
-    )
-    active_providers = []
-    if claude_tokens > 0:
-        active_providers.append(f"Claude {usage_stats.compact_token_count(claude_tokens)}")
-    if totals.codex_tokens > 0:
-        active_providers.append(f"Codex {usage_stats.compact_token_count(totals.codex_tokens)}")
-    opencode_tokens = sum(r[4] + r[5] + r[6] + r[7] for r in opencode_records)
-    if opencode_tokens > 0:
-        active_providers.append(f"OpenCode {usage_stats.compact_token_count(opencode_tokens)}")
-    t3_tokens = sum(r[4] + r[5] + r[6] + r[7] for r in t3code_records)
-    if t3_tokens > 0:
-        active_providers.append(f"T3 {usage_stats.compact_token_count(t3_tokens)}")
-    agy_tokens = sum(r[4] + r[5] + r[6] + r[7] for r in antigravity_records)
-    if agy_tokens > 0:
-        active_providers.append(f"Antigravity {usage_stats.compact_token_count(agy_tokens)}")
+    model = {**model, "partial_provider_ids": partial_provider_ids}
+    from .provider_usage_platform import provider_descriptors
 
-    distinct_sessions = len(totals.sessions) + len({r[1] for r in opencode_records}) + len({r[1] for r in t3code_records}) + len({r[1] for r in antigravity_records})
-    prov_str = " · ".join(active_providers) if active_providers else "No tokens"
-    summary = (
-        f"{usage_stats.usage_period_label(days)}: {prov_str} · "
-        f"{distinct_sessions} sessions"
+    labels = {descriptor.provider_id: descriptor.label for descriptor in provider_descriptors()}
+    labels["t3code"] = "T3 Code"
+    if mode == "sessions":
+        parts = [
+            f"{labels.get(series['provider_id'], series['provider_id'])} "
+            f"{int(sum(series['values']))} session-days"
+            for series in model["series"]
+        ]
+        detail = " · ".join(parts) or "No recorded sessions"
+    elif mode == "percent":
+        detail = "Remaining quota for " + ", ".join(labels.get(provider, provider) for provider in provider_ids)
+    else:
+        parts = [
+            f"{labels.get(provider, provider)} {usage_stats.compact_token_count(value.totals.tokens)}"
+            for provider, value in heatmap.providers.items() if value.totals.tokens > 0
+        ]
+        detail = (" · ".join(parts) or "No recorded tokens") + f" · {heatmap.aggregate.totals.sessions} sessions"
+    summary = f"{usage_stats.usage_period_label(days)}: {detail}"
+    partial = [
+        labels.get(provider, provider)
+        for provider, coverage in totals.source_coverage.items()
+        if provider in provider_ids and coverage.status != usage_stats.UsageSourceStatus.OK
+    ]
+    partial.extend(
+        labels.get(provider, provider)
+        for provider in partial_provider_ids
+        if labels.get(provider, provider) not in partial
     )
+    if partial:
+        summary += " · Partial local history: " + ", ".join(partial)
+    if mode == "cost":
+        summary += f" · {API_EQUIVALENT_COST_DISCLOSURE}"
     return model, summary
 
 
-def build_usage_graph_model(settings) -> dict:
+def build_usage_graph_model(
+    settings,
+    *,
+    t3_policy: T3ReadOnlyPolicy | None = None,
+) -> dict:
     """The chart model for the CURRENT metric, straight from the sources."""
-    return _build_payload(_settings_snapshot(settings))[0]
+    snapshot = _settings_snapshot(settings)
+    if t3_policy is None:
+        return _build_payload(snapshot)[0]
+    return _build_payload(snapshot, t3_policy=t3_policy)[0]
 
 
 def scanning_placeholder(settings) -> dict:
@@ -305,12 +497,27 @@ def scanning_placeholder(settings) -> dict:
     }
 
 
-def _build_key(settings) -> tuple:
+def _build_key(
+    settings,
+    t3_policy: T3ReadOnlyPolicy | None = None,
+) -> tuple:
     settings = _settings_snapshot(settings)
+    t3_key = (
+        False,
+        False,
+        None,
+    )
+    if t3_policy is not None:
+        t3_key = (
+            t3_policy.enabled,
+            t3_policy.may_scan_activity_statistics,
+            t3_policy.base_dir,
+        )
     return (
         settings.usage_graph_days,
         settings.usage_display_mode,
         settings.usage_graph_providers,
+        t3_key,
     )
 
 
@@ -331,12 +538,18 @@ def refresh_usage_graph(
     target,
     *,
     monotonic: Callable[[], float] = time.monotonic,
+    t3_policy: T3ReadOnlyPolicy | None = None,
 ) -> None:
     """Fire-and-forget rebuild; lands on main via AppHelper.callAfter."""
+    if t3_policy is None:
+        candidate = getattr(target, "_t3_read_only_policy", None)
+        if type(candidate) is T3ReadOnlyPolicy:
+            t3_policy = candidate
     fields = getattr(target, "settings_fields", {}) or {}
     graph = fields.get("profile_usage_graph")
+    heatmap_view = fields.get("profile_usage_heatmap")
     settings = _settings_snapshot(target.settings)
-    key = _build_key(settings)
+    key = _build_key(settings, t3_policy)
 
     # Same inputs, recent result: serve the landed model without paying
     # the scan again (a pane switch rebuilds the view but not the data).
@@ -351,6 +564,17 @@ def refresh_usage_graph(
         if graph is not None:
             try:
                 graph.setModel_(model)
+            except Exception:
+                pass
+        if heatmap_view is not None and model.get("heatmap") is not None:
+            try:
+                heatmap_view.setHeatmap_(model["heatmap"])
+            except Exception:
+                pass
+        label = fields.get("profile_usage_label")
+        if label is not None and model.get("summary"):
+            try:
+                label.setStringValue_(model["summary"])
             except Exception:
                 pass
         return
@@ -387,7 +611,11 @@ def refresh_usage_graph(
         # captures a new snapshot after this one lands.
         built_key = key
         try:
-            model, summary = _build_payload(settings)
+            if t3_policy is None:
+                model, summary = _build_payload(settings)
+            else:
+                model, summary = _build_payload(settings, t3_policy=t3_policy)
+            model = {**model, "summary": summary}
         except Exception:
             model = None
         finally:
@@ -406,18 +634,51 @@ def refresh_usage_graph(
                             view.setModel_(model)
                         except Exception:
                             pass
-                    # The old acceptance-gated path could leave "Loading
-                    # local usage history…" forever; scan-derived truth
-                    # resolves it whenever that path has said nothing.
-                    if summary and not getattr(target, "usage_summary_text", None):
+                    heatmap_view = fields.get("profile_usage_heatmap")
+                    if heatmap_view is not None and model.get("heatmap") is not None:
+                        try:
+                            heatmap_view.setHeatmap_(model["heatmap"])
+                        except Exception:
+                            pass
+                    # This label describes the local chart, not the separate
+                    # provider summary. Replace loading and prior retry errors.
+                    if summary:
                         label = fields.get("profile_usage_label")
                         if label is not None:
                             try:
                                 label.setStringValue_(summary)
                             except Exception:
                                 pass
+                else:
+                    # A failed worker is no longer scanning. Clear any old
+                    # result so reopening the page retries instead of reusing it.
+                    target.usage_graph_model = None
+                    target._usage_local_scan_complete = False
+                    setattr(target, _LAST_BUILD_ATTR, None)
+                    message = "Local activity couldn't be loaded. Reopen Activity to retry."
+                    failed_model = {**scanning_placeholder(settings), "empty_text": message}
+                    unavailable = build_usage_heatmap(
+                        [], days=settings.usage_graph_days,
+                        provider_ids=settings.usage_graph_providers,
+                    )
+                    fields = getattr(target, "settings_fields", {}) or {}
+                    for name, method, value in (
+                        ("profile_usage_graph", "setModel_", failed_model),
+                        ("profile_usage_heatmap", "setHeatmap_", unavailable),
+                        ("profile_usage_label", "setStringValue_", message),
+                    ):
+                        field = fields.get(name)
+                        if field is not None:
+                            try:
+                                getattr(field, method)(value)
+                            except Exception:
+                                pass
                 if pending:
-                    refresh_usage_graph(target, monotonic=monotonic)
+                    refresh_usage_graph(
+                        target,
+                        monotonic=monotonic,
+                        t3_policy=t3_policy,
+                    )
 
             try:
                 # AppHelper.callAfter is the PyObjC-blessed main-thread
@@ -438,5 +699,6 @@ def refresh_usage_graph(
 __all__ = [
     "build_usage_graph_model",
     "refresh_usage_graph",
+    "scan_t3_activity_statistics",
     "scanning_placeholder",
 ]

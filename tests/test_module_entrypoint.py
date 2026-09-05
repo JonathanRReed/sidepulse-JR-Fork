@@ -26,7 +26,9 @@ def run_sidepulse_module(temp_root: Path, *arguments: str) -> subprocess.Complet
         env=environment,
         capture_output=True,
         text=True,
-        timeout=10,
+        # This is a deadman switch, not a startup-performance assertion. The
+        # full AppKit suite can briefly delay subprocess scheduling on macOS.
+        timeout=30,
         check=False,
     )
 

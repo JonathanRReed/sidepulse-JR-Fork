@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import os
+import platform
 import threading
 import time
 from collections.abc import Callable
@@ -22,6 +24,7 @@ ALCOVE_MAX_CONTOUR_POINTS = 64
 # here, because every other Alcove constant that got a second copy in
 # another module is exactly how the last Alcove bug was introduced.
 ALCOVE_OWNER_NAME: Final = "Alcove"
+ALCOVE_BUNDLE_ID: Final = "com.henrikruscon.Alcove"
 
 
 class AlcoveCaptureStatus(str, Enum):
@@ -41,6 +44,7 @@ class AlcoveCaptureStatus(str, Enum):
     WINDOW_UNAVAILABLE = "window_unavailable"
     IMAGE_UNUSABLE = "image_unusable"
     CAPTURE_FAILED = "capture_failed"
+    CAPTURE_API_UNAVAILABLE = "capture_api_unavailable"
     # Never returned by a capture: the user turned following off, or a
     # manual wing length is overriding it. Said out loud so a surface
     # never has to guess whether silence means "off" or "broken".
@@ -138,10 +142,10 @@ _CONFIDENCE_COPY = MappingProxyType({
         "The Screen Bar is following a current measurement.",
     ),
     AlcoveConfidenceState.STALE: (
-        "Stale. {geometry} while JR Bar checks again.", "Stale", "{help}",
+        "Stale. {geometry} while JR-Bar checks again.", "Stale", "{help}",
     ),
     AlcoveConfidenceState.PERMISSION_DENIED: (
-        "Screen Recording is off, so JR Bar cannot see Alcove's capsule. The bar keeps its own size until you grant it.",
+        "Screen Recording is off, so JR-Bar cannot see Alcove's capsule. The bar keeps its own size until you grant it.",
         "Permission denied", "Grant Screen Recording access to let the Screen Bar follow Alcove.",
     ),
     AlcoveConfidenceState.DISCONNECTED: (
@@ -211,6 +215,10 @@ ALCOVE_STATUS_MESSAGES: Final[dict[AlcoveCaptureStatus, str]] = {
     AlcoveCaptureStatus.CAPTURE_FAILED: (
         "Measuring Alcove's capsule failed, so the bar is using its own size."
     ),
+    AlcoveCaptureStatus.CAPTURE_API_UNAVAILABLE: (
+        "Alcove measurement is unavailable on this macOS installation, so the "
+        "bar is using its own size."
+    ),
     AlcoveCaptureStatus.NOT_FOLLOWING: (
         "Not following Alcove -- the bar uses its own size."
     ),
@@ -227,6 +235,9 @@ ALCOVE_STATUS_LOG_LINES: Final[dict[AlcoveCaptureStatus, str]] = {
     AlcoveCaptureStatus.WINDOW_UNAVAILABLE: "alcove: no capsule window on screen",
     AlcoveCaptureStatus.IMAGE_UNUSABLE: "alcove: captured, image unusable",
     AlcoveCaptureStatus.CAPTURE_FAILED: "alcove: capture failed",
+    AlcoveCaptureStatus.CAPTURE_API_UNAVAILABLE: (
+        "alcove: ScreenCaptureKit measurement unavailable"
+    ),
     AlcoveCaptureStatus.NOT_FOLLOWING: "alcove: following is off",
 }
 
@@ -327,6 +338,11 @@ _screen_recording_cache: tuple[float, bool | None] | None = None
 
 _status_lock = threading.Lock()
 _status_snapshot: AlcoveStatusSnapshot | None = None
+_window_presence_lock = threading.Lock()
+_window_presence_cache: tuple[float, bool | None] | None = None
+_window_presence_refreshing = False
+_window_presence_generation = 0
+ALCOVE_WINDOW_PRESENCE_TTL_SECONDS: Final = 1.5
 
 
 def _quartz():
@@ -425,22 +441,7 @@ def request_screen_recording_access(
     return granted
 
 
-def alcove_window_present(*, window_lister: Callable[[], object] | None = None) -> bool | None:
-    """Is an Alcove window on screen? None when the list cannot be read."""
-    if window_lister is not None:
-        try:
-            info = window_lister()
-        except Exception:
-            return None
-    else:
-        try:
-            quartz = _quartz()
-            info = quartz.CGWindowListCopyWindowInfo(
-                quartz.kCGWindowListOptionOnScreenOnly,
-                quartz.kCGNullWindowID,
-            )
-        except Exception:
-            return None
+def _presence_from_window_info(info: object) -> bool | None:
     if info is None:
         return None
     try:
@@ -450,6 +451,81 @@ def alcove_window_present(*, window_lister: Callable[[], object] | None = None) 
         )
     except Exception:
         return None
+
+
+def _query_alcove_window_presence() -> bool | None:
+    try:
+        quartz = _quartz()
+        info = quartz.CGWindowListCopyWindowInfo(
+            quartz.kCGWindowListOptionOnScreenOnly,
+            quartz.kCGNullWindowID,
+        )
+    except Exception:
+        return None
+    return _presence_from_window_info(info)
+
+
+def _start_alcove_window_presence_refresh(task) -> None:
+    threading.Thread(
+        target=task,
+        name="sidepulse-alcove-window-presence",
+        daemon=True,
+    ).start()
+
+
+def reset_alcove_window_presence_cache() -> None:
+    global _window_presence_cache, _window_presence_refreshing
+    global _window_presence_generation
+    with _window_presence_lock:
+        _window_presence_cache = None
+        _window_presence_refreshing = False
+        _window_presence_generation += 1
+
+
+def alcove_window_present(
+    *,
+    window_lister: Callable[[], object] | None = None,
+    now: float | None = None,
+) -> bool | None:
+    """Cached Alcove presence, or None while the background probe warms."""
+    if window_lister is not None:
+        try:
+            return _presence_from_window_info(window_lister())
+        except Exception:
+            return None
+
+    global _window_presence_refreshing
+    moment = time.monotonic() if now is None else float(now)
+    task = None
+    with _window_presence_lock:
+        cached = _window_presence_cache
+        fresh = (
+            cached is not None
+            and 0.0 <= moment - cached[0] < ALCOVE_WINDOW_PRESENCE_TTL_SECONDS
+        )
+        if not fresh and not _window_presence_refreshing:
+            _window_presence_refreshing = True
+            generation = _window_presence_generation
+
+            def refresh() -> None:
+                global _window_presence_cache, _window_presence_refreshing
+                value = _query_alcove_window_presence()
+                with _window_presence_lock:
+                    if generation != _window_presence_generation:
+                        return
+                    _window_presence_cache = (moment, value)
+                    _window_presence_refreshing = False
+
+            task = refresh
+        value = None if cached is None else cached[1]
+    if task is not None:
+        try:
+            _start_alcove_window_presence_refresh(task)
+        except Exception:
+            with _window_presence_lock:
+                if generation == _window_presence_generation:
+                    _window_presence_refreshing = False
+    return value
 
 
 def alcove_follow_blocker(*, following: bool = True) -> AlcoveCaptureStatus | None:
@@ -562,6 +638,8 @@ def project_alcove_confidence(
     elif snapshot.status is AlcoveCaptureStatus.WINDOW_UNAVAILABLE:
         return _confidence_projection(AlcoveConfidenceState.DISCONNECTED)
     elif snapshot.status is AlcoveCaptureStatus.IMAGE_UNUSABLE:
+        state = AlcoveConfidenceState.UNSUPPORTED
+    elif snapshot.status is AlcoveCaptureStatus.CAPTURE_API_UNAVAILABLE:
         state = AlcoveConfidenceState.UNSUPPORTED
     elif snapshot.status is AlcoveCaptureStatus.CAPTURE_FAILED:
         state = AlcoveConfidenceState.RECOVERING
@@ -861,10 +939,311 @@ def _cg_alpha_offset(quartz: object, bitmap_info: int, bytes_per_pixel: int) -> 
     return 0 if is_little else bytes_per_pixel - 1
 
 
+_CAPTURE_API_UNAVAILABLE = object()
+_CAPTURE_FAILED = object()
+_screen_capture_kit_lock = threading.Lock()
+_screen_capture_kit_classes: tuple[object, object, object, object] | None = None
+_screen_capture_kit_load_attempted = False
+
+
+def _macos_major_version() -> int:
+    try:
+        version = platform.mac_ver()[0]
+        if version:
+            return int(version.split(".", 1)[0])
+    except (TypeError, ValueError, OSError):
+        pass
+    try:
+        if os.uname().sysname == "Darwin":
+            return max(0, int(os.uname().release.split(".", 1)[0]) - 9)
+    except (AttributeError, TypeError, ValueError, OSError):
+        pass
+    return 0
+
+
+def _load_screen_capture_kit():
+    """Load only the ScreenCaptureKit surface used by Alcove measurement."""
+    global _screen_capture_kit_classes, _screen_capture_kit_load_attempted
+    with _screen_capture_kit_lock:
+        if _screen_capture_kit_load_attempted:
+            return _screen_capture_kit_classes
+        _screen_capture_kit_load_attempted = True
+        try:
+            import AppKit
+            import objc
+
+            bundle = AppKit.NSBundle.bundleWithPath_(
+                "/System/Library/Frameworks/ScreenCaptureKit.framework"
+            )
+            if bundle is None or not bundle.load():
+                return None
+            objc.registerMetaDataForSelector(
+                b"SCShareableContent",
+                b"getShareableContentExcludingDesktopWindows:onScreenWindowsOnly:completionHandler:",
+                {
+                    "arguments": {
+                        4: {
+                            "callable": {
+                                "retval": {"type": b"v"},
+                                "arguments": {
+                                    0: {"type": b"^v"},
+                                    1: {"type": b"@"},
+                                    2: {"type": b"@"},
+                                },
+                            }
+                        }
+                    }
+                },
+            )
+            objc.registerMetaDataForSelector(
+                b"SCScreenshotManager",
+                b"captureImageWithFilter:configuration:completionHandler:",
+                {
+                    "arguments": {
+                        4: {
+                            "callable": {
+                                "retval": {"type": b"v"},
+                                "arguments": {
+                                    0: {"type": b"^v"},
+                                    1: {"type": b"^{CGImage=}"},
+                                    2: {"type": b"@"},
+                                },
+                            }
+                        }
+                    }
+                },
+            )
+            _screen_capture_kit_classes = (
+                objc.lookUpClass("SCShareableContent"),
+                objc.lookUpClass("SCContentFilter"),
+                objc.lookUpClass("SCStreamConfiguration"),
+                objc.lookUpClass("SCScreenshotManager"),
+            )
+        except Exception:
+            _screen_capture_kit_classes = None
+        return _screen_capture_kit_classes
+
+
+def _screen_capture_kit_image(
+    request: AlcoveCaptureRequest,
+    *,
+    api=None,
+    timeout_seconds: float = 2.0,
+):
+    """Capture the selected Alcove window with ScreenCaptureKit.
+
+    Pixels remain in memory only long enough for the existing alpha scanner;
+    this bridge does not persist, encode, or log them.
+    """
+    classes = _load_screen_capture_kit() if api is None else api
+    if classes is None:
+        return _CAPTURE_API_UNAVAILABLE
+    shareable, content_filter, configuration, screenshot_manager = classes
+    content_result: dict[str, object] = {}
+    content_ready = threading.Event()
+
+    def content_callback(content, error) -> None:
+        content_result["content"] = content
+        content_result["error"] = error
+        content_ready.set()
+
+    try:
+        shareable.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_(
+            True,
+            True,
+            content_callback,
+        )
+        if not content_ready.wait(max(0.05, float(timeout_seconds))):
+            return _CAPTURE_FAILED
+        content = content_result.get("content")
+        if content is None or content_result.get("error") is not None:
+            return _CAPTURE_FAILED
+        target = None
+        for window in content.windows() or ():
+            if int(window.windowID()) != request.window_number:
+                continue
+            application = window.owningApplication()
+            if application is None or str(application.bundleIdentifier()) != ALCOVE_BUNDLE_ID:
+                continue
+            target = window
+            break
+        if target is None:
+            return None
+
+        capture_filter = content_filter.alloc().initWithDesktopIndependentWindow_(target)
+        capture_configuration = configuration.alloc().init()
+        pixel_width = max(1, int(round(request.window_width * request.scale)))
+        probe_height = request.menu_band_height * (ALCOVE_MAX_BAND_FACTOR + 0.2)
+        pixel_height = max(1, int(round(probe_height * request.scale)))
+        capture_configuration.setWidth_(pixel_width)
+        capture_configuration.setHeight_(pixel_height)
+        capture_configuration.setShowsCursor_(False)
+        try:
+            import Quartz
+
+            capture_configuration.setSourceRect_(
+                Quartz.CGRectMake(0.0, 0.0, request.window_width, probe_height)
+            )
+        except Exception:
+            return _CAPTURE_FAILED
+
+        image_result: dict[str, object] = {}
+        image_ready = threading.Event()
+
+        def image_callback(image, error) -> None:
+            image_result["image"] = image
+            image_result["error"] = error
+            image_ready.set()
+
+        screenshot_manager.captureImageWithFilter_configuration_completionHandler_(
+            capture_filter,
+            capture_configuration,
+            image_callback,
+        )
+        if not image_ready.wait(max(0.05, float(timeout_seconds))):
+            return _CAPTURE_FAILED
+        if image_result.get("error") is not None:
+            return _CAPTURE_FAILED
+        return image_result.get("image")
+    except Exception:
+        return _CAPTURE_FAILED
+
+
+def capture_display_region_image(
+    *,
+    display_id: int,
+    source_width: float,
+    source_height: float,
+    pixel_width: int,
+    pixel_height: int,
+    excluded_window_number: int = 0,
+    api=None,
+    timeout_seconds: float = 2.0,
+):
+    """Capture one display-local rectangle with ScreenCaptureKit.
+
+    This is intentionally synchronous only to its caller. The Screen Bar's
+    notch probe calls it from a daemon worker, never from AppKit layout. The
+    returned CGImage remains in memory and is neither encoded nor logged.
+    """
+    if (
+        int(display_id) <= 0
+        or not math.isfinite(float(source_width))
+        or not math.isfinite(float(source_height))
+        or float(source_width) <= 0.0
+        or float(source_height) <= 0.0
+        or int(pixel_width) <= 0
+        or int(pixel_height) <= 0
+    ):
+        return None
+    classes = _load_screen_capture_kit() if api is None else api
+    if classes is None:
+        return None
+    shareable, content_filter, configuration, screenshot_manager = classes
+    content_result: dict[str, object] = {}
+    content_ready = threading.Event()
+
+    def content_callback(content, error) -> None:
+        content_result["content"] = content
+        content_result["error"] = error
+        content_ready.set()
+
+    try:
+        shareable.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_(
+            False,
+            True,
+            content_callback,
+        )
+        if not content_ready.wait(max(0.05, float(timeout_seconds))):
+            return None
+        content = content_result.get("content")
+        if content is None or content_result.get("error") is not None:
+            return None
+        display = next(
+            (
+                candidate
+                for candidate in content.displays() or ()
+                if int(candidate.displayID()) == int(display_id)
+            ),
+            None,
+        )
+        if display is None:
+            return None
+        excluded = []
+        if int(excluded_window_number) > 0:
+            excluded = [
+                window
+                for window in content.windows() or ()
+                if int(window.windowID()) == int(excluded_window_number)
+            ]
+        capture_filter = content_filter.alloc().initWithDisplay_excludingWindows_(
+            display,
+            excluded,
+        )
+        capture_configuration = configuration.alloc().init()
+        capture_configuration.setWidth_(int(pixel_width))
+        capture_configuration.setHeight_(int(pixel_height))
+        capture_configuration.setShowsCursor_(False)
+        import Quartz
+
+        capture_configuration.setSourceRect_(
+            Quartz.CGRectMake(
+                0.0,
+                0.0,
+                float(source_width),
+                float(source_height),
+            )
+        )
+        image_result: dict[str, object] = {}
+        image_ready = threading.Event()
+
+        def image_callback(image, error) -> None:
+            image_result["image"] = image
+            image_result["error"] = error
+            image_ready.set()
+
+        screenshot_manager.captureImageWithFilter_configuration_completionHandler_(
+            capture_filter,
+            capture_configuration,
+            image_callback,
+        )
+        if not image_ready.wait(max(0.05, float(timeout_seconds))):
+            return None
+        if image_result.get("error") is not None:
+            return None
+        return image_result.get("image")
+    except Exception:
+        return None
+
+
+def _legacy_capture_alcove_image(request: AlcoveCaptureRequest, quartz: object):
+    """Pre-macOS-15 compatibility path for the API Apple made obsolete."""
+    probe_height = request.menu_band_height * (ALCOVE_MAX_BAND_FACTOR + 0.2)
+    rect = quartz.CGRectMake(
+        request.window_x,
+        request.window_y,
+        request.window_width,
+        probe_height,
+    )
+    return quartz.CGWindowListCreateImage(
+        rect,
+        quartz.kCGWindowListOptionIncludingWindow,
+        request.window_number,
+        quartz.kCGWindowImageNominalResolution,
+    )
+
+
+def _capture_alcove_image(request: AlcoveCaptureRequest, quartz: object):
+    if _macos_major_version() >= 15:
+        return _screen_capture_kit_image(request)
+    return _legacy_capture_alcove_image(request, quartz)
+
+
 def capture_alcove_observation(
     request: AlcoveCaptureRequest,
     *,
     screen_recording: bool | None = None,
+    image_capture=None,
 ) -> AlcoveCaptureOutcome:
     """Capture one requested Alcove window, and always say what happened.
 
@@ -887,19 +1266,12 @@ def capture_alcove_observation(
 
         import Quartz
 
-        probe_height = request.menu_band_height * (ALCOVE_MAX_BAND_FACTOR + 0.2)
-        rect = Quartz.CGRectMake(
-            request.window_x,
-            request.window_y,
-            request.window_width,
-            probe_height,
-        )
-        image = Quartz.CGWindowListCreateImage(
-            rect,
-            Quartz.kCGWindowListOptionIncludingWindow,
-            request.window_number,
-            Quartz.kCGWindowImageNominalResolution,
-        )
+        capture = image_capture or _capture_alcove_image
+        image = capture(request, Quartz)
+        if image is _CAPTURE_API_UNAVAILABLE:
+            return AlcoveCaptureOutcome(AlcoveCaptureStatus.CAPTURE_API_UNAVAILABLE)
+        if image is _CAPTURE_FAILED:
+            return AlcoveCaptureOutcome(AlcoveCaptureStatus.CAPTURE_FAILED)
         if image is None:
             # The window went away between selection on main and capture
             # here -- Alcove quit, collapsed, or moved to another Space.

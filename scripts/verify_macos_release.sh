@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON="${PYTHON:-$ROOT_DIR/.venv/bin/python}"
 PERFORMANCE_SOURCE="${SIDEPULSE_PERFORMANCE_EVIDENCE:-}"
-REQUIRED_HARDWARE="${SIDEPULSE_REQUIRED_HARDWARE:-both}"
+REQUIRED_HARDWARE="${SIDEPULSE_REQUIRED_HARDWARE:-software}"
 SETTINGS_PATH="${SIDEPULSE_SETTINGS_PATH:-$HOME/.config/sidepulse/agent-monitor/settings.json}"
 RELEASE_USER="${SIDEPULSE_RELEASE_USER:-$(/usr/bin/id -un)}"
 EVIDENCE_DIR="$ROOT_DIR/dist/release-evidence"
@@ -13,7 +13,7 @@ RELEASE_CHANNEL="${SIDEPULSE_RELEASE_CHANNEL:-stable}"
 SPARKLE_HISTORY_DIR="${SIDEPULSE_SPARKLE_HISTORY_DIR:-}"
 
 if [ "$(uname -s)" != "Darwin" ]; then
-    echo "The authoritative JR Bar release gate requires macOS." >&2
+    echo "The authoritative JR-Bar release gate requires macOS." >&2
     exit 2
 fi
 if [ ! -x "$PYTHON" ]; then
@@ -40,10 +40,16 @@ if [ "${SIDEPULSE_RUN_UNINSTALL:-0}" != "1" ]; then
     echo "Set SIDEPULSE_RUN_UNINSTALL=1 to authorize uninstall verification." >&2
     exit 2
 fi
-if [ "${SIDEPULSE_HARDWARE_CONFIRM:-0}" != "1" ]; then
-    echo "Set SIDEPULSE_HARDWARE_CONFIRM=1 to authorize reversible hardware writes." >&2
-    exit 2
-fi
+case "$REQUIRED_HARDWARE" in
+    software) ;;
+    any|pro|dot|both)
+        if [ "${SIDEPULSE_HARDWARE_CONFIRM:-0}" != "1" ]; then
+            echo "Set SIDEPULSE_HARDWARE_CONFIRM=1 to authorize reversible hardware writes." >&2
+            exit 2
+        fi
+        ;;
+    *) echo "SIDEPULSE_REQUIRED_HARDWARE must be software, any, pro, dot, or both." >&2; exit 2 ;;
+esac
 if [ "$RELEASE_USER" != "$(/usr/bin/id -un)" ]; then
     echo "Run the release gate while logged in as SIDEPULSE_RELEASE_USER." >&2
     exit 2
@@ -54,14 +60,16 @@ if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
     echo "Refusing release verification from a dirty or untracked tree." >&2
     exit 2
 fi
-if [ "$(git branch --show-current)" != "main" ]; then
-    echo "Authoritative release verification must run from main." >&2
-    exit 2
-fi
 git fetch --quiet origin main --tags
 head_commit="$(git rev-parse HEAD)"
-if [ "$head_commit" != "$(git rev-parse origin/main)" ]; then
-    echo "Local main is not exactly origin/main." >&2
+origin_main_commit="$(git rev-parse origin/main)"
+current_branch="$(git branch --show-current)"
+if [ -n "$current_branch" ] && [ "$current_branch" != "main" ]; then
+    echo "Authoritative release verification must run from main or its detached commit." >&2
+    exit 2
+fi
+if [ "$head_commit" != "$origin_main_commit" ]; then
+    echo "Release commit is not exactly the freshly fetched origin/main." >&2
     exit 2
 fi
 
@@ -279,10 +287,12 @@ record_receipt signed-appcast "$appcast" \
     'import sys; from pathlib import Path; from scripts.generate_sparkle_channel import validate_channel_outputs; validate_channel_outputs(archive=Path(sys.argv[1]), appcast=Path(sys.argv[2]), metadata=Path(sys.argv[3]), candidate_id=sys.argv[4], sparkle_distribution=Path(sys.argv[5]), keychain_account=sys.argv[6])' \
     "$update_archive" "$appcast" "$channel_metadata" "$candidate_id" \
     "$sparkle_distribution" "$SPARKLE_KEY_ACCOUNT"
-record_receipt hardware-smoke "$pkg" \
-    "$PYTHON" scripts/verify_hardware_release.py \
-        --confirm-write \
-        --require "$REQUIRED_HARDWARE"
+if [ "$REQUIRED_HARDWARE" != "software" ]; then
+    record_receipt hardware-smoke "$pkg" \
+        "$PYTHON" scripts/verify_hardware_release.py \
+            --confirm-write \
+            --require "$REQUIRED_HARDWARE"
+fi
 
 package_contents_receipt="$EVIDENCE_DIR/package-contents.json"
 "$PYTHON" scripts/release_evidence.py package-contents-receipt \
@@ -327,7 +337,7 @@ trap cleanup EXIT
 /usr/bin/sudo /usr/sbin/installer -pkg "$pkg" -target /
 installed_binary="/Applications/SidePulse.app/Contents/MacOS/SidePulse"
 if [ ! -x "$installed_binary" ]; then
-    echo "Installed JR Bar executable is missing at the compatibility path." >&2
+    echo "Installed JR-Bar executable is missing at the compatibility path." >&2
     exit 1
 fi
 # The package remains payload-only. The upgrade smoke explicitly starts the
@@ -409,6 +419,7 @@ manifest_args=(
     --candidate "$candidate"
     --performance-evidence "$PERFORMANCE_EVIDENCE"
     --sbom "$sbom"
+    --hardware-profile "$REQUIRED_HARDWARE"
 )
 for artifact in "${artifacts[@]}"; do
     manifest_args+=(--artifact "$artifact")
@@ -418,4 +429,4 @@ for receipt in "${receipt_files[@]}"; do
 done
 "$PYTHON" scripts/generate_release_manifest.py "${manifest_args[@]}"
 
-printf '%s\n' "Authoritative JR Bar macOS release gate passed."
+printf '%s\n' "Authoritative JR-Bar macOS release gate passed."

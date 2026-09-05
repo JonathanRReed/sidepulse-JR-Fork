@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble a fail-closed exact-candidate JR Bar release manifest."""
+"""Assemble a fail-closed exact-candidate JR-Bar release manifest."""
 
 from __future__ import annotations
 
@@ -41,6 +41,11 @@ def main() -> int:
     parser.add_argument("--performance-evidence", type=Path, required=True)
     parser.add_argument("--artifact", action="append", type=Path, default=[])
     parser.add_argument("--sbom", type=Path, required=True)
+    parser.add_argument(
+        "--hardware-profile",
+        choices=sorted(release_evidence.HARDWARE_PROFILES),
+        default="software",
+    )
     args = parser.parse_args()
 
     try:
@@ -69,6 +74,7 @@ def main() -> int:
             sbom=args.sbom.resolve(strict=True),
             performance_evidence=args.performance_evidence.resolve(strict=True),
             artifacts=tuple(path.resolve(strict=True) for path in args.artifact),
+            hardware_profile=args.hardware_profile,
         )
         release_evidence.write_json(args.output, document)
     except (

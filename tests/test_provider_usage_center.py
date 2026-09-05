@@ -219,5 +219,77 @@ def test_usage_center_falls_back_when_exact_profile_is_missing():
         visual=visual,
     ).sections[0]
 
-    assert section.title == "Claude · personal"
+    assert section.title.startswith("Claude #")
+    assert "personal" not in repr(section)
     assert section.color_override is None
+
+
+def test_usage_center_never_exposes_opaque_account_or_source_identity():
+    raw_account = "org-7535461b-2b9a-4371-b335-3928397be5cd"
+    raw_source = "profile:work:8f14e45fceea167a5a36dedd4bea2543"
+    source = ProviderUsageSnapshot(
+        provider_id="codex",
+        account_label=raw_account,
+        observed_at=1000,
+        state=ProviderSourceState.READY,
+        reason_code=None,
+        action_label=None,
+        lanes=(),
+        input_tokens=0,
+        cached_input_tokens=0,
+        output_tokens=0,
+        model_count=0,
+        estimated_cost_usd=None,
+        cache_savings_usd=None,
+        credits_remaining=None,
+        incident=None,
+        source_instance_id=raw_source,
+    )
+
+    section = project_usage_center(
+        ProviderUsageState((source,), 1000, 1100, False),
+        now=1000,
+    ).sections[0]
+
+    assert section.title.startswith("Codex #")
+    assert section.account is None
+    assert raw_account not in repr(section)
+    assert raw_source not in repr(section)
+
+
+def test_usage_center_privacy_mode_suppresses_email_and_alias():
+    source = ProviderUsageSnapshot(
+        provider_id="claude",
+        account_label="person@example.com",
+        observed_at=1000,
+        state=ProviderSourceState.READY,
+        reason_code=None,
+        action_label=None,
+        lanes=(),
+        input_tokens=0,
+        cached_input_tokens=0,
+        output_tokens=0,
+        model_count=0,
+        estimated_cost_usd=None,
+        cache_savings_usd=None,
+        credits_remaining=None,
+        incident=None,
+        source_instance_id="work",
+    )
+    visual = ProviderInstanceVisualProjection(
+        (
+            ProviderInstanceVisualPolicy("claude", "work", "Client Claude", None),
+        )
+    )
+
+    section = project_usage_center(
+        ProviderUsageState((source,), 1000, 1100, False),
+        now=1000,
+        visual=visual,
+        privacy_mode=True,
+    ).sections[0]
+
+    assert section.title == "Claude"
+    assert section.account is None
+    assert "person@example.com" not in repr(section)
+    assert "Client Claude" not in repr(section)

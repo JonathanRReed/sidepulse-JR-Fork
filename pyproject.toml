@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sidepulse"
 version = "0.6.0"
-description = "JR Bar tools for SidePulse Pro and SidePulse Dot."
+description = "JR-Bar tools for SidePulse Pro and SidePulse Dot."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -41,6 +41,7 @@ dependencies = [
     "rleveldb==1.0.0; sys_platform == 'darwin'",
     # Preserve comments and formatting while editing Hermes YAML config.
     "ruamel.yaml==0.19.1",
+    "hidapi==0.14.0; sys_platform == 'darwin'",
 ]
 
 [project.urls]

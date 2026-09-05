@@ -1,4 +1,4 @@
-"""Pure semantic courtesy signatures for JR Bar.
+"""Pure semantic courtesy signatures for JR-Bar.
 
 Courtesy signatures communicate a small set of event meanings through finite
 spatial geometry and safe cadence, never through color alone.  The registry is
@@ -179,7 +179,7 @@ class CourtesySignature:
             or _IDENTIFIER.fullmatch(self.identifier) is None
         ):
             raise CourtesySignatureError(
-                "signature identifier must be a stable JR Bar identifier"
+                "signature identifier must be a stable JR-Bar identifier"
             )
         if type(self.semantic) is not CourtesySemantic:
             raise CourtesySignatureError("signature semantic must be CourtesySemantic")

@@ -1,6 +1,6 @@
 """Pure planning for the opt-in Rainstick Idle liveness effect.
 
-Rainstick Idle is an ambient, content-free indication that JR Bar is alive and
+Rainstick Idle is an ambient, content-free indication that JR-Bar is alive and
 watching.  When admitted, one dim pixel advances along a bounded path at a low
 frequency.  This module describes that geometry and cadence only.  It owns no
 clock, scheduler, AppKit object, renderer, or device writer.
@@ -342,7 +342,7 @@ def plan_rainstick_idle(
         suppression_reasons=(),
         accessibility_text=(
             "Rainstick Idle is on. One dim pixel advances every 30 seconds to "
-            f"show that JR Bar is alive and watching. {RAINSTICK_ACCESSIBILITY_DISCLOSURE}"
+            f"show that JR-Bar is alive and watching. {RAINSTICK_ACCESSIBILITY_DISCLOSURE}"
         ),
     )
 

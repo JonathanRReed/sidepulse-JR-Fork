@@ -4,6 +4,7 @@ import math
 import os
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from enum import Enum
 
@@ -38,8 +39,14 @@ from Quartz import CGContextFillRect, CGContextSetRGBFillColor
 
 from .accessibility_display import AccessibilityDisplayPreferences
 from .colors import hex_to_rgb, normalize_hex
+from .alcove_window_probe import (
+    AlcoveWindowProbe,
+    AlcoveWindowSnapshot,
+    select_alcove_window_values,
+)
 from .draw_guard import guard_draw
 from .alcove_observation import (
+    ALCOVE_BUNDLE_ID,
     ALCOVE_STATUS_LOG_LINES,
     AlcoveCaptureRequest,
     AlcoveCaptureStatus,
@@ -55,8 +62,18 @@ from .alcove_observation import (
     reset_alcove_status,
     note_alcove_status,
     screen_recording_granted,
+    capture_display_region_image,
+    _macos_major_version,
 )
 from .led_status import LedDisplayState, normalize_brightness, program_for_display_state
+from .native_gradient import draw_horizontal_gradient
+from .notch_silhouette import (
+    bitmap_rep_black_runs as _bitmap_rep_black_runs,
+    center_black_run as _center_black_run,  # noqa: F401 - compatibility import
+    center_black_run_in_bytes as _center_black_run_in_bytes,  # noqa: F401
+    cgimage_black_runs as _cgimage_black_runs,
+    validated_notch_silhouette as _validated_notch_silhouette,
+)
 from .announcer_content import (
     ANNOUNCER_NAME_CAP as ANNOUNCER_NAME_CAP,
     ANNOUNCER_QUESTION_CAP as ANNOUNCER_QUESTION_CAP,
@@ -71,7 +88,7 @@ from .presentation_policy import MotionClass
 from .presentation_scheduler import PresentationSchedulerInputs
 from .render_policy import (
     ACTIVE_RENDER_FPS,
-    GENTLE_MOTION_FPS,  # noqa: F401  -- re-exported; callers patch it here
+    GENTLE_MOTION_FPS,
     STATIC_WATCH_FPS,
     BoundedRenderCache,
     GlowGeometryKey,
@@ -113,7 +130,6 @@ NOTCH_BOTTOM_RADIUS = 8.0
 # disconnected/floating rather than integrated).
 # "never set" -- distinct from every real value, including None.
 _UNSET = object()
-ALCOVE_BUNDLE_ID = "com.henrikruscon.Alcove"
 
 #: How long the Screen Bar may hold a deduped program before it is
 #: re-commanded regardless.
@@ -342,6 +358,33 @@ def virtual_display_state_for_projection(projection, active_signal=None) -> LedD
     return display_state_for_projection(projection, active_signal)
 
 
+@dataclass(frozen=True, slots=True)
+class NotchCaptureRequest:
+    screen_id: str
+    display_id: int
+    frame_x: float
+    screen_width: float
+    scale: float
+    rows: int
+    excluded_window_number: int = 0
+
+
+def _notch_capture_request(screen, *, rows: int, below_window_number: int = 0):
+    values = _screen_capture_values(screen)
+    if values is None:
+        return None
+    screen_id, display_id, frame_x, _frame_y, screen_width, _height, scale = values
+    return NotchCaptureRequest(
+        screen_id,
+        display_id,
+        frame_x,
+        screen_width,
+        scale,
+        int(rows),
+        int(below_window_number),
+    )
+
+
 def measured_notch_silhouette(screen, below_window_number: int = 0, max_width: float | None = None):
     """The hardware notch's full measured outline: per-row black-run
     insets through the notch's depth, so the drawn body can follow the
@@ -355,179 +398,167 @@ def measured_notch_silhouette(screen, below_window_number: int = 0, max_width: f
         depth = int(round(notch_depth_for_screen(screen)))
         if depth <= 2:
             return None
-        runs, scale, frame_x = _captured_notch_runs(screen, rows=depth, below_window_number=below_window_number)
+        request = _notch_capture_request(
+            screen,
+            rows=depth,
+            below_window_number=below_window_number,
+        )
+        if request is None:
+            return None
+        runs, scale, frame_x = _capture_notch_runs(request)
         return _validated_notch_silhouette(runs, scale, frame_x, max_width=max_width)
     except Exception:
         return None
 
 
-def _captured_notch_runs(screen, *, rows: int, below_window_number: int = 0):
-    """(per-row center black runs in px, scale, frame_x) for the top rows."""
-    import Quartz
-
-    frame = screen.frame()
-    rect = Quartz.CGRectMake(float(frame.origin.x), 0.0, float(frame.size.width), float(rows))
+def _legacy_notch_capture_image(request: NotchCaptureRequest):
+    """Pre-macOS-15 WindowServer capture, called only on the probe worker."""
+    rect = Quartz.CGRectMake(
+        request.frame_x,
+        0.0,
+        request.screen_width,
+        float(request.rows),
+    )
     option = (
-        Quartz.kCGWindowListOptionOnScreenBelowWindow if below_window_number else Quartz.kCGWindowListOptionOnScreenOnly
+        Quartz.kCGWindowListOptionOnScreenBelowWindow
+        if request.excluded_window_number
+        else Quartz.kCGWindowListOptionOnScreenOnly
     )
-    image = Quartz.CGWindowListCreateImage(
-        rect, option, int(below_window_number), Quartz.kCGWindowImageNominalResolution
+    return Quartz.CGWindowListCreateImage(
+        rect,
+        option,
+        request.excluded_window_number,
+        Quartz.kCGWindowImageNominalResolution,
     )
+
+
+def _notch_runs_from_image(image, request: NotchCaptureRequest):
     if image is None:
         raise ValueError("no composite image")
     width_px = int(Quartz.CGImageGetWidth(image))
     if width_px <= 0:
         raise ValueError("empty composite image")
-    scale = width_px / float(frame.size.width)
-    runs = _cgimage_black_runs(image, rows=rows, width_px=width_px)
+    scale = width_px / request.screen_width
+    runs = _cgimage_black_runs(image, rows=request.rows, width_px=width_px)
     if runs is None:
-        runs = _bitmap_rep_black_runs(image, rows=rows, width_px=width_px)
-    return runs, scale, float(frame.origin.x)
+        runs = _bitmap_rep_black_runs(image, rows=request.rows, width_px=width_px)
+    return runs, scale, request.frame_x
 
 
-def _cgimage_black_runs(image, *, rows: int, width_px: int):
-    """Per-row center black runs read from the image's raw bytes.
-
-    ``colorAtX_y_`` crossed the PyObjC bridge once per PIXEL -- >100k
-    NSColor round trips per measure, 150-300ms of main-thread time. The
-    raw buffer is one bridge crossing and the scan is a plain byte loop.
-    Returns None when the pixel format is not the 32-bit layout window
-    composites use, and the caller falls back to the bridge path.
-    """
-    import Quartz
-
-    try:
-        bytes_per_pixel = int(Quartz.CGImageGetBitsPerPixel(image)) // 8
-        if bytes_per_pixel != 4:
-            return None
-        bytes_per_row = int(Quartz.CGImageGetBytesPerRow(image))
-        available = int(Quartz.CGImageGetHeight(image))
-        provider = Quartz.CGImageGetDataProvider(image)
-        data = bytes(Quartz.CGDataProviderCopyData(provider))
-    except Exception:
-        return None
-    if available <= 0 or len(data) < bytes_per_row * available:
-        return None
-    runs = []
-    for row in range(rows):
-        y = min(row, available - 1)
-        runs.append(_center_black_run_in_bytes(data, y * bytes_per_row, width_px, bytes_per_pixel))
-    return runs
-
-
-def _center_black_run_in_bytes(data, base: int, width_px: int, bytes_per_pixel: int):
-    """The pure-black run covering the horizontal center, in px, or None.
-
-    A black pixel in an opaque 32-bit composite is three zero colour
-    channels plus a full alpha byte, in whichever byte order the image
-    uses -- so "at most one nonzero byte in the pixel" identifies black
-    without knowing the channel layout: any actual colour keeps alpha
-    AND at least one colour channel nonzero. A fully transparent pixel
-    (all four bytes zero) also reads black, exactly as the NSColor path
-    always treated it.
-    """
-    center_px = width_px / 2.0
-    run_start = None
-    best = None
-    for x in range(width_px):
-        i = base + x * bytes_per_pixel
-        nonzero = (
-            (1 if data[i] else 0) + (1 if data[i + 1] else 0) + (1 if data[i + 2] else 0) + (1 if data[i + 3] else 0)
+def _capture_notch_runs(request: NotchCaptureRequest):
+    if _macos_major_version() >= 15:
+        image = capture_display_region_image(
+            display_id=request.display_id,
+            source_width=request.screen_width,
+            source_height=float(request.rows),
+            pixel_width=max(1, int(round(request.screen_width * request.scale))),
+            pixel_height=max(1, int(round(request.rows * request.scale))),
+            excluded_window_number=request.excluded_window_number,
         )
-        if nonzero <= 1:
-            if run_start is None:
-                run_start = x
-            continue
-        if run_start is not None:
-            if run_start <= center_px <= x:
-                best = (run_start, x)
-            run_start = None
-    if run_start is not None and run_start <= center_px:
-        best = (run_start, width_px)
-    return best
+    else:
+        image = _legacy_notch_capture_image(request)
+    return _notch_runs_from_image(image, request)
 
 
-def _bitmap_rep_black_runs(image, *, rows: int, width_px: int):
-    """The original per-pixel bridge path, kept as the format fallback."""
-    from AppKit import NSBitmapImageRep
-
-    rep = NSBitmapImageRep.alloc().initWithCGImage_(image)
-    if rep is None:
-        raise ValueError("unreadable composite image")
-    available = int(rep.pixelsHigh())
-    runs = []
-    for row in range(rows):
-        y = min(row, available - 1) if available > 0 else 0
-        runs.append(_center_black_run(rep, y, width_px))
-    return runs
+def _captured_notch_runs(screen, *, rows: int, below_window_number: int = 0):
+    """Compatibility wrapper; production calls this only from a worker."""
+    request = _notch_capture_request(
+        screen,
+        rows=rows,
+        below_window_number=below_window_number,
+    )
+    if request is None:
+        raise ValueError("unavailable screen geometry")
+    return _capture_notch_runs(request)
 
 
-def _center_black_run(rep, y: int, width_px: int):
-    """The pure-black run covering the horizontal center, in px, or None."""
-    center_px = width_px / 2.0
-    run_start = None
-    best = None
-    for x in range(width_px):
-        color = rep.colorAtX_y_(x, y)
-        is_black = (
-            color is not None
-            and color.redComponent() == 0.0
-            and color.greenComponent() == 0.0
-            and color.blueComponent() == 0.0
+class NotchSilhouetteProbe:
+    """One coalesced, background notch measurement per display geometry."""
+
+    def __init__(self, *, probe=None, start_refresh=None) -> None:
+        self._probe = probe or (
+            lambda request, max_width: _validated_notch_silhouette(
+                *_capture_notch_runs(request),
+                max_width=max_width,
+            )
         )
-        if is_black:
-            if run_start is None:
-                run_start = x
-            continue
-        if run_start is not None:
-            if run_start <= center_px <= x:
-                best = (run_start, x)
-            run_start = None
-    if run_start is not None and run_start <= center_px:
-        best = (run_start, width_px)
-    return best
+        self._start_refresh = start_refresh or self._start_thread
+        self._key = None
+        self._value = None
+        self._has_sample = False
+        self._refreshing = False
+        self._retry_at = 0.0
+        self._backoff = 60.0
+        self._generation = 0
+        self._lock = threading.Lock()
 
+    def read(self, request, *, max_width=None, now=None, allow_refresh=True):
+        moment = time.monotonic() if now is None else float(now)
+        key = (request, max_width)
+        task = None
+        with self._lock:
+            if key != self._key:
+                self._key = key
+                self._value = None
+                self._has_sample = False
+                self._refreshing = False
+                self._retry_at = 0.0
+                self._backoff = 60.0
+                self._generation += 1
+            if (
+                allow_refresh
+                and not self._refreshing
+                and (not self._has_sample or (self._value is None and moment >= self._retry_at))
+            ):
+                self._refreshing = True
+                generation = self._generation
 
-def _validated_notch_silhouette(runs, scale, frame_x, max_width: float | None = None):
-    """Validate raw per-row runs into (x, top_width, per-row insets).
+                def refresh_task() -> None:
+                    self._refresh(key, generation, request, max_width)
 
-    Every rejection is a fact about the composite, not the notch: the
-    notch itself cannot widen with depth, cannot out-grow the gap the
-    system reports between its auxiliary areas, and cannot vanish
-    mid-face. Anything violating those is an impostor (Alcove's capsule
-    was measured at 266pt over this panel's 186pt notch and sailed
-    through the old 120-320 sanity band) or a corrupted capture -- both
-    fall back to the parametric shape rather than poison the body."""
-    if not runs or runs[0] is None or scale <= 0.0:
-        return None
-    left_0, right_0 = runs[0]
-    top_width = (right_0 - left_0) / scale
-    # Sanity band: MacBook notches live in roughly 150-260pt.
-    if not (120.0 <= top_width <= 320.0):
-        return None
-    if max_width is not None and top_width > float(max_width):
-        return None
-    insets: list[tuple[float, float]] = []
-    floor_left = 0.0
-    floor_right = 0.0
-    for run in runs:
-        if run is None:
-            return None
-        left, right = run
-        inset_left = (left - left_0) / scale
-        inset_right = (right_0 - right) / scale
-        # A row WIDER than the top row is not a notch silhouette.
-        if inset_left < -1.0 or inset_right < -1.0:
-            return None
-        inset_left = max(floor_left, inset_left)
-        inset_right = max(floor_right, inset_right)
-        # A run collapsing toward nothing mid-face is not the notch.
-        if inset_left + inset_right > top_width - 8.0:
-            return None
-        insets.append((inset_left, inset_right))
-        floor_left = inset_left
-        floor_right = inset_right
-    return (frame_x + left_0 / scale, top_width, tuple(insets))
+                task = refresh_task
+            value = self._value if self._has_sample else None
+        if task is not None:
+            try:
+                self._start_refresh(task)
+            except Exception:
+                with self._lock:
+                    if key == self._key and generation == self._generation:
+                        self._refreshing = False
+        return value
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._key = None
+            self._value = None
+            self._has_sample = False
+            self._refreshing = False
+            self._generation += 1
+
+    @staticmethod
+    def _start_thread(task) -> None:
+        threading.Thread(
+            target=task,
+            name="sidepulse-notch-silhouette-probe",
+            daemon=True,
+        ).start()
+
+    def _refresh(self, key, generation, request, max_width) -> None:
+        try:
+            value = self._probe(request, max_width)
+        except Exception:
+            value = None
+        with self._lock:
+            if key != self._key or generation != self._generation:
+                return
+            self._value = value
+            self._has_sample = True
+            self._refreshing = False
+            if value is None:
+                self._retry_at = time.monotonic() + self._backoff
+                self._backoff = min(900.0, self._backoff * 2.0)
+            else:
+                self._backoff = 60.0
 
 
 def slot_width_for_screen(screen) -> float:
@@ -925,89 +956,42 @@ def _screen_capture_values(screen):
     )
 
 
+def _select_alcove_window_values(
+    info: object,
+    screen_x: float,
+    screen_width: float,
+):
+    """Select the visible Alcove capsule from an already-fetched window list."""
+    return select_alcove_window_values(
+        info,
+        screen_x,
+        screen_width,
+        owner_name=ALCOVE_OWNER_NAME,
+    )
+
+
 def _alcove_window_values(screen_x: float, screen_width: float):
-    """Select Alcove's on-screen window on main without capturing pixels."""
-    try:
-        info = Quartz.CGWindowListCopyWindowInfo(
-            Quartz.kCGWindowListOptionOnScreenOnly,
-            Quartz.kCGNullWindowID,
-        )
-    except Exception:
-        return None
-    candidates = []
-    for entry in info or ():
-        try:
-            if str(entry.get("kCGWindowOwnerName", "")) != ALCOVE_OWNER_NAME:
-                continue
-            window_number = int(entry.get("kCGWindowNumber", 0))
-            window_layer = int(entry.get("kCGWindowLayer", 0))
-            bounds = entry.get("kCGWindowBounds") or {}
-            window_x = float(bounds.get("X", 0.0))
-            window_y = float(bounds.get("Y", 0.0))
-            window_width = float(bounds.get("Width", 0.0))
-            window_height = float(bounds.get("Height", 0.0))
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if (
-            window_number <= 0
-            or not all(math.isfinite(value) for value in (window_x, window_y, window_width, window_height))
-            or window_width < 40.0
-            or window_height < 1.0
-        ):
-            continue
-        center_x = window_x + window_width / 2.0
-        if not (screen_x <= center_x <= screen_x + screen_width):
-            continue
-        candidates.append(
-            (
-                window_y,
-                -window_width,
-                # Alcove stacks an empty backing window at the same bounds
-                # as the visible capsule; the capsule lives on the HIGHER
-                # window layer, and a bare window-number tiebreak selected
-                # the empty backing sheet — every capture then scanned as
-                # "image unusable" and the bar never followed the capsule.
-                -window_layer,
-                -window_number,
-                window_number,
-                window_x,
-                window_y,
-                window_width,
-            )
-        )
-    if not candidates:
-        return None
-    (
-        _sort_y,
-        _sort_width,
-        _sort_layer,
-        _sort_number,
-        window_number,
-        window_x,
-        window_y,
-        window_width,
-    ) = min(candidates)
-    return window_number, window_x, window_y, window_width
+    """Compatibility wrapper for focused callers and tests."""
+    return _select_alcove_window_values(
+        _on_screen_windows(),
+        screen_x,
+        screen_width,
+    )
 
 
-def _legibility_boost(color, floor: float):
-    """The bracket is a STATUS surface: any lit LED renders at least
-    this visible on it, whatever fade floors and Focus dimming did to
-    the underlying program. Relay's 1% resting glow stacked with
-    nighttime dimming made the whole bar read as "gone" -- the physical
-    LEDs may whisper; the on-screen bracket must stay readable. Truly
-    off (alpha 0) stays off."""
-    red, green, blue, alpha = color
-    if floor <= 0.0 or alpha <= 0.0005 or alpha >= floor:
-        return color
-    # Shared scale, capped at the brightest channel, for the same reason
-    # tone_mapped_led_color uses one: clamping each channel on its own turns
-    # "make this more visible" into "make this a different colour".
-    peak = max(red, green, blue)
-    factor = floor / alpha
-    if peak > 0.0:
-        factor = min(factor, 1.0 / peak)
-    return (red * factor, green * factor, blue * factor, floor)
+def _discover_alcove_window_snapshot(
+    screen_x: float,
+    screen_width: float,
+) -> AlcoveWindowSnapshot | None:
+    """Fetch WindowServer state once, on the probe worker, for shape and level."""
+    info = _on_screen_windows()
+    values = _select_alcove_window_values(info, screen_x, screen_width)
+    if values is None:
+        return None
+    return AlcoveWindowSnapshot(
+        values=values,
+        level=alcove_window_level(window_lister=lambda: info),
+    )
 
 
 def notch_bar_path_from_insets(rect, insets, band_height: float = LED_BAND_HEIGHT):
@@ -1208,7 +1192,13 @@ def tone_mapped_led_color(
     statement about the shape of the curve, not its overall gain. What did not
     survive is anything per-channel. See LED_CORE_BOOST's comment.
     """
-    faded = min(1.0, max(0.0, alpha * alpha_scale))
+    # The engine's RGB output already contains the animation phase and the
+    # shared brightness intent. Treating its derived alpha as another scalar
+    # squared every dim: a 50% sample was painted at 50% RGB and 50% opacity.
+    # Alpha is therefore only the layer's fixed compositing calibration. The
+    # sampled alpha remains useful as an on/off guard for transparent frames.
+    lit = max(red, green, blue) > 0.0005 and alpha > 0.0005
+    faded = min(1.0, max(0.0, alpha_scale)) if lit else 0.0
     # One scale, shared by all three channels, and never above 1.0. Shared is
     # what keeps the hue: scaling channels independently and clipping each on
     # its own moves the colour. Bounded is what keeps the LEVEL comparable
@@ -1236,6 +1226,27 @@ def fill_rect_with_cg(context, rect, color) -> None:
         return
     CGContextSetRGBFillColor(context, red, green, blue, alpha)
     CGContextFillRect(context, rect)
+
+
+def draw_horizontal_glow_gradient(
+    context,
+    rect,
+    runs,
+    *,
+    boost: float,
+    alpha_scale: float,
+) -> bool:
+    """Draw one glow layer natively, with a bounded fallback on failure."""
+    return draw_horizontal_gradient(
+        context,
+        rect,
+        runs,
+        color_mapper=lambda color: tone_mapped_led_color(
+            *color,
+            boost=boost,
+            alpha_scale=alpha_scale,
+        ),
+    )
 
 
 def current_cg_context():
@@ -1387,6 +1398,11 @@ class VirtualLedView(NSView):
             self.fixed_colors = None
             self.current_program = None
             self._presentation_colors = None
+            # Missing Python attributes on NSView fall through to an expensive
+            # Objective-C selector search. Initialize defaults used every frame.
+            self.min_glow = 0.25
+            self._gauge_left_level = 0.0
+            self._gauge_right_on = False
             self.wasm_controller = None
             self.wasm_error = None
             self.has_notch = True
@@ -1464,7 +1480,7 @@ class VirtualLedView(NSView):
             return
         self.alcove_confidence = projection
         for selector, value in (
-            ("setAccessibilityLabel_", "JR Bar Screen Bar, Alcove following"),
+            ("setAccessibilityLabel_", "JR-Bar Screen Bar, Alcove following"),
             ("setAccessibilityValue_", projection.accessibility_value),
             ("setAccessibilityHelp_", projection.accessibility_help),
         ):
@@ -1861,57 +1877,15 @@ class VirtualLedView(NSView):
         NSGraphicsContext.restoreGraphicsState()
 
     def _classic_status_colors(self, colors):
-        """Keep lit classic-bar pixels readable at the configured floor."""
-        if str(getattr(self, "current_program", "")).strip().lower() == "off":
-            return colors
-        floor = max(0.0, min(1.0, getattr(self, "min_glow", 0.25))) * 0.72
-        return [_legibility_boost(color, floor) for color in colors]
+        """Preserve the program's brightness and dark gaps on every frame."""
+        return colors
 
     def _bracket_colors(self, colors):
-        """The colors the Alcove bracket paints. "spatial" mirrors the
-        physical LEDs exactly -- the relay ripple travels along the
-        underline in lockstep with the light bar. "identity" collapses
-        to one blended hue (the original visibility fix: one agent
-        lights 1 of 8 LEDs, and a spatial bracket was 7/8 black).
-        "auto" (default) picks spatial whenever at least two LEDs are
-        lit -- multi-agent blends have rest glow everywhere, so the
-        ripple reads -- and identity otherwise."""
+        """Keep spatial motion unless the user explicitly chooses one hue."""
         style = getattr(self, "bracket_style", "auto")
-        # Threshold 0.0008, not 0.004: Relay's resting LEDs glow at ~1%
-        # (right AT the old threshold), so auto flickered between
-        # spatial and identity as the spotlight moved -- and identity's
-        # alpha-weighted blend follows the spotlight, which read as the
-        # bar "cycling between colors, not adhering to Relay".
-        lit = sum(1 for c in colors if max(c[0], c[1], c[2], c[3]) > 0.0008)
-        now = time.monotonic()
-        if lit >= 2:
-            self._bracket_spatial_hold_until = now + 2.0
-        spatial_held = now < getattr(self, "_bracket_spatial_hold_until", 0.0)
-        # The legibility floor scales with the user's dim-floor dial: at
-        # 0 the bar is allowed to go PITCH BLACK -- only the moving
-        # signal (relay dot, timer frontier) renders.
-        floor = max(0.0, min(1.0, getattr(self, "min_glow", 0.25))) * 0.72
-        identity = self._bar_identity_color(colors)
-        if identity[3] > 0.0005:
-            self._last_visible_bracket_identity = identity
-        elif floor > 0.0 and str(getattr(self, "current_program", "")).strip().lower() != "off":
-            remembered = getattr(
-                self,
-                "_last_visible_bracket_identity",
-                (0.10, 0.32, 0.38, floor),
-            )
-            visible = (
-                remembered[0],
-                remembered[1],
-                remembered[2],
-                max(floor, remembered[3]),
-            )
-            colors = [visible] * LED_COUNT
-            identity = visible
-            lit = LED_COUNT
-        if style == "spatial" or (style == "auto" and (lit >= 2 or spatial_held)):
-            return [_legibility_boost(c, floor) for c in colors]
-        return [_legibility_boost(identity, floor)] * LED_COUNT
+        if style == "identity":
+            return [self._bar_identity_color(colors)] * LED_COUNT
+        return colors
 
     def setBracketStyle_(self, style):
         self.bracket_style = str(style or "auto")
@@ -2068,30 +2042,38 @@ class VirtualLedView(NSView):
         bloom_height = glow_height * 0.45
         soft_y = bloom_y + bloom_height
         soft_height = glow_height * 0.55
-        for run in runs:
-            if run is None:
+        layers = (
+            (((x_start, bloom_y), (x_end - x_start, bloom_height)), 0.82, 0.18),
+            (((x_start, soft_y), (x_end - x_start, soft_height)), 0.64, 0.07),
+            (
+                ((x_start, base_y), (x_end - x_start, LED_BAND_HEIGHT)),
+                LED_CORE_BOOST,
+                0.92,
+            ),
+            (((x_start, base_y), (x_end - x_start, 1.15)), LED_HOTLINE_BOOST, 0.72),
+        )
+        for rect, boost, alpha_scale in layers:
+            if draw_horizontal_glow_gradient(
+                cg_context,
+                rect,
+                runs,
+                boost=boost,
+                alpha_scale=alpha_scale,
+            ):
                 continue
-            run_x, run_width, (red, green, blue, alpha) = run
-            fill_rect_with_cg(
-                cg_context,
-                ((run_x, bloom_y), (run_width, bloom_height)),
-                tone_mapped_led_color(red, green, blue, alpha, boost=0.82, alpha_scale=0.18),
-            )
-            fill_rect_with_cg(
-                cg_context,
-                ((run_x, soft_y), (run_width, soft_height)),
-                tone_mapped_led_color(red, green, blue, alpha, boost=0.64, alpha_scale=0.07),
-            )
-            fill_rect_with_cg(
-                cg_context,
-                ((run_x, base_y), (run_width, LED_BAND_HEIGHT)),
-                tone_mapped_led_color(red, green, blue, alpha, boost=LED_CORE_BOOST, alpha_scale=0.92),
-            )
-            fill_rect_with_cg(
-                cg_context,
-                ((run_x, base_y), (run_width, 1.15)),
-                tone_mapped_led_color(red, green, blue, alpha, boost=LED_HOTLINE_BOOST, alpha_scale=0.72),
-            )
+            for run in runs:
+                if run is None:
+                    continue
+                run_x, run_width, color = run
+                fill_rect_with_cg(
+                    cg_context,
+                    ((run_x, rect[0][1]), (run_width, rect[1][1])),
+                    tone_mapped_led_color(
+                        *color,
+                        boost=boost,
+                        alpha_scale=alpha_scale,
+                    ),
+                )
 
     def _draw_wing_riser(self, cg_context, edge_color, x_start, x_end, height, *, outer_on_left: bool = True) -> None:
         """A vertical glow at one wing's outer edge, solid for its lower
@@ -2477,6 +2459,10 @@ class VirtualStatusDevice(NSObject):
             self._last_alcove_confidence_state = None
             self._alcove_generation = 0
             self._alcove_request_id = 0
+            self._alcove_window_probe = AlcoveWindowProbe(
+                probe=_discover_alcove_window_snapshot
+            )
+            self._notch_silhouette_probe = NotchSilhouetteProbe()
             self._last_safe_colors = None
             self._static_fallback_colors = _OFF_COLORS
             self._last_marked_colors = None
@@ -2714,7 +2700,10 @@ class VirtualStatusDevice(NSObject):
             app_terminating=bool(self._terminating),
             animation_active=bool(self._frame_fallback_relevant),
             next_visual_change_at=self._presentation_deadline(),
-            alcove_enabled=bool(self.wraps_menu_bar and getattr(self, "follow_alcove_width", True)),
+            alcove_enabled=bool(
+                getattr(self, "follow_alcove_width", True)
+                and getattr(self, "wing_length_override", None) is None
+            ),
             alcove_relevant=self._alcove_follow_relevant(),
             pointer_interaction_relevant=bool(self._pointer_interaction_relevant),
             frame_interval=getattr(self, "_frame_interval_current", None),
@@ -2734,8 +2723,7 @@ class VirtualStatusDevice(NSObject):
         if self._alcove_relevant:
             return True
         if not (
-            self.wraps_menu_bar
-            and getattr(self, "follow_alcove_width", True)
+            getattr(self, "follow_alcove_width", True)
             and getattr(self, "wing_length_override", None) is None
         ):
             return False
@@ -3518,6 +3506,7 @@ class VirtualStatusDevice(NSObject):
         self._invalidate_frame_driver()
         self._stop_sampler()
         self._stop_alcove_observer()
+        self._notch_silhouette_probe.invalidate()
         if self._announcer_pill is not None:
             self._announcer_pill.hide()
         self._announcer_presenter.hide()
@@ -3774,7 +3763,11 @@ class VirtualStatusDevice(NSObject):
             program=str(program),
             parse_anchor=float(anchor),
             static_fallback_program=str(static_fallback_program),
-            sample_interval=1.0 / ACTIVE_RENDER_FPS,
+            sample_interval=(
+                1.0 / GENTLE_MOTION_FPS
+                if motion_class is MotionClass.CONTINUOUS
+                else 1.0 / ACTIVE_RENDER_FPS
+            ),
             motion=motion if isinstance(motion, MotionClass) else MotionClass.STATIC,
             next_visual_change_at=next_visual_change_at,
         )
@@ -3865,6 +3858,19 @@ class VirtualStatusDevice(NSObject):
             probe = AlcovePresenceProbe()
             self._alcove_presence_probe = probe
         alcove_active = probe.running(now=now)
+        window_snapshot = None
+        window_probe = getattr(self, "_alcove_window_probe", None)
+        if window_probe is None:
+            window_probe = AlcoveWindowProbe(probe=_discover_alcove_window_snapshot)
+            self._alcove_window_probe = window_probe
+        if alcove_active and render_screen_values is not None:
+            window_snapshot = window_probe.read(
+                render_screen_values[2],
+                render_screen_values[4],
+                now=now,
+            )
+        elif not alcove_active:
+            window_probe.invalidate()
         wings_only = alcove_active and self.wraps_menu_bar
         compact = alcove_active and not self.wraps_menu_bar
 
@@ -3885,49 +3891,46 @@ class VirtualStatusDevice(NSObject):
             # auxiliary-area gap for the same reason, and never cache a
             # failed read forever (retry later instead of wearing a
             # one-time contamination for the rest of the session).
-            frame = screen.frame()
-            cache_key = (round(frame.size.width), round(frame.size.height))
-            cache = getattr(self, "_notch_measure_cache", None)
-            cache_stale = cache is None or cache[0] != cache_key
-            retry_due = (
-                cache is not None and cache[1] is None and (now >= getattr(self, "_notch_measure_retry_at", 0.0))
-            )
-            if (
-                not alcove_active
-                and (cache_stale or retry_due)
-                # A full-screen Space hides the menu bar and paints app
-                # content over the very rows the scan reads: the measure
-                # CANNOT succeed there, and each doomed attempt is a
-                # synchronous WindowServer capture on the main thread --
-                # measured at 150ms typical and 10s worst-case during
-                # full-screen video. Wait for a Space that can answer.
-                and not space_hides_menu_bar(screen)
-            ):
-                if cache_stale:
-                    self._notch_measure_backoff = 60.0
-                silhouette = measured_notch_silhouette(
-                    screen,
-                    below_window_number=int(self.window.windowNumber() or 0),
-                    max_width=_hardware_slot_ceiling(screen),
+            request = None
+            if render_screen_values is not None:
+                (
+                    screen_id,
+                    display_id,
+                    frame_x,
+                    _frame_y,
+                    screen_width,
+                    _screen_height,
+                    scale,
+                ) = render_screen_values
+                request = NotchCaptureRequest(
+                    screen_id,
+                    display_id,
+                    frame_x,
+                    screen_width,
+                    scale,
+                    int(round(notch_depth_for_screen(screen))),
+                    int(self.window.windowNumber() or 0),
                 )
-                self._notch_measure_cache = (cache_key, silhouette)
-                cache = self._notch_measure_cache
-                if silhouette is None:
-                    # Repeated failure means something durable (an overlay
-                    # compositing over the notch rows); retrying every
-                    # minute forever just burns main-thread time. Back off
-                    # up to 15 minutes; success or a screen change resets.
-                    backoff = max(60.0, getattr(self, "_notch_measure_backoff", 60.0))
-                    self._notch_measure_retry_at = now + backoff
-                    self._notch_measure_backoff = min(900.0, backoff * 2.0)
-                else:
-                    self._notch_measure_backoff = 60.0
-            if cache is not None and cache[0] == cache_key and cache[1] is not None:
-                effective_gap = cache[1][1]
-                measured_notch_insets = cache[1][2]
+            silhouette = None
+            if request is not None and request.rows > 2:
+                # The caller reads only a cached immutable result. Both the
+                # ScreenCaptureKit path on macOS 15+ and the explicit legacy
+                # path on older systems run inside the probe worker.
+                silhouette = self._notch_silhouette_probe.read(
+                    request,
+                    max_width=_hardware_slot_ceiling(screen),
+                    now=now,
+                    allow_refresh=(
+                        not alcove_active and not space_hides_menu_bar(screen)
+                    ),
+                )
+            if silhouette is not None:
+                effective_gap = silhouette[1]
+                measured_notch_insets = silhouette[2]
         # Follow Alcove's visible capsule through the serial observer.
-        # Reposition resolves AppKit and window identity on main, consumes
-        # only a validated plain result, and never captures or scans pixels.
+        # Reposition resolves AppKit screen values on main, then consumes a
+        # cached plain window snapshot discovered by the background probe. It
+        # never lists windows, captures pixels, or scans pixels on this path.
         follow_width = None
         follow_center_x = None
         follow_observation = None
@@ -3951,7 +3954,7 @@ class VirtualStatusDevice(NSObject):
         elif alcove_active and follow_enabled:
             band = max(24.0, window_height_for_notch_depth(notch_depth_for_screen(screen)))
             screen_values = render_screen_values
-            window_values = None if screen_values is None else _alcove_window_values(screen_values[2], screen_values[4])
+            window_values = None if window_snapshot is None else window_snapshot.values
             observation = None
             target_changed = False
             if screen_values is not None and window_values is not None:
@@ -4013,7 +4016,7 @@ class VirtualStatusDevice(NSObject):
                 follow_width = observation.width + 2.0 * _screen_bar_edge_inset()
                 follow_center_x = observation.center_x
             # Why there is no geometry, said once per transition. The
-            # main-thread lookup losing the window outranks a stale worker
+            # cached lookup losing the window outranks a stale capture-worker
             # status: we KNOW there is nothing to capture right now.
             if screen_values is None or window_values is None:
                 self._record_alcove_status(AlcoveCaptureStatus.WINDOW_UNAVAILABLE, now=now)
@@ -4125,7 +4128,11 @@ class VirtualStatusDevice(NSObject):
             (granted.origin.x, granted.origin.y),
             (granted.size.width, granted.size.height),
         )
-        self.window.setLevel_(alcove_window_level() if alcove_active else STATUS_WINDOW_LEVEL)
+        self.window.setLevel_(
+            window_snapshot.level
+            if alcove_active and window_snapshot is not None
+            else (ABOVE_ALCOVE_WINDOW_LEVEL if alcove_active else STATUS_WINDOW_LEVEL)
+        )
         if self.view is not None:
             set_geometry_identity = getattr(self.view, "setRenderGeometryIdentity_", None)
             if render_screen_values is not None and callable(set_geometry_identity):

@@ -15,7 +15,7 @@ its caller and does nothing else with it -- no logging, no error text, no
 caching to disk, no inclusion in doctor output. Failures are reported as
 codes, never as content.
 
-**External credentials are read-only.** JR Bar may copy a current access token
+**External credentials are read-only.** JR-Bar may copy a current access token
 into its own Keychain-backed store, but it never refreshes or mutates the
 credential owned by Claude Code. A single hardened read entry point can be
 reviewed once. Ad-hoc reads and third-party Keychain writes cannot.

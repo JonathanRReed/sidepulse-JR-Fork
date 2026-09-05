@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble JR Bar's compatibility-named macOS PKG artifact."""
+"""Assemble JR-Bar's compatibility-named macOS PKG artifact."""
 
 from __future__ import annotations
 

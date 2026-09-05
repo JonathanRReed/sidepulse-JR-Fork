@@ -495,7 +495,10 @@ else:
             probes = getattr(self, "_intake_probes", None)
             probed_at = float(getattr(self, "_intake_probed_at", 0.0) or 0.0)
             if force or probes is None or now - probed_at > 30.0:
-                self._intake_service().request(self._intake_probe_ready)
+                self._intake_service().request(
+                    self._intake_probe_ready,
+                    force=force,
+                )
                 # A synchronously delivered result (tests, warm caches) is
                 # usable immediately; a real off-main probe lands later.
                 probes = getattr(self, "_intake_probes", None)

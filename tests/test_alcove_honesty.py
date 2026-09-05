@@ -151,6 +151,21 @@ class _FakeQuartz:
         return self.image.data
 
 
+def _fake_legacy_capture(request, quartz):
+    probe_height = request.menu_band_height * 2.0
+    return quartz.CGWindowListCreateImage(
+        quartz.CGRectMake(
+            request.window_x,
+            request.window_y,
+            request.window_width,
+            probe_height,
+        ),
+        quartz.kCGWindowListOptionIncludingWindow,
+        request.window_number,
+        quartz.kCGWindowImageNominalResolution,
+    )
+
+
 # --- 1. the four outcomes are four values, not one None -----------------
 
 
@@ -163,7 +178,9 @@ def test_denied_screen_recording_is_named_and_never_captures(monkeypatch) -> Non
     quartz = _FakeQuartz(image=_FakeImage())
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
 
-    outcome = capture_alcove_observation(_request(), screen_recording=False)
+    outcome = capture_alcove_observation(
+        _request(), screen_recording=False, image_capture=_fake_legacy_capture
+    )
 
     assert outcome.status is AlcoveCaptureStatus.SCREEN_RECORDING_DENIED
     assert outcome.observation is None
@@ -172,10 +189,14 @@ def test_denied_screen_recording_is_named_and_never_captures(monkeypatch) -> Non
 
 def test_a_missing_window_is_not_an_unusable_image(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "Quartz", _FakeQuartz(image=None))
-    missing = capture_alcove_observation(_request(), screen_recording=True)
+    missing = capture_alcove_observation(
+        _request(), screen_recording=True, image_capture=_fake_legacy_capture
+    )
 
     monkeypatch.setitem(sys.modules, "Quartz", _FakeQuartz(image=_FakeImage()))
-    unusable = capture_alcove_observation(_request(), screen_recording=True)
+    unusable = capture_alcove_observation(
+        _request(), screen_recording=True, image_capture=_fake_legacy_capture
+    )
 
     assert missing.status is AlcoveCaptureStatus.WINDOW_UNAVAILABLE
     assert unusable.status is AlcoveCaptureStatus.IMAGE_UNUSABLE
@@ -189,7 +210,9 @@ def test_a_nil_data_provider_is_unusable_rather_than_a_crash(monkeypatch) -> Non
         _FakeQuartz(image=_FakeImage(), provider=None),
     )
 
-    outcome = capture_alcove_observation(_request(), screen_recording=True)
+    outcome = capture_alcove_observation(
+        _request(), screen_recording=True, image_capture=_fake_legacy_capture
+    )
 
     assert outcome.status is AlcoveCaptureStatus.IMAGE_UNUSABLE
 
@@ -201,7 +224,9 @@ def test_an_unexpected_failure_still_cannot_raise_but_must_say_so(monkeypatch) -
 
     monkeypatch.setitem(sys.modules, "Quartz", Exploding(image=None))
 
-    outcome = capture_alcove_observation(_request(), screen_recording=True)
+    outcome = capture_alcove_observation(
+        _request(), screen_recording=True, image_capture=_fake_legacy_capture
+    )
 
     assert outcome.status is AlcoveCaptureStatus.CAPTURE_FAILED
     assert outcome.observation is None
@@ -222,11 +247,142 @@ def test_a_measurable_capsule_reports_captured_with_its_geometry(monkeypatch) ->
         ),
     )
 
+    outcome = capture_alcove_observation(
+        _request(), screen_recording=True, image_capture=_fake_legacy_capture
+    )
+
+    assert outcome.status is AlcoveCaptureStatus.CAPTURED
+    assert outcome.observation is not None
+    assert outcome.observation.width == pytest.approx(272.0, abs=1.0)
+
+
+def test_macos_15_never_falls_back_to_obsolete_window_capture(monkeypatch) -> None:
+    import sidepulse.alcove_observation as module
+
+    quartz = _FakeQuartz(image=_FakeImage())
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+    monkeypatch.setattr(module, "_macos_major_version", lambda: 15)
+    monkeypatch.setattr(
+        module,
+        "_screen_capture_kit_image",
+        lambda _request: module._CAPTURE_API_UNAVAILABLE,
+    )
+
+    outcome = capture_alcove_observation(_request(), screen_recording=True)
+
+    assert outcome.status is AlcoveCaptureStatus.CAPTURE_API_UNAVAILABLE
+    assert quartz.create_calls == 0
+
+
+def test_macos_15_screen_capture_kit_image_uses_the_existing_scanner(
+    monkeypatch,
+) -> None:
+    import sidepulse.alcove_observation as module
+
+    width_px, height_px = 624, 74
+    pixels = bytearray(width_px * height_px * 4)
+    for y in range(8, 41):
+        for x in range(176, 448):
+            pixels[(y * width_px + x) * 4 + 3] = 255
+    image = _FakeImage(width=width_px, height=height_px, data=bytes(pixels))
+    quartz = _FakeQuartz(image=image)
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+    monkeypatch.setattr(module, "_macos_major_version", lambda: 15)
+    monkeypatch.setattr(module, "_screen_capture_kit_image", lambda _request: image)
+
     outcome = capture_alcove_observation(_request(), screen_recording=True)
 
     assert outcome.status is AlcoveCaptureStatus.CAPTURED
     assert outcome.observation is not None
     assert outcome.observation.width == pytest.approx(272.0, abs=1.0)
+    assert quartz.create_calls == 0
+
+
+def test_screen_capture_kit_targets_only_the_selected_alcove_window(
+    monkeypatch,
+) -> None:
+    import sidepulse.alcove_observation as module
+
+    captured_image = object()
+    selected_window = SimpleNamespace(
+        windowID=lambda: 99,
+        owningApplication=lambda: SimpleNamespace(
+            bundleIdentifier=lambda: module.ALCOVE_BUNDLE_ID
+        ),
+    )
+    unrelated_window = SimpleNamespace(
+        windowID=lambda: 41,
+        owningApplication=lambda: SimpleNamespace(
+            bundleIdentifier=lambda: "com.example.Other"
+        ),
+    )
+
+    class Shareable:
+        @classmethod
+        def getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_(
+            cls, _exclude_desktop, _on_screen_only, callback
+        ) -> None:
+            callback(
+                SimpleNamespace(windows=lambda: [unrelated_window, selected_window]),
+                None,
+            )
+
+    class Filter:
+        @classmethod
+        def alloc(cls):
+            return cls()
+
+        def initWithDesktopIndependentWindow_(self, window):
+            self.window = window
+            return self
+
+    class Configuration:
+        last = None
+
+        @classmethod
+        def alloc(cls):
+            cls.last = cls()
+            return cls.last
+
+        def init(self):
+            return self
+
+        def setWidth_(self, value):
+            self.width = value
+
+        def setHeight_(self, value):
+            self.height = value
+
+        def setShowsCursor_(self, value):
+            self.shows_cursor = value
+
+        def setSourceRect_(self, value):
+            self.source_rect = value
+
+    class ScreenshotManager:
+        @classmethod
+        def captureImageWithFilter_configuration_completionHandler_(
+            cls, capture_filter, configuration, callback
+        ) -> None:
+            assert capture_filter.window is selected_window
+            assert configuration is Configuration.last
+            callback(captured_image, None)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "Quartz",
+        SimpleNamespace(CGRectMake=lambda x, y, width, height: (x, y, width, height)),
+    )
+    result = module._screen_capture_kit_image(
+        _request(),
+        api=(Shareable, Filter, Configuration, ScreenshotManager),
+    )
+
+    assert result is captured_image
+    assert Configuration.last.width == 1248
+    assert Configuration.last.height == 148
+    assert Configuration.last.shows_cursor is False
+    assert Configuration.last.source_rect == (0.0, 0.0, 624.0, 74.0)
 
 
 def test_an_outcome_cannot_claim_success_with_nothing_to_show() -> None:
@@ -314,6 +470,38 @@ def test_an_unaskable_preflight_is_unknown_not_denied() -> None:
     assert alcove_follow_blocker(following=True) is not (
         AlcoveCaptureStatus.SCREEN_RECORDING_DENIED
     )
+
+
+def test_default_window_presence_lookup_is_cached_and_never_runs_inline(
+    monkeypatch,
+) -> None:
+    import sidepulse.alcove_observation as module
+
+    queued: list[object] = []
+    calls = 0
+
+    def query() -> bool:
+        nonlocal calls
+        calls += 1
+        return True
+
+    module.reset_alcove_window_presence_cache()
+    monkeypatch.setattr(module, "_query_alcove_window_presence", query)
+    monkeypatch.setattr(
+        module,
+        "_start_alcove_window_presence_refresh",
+        queued.append,
+    )
+
+    for _ in range(100):
+        assert module.alcove_window_present(now=0.0) is None
+    assert calls == 0
+    assert len(queued) == 1
+
+    queued.pop()()
+    assert module.alcove_window_present(now=0.5) is True
+    assert calls == 1
+    module.reset_alcove_window_presence_cache()
 
 
 def test_nothing_on_the_background_path_may_request_access(monkeypatch) -> None:
@@ -469,6 +657,17 @@ def _alcove_device(monkeypatch, *, granted, alcove_running=True, window=(99, 444
     )
     monkeypatch.setattr(
         virtual_device, "_alcove_window_values", lambda *_a: window
+    )
+    device._alcove_window_probe = SimpleNamespace(
+        read=lambda screen_x, screen_width, now: (
+            None
+            if (values := virtual_device._alcove_window_values(screen_x, screen_width)) is None
+            else virtual_device.AlcoveWindowSnapshot(
+                values=values,
+                level=virtual_device.ABOVE_ALCOVE_WINDOW_LEVEL,
+            )
+        ),
+        invalidate=lambda: None,
     )
     monkeypatch.setattr(
         virtual_device, "screen_recording_granted", lambda **_k: granted
@@ -937,7 +1136,7 @@ class AlcoveSettingsSurfaceTests(unittest.TestCase):
     def test_every_confidence_state_has_stable_copy_and_accessibility_metadata(self) -> None:
         cases = (
             (AlcoveCaptureStatus.CAPTURED, "Live. Matching Alcove's width.", "Fresh", False),
-            (AlcoveCaptureStatus.SCREEN_RECORDING_DENIED, "Screen Recording is off, so JR Bar cannot see Alcove's capsule. The bar keeps its own size until you grant it.", "Permission denied", True),
+            (AlcoveCaptureStatus.SCREEN_RECORDING_DENIED, "Screen Recording is off, so JR-Bar cannot see Alcove's capsule. The bar keeps its own size until you grant it.", "Permission denied", True),
             (AlcoveCaptureStatus.WINDOW_UNAVAILABLE, "Disconnected. Alcove is not showing a capsule, so the bar is using its own size.", "Disconnected", False),
             (AlcoveCaptureStatus.IMAGE_UNUSABLE, "Unsupported shape. The captured capsule could not be measured safely, so the bar is using its own size.", "Unsupported", False),
             (AlcoveCaptureStatus.CAPTURE_FAILED, "Recovering. Using the Screen Bar's own size until a fresh measurement arrives.", "Recovering", False),
@@ -965,7 +1164,7 @@ class AlcoveSettingsSurfaceTests(unittest.TestCase):
                 self.settings_window.refresh_alcove_follow_controls(self.controller)
             self.assertEqual(
                 label.stringValue(),
-                "Stale. Using the Screen Bar's own size while JR Bar checks again.",
+                "Stale. Using the Screen Bar's own size while JR-Bar checks again.",
             )
             self.assertEqual(label.accessibilityLabel(), "Stale")
             self.assertTrue(button.isHidden())

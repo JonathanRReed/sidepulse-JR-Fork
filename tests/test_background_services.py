@@ -41,6 +41,35 @@ def test_intake_failure_uses_a_closed_reason_code() -> None:
     assert results[0].reason == INTAKE_REASON_UNAVAILABLE
 
 
+def test_forced_intake_request_queues_one_fresh_probe_after_in_flight_work() -> None:
+    first_started = threading.Event()
+    release_first = threading.Event()
+    completed = threading.Event()
+    calls: list[int] = []
+    results: list[tuple[str, int]] = []
+
+    def probe():
+        call = len(calls) + 1
+        calls.append(call)
+        if call == 1:
+            first_started.set()
+            assert release_first.wait(1.0)
+        return (call,)
+
+    service = IntakeProbeService(probe)
+    service.request(lambda result: results.append(("initial", result.probes[0])))
+    assert first_started.wait(1.0)
+    service.request(
+        lambda result: (results.append(("forced", result.probes[0])), completed.set()),
+        force=True,
+    )
+    release_first.set()
+
+    assert completed.wait(1.0)
+    assert calls == [1, 2]
+    assert results == [("initial", 1), ("forced", 2)]
+
+
 def test_remote_ledger_publication_is_latest_wins_and_off_caller() -> None:
     release = threading.Event()
     completed = threading.Event()

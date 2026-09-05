@@ -435,7 +435,7 @@ def collect_claude(
 ) -> ProviderUsageSnapshot:
     del preference
     local = local_scanner(Path(home), observed_at)
-    # Re-read BEFORE asking when JR Bar's copy is stale. This is a
+    # Re-read BEFORE asking when JR-Bar's copy is stale. This is a
     # read-only sync under a previously recorded standing grant. Claude
     # Code remains the sole owner of refresh and Keychain mutation.
     try:

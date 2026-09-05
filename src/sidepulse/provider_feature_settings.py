@@ -105,6 +105,7 @@ class ProviderMenuPresentation:
     show_cost: bool = True
     show_detail_lanes: bool = True
     show_menu_bar_percent: bool = True
+    privacy_mode: bool = False
 
     def __post_init__(self) -> None:
         if not all(
@@ -115,6 +116,7 @@ class ProviderMenuPresentation:
                 "show_cost",
                 "show_detail_lanes",
                 "show_menu_bar_percent",
+                "privacy_mode",
             )
         ):
             raise ValueError("invalid provider menu presentation")
@@ -127,6 +129,10 @@ class ProviderPresentationFeature:
     provider_id: str
     menu_visible: bool
     reset_celebrations: bool
+    reset_overlay: bool
+    reset_hardware: bool
+    reset_notification: bool
+    reset_sound: bool
     threshold_remaining: float
     source_instance_id: str = "default"
 
@@ -135,6 +141,15 @@ class ProviderPresentationFeature:
         if (
             type(self.menu_visible) is not bool
             or type(self.reset_celebrations) is not bool
+            or not all(
+                type(value) is bool
+                for value in (
+                    self.reset_overlay,
+                    self.reset_hardware,
+                    self.reset_notification,
+                    self.reset_sound,
+                )
+            )
             or isinstance(self.threshold_remaining, bool)
             or not isinstance(self.threshold_remaining, (int, float))
             or not 0.0 <= float(self.threshold_remaining) <= 100.0
@@ -201,6 +216,10 @@ class ProviderPresentationSettings:
     @property
     def show_menu_bar_percent(self) -> bool:
         return self.menu.show_menu_bar_percent
+
+    @property
+    def privacy_mode(self) -> bool:
+        return self.menu.privacy_mode
 
     def hidden_menu_providers(self) -> frozenset[str]:
         provider_ids = {preference.provider_id for preference in self.providers}
@@ -526,6 +545,10 @@ def project_presentation_settings(settings: ProviderUsageSettings) -> ProviderPr
                 provider_id=preference.provider_id,
                 menu_visible=preference.menu_visible,
                 reset_celebrations=preference.reset_celebrations,
+                reset_overlay=preference.reset_overlay,
+                reset_hardware=preference.reset_hardware,
+                reset_notification=preference.reset_notification,
+                reset_sound=preference.reset_sound,
                 threshold_remaining=preference.threshold_remaining,
                 source_instance_id=preference.source_instance_id,
             )
@@ -540,6 +563,7 @@ def project_presentation_settings(settings: ProviderUsageSettings) -> ProviderPr
                     "show_cost",
                     "show_detail_lanes",
                     "show_menu_bar_percent",
+                    "privacy_mode",
                 )
             }
         ),
@@ -636,7 +660,11 @@ def _feature_ids(
     identifiers.update(
         f"{prefix('presentation', item.provider_id, item.source_instance_id)}.{field}"
         for item in presentation.providers
-        for field in ("menu_visible", "reset_celebrations", "threshold_remaining")
+        for field in (
+            "menu_visible", "reset_celebrations", "reset_overlay",
+            "reset_hardware", "reset_notification", "reset_sound",
+            "threshold_remaining",
+        )
     )
     identifiers.update(
         f"presentation.menu.{field}"
@@ -646,6 +674,7 @@ def _feature_ids(
             "show_cost",
             "show_detail_lanes",
             "show_menu_bar_percent",
+            "privacy_mode",
         )
     )
     identifiers.update({"sync.enabled", "sync.device_id", "sync.categories", "sync.peers"})
@@ -701,10 +730,18 @@ def _changed_feature_ids(
             if before is None:
                 changed.update(
                     f"{feature_prefix}.{field}"
-                    for field in ("menu_visible", "reset_celebrations", "threshold_remaining")
+                    for field in (
+                        "menu_visible", "reset_celebrations", "reset_overlay",
+                        "reset_hardware", "reset_notification", "reset_sound",
+                        "threshold_remaining",
+                    )
                 )
                 continue
-            for field in ("menu_visible", "reset_celebrations", "threshold_remaining"):
+            for field in (
+                "menu_visible", "reset_celebrations", "reset_overlay",
+                "reset_hardware", "reset_notification", "reset_sound",
+                "threshold_remaining",
+            ):
                 if getattr(before, field) != getattr(after, field):
                     changed.add(f"{feature_prefix}.{field}")
         for field in (
@@ -713,6 +750,7 @@ def _changed_feature_ids(
             "show_cost",
             "show_detail_lanes",
             "show_menu_bar_percent",
+            "privacy_mode",
         ):
             if getattr(current.presentation.menu, field) != getattr(previous.presentation.menu, field):
                 changed.add(f"presentation.menu.{field}")

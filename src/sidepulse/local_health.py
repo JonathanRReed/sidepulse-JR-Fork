@@ -1,4 +1,4 @@
-"""Bounded, content-free current-run health aggregation for JR Bar."""
+"""Bounded, content-free current-run health aggregation for JR-Bar."""
 
 from __future__ import annotations
 

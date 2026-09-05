@@ -172,17 +172,23 @@ def _details(kind: str, candidate: dict[str, object]) -> dict[str, object]:
         archive = candidate["update_archive"]
         assert isinstance(archive, dict)
         details = {"archive_sha256": archive["sha256"]}
+    elif kind == "hardware-smoke":
+        details = {"hardware_profile": "both"}
     return details
 
 
 def _receipts(
     fixture: dict[str, object],
+    *,
+    hardware_profile: str = "software",
 ) -> list[dict[str, object]]:
     candidate = fixture["candidate"]
     assert isinstance(candidate, dict)
     app_kinds = release_evidence.APP_INPUT_RECEIPTS
     receipts = []
     for kind in sorted(release_evidence.REQUIRED_RECEIPT_KINDS):
+        if kind == "hardware-smoke" and hardware_profile == "software":
+            continue
         if kind == "performance":
             input_path = fixture["performance"]
         elif kind == "sbom":
@@ -204,14 +210,23 @@ def _receipts(
                 tool=f"test-{kind}",
                 input_path=input_path,
                 output_text=f"{kind} passed",
-                details=_details(kind, candidate),
+                details=(
+                    {"hardware_profile": hardware_profile}
+                    if kind == "hardware-smoke"
+                    else _details(kind, candidate)
+                ),
                 observed_at=OBSERVED_AT,
             )
         )
     return receipts
 
 
-def _manifest(fixture: dict[str, object], receipts: list[dict[str, object]]):
+def _manifest(
+    fixture: dict[str, object],
+    receipts: list[dict[str, object]],
+    *,
+    hardware_profile: str = "software",
+):
     return release_evidence.build_manifest(
         root=fixture["root"],
         candidate=fixture["candidate"],
@@ -225,6 +240,7 @@ def _manifest(fixture: dict[str, object], receipts: list[dict[str, object]]):
             fixture["appcast"],
             fixture["channel_metadata"],
         ),
+        hardware_profile=hardware_profile,
         generated_at=OBSERVED_AT,
     )
 
@@ -240,15 +256,58 @@ def test_manifest_contains_candidate_bound_receipts_without_asserted_booleans(
     assert document["schema_version"] == release_evidence.SCHEMA_VERSION
     assert document["candidate"]["pkg"]["path"] == ("dist/SidePulse-0.5.0-arm64.pkg")
     assert document["candidate"]["update_archive"]["path"] == ("dist/SidePulse-0.5.0-arm64.zip")
-    assert {item["kind"] for item in document["receipts"]} == (release_evidence.REQUIRED_RECEIPT_KINDS)
+    assert {item["kind"] for item in document["receipts"]} == release_evidence.SOFTWARE_RECEIPT_KINDS
     assert "true" not in json.dumps(document).casefold()
+
+
+def test_software_manifest_does_not_claim_or_require_hardware_smoke(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    receipts = [
+        receipt
+        for receipt in _receipts(fixture)
+        if receipt["kind"] != "hardware-smoke"
+    ]
+
+    document = _manifest(fixture, receipts)
+
+    assert document["hardware_profile"] == "software"
+    assert "hardware-smoke" not in {item["kind"] for item in document["receipts"]}
+
+
+def test_explicit_hardware_profile_requires_real_hardware_smoke_receipt(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    receipts = [
+        receipt
+        for receipt in _receipts(fixture)
+        if receipt["kind"] != "hardware-smoke"
+    ]
+
+    with pytest.raises(release_evidence.EvidenceError, match="hardware-smoke"):
+        _manifest(fixture, receipts, hardware_profile="pro")
+
+
+def test_hardware_manifest_rejects_smoke_from_another_hardware_profile(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+
+    with pytest.raises(release_evidence.EvidenceError, match="hardware profile"):
+        _manifest(
+            fixture,
+            _receipts(fixture, hardware_profile="both"),
+            hardware_profile="pro",
+        )
 
 
 def test_manifest_rejects_every_missing_required_receipt(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     receipts = _receipts(fixture)
 
-    for removed in release_evidence.REQUIRED_RECEIPT_KINDS:
+    for removed in release_evidence.SOFTWARE_RECEIPT_KINDS:
         incomplete = [item for item in receipts if item["kind"] != removed]
         with pytest.raises(release_evidence.EvidenceError, match=removed):
             _manifest(fixture, incomplete)

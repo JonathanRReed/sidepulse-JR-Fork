@@ -3,13 +3,33 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
+from sidepulse import weather_watch
 from sidepulse.today_menu import (
+    TodayFeed,
     TodaySnapshot,
     _relative_start,
     project_today_rows,
     today_menu_title,
 )
+
+
+def test_weather_guidance_does_not_request_location_without_consent(monkeypatch) -> None:
+    monkeypatch.setattr(
+        weather_watch,
+        "ip_location",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected IP lookup")),
+    )
+    settings = SimpleNamespace(
+        weather_latitude=None,
+        weather_longitude=None,
+        weather_ip_geolocation_enabled=False,
+    )
+
+    assert TodayFeed()._weather_lines(settings) == (
+        "Set a weather location in Settings",
+    )
 
 
 def test_relative_start_phrasing() -> None:

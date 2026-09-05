@@ -1,6 +1,6 @@
 # macOS installer
 
-The signed and notarized PKG is JR Bar's authoritative installer and manual
+The signed and notarized PKG is JR-Bar's authoritative installer and manual
 recovery artifact.
 The release script builds the compatibility-named `SidePulse.app`, signs it
 with hardened runtime, wraps it in the signed PKG, submits it to Apple's notary
@@ -45,7 +45,7 @@ SPARKLE_KEY_ACCOUNT="io.sidepulse.app" \
 The resulting installer is written to `dist/`. On installation it places the
 app in `/Applications` and links the `sidepulse` command into `/usr/local/bin`.
 Hooks, per-user LaunchAgents, privileged helpers, and provider integrations are
-configured only through JR Bar's explicit first-run or CLI actions.
+configured only through JR-Bar's explicit first-run or CLI actions.
 
 The production builder embeds pinned Sparkle 2.9.6, notarizes and staples the
 app before final packaging, and creates the supplemental

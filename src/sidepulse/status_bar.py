@@ -131,6 +131,8 @@ def _remove_item(menu, item) -> None:
 
 
 def _connected_device_count(target) -> int:
+    if not getattr(target, "_runtime_started", False):
+        return 0
     try:
         devices = target.status_bar_devices(remember=False)
     except Exception:
@@ -381,28 +383,46 @@ def _install_clear_agents_action(menu, target, plan_by_key) -> None:
     menu.insertItem_atIndex_(item, min(replaced_index, len(_menu_items(menu))))
 
 
-def _install_effect_studio_action(menu, target) -> None:
-    """Expose the native Studio beside the app's other windows."""
-
+def _install_quick_settings_menu(menu, target, inputs, plan_by_key) -> None:
+    """Group the high-frequency controls without creating more root rows."""
     items = _menu_items(menu)
-    if any(_safe_title(item) == "Effect Studio…" for item in items):
-        return
-    settings_index = next(
-        (
-            index
-            for index, item in enumerate(items)
-            if _safe_title(item) == "Settings…"
-        ),
-        len(items),
-    )
-    studio = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-        "Effect Studio…",
-        "openEffectStudio:",
+    movable = [
+        item
+        for item in items
+        if _safe_title(item) == "Settings…" or _safe_title(item).startswith("DND:")
+    ]
+    insert_at = min((items.index(item) for item in movable), default=len(items))
+    submenu = _legacy.NSMenu.alloc().init()
+    submenu.setAutoenablesItems_(False)
+
+    screen_bar = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Screen Bar",
+        "toggleVirtualStatusDevice:",
         "",
     )
-    studio.setTarget_(target)
-    studio.setEnabled_(True)
-    menu.insertItem_atIndex_(studio, settings_index)
+    screen_bar.setTarget_(target)
+    screen_bar.setState_(1 if inputs.screen_bar_enabled else 0)
+    submenu.addItem_(screen_bar)
+
+    lighting = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Lighting…",
+        "openColorsWindow:",
+        "",
+    )
+    lighting.setTarget_(target)
+    submenu.addItem_(lighting)
+    submenu.addItem_(_legacy.NSMenuItem.separatorItem())
+    for item in movable:
+        _remove_item(menu, item)
+        submenu.addItem_(item)
+
+    parent = _legacy.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        plan_by_key["quick_settings"].title,
+        None,
+        "",
+    )
+    parent.setSubmenu_(submenu)
+    menu.insertItem_atIndex_(parent, min(insert_at, len(_menu_items(menu))))
 
 
 def _compact_existing_menu(menu, snapshot, target):
@@ -521,8 +541,8 @@ def _compact_existing_menu(menu, snapshot, target):
         menu.insertItem_atIndex_(parent, first_index)
 
     _install_dnd_menu(menu, target, inputs, plan_by_key)
+    _install_quick_settings_menu(menu, target, inputs, plan_by_key)
     _install_clear_agents_action(menu, target, plan_by_key)
-    _install_effect_studio_action(menu, target)
 
     diagnostics_index = next(
         (

@@ -282,7 +282,7 @@ def test_dnd_card_uses_native_controls_plain_labels_and_exact_accessibility(
     assert str(fields["dnd_status_label"].accessibilityHelp() or "").strip()
     assert (
         fields["dnd_focus_authorization_status"].stringValue()
-        == "Focus status access is denied. JR Bar will not claim that Focus is active."
+        == "Focus status access is denied. JR-Bar will not claim that Focus is active."
     )
     assert buttons["dnd_focus_authorization"].isEnabled() is False
     for mode in DndMode:

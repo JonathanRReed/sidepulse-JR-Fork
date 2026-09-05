@@ -40,7 +40,7 @@ def test_literal_registry_has_one_deterministic_row_per_supported_surface() -> N
         ("hermes", "cli", "Hermes CLI", "cli", "lifecycle"),
         ("openclaw", "cli", "OpenClaw CLI", "cli", "lifecycle"),
         ("opencode", "cli", "OpenCode CLI", "cli", "inventory"),
-        ("opencode", "sidepulse-plugin", "OpenCode JR Bar integration", "local_harness", "lifecycle"),
+        ("opencode", "sidepulse-plugin", "OpenCode JR-Bar integration", "local_harness", "lifecycle"),
         ("opencode", "desktop", "OpenCode Desktop", "desktop", "inventory"),
         ("google", "antigravity-cli", "Google Antigravity CLI", "cli", "inventory"),
         ("google", "antigravity-desktop", "Google Antigravity Desktop", "desktop", "inventory"),
@@ -50,7 +50,7 @@ def test_literal_registry_has_one_deterministic_row_per_supported_surface() -> N
         ("google", "gemini-code-assist-vscode", "Gemini Code Assist for VS Code", "ide_extension", "inventory"),
         ("github", "copilot-ide", "GitHub Copilot", "ide_extension", "inventory"),
         ("kiro", "cli", "Kiro CLI", "cli", "lifecycle"),
-        ("kiro", "sidepulse-agent", "Kiro JR Bar agent", "local_harness", "lifecycle"),
+        ("kiro", "sidepulse-agent", "Kiro JR-Bar agent", "local_harness", "lifecycle"),
     )
 
 

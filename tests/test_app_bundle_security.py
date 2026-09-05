@@ -647,8 +647,30 @@ def test_sd_guard_compile_and_launch_use_trusted_system_paths(tmp_path: Path) ->
     assert [command[0] for command in commands[1:]] == [
         "/bin/launchctl",
         "/bin/launchctl",
-        "/bin/launchctl",
     ]
+
+
+def test_sd_guard_requires_an_explicit_volume_uuid_before_registration() -> None:
+    source = (REPO_ROOT / "src" / "sidepulse" / "resources" / "sd_eject_guard.c").read_text()
+
+    assert "--volume-uuid" in source
+    assert "g_selected_volume_uuid" in source
+    assert "kDADiskDescriptionVolumeUUIDKey" in source
+    assert 'CFStringHasPrefix(name, CFSTR("SidePulse"))' in source
+    assert "if (!g_selected_volume_uuid)" in source
+    assert source.index("if (!g_selected_volume_uuid)") < source.index("DARegisterDiskEjectApprovalCallback")
+    assert "is_builtin_sd" not in source
+
+
+def test_field_diagnostics_redacts_paths_and_device_serials() -> None:
+    source = (REPO_ROOT / "scripts" / "field-diagnostics.sh").read_text()
+
+    assert 'APP_LABEL="user Applications/SidePulse.app"' in source
+    assert 'echo "app: $APP (' not in source
+    assert 'echo "$CONFIG:' not in source
+    assert "ls -d /Volumes/SidePulse" not in source
+    assert 'grep -E "serial|' not in source
+    assert "retains file names, sizes, ages, and filtered operational log lines" in source
 
 
 def test_status_bar_shortcut_quit_and_openers_use_trusted_system_paths() -> None:
@@ -755,6 +777,10 @@ def test_package_builder_uses_isolated_roots_identity_and_pre_pkg_verifier(tmp_p
     requirements_dir.mkdir()
     shutil.copy2(
         REPO_ROOT / "requirements" / "release-constraints.txt",
+        requirements_dir,
+    )
+    shutil.copy2(
+        REPO_ROOT / "requirements" / "release-lock.txt",
         requirements_dir,
     )
 
@@ -904,13 +930,13 @@ if [ "$1" != "-m" ] || [ "$2" != "venv" ]; then exit 90; fi
     app = build_root / "pyinstaller" / "SidePulse.app"
     info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
     assert info["CFBundleIdentifier"] == "io.sidepulse.app"
-    assert info["CFBundleDisplayName"] == "JR Bar"
+    assert info["CFBundleDisplayName"] == "JR-Bar"
     assert info["NSAppleEventsUsageDescription"] == (
-        "JR Bar uses Automation only to open a reviewed resume command in "
+        "JR-Bar uses Automation only to open a reviewed resume command in "
         "Terminal or iTerm2 when you choose Open."
     )
     assert info["NSFocusStatusUsageDescription"] == (
-        "JR Bar uses Focus Status only when you choose Allow Focus Status, "
+        "JR-Bar uses Focus Status only when you choose Allow Focus Status, "
         "so Do Not Disturb can follow whether a macOS Focus is active."
     )
     entitlements = plistlib.loads((packaging_dir / "entitlements.plist").read_bytes())

@@ -360,7 +360,7 @@ def _state_copy(
     if state is ClearAgentsPopoverState.FAILURE:
         return (
             "Could Not Clear Agents",
-            "JR Bar could not save the local presentation receipts. Nothing was cleared.",
+            "JR-Bar could not save the local presentation receipts. Nothing was cleared.",
         )
     if state is ClearAgentsPopoverState.RECEIPT:
         return (

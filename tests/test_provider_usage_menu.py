@@ -64,7 +64,7 @@ def snapshot(
     )
 
 
-def test_summary_shows_two_tightest_trustworthy_providers():
+def test_summary_shows_only_the_tightest_quota_and_reset():
     state = ProviderUsageState(
         (
             snapshot("codex", "Weekly", 71),
@@ -76,7 +76,9 @@ def test_summary_shows_two_tightest_trustworthy_providers():
         False,
     )
     projection = project_usage_menu(state, now=1000)
-    assert projection.title == "Usage · ▰▰▰▱▱▱▱▱  Claude 36% · Codex 71% · Grok 90%"
+    assert projection.title == "Usage · Claude 36% · resets in 33m"
+    assert "Codex" not in projection.title
+    assert "▰" not in projection.title
     assert projection.rows[0].title.startswith("Codex")
     assert projection.rows[1].title.startswith("Claude")
 
@@ -194,7 +196,7 @@ def test_hidden_providers_leave_the_rows_and_the_title():
         state, now=1000, hidden_providers=frozenset({"claude"})
     )
     assert [row.provider_id for row in projection.rows] == ["codex"]
-    assert projection.title == "Usage · ▰▰▰▰▰▰▱▱  Codex 71%"
+    assert projection.title == "Usage · Codex 71% · resets in 33m"
 
 
 def test_hidden_instances_hide_only_the_matching_source_instance():
@@ -226,7 +228,8 @@ def test_hidden_instances_hide_only_the_matching_source_instance():
     )
 
     assert [row.source_instance_id for row in projection.rows] == ["personal"]
-    assert projection.rows[0].title.startswith("Claude · personal@example.invalid")
+    assert projection.rows[0].title == "Claude · 36% left"
+    assert "personal@example.invalid" not in repr(projection)
 
 
 def test_lanes_past_their_threshold_are_flagged_for_alert_rendering():
@@ -257,8 +260,9 @@ def test_menu_renders_distinct_same_provider_instance_labels():
     )
     projection = project_usage_menu(state, now=1000)
     assert len(projection.rows) == 2
-    assert "personal@example.invalid" in projection.rows[0].title
-    assert "work@example.invalid" in projection.rows[1].title
+    assert projection.rows[0].title == "Claude · Account 1 · 36% left"
+    assert projection.rows[1].title == "Claude · Account 2 · 72% left"
+    assert "@example.invalid" not in repr(projection)
     assert {row.source_instance_id for row in projection.rows} == {"personal", "work"}
 
 
@@ -289,12 +293,12 @@ def test_menu_uses_exact_profile_labels_in_rows_and_aggregate_title():
 
     projection = project_usage_menu(state, now=1000, visual=visual)
 
-    assert projection.rows[0].title == "Client Claude · 36% left"
-    assert "Client Claude 36%" in projection.title
+    assert projection.rows[0].title == "Claude · 36% left"
+    assert projection.title == "Usage · Claude 36% · resets in 33m"
     assert "· work" not in projection.title
 
 
-def test_menu_keeps_provider_and_raw_instance_fallback_without_exact_profile():
+def test_menu_omits_raw_instance_fallback_for_a_single_visible_account():
     state = ProviderUsageState(
         (
             snapshot(
@@ -321,8 +325,197 @@ def test_menu_keeps_provider_and_raw_instance_fallback_without_exact_profile():
 
     projection = project_usage_menu(state, now=1000, visual=visual)
 
-    assert projection.rows[0].title == "Claude · personal · 36% left"
-    assert "Claude · personal 36%" in projection.title
+    assert projection.rows[0].title == "Claude · 36% left"
+    assert "personal" not in repr(projection)
+
+
+def test_menu_never_exposes_opaque_account_or_internal_source_ids():
+    raw_account = "your-organization-7535461b-2b9a-4371-b335-3928397be5cd"
+    raw_source = "profile:work-machine:8f14e45fceea167a5a36dedd4bea2543"
+    projection = project_usage_menu(
+        ProviderUsageState(
+            (
+                snapshot(
+                    "codex",
+                    "Weekly",
+                    42,
+                    account_label=raw_account,
+                    source_instance_id=raw_source,
+                ),
+            ),
+            1000,
+            1100,
+            False,
+        ),
+        now=1000,
+    )
+
+    assert raw_account not in repr(projection)
+    assert raw_source not in repr(projection)
+    assert projection.rows[0].title == "Codex · 42% left"
+
+
+def test_single_account_email_is_absent_from_the_compact_projection():
+    email = "jonathan@example.com"
+    projection = project_usage_menu(
+        ProviderUsageState(
+            (
+                snapshot(
+                    "grok",
+                    "Weekly",
+                    95,
+                    account_label=email,
+                    source_instance_id="signed-in-account",
+                ),
+            ),
+            1000,
+            1100,
+            False,
+        ),
+        now=1000,
+    )
+
+    assert projection.rows[0].title == "Grok · 95% left"
+    assert email not in repr(projection)
+
+
+def test_multiple_accounts_use_user_aliases_without_exposing_account_labels():
+    visual = ProviderInstanceVisualProjection(
+        (
+            ProviderInstanceVisualPolicy("claude", "personal", "Personal", None),
+            ProviderInstanceVisualPolicy("claude", "work", "Work", None),
+        )
+    )
+    projection = project_usage_menu(
+        ProviderUsageState(
+            (
+                snapshot(
+                    "claude",
+                    "Weekly",
+                    36,
+                    account_label="personal@example.com",
+                    source_instance_id="personal",
+                ),
+                snapshot(
+                    "claude",
+                    "Weekly",
+                    72,
+                    account_label="work@example.com",
+                    source_instance_id="work",
+                ),
+            ),
+            1000,
+            1100,
+            False,
+        ),
+        now=1000,
+        visual=visual,
+    )
+
+    assert [row.title for row in projection.rows] == [
+        "Claude · Personal · 36% left",
+        "Claude · Work · 72% left",
+    ]
+    assert "@example.com" not in repr(projection)
+
+
+def test_privacy_mode_suppresses_email_and_alias_everywhere():
+    visual = ProviderInstanceVisualProjection(
+        (
+            ProviderInstanceVisualPolicy(
+                provider_id="claude",
+                source_instance_id="work",
+                label="Client Claude",
+                color_override=None,
+            ),
+        )
+    )
+    projection = project_usage_menu(
+        ProviderUsageState(
+            (
+                snapshot(
+                    "claude",
+                    "Weekly",
+                    72,
+                    account_label="person@example.com",
+                    source_instance_id="work",
+                ),
+            ),
+            1000,
+            1100,
+            False,
+        ),
+        now=1000,
+        visual=visual,
+        privacy_mode=True,
+    )
+
+    assert "person@example.com" not in repr(projection)
+    assert "Client Claude" not in repr(projection)
+    assert projection.rows[0].title.startswith("Claude ·")
+
+
+def test_privacy_mode_keeps_multiple_aliased_accounts_distinguishable():
+    visual = ProviderInstanceVisualProjection(
+        (
+            ProviderInstanceVisualPolicy("claude", "personal", "Personal", None),
+            ProviderInstanceVisualPolicy("claude", "work", "Work", None),
+        )
+    )
+    state = ProviderUsageState(
+        (
+            snapshot("claude", "Weekly", 36, source_instance_id="personal"),
+            snapshot("claude", "Weekly", 72, source_instance_id="work"),
+        ),
+        1000,
+        1100,
+        False,
+    )
+    projection = project_usage_menu(state, now=1000, visual=visual, privacy_mode=True)
+
+    assert [row.title for row in projection.rows] == [
+        "Claude · Account 1 · 36% left",
+        "Claude · Account 2 · 72% left",
+    ]
+    assert "Personal" not in repr(projection)
+    assert "Work" not in repr(projection)
+
+
+def test_dense_account_menu_orders_quota_and_collapses_only_healthy_rows():
+    accounts = (
+        snapshot("claude", "Weekly", 88, account_label="one@example.com", source_instance_id="one"),
+        snapshot("claude", "Weekly", 5, account_label="low@example.com", source_instance_id="low"),
+        snapshot("claude", "Weekly", 70, account_label="active@example.com", source_instance_id="active"),
+        snapshot("claude", "Weekly", 92, account_label="two@example.com", source_instance_id="two"),
+        snapshot("claude", "Weekly", 81, account_label="three@example.com", source_instance_id="three"),
+    )
+    projection = project_usage_menu(
+        ProviderUsageState(accounts, 1000, 1100, False),
+        now=1000,
+        thresholds={"claude": 20.0},
+        active_instances=frozenset({("claude", "active")}),
+    )
+
+    assert [row.source_instance_id for row in projection.rows[:2]] == ["low", "active"]
+    summary = projection.rows[2]
+    assert summary.collapsed_count == 3
+    assert [row.source_instance_id for row in summary.collapsed_rows] == ["three", "one", "two"]
+    assert summary.detail is not None
+    assert all(
+        account in summary.detail
+        for account in ("Account 5", "Account 1", "Account 4")
+    )
+    assert "@example.com" not in repr(projection)
+    assert "tokens" not in summary.detail
+    assert {row.source_instance_id for row in projection.account_rows} == {
+        "one",
+        "low",
+        "active",
+        "two",
+        "three",
+    }
+    assert all(row.usage_detail == "175 tokens · 2 models · est. $1.25" for row in projection.account_rows)
+    assert all("tokens" not in line for row in projection.account_rows for line in row.lane_lines)
 
 
 def test_menu_bar_glance_prefers_running_providers_then_tightest():

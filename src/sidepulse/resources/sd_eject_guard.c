@@ -9,7 +9,7 @@
 //
 // Build: clang -o "SidePulse Pro Eject Prevention" sd_eject_guard.c \
 //          -framework DiskArbitration -framework CoreFoundation
-// Run:   ./sd_eject_guard [-n]   (leave running; Ctrl-C to stop)
+// Run:   ./sd_eject_guard --volume-uuid UUID [-n]   (leave running; Ctrl-C to stop)
 //        -n / --no-mount: only veto ejects; don't retry mounting.
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -21,6 +21,7 @@
 
 static DASessionRef g_session;
 static bool g_no_mount = false;
+static CFStringRef g_selected_volume_uuid = NULL;
 
 static void log_msg(const char *fmt, CFStringRef s) {
     char buf[256] = "?";
@@ -29,14 +30,16 @@ static void log_msg(const char *fmt, CFStringRef s) {
     fflush(stdout);
 }
 
-static bool is_builtin_sd(DADiskRef disk) {
+static bool is_selected_sidepulse_volume(DADiskRef disk) {
     CFDictionaryRef desc = DADiskCopyDescription(disk);
     if (!desc) return false;
-    CFStringRef proto = CFDictionaryGetValue(desc, kDADiskDescriptionDeviceProtocolKey);
-    CFStringRef model = CFDictionaryGetValue(desc, kDADiskDescriptionDeviceModelKey);
-    bool match =
-        (proto && CFStringFind(proto, CFSTR("Secure Digital"), 0).location != kCFNotFound) ||
-        (model && CFStringFind(model, CFSTR("SDXC"), 0).location != kCFNotFound);
+    CFUUIDRef uuid = CFDictionaryGetValue(desc, kDADiskDescriptionVolumeUUIDKey);
+    CFStringRef name = CFDictionaryGetValue(desc, kDADiskDescriptionVolumeNameKey);
+    CFStringRef value = uuid ? CFUUIDCreateString(kCFAllocatorDefault, uuid) : NULL;
+    bool match = name && CFStringHasPrefix(name, CFSTR("SidePulse")) &&
+        value && g_selected_volume_uuid &&
+        CFStringCompare(value, g_selected_volume_uuid, kCFCompareCaseInsensitive) == kCFCompareEqualTo;
+    if (value) CFRelease(value);
     CFRelease(desc);
     return match;
 }
@@ -83,7 +86,7 @@ static void start_mount_retries(DADiskRef disk) {
 }
 
 static DADissenterRef eject_approval(DADiskRef disk, void *ctx) {
-    if (!is_builtin_sd(disk))
+    if (!is_selected_sidepulse_volume(disk))
         return NULL;  // not ours, allow
     CFDictionaryRef desc = DADiskCopyDescription(disk);
     CFStringRef vol = desc ? CFDictionaryGetValue(desc, kDADiskDescriptionVolumeNameKey) : NULL;
@@ -97,7 +100,7 @@ static DADissenterRef eject_approval(DADiskRef disk, void *ctx) {
 }
 
 static void disk_appeared(DADiskRef disk, void *ctx) {
-    if (!is_builtin_sd(disk)) return;
+    if (!is_selected_sidepulse_volume(disk)) return;
     printf("SD disk appeared: %s\n", DADiskGetBSDName(disk));
     fflush(stdout);
 }
@@ -106,10 +109,17 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-n") || !strcmp(argv[i], "--no-mount")) {
             g_no_mount = true;
+        } else if (!strcmp(argv[i], "--volume-uuid") && i + 1 < argc) {
+            g_selected_volume_uuid = CFStringCreateWithCString(
+                kCFAllocatorDefault, argv[++i], kCFStringEncodingUTF8);
         } else {
-            fprintf(stderr, "usage: %s [-n | --no-mount]\n", argv[0]);
+            fprintf(stderr, "usage: %s --volume-uuid UUID [-n | --no-mount]\n", argv[0]);
             return 2;
         }
+    }
+    if (!g_selected_volume_uuid) {
+        fprintf(stderr, "refusing to guard SD media without an explicit --volume-uuid\n");
+        return 2;
     }
     g_session = DASessionCreate(kCFAllocatorDefault);
     if (!g_session) {
@@ -119,7 +129,7 @@ int main(int argc, char **argv) {
     DARegisterDiskEjectApprovalCallback(g_session, NULL, eject_approval, NULL);
     DARegisterDiskAppearedCallback(g_session, NULL, disk_appeared, NULL);
     DASessionScheduleWithRunLoop(g_session, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
-    printf("SidePulse Pro Eject Prevention: watching for ejects of the built-in SD reader%s...\n",
+    printf("SidePulse Pro Eject Prevention: watching one selected volume UUID%s...\n",
            g_no_mount ? " (mount retries disabled)" : "");
     fflush(stdout);
     CFRunLoopRun();

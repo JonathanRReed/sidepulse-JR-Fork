@@ -17,6 +17,7 @@ class ResetEvent:
     label: str
     occurred_at: float
     source_instance_id: str = "default"
+    reset_boundary: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +164,7 @@ def detect_reset_events(
                     f"{lane_after.label} reset",
                     after.observed_at,
                     after.source_instance_id,
+                    lane_before.reset_at,
                 )
             )
     return tuple(events)

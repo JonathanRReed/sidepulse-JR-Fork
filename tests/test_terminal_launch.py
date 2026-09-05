@@ -84,7 +84,7 @@ def test_reviewed_terminal_matrix_routes_exact_hosts_and_product_fallback(
         TERMINAL_BUNDLE_IDENTIFIER,
     )
     assert unsupported.fallback_copy == (
-        "JR Bar does not support this terminal yet, so it opened Terminal."
+        "JR-Bar does not support this terminal yet, so it opened Terminal."
     )
 
 
@@ -211,7 +211,7 @@ def test_unavailable_ghostty_uses_terminal_with_specific_product_copy() -> None:
     assert plan.kind is TerminalLaunchKind.APPLE_EVENTS
     assert plan.selected_bundle_identifier == TERMINAL_BUNDLE_IDENTIFIER
     assert plan.fallback_copy == (
-        "JR Bar could not verify Ghostty, so it opened Terminal."
+        "JR-Bar could not verify Ghostty, so it opened Terminal."
     )
 
 
@@ -301,5 +301,5 @@ def test_status_bar_executes_each_reviewed_plan_and_logs_only_real_fallback(
     )
     assert launched[3][0:2] == ("/usr/bin/osascript", "-e")
     log.assert_called_once_with(
-        "JR Bar does not support this terminal yet, so it opened Terminal."
+        "JR-Bar does not support this terminal yet, so it opened Terminal."
     )

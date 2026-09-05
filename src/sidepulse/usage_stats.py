@@ -56,8 +56,11 @@ from .capacity_types import (
 from .private_io import atomic_private_write, ensure_private_directory, read_private_text
 from .providers import NegotiatedProviderSource, negotiated_provider_sources
 from .reset_policy import parse_reset_epoch
+from .usage_file_index import UsageFileIndex
+from .usage_heatmap import build_usage_heatmap
 
 CACHE_VERSION = 7
+CODEX_CACHE_SEMANTICS_VERSION = 4
 # The byte budget below is the real bound; this one only stops the candidate
 # list itself from growing without limit. At 4096 it bound FIRST on the owner's
 # corpus -- 5,605 transcripts across ~/.claude and ~/.codex -- so ~1,500 files
@@ -67,6 +70,10 @@ CACHE_VERSION = 7
 USAGE_CACHE_MAX_FILES = 8192
 USAGE_INVENTORY_MAX_FILES = 4096
 USAGE_FILE_MAX_BYTES = 64 * 1024 * 1024
+# Keep large transcript files admissible while bounding the memory a single
+# hostile JSONL record can make json.loads allocate. Real provider records are
+# far smaller than one MiB; the file-level 64 MiB limit remains independent.
+USAGE_RECORD_MAX_BYTES = 1024 * 1024
 
 # The scan cache is an accelerator, never the source of truth: the transcripts
 # on disk are. So it is allowed to forget. Three bounds keep it from becoming
@@ -163,9 +170,7 @@ class UsageTotals:
     estimated_cost_usd: float = 0.0
     estimated_cache_savings_usd: float = 0.0
     source_coverage: dict[str, UsageSourceCoverage] = field(default_factory=dict)
-    pricing_coverage: PricingCoverageMetrics = field(
-        default_factory=lambda: PricingCoverageMetrics(0, 0, 0, 0)
-    )
+    pricing_coverage: PricingCoverageMetrics = field(default_factory=lambda: PricingCoverageMetrics(0, 0, 0, 0))
     codex_rate_limit_evidence: tuple[dict, ...] = ()
     #: When that evidence was written (epoch seconds). Without it a
     #: reading frozen days ago renders identically to a live one.
@@ -270,20 +275,12 @@ class ProviderUsageResult:
             and all(type(value) is int and value >= 0 for value in counts)
             and type(self.pricing_coverage) is PricingCoverage
             and all(
-                value is None
-                or (
-                    type(value) in {int, float}
-                    and math.isfinite(value)
-                    and value >= 0.0
-                )
+                value is None or (type(value) in {int, float} and math.isfinite(value) and value >= 0.0)
                 for value in estimates
             )
             and (
                 self.pricing_as_of is None
-                or (
-                    type(self.pricing_as_of) is str
-                    and self.pricing_as_of == PRICING_TABLE_AS_OF
-                )
+                or (type(self.pricing_as_of) is str and self.pricing_as_of == PRICING_TABLE_AS_OF)
             )
         ):
             raise ValueError("invalid provider usage result")
@@ -391,11 +388,7 @@ class _CoverageState:
                 0,
                 self.files_discovered - self.duplicate_physical_files,
             )
-            if (
-                physical_candidates > 0
-                and usable_files == 0
-                and self.unreadable_files > 0
-            ):
+            if physical_candidates > 0 and usable_files == 0 and self.unreadable_files > 0:
                 status = UsageSourceStatus.FAILED
             elif (
                 self.walk_failed
@@ -487,9 +480,11 @@ def _token_counts(mapping: dict, keys: tuple[str, ...]) -> tuple[int, ...] | Non
 def _record_from_line(line: str, session_id: str, dedupe_secret: bytes) -> tuple | None:
     """[session, model, epoch, input, cached_in, cache_create, output,
     dedupe_key] or None. The gate has already run."""
+    if len(line.encode("utf-8")) > USAGE_RECORD_MAX_BYTES:
+        return None
     try:
         row = json.loads(line)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, RecursionError, ValueError):
         return None
     if not isinstance(row, dict) or row.get("type") != "assistant":
         return None
@@ -511,11 +506,14 @@ def _record_from_line(line: str, session_id: str, dedupe_secret: bytes) -> tuple
     if not raw_dedupe:
         # No message id means no safe dedupe; skip rather than overcount.
         return None
-    dedupe = "message:" + hmac.new(
+    dedupe = (
+        "message:"
+        + hmac.new(
         dedupe_secret,
         raw_dedupe.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()[:DEDUPE_DIGEST_HEX_CHARS]
+    )
     counts = _token_counts(
         usage,
         (
@@ -560,11 +558,7 @@ def _read_verified_prefix(
     newline so no line is ever split mid-write, and reports the
     absolute offset covered.
     """
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError:
@@ -605,30 +599,148 @@ def _read_verified_prefix(
     )
 
 
-def _scan_codex_lines(handle):
-    """The shared per-line codex scan for full and tail parses."""
-    last_counts = None
-    last_epoch = None
+def _codex_private_id(prefix: str, value: str, dedupe_secret: bytes) -> str:
+    digest = hmac.new(dedupe_secret, value.encode("utf-8"), hashlib.sha256).hexdigest()
+    return prefix + digest[:DEDUPE_DIGEST_HEX_CHARS]
+
+
+def _codex_event_dedupe(
+    session_id: str,
+    parent_id: str | None,
+    root_id: str | None,
+    timestamp: str,
+    totals: tuple[int, int, int, int],
+    dedupe_secret: bytes,
+    *,
+    ownership: str,
+) -> str:
+    """Stable identity for a token event copied into resumed/forked rollouts."""
+    payload = json.dumps([timestamp, *totals], separators=(",", ":"))
+    digest = _codex_private_id("", payload, dedupe_secret)
+    session = (
+        session_id.removeprefix("codex-session:")
+        if session_id.startswith("codex-session:")
+        else _codex_private_id("", session_id, dedupe_secret)
+    )
+    parent = (parent_id or "-").removeprefix("codex-session:")
+    root = (root_id or "-").removeprefix("codex-session:")
+    return "codex-event:" + ":".join((ownership, session, parent, root, digest)) + ":" + ":".join(
+        str(value) for value in totals
+    )
+
+
+def _codex_event_identity(
+    value: object,
+) -> tuple[str, str, str | None, str | None, str] | None:
+    if not isinstance(value, str) or not value.startswith("codex-event:"):
+        return None
+    fields = value.split(":", 9)
+    if len(fields) != 10 or fields[1] not in {"own", "inherited", "boundary"}:
+        return None
+    event_id = fields[5]
+    if len(event_id) != DEDUPE_DIGEST_HEX_CHARS:
+        return None
+    return (
+        fields[1],
+        fields[2],
+        None if fields[3] == "-" else fields[3],
+        None if fields[4] == "-" else fields[4],
+        event_id,
+    )
+
+
+def _codex_context_from_dedupe(
+    value: object,
+) -> tuple[str | None, str | None] | None:
+    identity = _codex_event_identity(value)
+    if identity is None:
+        return None
+    return identity[2], identity[3]
+
+
+def _codex_endpoint_from_dedupe(value: object) -> tuple[int, int, int, int] | None:
+    if not isinstance(value, str) or not value.startswith("codex-event:"):
+        return None
+    fields = value.rsplit(":", 4)[-4:]
+    try:
+        counts = tuple(int(field) for field in fields)
+    except ValueError:
+        return None
+    if len(counts) != 4 or any(value < 0 for value in counts):
+        return None
+    return counts
+
+
+def _scan_codex_lines(
+    handle,
+    *,
+    fallback_session_id: str,
+    dedupe_secret: bytes,
+    initial_totals: tuple[int, int, int, int] | None = None,
+    initial_parent_id: str | None = None,
+    initial_root_id: str | None = None,
+):
+    """Parse Codex token deltas and logical lineage from a rollout.
+
+    Modern Codex rows carry ``last_token_usage``, the usage added by that
+    event. Rollout forks and resumes copy those rows verbatim, so their stable
+    timestamp plus cumulative endpoint is also the safe cross-file dedupe key.
+    Older rows without a delta are converted from their cumulative sequence.
+    """
+    records: list[tuple] = []
+    logical_session_id = fallback_session_id
+    parent_id = initial_parent_id
+    root_id = initial_root_id
+    fork_boundary = None
+    previous_totals = initial_totals
+    legacy_tail_without_baseline = False
     rate_limit_windows: tuple[dict, ...] = ()
     malformed_lines = 0
     eof_newline = True
     for line in handle:
         eof_newline = line.endswith("\n")
-        if CODEX_MARKER not in line:
+        if CODEX_MARKER not in line and '"session_meta"' not in line:
+            continue
+        if len(line.encode("utf-8")) > USAGE_RECORD_MAX_BYTES:
+            malformed_lines += 1
             continue
         try:
             row = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, RecursionError, ValueError):
             malformed_lines += 1
             continue
-        payload = row.get("payload") if isinstance(row, dict) else None
+        if not isinstance(row, dict):
+            malformed_lines += 1
+            continue
+        payload = row.get("payload")
+        if row.get("type") == "session_meta" and isinstance(payload, dict):
+            candidate = payload.get("id")
+            if isinstance(candidate, str) and candidate and len(candidate) <= 256:
+                logical_session_id = _codex_private_id(
+                    "codex-session:", candidate, dedupe_secret
+                )
+            forked_from = payload.get("forked_from_id")
+            if isinstance(forked_from, str) and forked_from and len(forked_from) <= 256:
+                parent_id = _codex_private_id(
+                    "codex-session:", forked_from, dedupe_secret
+                )
+                raw_boundary = payload.get("timestamp", row.get("timestamp"))
+                try:
+                    fork_boundary = datetime.fromisoformat(
+                        str(raw_boundary).replace("Z", "+00:00")
+                    ).timestamp()
+                except (TypeError, ValueError):
+                    fork_boundary = None
+            raw_root = payload.get("parent_thread_id")
+            if isinstance(raw_root, str) and raw_root and len(raw_root) <= 256:
+                root_id = _codex_private_id(
+                    "codex-session:", raw_root, dedupe_secret
+                )
+            continue
         limits = payload.get("rate_limits") if isinstance(payload, dict) else None
         if isinstance(limits, dict):
             rate_limit_windows = tuple(codex_windows_from_limits(limits))
-        if (
-            not isinstance(payload, dict)
-            or payload.get("type") != "token_count"
-        ):
+        if not isinstance(payload, dict) or payload.get("type") != "token_count":
             malformed_lines += 1
             continue
         info = payload.get("info")
@@ -653,52 +765,87 @@ def _scan_codex_lines(handle):
             continue
         timestamp = row.get("timestamp")
         try:
-            last_epoch = datetime.fromisoformat(
-                str(timestamp).replace("Z", "+00:00")
-            ).timestamp()
+            epoch = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00")).timestamp()
         except (TypeError, ValueError):
             malformed_lines += 1
             continue
-        last_counts = counts
-    return last_counts, last_epoch, rate_limit_windows, malformed_lines, eof_newline
+        last_usage = info.get("last_token_usage")
+        delta = _token_counts(
+            last_usage,
+            ("input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens"),
+        ) if isinstance(last_usage, dict) else None
+        if previous_totals is None:
+            if delta is None:
+                delta = counts
+                legacy_tail_without_baseline = True
+        elif counts == previous_totals:
+            previous_totals = counts
+            continue
+        elif all(current >= previous for current, previous in zip(counts, previous_totals)):
+            delta = tuple(
+                current - previous for current, previous in zip(counts, previous_totals)
+            )
+        elif delta is None:
+            delta = tuple(
+                current - previous if current >= previous else current
+                for current, previous in zip(counts, previous_totals)
+            )
+        previous_totals = counts
+        # Codex reports cache reads and cache writes as subsets of input_tokens.
+        # Store the canonical tuple as ordinary input, cached input, cache
+        # writes, and output so downstream sums preserve raw input + output.
+        delta = (
+            max(0, delta[0] - delta[1] - delta[2]),
+            delta[1],
+            delta[2],
+            delta[3],
+        )
+        stamp = str(timestamp)
+        ownership = "own"
+        if fork_boundary is not None:
+            if epoch < fork_boundary:
+                ownership = "inherited"
+            elif epoch == fork_boundary:
+                ownership = "boundary"
+        dedupe = _codex_event_dedupe(
+            logical_session_id,
+            parent_id,
+            root_id,
+            stamp,
+            counts,
+            dedupe_secret,
+            ownership=ownership,
+        )
+        records.append(
+            (
+                "codex", logical_session_id, "codex", epoch,
+                delta[0], delta[1], delta[2], delta[3], dedupe,
+            )
+        )
+    return (
+        records, rate_limit_windows, malformed_lines, eof_newline,
+        legacy_tail_without_baseline,
+    )
 
 
-def _parse_codex_file(path: Path, expected_stat: os.stat_result) -> _ParseResult:
-    """One record per rollout: total_token_usage is CUMULATIVE per
-    session, so the LAST token_count event is the exact session total --
-    no dedupe gymnastics needed (CodexBar's reading of the format)."""
+def _parse_codex_file(
+    path: Path,
+    expected_stat: os.stat_result,
+    dedupe_secret: bytes,
+) -> _ParseResult:
+    """Parse event deltas with identities stable across copied rollouts."""
     snapshot = _read_verified_prefix(path, expected_stat)
     if snapshot is None:
         return _ParseResult([], 0, False)
     text, parsed_size = snapshot
-    (
-        last_counts,
-        last_epoch,
-        rate_limit_windows,
-        malformed_lines,
-        _eof,
-    ) = _scan_codex_lines(text.splitlines(keepends=True))
-    if last_counts is None or last_epoch is None:
-        return _ParseResult(
-            [], malformed_lines, True, rate_limit_windows, True, parsed_size
-        )
-
     physical_id = f"codex:{expected_stat.st_dev}:{expected_stat.st_ino}"
-
+    records, rate_limit_windows, malformed_lines, _eof, _legacy = _scan_codex_lines(
+        text.splitlines(keepends=True),
+        fallback_session_id=physical_id,
+        dedupe_secret=dedupe_secret,
+    )
     return _ParseResult(
-        [
-            (
-                "codex",
-                physical_id,
-                "codex",
-                last_epoch,
-                last_counts[0],
-                last_counts[1],
-                last_counts[2],
-                last_counts[3],
-                physical_id,
-            )
-        ],
+        records,
         malformed_lines,
         True,
         rate_limit_windows,
@@ -775,9 +922,7 @@ def cached_codex_rate_limits(cache_path: Path) -> dict | None:
             or not isinstance(windows, list)
         ):
             continue
-        admitted = tuple(
-            dict(window) for window in windows[:32] if isinstance(window, dict)
-        )
+        admitted = tuple(dict(window) for window in windows[:32] if isinstance(window, dict))
         if admitted:
             candidates.append((float(mtime), key, admitted))
     if not candidates:
@@ -809,20 +954,14 @@ def codex_windows_from_limits(payload: object) -> list[dict]:
         if not isinstance(entry, dict) or len(windows) >= 32:
             return
         percent = entry.get("used_percent")
-        if (
-            isinstance(percent, bool)
-            or not isinstance(percent, (int, float))
-            or not math.isfinite(float(percent))
-        ):
+        if isinstance(percent, bool) or not isinstance(percent, (int, float)) or not math.isfinite(float(percent)):
             return
         minutes = entry.get("window_minutes")
         if isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
             seconds = entry.get("limit_window_seconds", entry.get("window_seconds"))
             minutes = (
                 seconds / 60.0
-                if not isinstance(seconds, bool)
-                and isinstance(seconds, (int, float))
-                and math.isfinite(float(seconds))
+                if not isinstance(seconds, bool) and isinstance(seconds, (int, float)) and math.isfinite(float(seconds))
                 else None
             )
         if isinstance(minutes, (int, float)) and not math.isfinite(float(minutes)):
@@ -838,10 +977,7 @@ def codex_windows_from_limits(payload: object) -> list[dict]:
                     else None
                 ),
                 "resets_at": (
-                    reset_at
-                    if not isinstance(reset_at, bool)
-                    and isinstance(reset_at, (str, int, float))
-                    else None
+                    reset_at if not isinstance(reset_at, bool) and isinstance(reset_at, (str, int, float)) else None
                 ),
             }
         )
@@ -1009,11 +1145,7 @@ def _codex_lane_evidence(descriptor, window: object, *, observed_at: float):
         return None
 
     used = window.get("used_percent")
-    if (
-        isinstance(used, bool)
-        or not isinstance(used, (int, float))
-        or not math.isfinite(float(used))
-    ):
+    if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(float(used)):
         return None
 
     # `parse_reset_epoch` is the one place that accepts both the ISO string and
@@ -1114,6 +1246,10 @@ def _parse_file_tail(
     resume_offset: int,
     provider_id: str,
     dedupe_secret: bytes,
+    codex_session_id: str | None = None,
+    codex_previous_totals: tuple[int, int, int, int] | None = None,
+    codex_parent_id: str | None = None,
+    codex_root_id: str | None = None,
 ) -> _ParseResult:
     """Parse only the bytes appended past ``resume_offset``.
 
@@ -1130,32 +1266,24 @@ def _parse_file_tail(
     text, parsed_size = snapshot
     lines = text.splitlines(keepends=True)
     if provider_id == "codex":
-        (
-            last_counts,
-            last_epoch,
-            rate_limit_windows,
-            malformed_lines,
-            _eof,
-        ) = _scan_codex_lines(lines)
-        if last_counts is None or last_epoch is None:
-            return _ParseResult(
-                [], malformed_lines, True, rate_limit_windows, True, parsed_size
-            )
         physical_id = f"codex:{expected_stat.st_dev}:{expected_stat.st_ino}"
+        records, rate_limit_windows, malformed_lines, _eof, legacy_without_baseline = (
+            _scan_codex_lines(
+                lines,
+                fallback_session_id=codex_session_id or physical_id,
+                dedupe_secret=dedupe_secret,
+                initial_totals=codex_previous_totals,
+                initial_parent_id=codex_parent_id,
+                initial_root_id=codex_root_id,
+            )
+        )
+        # A legacy cumulative-only tail cannot derive its first delta without
+        # the cached cumulative endpoint. Refuse this optimization and let the
+        # caller perform the existing full reparse instead of overcounting.
+        if legacy_without_baseline and records:
+            return _ParseResult([], malformed_lines, False)
         return _ParseResult(
-            [
-                (
-                    "codex",
-                    physical_id,
-                    "codex",
-                    last_epoch,
-                    last_counts[0],
-                    last_counts[1],
-                    last_counts[2],
-                    last_counts[3],
-                    physical_id,
-                )
-            ],
+            records,
             malformed_lines,
             True,
             rate_limit_windows,
@@ -1220,13 +1348,20 @@ def _load_cache(
         # An oversized cache is refused rather than parsed: read_private_text
         # raises OSError past the cap, which lands in the handler below as an
         # ordinary cold scan. The next write replaces it with a capped one.
-        data = json.loads(
-            read_private_text(cache_path, max_bytes=USAGE_CACHE_MAX_BYTES)
-        )
+        data = json.loads(read_private_text(cache_path, max_bytes=USAGE_CACHE_MAX_BYTES))
     except (OSError, ValueError):
         return {}
     if not isinstance(data, dict) or data.get("version") != CACHE_VERSION:
         # A corrupt or old cache costs one cold scan, never a broken menu.
+        return {}
+    if (
+        source_key is not None
+        and source_key.provider_id == "codex"
+        and data.get("codex_semantics_version") != CODEX_CACHE_SEMANTICS_VERSION
+    ):
+        # Version 1 stored one cumulative record per physical inode. Reusing
+        # it would preserve copied/forked overcounts. Claude caches are not
+        # affected and remain warm.
         return {}
     if source_key is not None and data.get("source_key") != _source_key_payload(source_key):
         return {}
@@ -1277,7 +1412,7 @@ def _decode_records(
         model_index, session_index, usage_model_index = row[:3]
         dedupe_index = row[8]
         indexes = (model_index, session_index, usage_model_index, dedupe_index)
-        if any(not isinstance(index, int) or isinstance(index, bool) for index in indexes):
+        if any(not isinstance(index, int) or isinstance(index, bool) or index < 0 for index in indexes):
             return None
         epoch = row[3]
         token_counts = row[4:8]
@@ -1285,12 +1420,7 @@ def _decode_records(
             isinstance(epoch, bool)
             or not isinstance(epoch, (int, float))
             or not math.isfinite(float(epoch))
-            or any(
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value < 0
-                for value in token_counts
-            )
+            or any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in token_counts)
         ):
             return None
         try:
@@ -1343,9 +1473,7 @@ def _decode_cached_records(
         raw_windows = entry.get("rate_limit_windows", [])
         if not isinstance(raw_windows, list):
             return None
-        rate_limit_windows = tuple(
-            dict(window) for window in raw_windows[:32] if isinstance(window, dict)
-        )
+        rate_limit_windows = tuple(dict(window) for window in raw_windows[:32] if isinstance(window, dict))
     except (KeyError, TypeError, ValueError):
         return None
     records = _decode_records(
@@ -1359,26 +1487,26 @@ def _decode_cached_records(
 
 
 def _physical_file_unchanged(path: Path, expected_stat: os.stat_result) -> bool:
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
+    # A cache hit consumes no source bytes. Opening every transcript merely to
+    # fstat it makes thousands of otherwise warm hits pay the OS open cost.
+    # Revalidate the leaf without following symlinks and check read access;
+    # actual reads retain the descriptor-based checks in _read_verified_prefix.
     try:
-        descriptor = os.open(path, flags)
+        current = path.lstat()
+        readable = os.access(
+            path, os.R_OK,
+            effective_ids=os.access in os.supports_effective_ids,
+        )
     except OSError:
         return False
-    try:
-        current = os.fstat(descriptor)
-        return bool(
-            stat.S_ISREG(current.st_mode)
-            and current.st_dev == expected_stat.st_dev
-            and current.st_ino == expected_stat.st_ino
-            and current.st_size == expected_stat.st_size
-            and current.st_mtime_ns == expected_stat.st_mtime_ns
-        )
-    finally:
-        os.close(descriptor)
+    return bool(
+        readable
+        and stat.S_ISREG(current.st_mode)
+        and current.st_dev == expected_stat.st_dev
+        and current.st_ino == expected_stat.st_ino
+        and current.st_size == expected_stat.st_size
+        and current.st_mtime_ns == expected_stat.st_mtime_ns
+    )
 
 
 def _discover_usage_files(
@@ -1571,30 +1699,82 @@ def _scan_inventory_usage(
     if inventory_roots != expected_roots:
         raise ValueError("usage inventory roots do not match scan roots")
 
-    cache = (
-        _load_cache(cache_path, cache_source_key)
-        if cache_path is not None
-        else {}
-    )
+    cache = _load_cache(cache_path, cache_source_key) if cache_path is not None else {}
+    file_index = None
+    if cache_path is not None:
+        file_index = UsageFileIndex.open(
+            cache_path.with_suffix(".files.sqlite3"),
+            source_key=_source_key_payload(cache_source_key),
+            cache_version=(
+                CACHE_VERSION + CODEX_CACHE_SEMANTICS_VERSION
+                if cache_source_key.provider_id == "codex"
+                else CACHE_VERSION
+            ),
+            seed_secret=cache.get("dedupe_secret", secrets.token_hex(32)),
+        )
+        if file_index is not None and cache.get("dedupe_secret") != file_index.dedupe_secret:
+            cache = {}
+    try:
+        return _scan_inventory_usage_with_index(
+            inventory, cache_path, cache=cache, file_index=file_index,
+            since_epoch=since_epoch, cache_max_files=cache_max_files,
+            cache_source_key=cache_source_key,
+        )
+    finally:
+        if file_index is not None:
+            file_index.close()
+
+
+def _usage_index_document(entry: dict, records: list[tuple]) -> dict:
+    """Encode parsed usage only, with string tables local to this file."""
+    sessions: list[str] = []
+    models: list[str] = []
+    dedupes: list[str] = []
+    session_index: dict[str, int] = {}
+    model_index: dict[str, int] = {}
+    dedupe_index: dict[str, int] = {}
+    encoded = [
+        [
+            _intern(r[0], models, model_index),
+            _intern(r[1], sessions, session_index),
+            _intern(r[2], models, model_index),
+            *r[3:8],
+            _intern(r[8], dedupes, dedupe_index),
+        ]
+        for r in records
+    ]
+    return {
+        "entry": {**entry, "records": encoded},
+        "sessions": sessions, "models": models, "dedupes": dedupes,
+    }
+
+
+def _scan_inventory_usage_with_index(
+    inventory: LocalUsageInventory,
+    cache_path: Path | None,
+    *,
+    cache: dict,
+    file_index: UsageFileIndex | None,
+    since_epoch: float,
+    cache_max_files: int,
+    cache_source_key: SourceKey,
+) -> UsageTotals:
     cached_files = cache.get("files", {}) if cache else {}
     cached_sessions = cache.get("sessions", []) if cache else []
     cached_models = cache.get("models", []) if cache else []
     cached_dedupes = cache.get("dedupes", []) if cache else []
     dedupe_secret = (
-        bytes.fromhex(cache["dedupe_secret"])
-        if cache
-        else secrets.token_bytes(32)
+        bytes.fromhex(file_index.dedupe_secret) if file_index is not None
+        else bytes.fromhex(cache["dedupe_secret"]) if cache else secrets.token_bytes(32)
     )
+    index_hits: set[str] = set()
+    file_floors: dict[str, float] = {}
 
     # A cache entry may hold only part of a file's history. It therefore
     # records the floor it was truncated to, and is refused below unless that
     # floor still covers the window being asked for -- otherwise a partial
     # entry would read as a complete one and silently undercount usage.
-    retention_epoch = (
-        max(0.0, since_epoch - USAGE_CACHE_RETENTION_HEADROOM_SECONDS)
-        if since_epoch > 0.0
-        else 0.0
-    )
+    retention_epoch = max(0.0, since_epoch - USAGE_CACHE_RETENTION_HEADROOM_SECONDS) if since_epoch > 0.0 else 0.0
 
     sessions_table: list[str] = []
     sessions_index: dict[str, int] = {}
@@ -1621,14 +1801,27 @@ def _scan_inventory_usage(
         for candidate in source.candidates:
             key = _cache_file_key(source.provider_id, candidate.info)
             raw_cached_entry = cached_files.get(key)
+            entry_sessions, entry_models, entry_dedupes = cached_sessions, cached_models, cached_dedupes
+            indexed = file_index.get(key) if file_index is not None else None
+            using_index = False
+            if (
+                isinstance(indexed, dict)
+                and _cached_entry_covers(indexed.get("entry"), since_epoch)
+                and all(isinstance(indexed.get(name), list) for name in ("sessions", "models", "dedupes"))
+            ):
+                raw_cached_entry = indexed["entry"]
+                entry_sessions, entry_models, entry_dedupes = (
+                    indexed["sessions"], indexed["models"], indexed["dedupes"],
+                )
+                using_index = True
             cached_entry = (
                 _decode_cached_records(
                     raw_cached_entry,
                     coverage.provider_id,
                     candidate.info,
-                    cached_sessions,
-                    cached_models,
-                    cached_dedupes,
+                    entry_sessions,
+                    entry_models,
+                    entry_dedupes,
                 )
                 if _cached_entry_covers(raw_cached_entry, since_epoch)
                 else None
@@ -1639,6 +1832,9 @@ def _scan_inventory_usage(
                     coverage.unreadable_files += 1
                     continue
                 coverage.cache_hits += 1
+                file_floors[key] = float(raw_cached_entry.get("since", 0.0))
+                if using_index:
+                    index_hits.add(key)
                 coverage.malformed_lines += cached_malformed_lines
                 all_records.extend(cached_records)
                 if source.provider_id == "codex" and cached_rate_windows:
@@ -1650,9 +1846,7 @@ def _scan_inventory_usage(
                     cached_malformed_lines,
                     cached_records,
                     cached_rate_windows,
-                    raw_cached_entry.get("eof_newline") is True
-                    if isinstance(raw_cached_entry, dict)
-                    else False,
+                    raw_cached_entry.get("eof_newline") is True if isinstance(raw_cached_entry, dict) else False,
                     int(raw_cached_entry.get("size", candidate.info.st_size))
                     if isinstance(raw_cached_entry, dict)
                     else candidate.info.st_size,
@@ -1662,9 +1856,9 @@ def _scan_inventory_usage(
             # Incremental tail: the file GREW in place (same device and
             # inode, cached parse ended on a newline). Read only the
             # appended bytes instead of re-parsing a 10MB live
-            # transcript on every poll. Claude records append; a codex
-            # tail's token_count is the session's new CUMULATIVE total
-            # and REPLACES the cached record. Any anomaly falls through
+            # transcript on every poll. Both providers now append event
+            # records. Codex copied-history events carry stable HMAC IDs,
+            # so the global pass removes them. Any anomaly falls through
             # to the full reparse below.
             resume_offset = (
                 _incremental_resume_offset(raw_cached_entry, candidate.info)
@@ -1676,9 +1870,9 @@ def _scan_inventory_usage(
                     raw_cached_entry,
                     coverage.provider_id,
                     candidate.info,
-                    cached_sessions,
-                    cached_models,
-                    cached_dedupes,
+                    entry_sessions,
+                    entry_models,
+                    entry_dedupes,
                     require_stat_match=False,
                 )
                 if base is not None:
@@ -1689,24 +1883,36 @@ def _scan_inventory_usage(
                         resume_offset,
                         source.provider_id,
                         dedupe_secret,
+                        (
+                            base_records[0][1]
+                            if source.provider_id == "codex" and base_records
+                            else None
+                        ),
+                        (
+                            _codex_endpoint_from_dedupe(base_records[-1][8])
+                            if source.provider_id == "codex" and base_records
+                            else None
+                        ),
+                        *(
+                            _codex_context_from_dedupe(base_records[-1][8])
+                            if source.provider_id == "codex" and base_records
+                            else (None, None)
+                        ),
                     )
                     if tail.read_ok:
+                        file_floors[key] = float(raw_cached_entry.get("since", 0.0))
                         coverage.files_read += 1
                         merged_malformed = base_malformed + tail.malformed_lines
                         coverage.malformed_lines += merged_malformed
                         if source.provider_id == "codex":
-                            merged_records = list(
-                                tail.records if tail.records else base_records
-                            )
+                            merged_records = [*base_records, *tail.records]
                             merged_windows = tail.rate_limit_windows or base_windows
                         else:
                             merged_records = [*base_records, *tail.records]
                             merged_windows = ()
                         all_records.extend(merged_records)
                         if source.provider_id == "codex" and merged_windows:
-                            rate_candidates.append(
-                                (candidate.info.st_mtime_ns, merged_windows)
-                            )
+                            rate_candidates.append((candidate.info.st_mtime_ns, merged_windows))
                         scanned_files[key] = (
                             candidate.info,
                             source.provider_id,
@@ -1715,17 +1921,11 @@ def _scan_inventory_usage(
                             merged_records,
                             merged_windows,
                             tail.eof_newline,
-                            tail.parsed_size
-                            if tail.parsed_size >= 0
-                            else candidate.info.st_size,
+                            tail.parsed_size if tail.parsed_size >= 0 else candidate.info.st_size,
                         )
                         continue
 
-            result = (
-                parser(candidate.path, candidate.info)
-                if source.provider_id == "codex"
-                else parser(candidate.path, candidate.info, dedupe_secret)
-            )
+            result = parser(candidate.path, candidate.info, dedupe_secret)
             if not result.read_ok:
                 coverage.unreadable_files += 1
                 continue
@@ -1742,10 +1942,28 @@ def _scan_inventory_usage(
                 result.records,
                 result.rate_limit_windows,
                 result.eof_newline,
-                result.parsed_size
-                if result.parsed_size >= 0
-                else candidate.info.st_size,
+                result.parsed_size if result.parsed_size >= 0 else candidate.info.st_size,
             )
+
+    if file_index is not None:
+        if all(source.walk_complete for source in inventory.sources):
+            file_index.prune({
+                _cache_file_key(source.provider_id, candidate.info)
+                for source in inventory.sources for candidate in source.candidates
+            })
+        for key, (
+            info, provider, root_key, malformed, records, windows, eof_newline, parsed_size,
+        ) in scanned_files.items():
+            if key in index_hits:
+                continue
+            file_index.put(key, _usage_index_document({
+                "since": file_floors.get(key, 0.0),
+                "size": parsed_size, "mtime": info.st_mtime,
+                "device": info.st_dev, "inode": info.st_ino,
+                "provider": provider, "root_key": root_key,
+                "malformed_lines": malformed, "eof_newline": eof_newline,
+                "rate_limit_windows": [dict(window) for window in windows],
+            }, records))
 
     retained_cached_files: dict[
         str,
@@ -1774,9 +1992,7 @@ def _scan_inventory_usage(
             raw_windows = entry.get("rate_limit_windows", [])
             if not isinstance(raw_windows, list):
                 continue
-            cached_rate_windows = tuple(
-                dict(window) for window in raw_windows[:32] if isinstance(window, dict)
-            )
+            cached_rate_windows = tuple(dict(window) for window in raw_windows[:32] if isinstance(window, dict))
             if cached_provider not in {"claude", "codex"}:
                 continue
             if cached_malformed_lines < 0:
@@ -1875,6 +2091,11 @@ def _scan_inventory_usage(
             # cycle -- measured live as a CPU pin at 104%, permanently. The
             # cache exists to avoid exactly that read.
         cost = _CACHE_BYTES_PER_ENTRY + _CACHE_BYTES_PER_RECORD * len(records)
+        if provider == "codex":
+            # Codex lineage keys carry HMAC-safe session ancestry plus the
+            # cumulative endpoint needed by incremental tails. Account for
+            # those extra bytes so the nominal 8 MiB cache remains readable.
+            cost += sum(max(0, len(record[8]) - 40) for record in records)
         if cost > cache_budget and new_files:
             # Skip this one, but keep going. Stopping here defeated the whole
             # point of the paragraph above: candidates are newest first, so the
@@ -1925,6 +2146,8 @@ def _scan_inventory_usage(
             "dedupes": dedupes_table,
             "dedupe_secret": dedupe_secret.hex(),
         }
+        if cache_source_key.provider_id == "codex":
+            payload["codex_semantics_version"] = CODEX_CACHE_SEMANTICS_VERSION
         if payload != cache:
             try:
                 atomic_private_write(
@@ -1934,11 +2157,62 @@ def _scan_inventory_usage(
             except OSError:
                 pass
 
+    # Forked rollouts contain an exact copy of their ancestor's token events.
+    # Resolve those copies only through the admitted lineage graph. This keeps
+    # sibling branches independent even when they happen to reach the same
+    # cumulative endpoint at the same timestamp.
+    codex_parents: dict[str, str] = {}
+    codex_roots: dict[str, str] = {}
+    codex_own_events: dict[tuple[str, str], str] = {}
+    for record in all_records:
+        if record[0] != "codex":
+            continue
+        identity = _codex_event_identity(record[8])
+        if identity is None:
+            continue
+        kind, session_id, parent_id, root_id, event_id = identity
+        if parent_id is not None:
+            codex_parents.setdefault(session_id, parent_id)
+        if root_id is not None:
+            codex_roots.setdefault(session_id, root_id)
+        if kind == "own":
+            codex_own_events.setdefault((session_id, event_id), record[8])
+
+    normalized_records: list[tuple] = []
+    for record in all_records:
+        if record[0] != "codex":
+            normalized_records.append(record)
+            continue
+        identity = _codex_event_identity(record[8])
+        if identity is None or identity[0] == "own":
+            normalized_records.append(record)
+            continue
+        _kind, session_id, parent_id, root_id, event_id = identity
+        owner = parent_id
+        visited: set[str] = set()
+        canonical = None
+        while owner is not None and owner not in visited:
+            visited.add(owner)
+            canonical = codex_own_events.get((owner, event_id))
+            if canonical is not None:
+                break
+            owner = codex_parents.get(owner)
+        if canonical is None and root_id is not None:
+            canonical = codex_own_events.get((root_id, event_id))
+        if canonical is None and identity[0] == "boundary":
+            # Equality is ambiguous at timestamp resolution. Reconcile it
+            # only when the admitted ancestor has the exact event; otherwise
+            # retain branch ownership so sibling work cannot collapse.
+            normalized_records.append(record)
+            continue
+        if canonical is None:
+            unresolved_owner = parent_id or root_id or session_id
+            canonical = f"codex-unresolved:{unresolved_owner}:{event_id}"
+        normalized_records.append((*record[:8], canonical))
+    all_records = normalized_records
+
     totals = UsageTotals()
-    totals.source_coverage = {
-        provider_id: coverage.finalize()
-        for provider_id, coverage in coverage_states.items()
-    }
+    totals.source_coverage = {provider_id: coverage.finalize() for provider_id, coverage in coverage_states.items()}
     seen: set[str] = set()
     priced_records = 0
     total_pricing_records = 0
@@ -1959,7 +2233,7 @@ def _scan_inventory_usage(
         totals.sessions.add(session)
         if provider == "codex":
             totals.codex_sessions.add(session)
-            totals.codex_tokens += inp + cached_in + out
+            totals.codex_tokens += inp + cached_in + cache_create + out
             continue
         totals.input_tokens += inp
         totals.cached_input_tokens += cached_in
@@ -1980,9 +2254,7 @@ def _scan_inventory_usage(
             + cache_create * input_rate * CACHE_WRITE_RATE
             + out * output_rate
         ) / 1_000_000.0
-        totals.estimated_cache_savings_usd += (
-            cached_in * input_rate * (1.0 - CACHE_READ_RATE)
-        ) / 1_000_000.0
+        totals.estimated_cache_savings_usd += (cached_in * input_rate * (1.0 - CACHE_READ_RATE)) / 1_000_000.0
     totals.pricing_coverage = PricingCoverageMetrics(
         priced_records=priced_records,
         total_records=total_pricing_records,
@@ -2050,9 +2322,7 @@ def _provider_result(
     source_key: SourceKey,
     totals: UsageTotals,
 ) -> ProviderUsageResult:
-    records = tuple(
-        record for record in totals.records if record[0] == source_key.provider_id
-    )
+    records = tuple(record for record in totals.records if record[0] == source_key.provider_id)
     sessions = {record[1] for record in records}
     input_tokens = sum(record[4] for record in records)
     cached_input_tokens = sum(record[5] for record in records)
@@ -2069,11 +2339,7 @@ def _provider_result(
         if source_key.provider_id == "codex":
             unpriced_records = len(records)
     else:
-        pricing = (
-            PricingCoverage.PARTIAL
-            if unpriced_records > 0
-            else PricingCoverage.COMPLETE
-        )
+        pricing = PricingCoverage.PARTIAL if unpriced_records > 0 else PricingCoverage.COMPLETE
         cost = totals.estimated_cost_usd
         savings = totals.estimated_cache_savings_usd
         pricing_as_of = metrics.table_as_of
@@ -2170,28 +2436,50 @@ def scan_usage(
     codex_root: Path | None = None,
     cache_max_files: int = USAGE_CACHE_MAX_FILES,
     inventory: LocalUsageInventory | None = None,
+    provider_ids: tuple[str, ...] | None = None,
 ) -> UsageTotals:
     """Compatibility aggregation over independent provider-local scans."""
     roots = {"claude": root}
     if codex_root is not None:
         roots["codex"] = codex_root
-    frozen = inventory or build_usage_inventory(root, codex_root=codex_root)
-    by_provider = {item.provider_id: item for item in frozen.sources}
     transcript_sources = {
         row.source_key.provider_id: row
         for row in negotiated_provider_sources()
-        if row.source_key.capability_id == "transcript_usage"
-        and row.observation_invocation_allowed
+        if row.source_key.capability_id == "transcript_usage" and row.observation_invocation_allowed
     }
+    selected = set(roots) if provider_ids is None else set(provider_ids)
+    admitted_roots = {
+        provider_id: provider_root
+        for provider_id, provider_root in roots.items()
+        if provider_id in selected and provider_id in transcript_sources
+    }
+    if not admitted_roots:
+        return UsageTotals()
+    if inventory is None:
+        frozen = LocalUsageInventory(
+            tuple(
+                _provider_inventory(provider_id, provider_root).sources[0]
+                for provider_id, provider_root in admitted_roots.items()
+            )
+        )
+    else:
+        frozen = LocalUsageInventory(
+            tuple(
+                source
+                for source in inventory.sources
+                if source.provider_id in admitted_roots
+            )
+        )
+    by_provider = {item.provider_id: item for item in frozen.sources}
     parts: list[UsageTotals] = []
-    for index, (provider_id, provider_root) in enumerate(roots.items()):
+    for provider_id, provider_root in admitted_roots.items():
         source = transcript_sources.get(provider_id)
         source_inventory = by_provider.get(provider_id)
         if source is None or source_inventory is None:
             continue
         provider_cache = (
             cache_path
-            if index == 0
+            if provider_id == "claude"
             else _secondary_provider_cache_path(cache_path, source.source_key)
         )
         _result, totals = _scan_provider_usage_with_totals(
@@ -2240,49 +2528,34 @@ def usage_summary_line(
         return None
     plural = "session" if count == 1 else "sessions"
     parts = [f"{count} {plural}"]
-    claude_tokens = (
-        totals.input_tokens + totals.cached_input_tokens + totals.output_tokens
-    )
+    claude_tokens = totals.input_tokens + totals.cached_input_tokens + totals.output_tokens
     if mode == "sessions":
         pass
     elif mode == "cost":
         if totals.estimated_cost_usd >= 0.005:
             parts.append(f"estimated ${totals.estimated_cost_usd:.2f}")
         if totals.estimated_cache_savings_usd >= 0.005:
-            parts.append(
-                f"saved ${totals.estimated_cache_savings_usd:.2f} with caching (estimated)"
-            )
+            parts.append(f"saved ${totals.estimated_cache_savings_usd:.2f} with caching (estimated)")
         pricing_fraction = totals.pricing_coverage.fraction
         if pricing_fraction is not None:
             parts.append(f"pricing coverage {pricing_fraction:.0%}")
         if (
             totals.pricing_coverage.priced_records > 0
-            and totals.pricing_coverage.priced_records
-            < totals.pricing_coverage.total_records
+            and totals.pricing_coverage.priced_records < totals.pricing_coverage.total_records
         ):
             parts.append("Estimate, known models only")
     else:
         if claude_tokens:
-            approx = (
-                f" (~${totals.estimated_cost_usd:,.0f}) estimated"
-                if totals.estimated_cost_usd >= 0.5
-                else ""
-            )
+            approx = f" (~${totals.estimated_cost_usd:,.0f}) estimated" if totals.estimated_cost_usd >= 0.5 else ""
             parts.append(f"{_compact_tokens(claude_tokens)} tokens{approx}")
         if totals.estimated_cache_savings_usd >= 0.5:
-            parts.append(
-                f"saved ~${totals.estimated_cache_savings_usd:,.0f} with caching (estimated)"
-            )
+            parts.append(f"saved ~${totals.estimated_cache_savings_usd:,.0f} with caching (estimated)")
         # A dollar figure without its coverage is a silent floor: the
         # Overview line showed "$23k estimated" while 55% of the tokens
         # were unpriced models (audit, 2026-08-26). Cost mode already
         # disclosed; the tokens-mode line now does too when partial.
         pricing_fraction = totals.pricing_coverage.fraction
-        if (
-            totals.estimated_cost_usd >= 0.5
-            and pricing_fraction is not None
-            and pricing_fraction < 0.995
-        ):
+        if totals.estimated_cost_usd >= 0.5 and pricing_fraction is not None and pricing_fraction < 0.995:
             parts.append(f"{pricing_fraction:.0%} of tokens priced")
     return str(period_label) + ": " + " · ".join(parts)
 
@@ -2318,10 +2591,7 @@ def daily_buckets(records, days: int = 7, *, now: datetime | None = None):
     Day keys come from each record's own timestamp converted to LOCAL
     time (the CodexBar rule: a 23:30 UTC session lands in YOUR day)."""
     current = now or datetime.now()
-    day_keys = [
-        (current - timedelta(days=offset)).date().isoformat()
-        for offset in range(days - 1, -1, -1)
-    ]
+    day_keys = [(current - timedelta(days=offset)).date().isoformat() for offset in range(days - 1, -1, -1)]
     buckets = {
         key: {
             "claude_cost": 0.0,
@@ -2348,7 +2618,7 @@ def daily_buckets(records, days: int = 7, *, now: datetime | None = None):
         provider_bucket["tokens"] += inp + cached_in + cache_create + out
         provider_bucket["sessions"].add(session)
         if provider == "codex":
-            bucket["codex_tokens"] += inp + cached_in + out
+            bucket["codex_tokens"] += inp + cached_in + cache_create + out
             # Codex cost was skipped by code choice while the records
             # carried model + token splits the whole time (owner
             # decision 2026-08-26: price it). No cache-write premium --
@@ -2420,28 +2690,16 @@ def usage_graph_model(
                 if bucket is None:
                     continue
                 entry = bucket["providers"].setdefault(provider_id, {})
-                entry["sessions"] = max(
-                    int(entry.get("sessions", 0) or 0), int(count)
-                )
+                entry["sessions"] = max(int(entry.get("sessions", 0) or 0), int(count))
     label_stride = max(1, days // 6)
-    labels = tuple(
-        day[5:].replace("-", "/") if index % label_stride == 0 else ""
-        for index, day in enumerate(buckets)
-    )
+    labels = tuple(day[5:].replace("-", "/") if index % label_stride == 0 else "" for index, day in enumerate(buckets))
     series = []
     for provider_id in provider_ids:
-        values = tuple(
-            bucket["providers"].get(provider_id, {}).get(metric, 0)
-            for bucket in buckets.values()
-        )
+        values = tuple(bucket["providers"].get(provider_id, {}).get(metric, 0) for bucket in buckets.values())
         if any(float(value) > 0.0 for value in values):
             series.append({"provider_id": provider_id, "values": values})
     maximum = max(
-        (
-            float(value)
-            for provider_series in series
-            for value in provider_series["values"]
-        ),
+        (float(value) for provider_series in series for value in provider_series["values"]),
         default=0.0,
     )
     return {
@@ -2451,6 +2709,12 @@ def usage_graph_model(
         "labels": labels,
         "series": tuple(series),
         "scale_max": nice_usage_scale(maximum),
+        "heatmap": build_usage_heatmap(
+            records,
+            provider_ids=provider_ids,
+            days=days,
+            now=now,
+        ),
     }
 
 

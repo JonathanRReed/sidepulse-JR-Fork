@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_product_display_name_is_central_and_compatibility_identity_is_stable() -> None:
-    assert PRODUCT_DISPLAY_NAME == "JR Bar"
+    assert PRODUCT_DISPLAY_NAME == "JR-Bar"
     assert APP_BUNDLE_NAME == "SidePulse.app"
     assert APP_EXECUTABLE_NAME == "SidePulse"
     assert APP_BUNDLE_IDENTIFIER == "io.sidepulse.app"
@@ -29,7 +29,7 @@ def test_cli_uses_jr_bar_display_name_and_preserves_command_name() -> None:
     parser = build_sidepulse_parser()
 
     assert parser.prog == "sidepulse"
-    assert "JR Bar" in parser.format_help()
+    assert "JR-Bar" in parser.format_help()
     assert "SidePulse command line tools" not in parser.format_help()
     assert PRODUCT_DISPLAY_NAME in build_parser().format_help()
 
@@ -48,7 +48,8 @@ def test_macos_package_sets_display_name_without_renaming_bundle() -> None:
     script = (ROOT / "packaging" / "build_macos_pkg.sh").read_text(encoding="utf-8")
 
     assert ":CFBundleDisplayName string $PRODUCT_DISPLAY_NAME" in script
-    assert "PRODUCT_DISPLAY_NAME=\"JR Bar\"" in script
+    assert ":CFBundleName string $PRODUCT_DISPLAY_NAME" in script
+    assert "PRODUCT_DISPLAY_NAME=\"JR-Bar\"" in script
     assert "--name SidePulse" in script
     assert 'APP_ID="io.sidepulse.app"' in script
 
@@ -80,7 +81,7 @@ def test_ios_visible_copy_uses_shared_display_name_and_preserves_hardware_name()
     send_push = (ios_tools / "send_push.py").read_text(encoding="utf-8")
     server = (ios_tools / "server.py").read_text(encoding="utf-8")
 
-    assert 'static let displayName = "JR Bar"' in app_model
+    assert 'static let displayName = "JR-Bar"' in app_model
     for retired_copy in (
         '.navigationTitle("SidePulse")',
         'Label("SidePulse",',
@@ -91,8 +92,9 @@ def test_ios_visible_copy_uses_shared_display_name_and_preserves_hardware_name()
     ):
         assert retired_copy not in content + shortcut + apns + send_push + server
     assert "ProductIdentity.displayName" in content
-    assert "ProductIdentity.displayName" in shortcut
-    assert 'PRODUCT_DISPLAY_NAME = "JR Bar"' in tool_identity
+    # App Intents title extraction is verified by the full Xcode build.
+    # Requiring member-reference interpolation here would break that build.
+    assert 'PRODUCT_DISPLAY_NAME = "JR-Bar"' in tool_identity
     assert "from product_identity import PRODUCT_DISPLAY_NAME" in apns
     assert '"title": PRODUCT_DISPLAY_NAME' in apns
     assert "PRODUCT_DISPLAY_NAME" in send_push
@@ -103,7 +105,7 @@ def test_ios_visible_copy_uses_shared_display_name_and_preserves_hardware_name()
 def test_openclaw_copy_uses_jr_bar_but_keeps_compatibility_ownership_marker() -> None:
     hook_document = OPENCLAW_HOOK_MD.format(name="sidepulse-status")
 
-    assert "# JR Bar Status" in hook_document
-    assert "Forwards agent activity to JR Bar" in hook_document
-    assert "JR Bar agent monitor" in hook_document
+    assert "# JR-Bar Status" in hook_document
+    assert "Forwards agent activity to JR-Bar" in hook_document
+    assert "JR-Bar agent monitor" in hook_document
     assert "Managed\nby SidePulse" in hook_document

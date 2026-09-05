@@ -9,7 +9,12 @@ bracket would simply vanish, with no error anywhere.
 
 from __future__ import annotations
 
-from sidepulse.virtual_device import ABOVE_ALCOVE_WINDOW_LEVEL, alcove_window_level
+from sidepulse.virtual_device import (
+    ABOVE_ALCOVE_WINDOW_LEVEL,
+    AlcoveWindowProbe,
+    AlcoveWindowSnapshot,
+    alcove_window_level,
+)
 
 
 def _windows(*levels: int):
@@ -42,3 +47,74 @@ def test_falls_back_when_alcove_is_absent_or_probing_fails() -> None:
         raise RuntimeError("no window server")
 
     assert alcove_window_level(window_lister=_broken) == ABOVE_ALCOVE_WINDOW_LEVEL
+
+
+def test_window_probe_coalesces_hot_reads_and_invalidates_on_screen_change() -> None:
+    """A presentation tick only schedules discovery; it never performs it inline."""
+    calls: list[tuple[float, float]] = []
+    queued: list[object] = []
+
+    def discover(screen_x: float, screen_width: float) -> AlcoveWindowSnapshot:
+        calls.append((screen_x, screen_width))
+        return AlcoveWindowSnapshot(
+            values=(99, screen_x + 444.0, 0.0, 624.0),
+            level=ABOVE_ALCOVE_WINDOW_LEVEL + 1,
+        )
+
+    probe = AlcoveWindowProbe(
+        probe=discover,
+        ttl_seconds=1.0,
+        start_refresh=queued.append,
+    )
+
+    assert probe.read(0.0, 1512.0, now=0.0) is None
+    for _ in range(100):
+        assert probe.read(0.0, 1512.0, now=0.5) is None
+    assert calls == []
+    assert len(queued) == 1
+
+    queued.pop()()
+    first = probe.read(0.0, 1512.0, now=0.5)
+    assert first is not None and first.values[0] == 99
+    assert calls == [(0.0, 1512.0)]
+
+    # A new display key cannot consume geometry discovered for the old one.
+    assert probe.read(1512.0, 1920.0, now=0.6) is None
+    assert len(queued) == 1
+    assert calls == [(0.0, 1512.0)]
+    queued.pop()()
+    second = probe.read(1512.0, 1920.0, now=0.7)
+    assert second is not None and second.values[1] == 1956.0
+    assert calls == [(0.0, 1512.0), (1512.0, 1920.0)]
+
+
+def test_window_probe_refreshes_once_after_ttl_while_serving_cached_geometry() -> None:
+    queued: list[object] = []
+    calls = 0
+
+    def discover(_screen_x: float, _screen_width: float) -> AlcoveWindowSnapshot:
+        nonlocal calls
+        calls += 1
+        return AlcoveWindowSnapshot(
+            values=(calls, 444.0, 0.0, 624.0),
+            level=ABOVE_ALCOVE_WINDOW_LEVEL,
+        )
+
+    probe = AlcoveWindowProbe(
+        probe=discover,
+        ttl_seconds=1.0,
+        start_refresh=queued.append,
+    )
+    probe.read(0.0, 1512.0, now=0.0)
+    queued.pop()()
+
+    for _ in range(100):
+        cached = probe.read(0.0, 1512.0, now=2.0)
+        assert cached is not None and cached.values[0] == 1
+    assert len(queued) == 1
+    assert calls == 1
+
+    queued.pop()()
+    refreshed = probe.read(0.0, 1512.0, now=2.1)
+    assert refreshed is not None and refreshed.values[0] == 2
+    assert calls == 2

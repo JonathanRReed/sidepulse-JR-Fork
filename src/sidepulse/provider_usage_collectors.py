@@ -7,19 +7,22 @@ permission, or transport failure to a generic "no reading" row.
 
 from __future__ import annotations
 
+import base64
 import json
-import os
 import math
+import os
 import re
+import shutil
 import sqlite3
-import subprocess
 import ssl
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from .provider_usage_parsers import (
     parse_antigravity_usage,
@@ -28,8 +31,6 @@ from .provider_usage_parsers import (
     parse_grok_usage,
     parse_openai_api_usage,
 )
-import base64
-import shutil
 from .provider_usage_platform import ProviderSourceState, ProviderUsageSnapshot, UsageLane
 from .provider_usage_settings import ProviderPreference
 
@@ -44,6 +45,43 @@ class ProviderHttpError(RuntimeError):
         super().__init__(reason)
         self.status = int(status)
         self.reason = str(reason)
+
+
+_SENSITIVE_PROVIDER_HEADERS = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "x-codeium-csrf-token",
+        "x-cog-org-id",
+        "x-xai-token-auth",
+    }
+)
+
+
+def _normalized_http_origin(url: str) -> tuple[str, str, int] | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    return (
+        parsed.scheme.lower(),
+        parsed.hostname.rstrip(".").lower(),
+        port if port is not None else (443 if parsed.scheme.lower() == "https" else 80),
+    )
+
+
+class _CredentialSafeRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        request_headers = {name.casefold() for name in req.headers}
+        request_headers.update(name.casefold() for name in req.unredirected_hdrs)
+        if request_headers & _SENSITIVE_PROVIDER_HEADERS:
+            if _normalized_http_origin(req.full_url) != _normalized_http_origin(newurl):
+                raise ProviderHttpError(0, "credential_redirect_refused")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,8 +113,12 @@ def _default_http_json(
     context = None
     if parsed.scheme == "https" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}:
         context = ssl._create_unverified_context()
+    opener = build_opener(
+        _CredentialSafeRedirectHandler(),
+        HTTPSHandler(context=context) if context is not None else HTTPSHandler(),
+    )
     try:
-        with urlopen(request, timeout=timeout, context=context) as response:
+        with opener.open(request, timeout=timeout) as response:
             data = response.read(HTTP_MAX_BYTES + 1)
             status = int(getattr(response, "status", 200))
     except HTTPError as error:
@@ -350,13 +392,14 @@ def collect_devin(
     secret = token.secret if token.available else None
 
     if secret is None and (organization_id or organization) and preference.browser_sources:
-        try:
-            from .browser_session_import import import_devin_session
-            session = import_devin_session(Path.home())
-            if session is not None and session.token:
-                secret = session.token
-        except Exception:
-            pass
+        from .provider_browser_access import _load_consented_devin_session
+
+        session = _load_consented_devin_session(
+            source_instance_id=preference.source_instance_id,
+            require_background_repair=True,
+        )
+        if session is not None and session.token:
+            secret = session.token
 
     if secret is None:
         return _failure(
@@ -415,8 +458,12 @@ def collect_devin(
     except ProviderHttpError as error:
         if error.status == 401 and preference.browser_sources:
             try:
-                from .browser_session_import import import_devin_session
-                session = import_devin_session(Path.home())
+                from .provider_browser_access import _load_consented_devin_session
+
+                session = _load_consented_devin_session(
+                    source_instance_id=preference.source_instance_id,
+                    require_background_repair=True,
+                )
                 if session is not None and session.token and session.token != secret:
                     secret = session.token
                     if session.organization:
@@ -594,7 +641,12 @@ def _is_pid_alive(pid: int | None) -> bool:
 
 def _discover_antigravity_endpoints(
     command_runner: Callable[[list[str], float], str] | None = None,
-) -> list[tuple[str, str | None, int]]:
+    process_identity_resolver=None,
+) -> list[tuple[str, str | None, int, tuple]]:
+    if process_identity_resolver is None:
+        from .antigravity_process_identity import verified_antigravity_process_identity
+
+        process_identity_resolver = verified_antigravity_process_identity
     try:
         if command_runner is not None:
             output = command_runner(["ps", "-eo", "pid,args"], 1.5)
@@ -608,7 +660,7 @@ def _discover_antigravity_endpoints(
     except Exception:
         return []
 
-    endpoints: list[tuple[str, str | None, int]] = []
+    endpoints: list[tuple[str, str | None, int, tuple]] = []
     for line in output.splitlines():
         line = line.strip()
         if not line:
@@ -629,6 +681,10 @@ def _discover_antigravity_endpoints(
             if csrf_match:
                 csrf = csrf_match.group(1)
             try:
+                pid = int(pid_str)
+                identity = process_identity_resolver(pid)
+                if identity is None:
+                    continue
                 if command_runner is not None:
                     lsof_out = command_runner(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", pid_str], 1.5)
                 else:
@@ -640,7 +696,7 @@ def _discover_antigravity_endpoints(
                     ).stdout
                 ports = re.findall(r":(\d+)\s+\(LISTEN\)", lsof_out)
                 for port in ports:
-                    endpoints.append((f"http://127.0.0.1:{port}", csrf, int(pid_str)))
+                    endpoints.append((f"http://127.0.0.1:{port}", csrf, pid, identity))
             except Exception:
                 continue
     return endpoints
@@ -662,6 +718,7 @@ def collect_antigravity(
     http_json: Callable[..., object] = _default_http_json,
     command_runner: Callable[[list[str], float], str] | None = None,
     home: Path | None = None,
+    process_identity_resolver=None,
 ) -> ProviderUsageSnapshot:
     global _cached_antigravity_creds, _cached_antigravity_tokens
 
@@ -709,35 +766,63 @@ def collect_antigravity(
 
     endpoint = _validated_loopback_endpoint(preference.option("endpoint"))
     csrf_token = preference.option("csrf_token")
-    candidates: list[tuple[str, str | None, int | None]] = []
+    if process_identity_resolver is None:
+        from .antigravity_process_identity import verified_antigravity_process_identity
+
+        process_identity_resolver = verified_antigravity_process_identity
+    candidates: list[tuple[str, str | None, int | None, tuple | None]] = []
 
     used_cached_endpoint = False
     if endpoint is not None:
-        candidates.append((endpoint, csrf_token, None))
+        candidates.append((endpoint, csrf_token, None, None))
     elif (
-        command_runner is None
-        and _cached_antigravity_connection.get("endpoint")
-        and _is_pid_alive(_cached_antigravity_connection.get("pid"))
+        _cached_antigravity_connection.get("endpoint")
+        and _cached_antigravity_connection.get("process_identity")
     ):
-        candidates.append((
-            _cached_antigravity_connection["endpoint"],
-            _cached_antigravity_connection.get("csrf"),
-            _cached_antigravity_connection.get("pid"),
-        ))
-        used_cached_endpoint = True
+        cached_pid = _cached_antigravity_connection.get("pid")
+        cached_identity = _cached_antigravity_connection.get("process_identity")
+        current_identity = (
+            process_identity_resolver(cached_pid)
+            if type(cached_pid) is int
+            else None
+        )
+        if current_identity == cached_identity:
+            candidates.append((
+                _cached_antigravity_connection["endpoint"],
+                _cached_antigravity_connection.get("csrf"),
+                cached_pid,
+                cached_identity,
+            ))
+            used_cached_endpoint = True
+        else:
+            _cached_antigravity_connection.clear()
+            discovered = _discover_antigravity_endpoints(
+                command_runner,
+                process_identity_resolver,
+            )
+            candidates.extend(discovered)
     else:
-        discovered = _discover_antigravity_endpoints(command_runner)
+        discovered = _discover_antigravity_endpoints(
+            command_runner,
+            process_identity_resolver,
+        )
         for ep in discovered:
             cand_url = ep[0]
             cand_csrf = ep[1]
             cand_pid = ep[2] if len(ep) > 2 else None
-            candidates.append((cand_url, cand_csrf, cand_pid))
+            cand_identity = ep[3] if len(ep) > 3 else None
+            candidates.append((cand_url, cand_csrf, cand_pid, cand_identity))
 
     def _query_candidates(
-        cands: list[tuple[str, str | None, int | None]],
+        cands: list[tuple[str, str | None, int | None, tuple | None]],
     ) -> tuple[ProviderUsageSnapshot | None, ProviderHttpError | None]:
         last_err: ProviderHttpError | None = None
-        for cand_endpoint, cand_csrf, cand_pid in cands:
+        for cand_endpoint, cand_csrf, cand_pid, cand_identity in cands:
+            if cand_pid is not None and (
+                cand_identity is None
+                or process_identity_resolver(cand_pid) != cand_identity
+            ):
+                continue
             url = cand_endpoint + "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
             headers = {"Connect-Protocol-Version": "1"}
             token_to_use = csrf_token or cand_csrf
@@ -756,10 +841,13 @@ def collect_antigravity(
                     },
                     timeout=HTTP_TIMEOUT_SECONDS,
                 )
+                if cand_pid is not None and process_identity_resolver(cand_pid) != cand_identity:
+                    continue
                 if command_runner is None and cand_pid:
                     _cached_antigravity_connection["endpoint"] = cand_endpoint
                     _cached_antigravity_connection["csrf"] = token_to_use
                     _cached_antigravity_connection["pid"] = cand_pid
+                    _cached_antigravity_connection["process_identity"] = cand_identity
                 snap = parse_antigravity_usage(
                     payload,
                     observed_at=observed_at,
@@ -780,13 +868,17 @@ def collect_antigravity(
 
     if used_cached_endpoint:
         _cached_antigravity_connection.clear()
-        discovered = _discover_antigravity_endpoints(command_runner)
-        fresh_candidates: list[tuple[str, str | None, int | None]] = []
+        discovered = _discover_antigravity_endpoints(
+            command_runner,
+            process_identity_resolver,
+        )
+        fresh_candidates: list[tuple[str, str | None, int | None, tuple | None]] = []
         for ep in discovered:
             cand_url = ep[0]
             cand_csrf = ep[1]
             cand_pid = ep[2] if len(ep) > 2 else None
-            fresh_candidates.append((cand_url, cand_csrf, cand_pid))
+            cand_identity = ep[3] if len(ep) > 3 else None
+            fresh_candidates.append((cand_url, cand_csrf, cand_pid, cand_identity))
         snapshot, last_error = _query_candidates(fresh_candidates)
         if snapshot is not None:
             return snapshot
@@ -1012,6 +1104,6 @@ __all__ = [
     "collect_cursor",
     "collect_devin",
     "collect_grok",
-    "collect_opencode",
     "collect_openai_api",
+    "collect_opencode",
 ]

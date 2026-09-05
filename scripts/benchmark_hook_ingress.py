@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure JR Bar hook admission and synchronous fallback on this source tree."""
+"""Measure JR-Bar hook admission and synchronous fallback on this source tree."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Pure, versioned authority for JR Bar visual effects.
+"""Pure, versioned authority for JR-Bar visual effects.
 
 This module deliberately contains no display, device, or AppKit code.  The
 registry is a small data model that presentation backends can compile.

@@ -34,6 +34,13 @@ else:
         ProviderPresentationSettings,
         project_presentation_settings,
     )
+    from .provider_reset_events import (
+        ResetDeliverySettings,
+        ResetDeliveryState,
+        begin_reset_delivery,
+        next_reset_retry_delay,
+        reset_event_is_terminal,
+    )
     from .provider_usage_controller_actions import (
         apply_provider_usage_settings_snapshot,
         perform_provider_usage_action,
@@ -41,10 +48,15 @@ else:
         toggle_provider_menu_visibility,
     )
     from .provider_usage_event_store import (
-        load_seen_reset_events,
-        save_seen_reset_events,
+        load_reset_delivery_state,
+        save_reset_delivery_state,
     )
-    from .provider_usage_menu import menu_bar_quota_glance, project_usage_menu
+    from .provider_usage_feedback_actions import (
+        alert_connection_loss,
+        alert_new_critical_pace,
+        celebrate_quota_resets,
+        report_reconnect_outcome,
+    )
     from .provider_usage_qol import (
         detect_reset_events,
         merged_edge_baseline,
@@ -69,6 +81,7 @@ else:
         select_page,
         show_category,
     )
+    from .settings_destination_refresh import refresh_settings_destination
     from .sparkle_updater import (
         BETA_CHANNEL,
         STABLE_CHANNEL,
@@ -89,7 +102,9 @@ else:
     from .usage_percent_history import record_state_observations
 
     _legacy = getattr(_host, "_legacy", _host)
-    _BaseStatusBarController = _host.JRStatusBarController
+    from .deck_status_bar import install_deck_status_bar
+
+    _BaseStatusBarController = install_deck_status_bar(_host.JRStatusBarController)
     _original_build_menu = _host.build_menu
 
 
@@ -102,6 +117,8 @@ def build_menu(snapshot, state, target):
     # Prefix match covers both the plain "Devices" title and the compact
     # facade's retitled "Devices · N connected" row.
     index = menu_index(menu, "Devices")
+    if index < 0:
+        index = menu_index(menu, "Hardware")
     if index < 0:
         index = min(4, menu.numberOfItems())
     menu.insertItem_atIndex_(native_item, index)
@@ -127,15 +144,12 @@ def _settings_category_at_row(row: int):
 
 
 _existing_controller = globals().get("JRProviderUsageStatusBarController")
-if (
-    isinstance(_existing_controller, type)
-    and _existing_controller.__name__ == "JRProviderUsageStatusBarController"
-):
+if isinstance(_existing_controller, type) and _existing_controller.__name__ == "JRProviderUsageStatusBarController":
     JRProviderUsageStatusBarController = _existing_controller
 else:
 
     class JRProviderUsageStatusBarController(_BaseStatusBarController):
-        """Native usage accounting, consolidated Settings, and finite reset cues."""
+        """Native provider usage controller."""
 
         @property
         def provider_usage_state(self) -> ProviderUsageState:
@@ -184,6 +198,9 @@ else:
                 show_category(self, category.key, previous)
             self.refresh_settings_window()
 
+        def _refresh_settings_destination(self, page_key: str) -> None:
+            refresh_settings_destination(self, page_key)
+
         def tableViewSelectionDidChange_(self, notification):
             table = notification.object()
             category = _settings_category_at_row(int(table.selectedRow()))
@@ -193,14 +210,8 @@ else:
             self._settings_active_category = category.key
             show_category(self, category.key, requested)
             if self.settings_window is not None:
-                self.settings_window.setTitle_(
-                    f"{PRODUCT_DISPLAY_NAME} Settings: {category.label}"
-                )
-            self.reconcile_device_runtime()
-            self.reconcile_installed_agent_inventory()
-            if self.current_settings_pane == "color_studio":
-                self.refresh_colors_window()
-            self.refresh_settings_window()
+                self.settings_window.setTitle_(f"{PRODUCT_DISPLAY_NAME} Settings: {category.label}")
+            self._refresh_settings_destination(self.current_settings_pane)
 
         @_legacy.objc.IBAction
         def selectSettingsCategoryPage_(self, sender) -> None:
@@ -212,14 +223,8 @@ else:
             show_category(self, category.key, page.key)
             self._settings_active_category = category.key
             if self.settings_window is not None:
-                self.settings_window.setTitle_(
-                    f"{PRODUCT_DISPLAY_NAME} Settings: {category.label}"
-                )
-            self.reconcile_device_runtime()
-            self.reconcile_installed_agent_inventory()
-            if page.key == "color_studio":
-                self.refresh_colors_window()
-            self.refresh_settings_window()
+                self.settings_window.setTitle_(f"{PRODUCT_DISPLAY_NAME} Settings: {category.label}")
+            self._refresh_settings_destination(page.key)
 
         def select_settings_pane(self, pane_key: str) -> None:
             try:
@@ -241,10 +246,8 @@ else:
                 show_category(self, category.key, requested)
                 self._settings_active_category = category.key
                 if self.settings_window is not None:
-                    self.settings_window.setTitle_(
-                        f"{PRODUCT_DISPLAY_NAME} Settings: {category.label}"
-                    )
-                self.refresh_settings_window()
+                    self.settings_window.setTitle_(f"{PRODUCT_DISPLAY_NAME} Settings: {category.label}")
+                self._refresh_settings_destination(requested)
 
         def show_settings_window(self) -> None:
             desired = getattr(self, "current_settings_pane", None) or "profile"
@@ -253,12 +256,18 @@ else:
             except KeyError:
                 category = _settings_navigation.SETTINGS_CATEGORIES[0]
                 desired = category.default_page
-            requested_page = (
-                desired if category.contains(desired) else category.default_page
-            )
+            requested_page = desired if category.contains(desired) else category.default_page
             self._pending_settings_page = requested_page
             self.current_settings_pane = category.key
-            _BaseStatusBarController.show_settings_window(self)
+            self._settings_window_closing = False
+            if self.settings_window is None:
+                self.settings_window = _legacy.build_settings_window(self)
+                if self.settings_sidebar_table is not None:
+                    row = _settings_navigation.SETTINGS_CATEGORIES.index(category)
+                    self.settings_sidebar_table.selectRowIndexes_byExtendingSelection_(
+                        _legacy.NSIndexSet.indexSetWithIndex_(row),
+                        False,
+                    )
             # The table-selection callback consumes `_pending_settings_page`.
             # Keep the local value so opening Settings directly to Screen Bar,
             # Capacity, or another child cannot snap back to the category's
@@ -266,6 +275,65 @@ else:
             show_category(self, category.key, requested_page)
             self._pending_settings_page = None
             self._settings_active_category = category.key
+            self._refresh_settings_destination(requested_page)
+            _legacy.present_window(self.settings_window)
+            _legacy.activate_app()
+
+        def refresh_setup_window(self) -> None:
+            from .onboarding_runtime import refresh_setup_window
+
+            refresh_setup_window(self, _legacy)
+
+        def _open_setup_destination(self, page_key: str) -> None:
+            if self.setup_window is not None:
+                self.setup_window.performClose_(None)
+            self.select_settings_pane(page_key)
+            self.show_settings_window()
+
+        @_legacy.objc.IBAction
+        def openSetupPhysicalDevices_(self, _sender) -> None:
+            self._open_setup_destination("devices")
+
+        @_legacy.objc.IBAction
+        def openSetupT3_(self, _sender) -> None:
+            self._open_setup_destination("installed_agents")
+
+        @_legacy.objc.IBAction
+        def openSetupAlcove_(self, _sender) -> None:
+            self._open_setup_destination("colors_screen_bar")
+
+        @_legacy.objc.IBAction
+        def openSetupAgentDeck_(self, _sender) -> None:
+            self._open_setup_destination("installed_agents")
+
+        def run_first_launch_setup(self) -> None:
+            from .onboarding_runtime import run_first_launch_setup
+
+            run_first_launch_setup(self, _legacy)
+
+        @_legacy.objc.IBAction
+        def toggleSleepDim_(self, sender) -> None:
+            from .onboarding_runtime import set_sleep_dim
+
+            set_sleep_dim(self, sender, _legacy)
+
+        @_legacy.objc.IBAction
+        def toggleIdleAutoOff_(self, sender) -> None:
+            from .onboarding_runtime import set_idle_auto_off
+
+            set_idle_auto_off(self, sender, _legacy)
+
+        @_legacy.objc.IBAction
+        def applySleepDimPercentage_(self, sender) -> None:
+            from .onboarding_runtime import set_sleep_dim_percentage
+
+            set_sleep_dim_percentage(self, sender, _legacy)
+
+        @_legacy.objc.IBAction
+        def applyIdleAutoOffTimeout_(self, sender) -> None:
+            from .onboarding_runtime import set_idle_auto_off_timeout
+
+            set_idle_auto_off_timeout(self, sender, _legacy)
 
         # --- Native provider usage --------------------------------------
 
@@ -343,13 +411,9 @@ else:
 
         @_legacy.objc.IBAction
         def applyUsageEventHook_(self, sender) -> None:
-            self.settings = self.settings.with_usage_event_hook_path(
-                str(sender.stringValue() or "")
-            )
+            self.settings = self.settings.with_usage_event_hook_path(str(sender.stringValue() or ""))
             _legacy.save_settings(self.settings)
-            self.set_settings_message(
-                hook_path_message(self.settings.usage_event_hook_path)
-            )
+            self.set_settings_message(hook_path_message(self.settings.usage_event_hook_path))
 
         @_legacy.objc.IBAction
         def applyProviderUsageState_(self, payload) -> None:
@@ -378,54 +442,50 @@ else:
             # Last COMPARABLE reading per provider -- a degraded
             # (vendor-incident) publish must not wipe the pre-reset
             # baseline the detectors compare against.
-            self._sidepulse_provider_usage_edge_baseline = (
-                merged_edge_baseline(previous_state, state)
-            )
+            self._sidepulse_provider_usage_edge_baseline = merged_edge_baseline(previous_state, state)
             self._sidepulse_provider_usage_state = state
             # Percent history: every provider's "how much is left", so the
             # settings chart can show ALL of them.
-            if record_state_observations(
+            if (
+                record_state_observations(
                 self,
                 state.snapshots,
                 writer=self._persistence_writer,
-            ) is False:
+                )
+                is False
+            ):
                 self._provider_usage_log("usage percent history write not queued")
-            seen = set(getattr(self, "_sidepulse_seen_reset_events", ()))
+            delivery_state = getattr(self, "_sidepulse_reset_delivery_state", ResetDeliveryState())
+            seen = {
+                event.event_id
+                for event in delivery_state.events
+                if reset_event_is_terminal(delivery_state, event.event_id)
+            }
             reset_events = detect_reset_events(
                 previous_state.snapshots,
                 state.snapshots,
                 seen_event_ids=frozenset(seen),
             )
-            enabled_resets = {
-                preference.identity
-                for preference in settings.providers
-                if preference.reset_celebrations
-            }
-            reset_events = tuple(
-                event
-                for event in reset_events
-                if (event.provider_id, event.source_instance_id) in enabled_resets
-            )
+            reset_preferences = {preference.identity: preference for preference in settings.providers}
             if reset_events:
-                seen.update(event.event_id for event in reset_events)
-                self._sidepulse_seen_reset_events = tuple(sorted(seen))[-512:]
-                persisted = self._sidepulse_seen_reset_events
-                disposition = self._persistence_writer.submit(
-                    "provider-reset-events",
-                    lambda: save_seen_reset_events(persisted),
-                    replace_pending=True,
+                for event in reset_events:
+                    preference = reset_preferences.get((event.provider_id, event.source_instance_id))
+                    enabled = bool(preference is not None and preference.reset_celebrations)
+                    delivery_state = begin_reset_delivery(
+                        delivery_state,
+                        event,
+                        ResetDeliverySettings(
+                            overlay=enabled and preference.reset_overlay,
+                            hardware=enabled and preference.reset_hardware,
+                            notification=enabled and preference.reset_notification,
+                            sound=enabled and preference.reset_sound,
+                        ),
+                        now=time.time(),
                 )
-                if disposition.value.startswith("refused"):
-                    self._provider_usage_log("reset event state write not queued")
-                self.quota_blink_until = max(
-                    float(getattr(self, "quota_blink_until", 0.0) or 0.0),
-                    time.monotonic() + 4.0,
-                )
-                self._celebrate_quota_resets(reset_events)
-            thresholds = {
-                preference.identity: preference.threshold_remaining
-                for preference in settings.providers
-            }
+                self._sidepulse_reset_delivery_state = delivery_state
+                self._persist_reset_delivery_state()
+            self._deliver_pending_reset_events()
+            thresholds = {preference.identity: preference.threshold_remaining for preference in settings.providers}
             self._sidepulse_provider_threshold_crossings = threshold_crossings(
                 previous_state.snapshots,
                 state.snapshots,
@@ -433,9 +493,7 @@ else:
             )
             # Edge-triggered user hooks: transitions only, never states,
             # so a chime/webhook script needs no rate limiting of its own.
-            hook_path = str(
-                getattr(self.settings, "usage_event_hook_path", "") or ""
-            )
+            hook_path = str(getattr(self.settings, "usage_event_hook_path", "") or "")
             if hook_path:
                 run_usage_hooks(
                     hook_path,
@@ -463,14 +521,10 @@ else:
             # no-implicit-provider-work law is untouched.
             try:
                 self.refresh_capacity_settings_projection()
-                plan_label = (getattr(self, "settings_fields", None) or {}).get(
-                    "profile_plan_label"
-                )
+                plan_label = (getattr(self, "settings_fields", None) or {}).get("profile_plan_label")
                 if plan_label is not None:
                     plan_label.setStringValue_(
-                        self.jr_capacity_settings_text("claude")
-                        or getattr(self, "claude_plan_text", None)
-                        or ""
+                        self.jr_capacity_settings_text("claude") or getattr(self, "claude_plan_text", None) or ""
                     )
             except Exception as exc:
                 self._provider_usage_log(f"usage projection refresh failed: {exc}")
@@ -517,6 +571,12 @@ else:
                 sender.setState_(0 if bool(sender.state()) else 1)
 
         @_legacy.objc.IBAction
+        def toggleProviderResetSetting_(self, sender) -> None:
+            from .provider_reset_settings_action import toggle_provider_reset_setting
+
+            toggle_provider_reset_setting(self, sender, log=_legacy.log_status_bar)
+
+        @_legacy.objc.IBAction
         def updateProviderInstanceProfile_(self, sender) -> None:
             save_provider_instance_profile_setting(
                 self,
@@ -537,18 +597,10 @@ else:
                 )
                 if type(durable) is ProviderUsageSettings:
                     settings = project_presentation_settings(durable)
-            return (
-                settings
-                if type(settings) is ProviderPresentationSettings
-                else None
-            )
+            return settings if type(settings) is ProviderPresentationSettings else None
 
-        def set_status(
-            self, state, *, ask_count: int = 0, done_badge: bool = False
-        ) -> None:
-            _BaseStatusBarController.set_status(
-                self, state, ask_count=ask_count, done_badge=done_badge
-            )
+        def set_status(self, state, *, ask_count: int = 0, done_badge: bool = False) -> None:
+            _BaseStatusBarController.set_status(self, state, ask_count=ask_count, done_badge=done_badge)
             self._append_quota_guarded()
 
         def _apply_status_accessibility_text(self, glance, finite_cues) -> None:
@@ -557,14 +609,10 @@ else:
             # which wiped the quota percent for seconds at a time exactly
             # while cues were animating. Re-append after every rewrite
             # (the substring dedup makes it idempotent).
-            _BaseStatusBarController._apply_status_accessibility_text(
-                self, glance, finite_cues
-            )
+            _BaseStatusBarController._apply_status_accessibility_text(self, glance, finite_cues)
             self._append_quota_guarded()
 
-        def _append_quota_guarded(
-            self, *, wall_clock: Callable[[], float] = time.time
-        ) -> None:
+        def _append_quota_guarded(self, *, wall_clock: Callable[[], float] = time.time) -> None:
             try:
                 self._append_quota_to_status_title(wall_clock=wall_clock)
             except Exception as exc:
@@ -582,46 +630,9 @@ else:
             """The base's 0.0 answered with the real reading: how far
             the tightest visible lane has sunk below its provider's
             threshold, 0 at-threshold to 1 fully out."""
-            try:
-                from .provider_usage_platform import (
-                    ProviderSourceState,
-                    most_constrained_lane,
-                )
+            from .provider_usage_status_projection import screen_bar_quota_ember_level
 
-                settings = self._usage_menu_settings()
-                if settings is None:
-                    return 0.0
-                hidden = settings.hidden_menu_providers()
-                hidden_instances = settings.hidden_menu_instances()
-                thresholds = {
-                    preference.identity: preference.threshold_remaining
-                    for preference in settings.providers
-                }
-                worst = 0.0
-                for snapshot in self.provider_usage_state.snapshots:
-                    if (
-                        snapshot.provider_id in hidden
-                        or snapshot.identity in hidden_instances
-                    ):
-                        continue
-                    if snapshot.state not in {
-                        ProviderSourceState.READY,
-                        ProviderSourceState.STALE,
-                    }:
-                        continue
-                    lane = most_constrained_lane(snapshot)
-                    if lane is None or lane.remaining_percent is None:
-                        continue
-                    threshold = thresholds.get(snapshot.identity, 20.0)
-                    if threshold <= 0.0:
-                        continue
-                    if lane.remaining_percent <= threshold:
-                        worst = max(
-                            worst, 1.0 - lane.remaining_percent / threshold
-                        )
-                return max(0.0, min(1.0, worst))
-            except Exception:
-                return 0.0
+            return screen_bar_quota_ember_level(self)
 
         def quota_runway_state(self):
             """The base withholds this LED (it collects no usage). The JR
@@ -632,17 +643,7 @@ else:
             return quota_runway_state_for_controller(self)
 
         def _alert_new_critical_pace(self, previous_state, state) -> None:
-            from .provider_usage_feedback import alert_new_critical_pace
-
-            alert_new_critical_pace(
-                self,
-                previous_state,
-                state,
-                log=_legacy.log_status_bar,
-                signal_kind=getattr(
-                    _legacy.signals_module, "SIGNAL_QUOTA", None
-                ),
-            )
+            alert_new_critical_pace(self, previous_state, state, legacy=_legacy)
 
         def request_jr_usage_refresh(
             self,
@@ -664,41 +665,9 @@ else:
             *,
             wall_clock: Callable[[], float] = time.time,
         ):
-            state = getattr(self, "_sidepulse_provider_usage_state", None)
-            snapshot = next(
-                (
-                    row
-                    for row in getattr(state, "snapshots", ())
-                    if row.provider_id == provider_id
-                ),
-                None,
-            )
-            if snapshot is None or not snapshot.lanes:
-                return None
-            from .provider_usage_qol import format_reset_countdown
+            from .provider_usage_status_projection import capacity_settings_text
 
-            now = float(wall_clock())
-            # None-safe: lanes without a readable percent are legal and
-            # real (grok's credits lane; claude windows missing a percent
-            # key) -- an f-string TypeError here killed the whole
-            # settings-refresh pass (2026-08-27 audit).
-            parts = []
-            for lane in snapshot.lanes[:3]:
-                if lane.remaining_percent is None:
-                    part = lane.label
-                else:
-                    part = f"{lane.label} {lane.remaining_percent:.0f}% left"
-                if lane.reset_at:
-                    part += f" · {format_reset_countdown(lane.reset_at, now=now)}"
-                parts.append(part)
-            if not parts:
-                return None
-            age_minutes = max(0, int((now - snapshot.observed_at) // 60))
-            checked = "just checked" if age_minutes < 1 else f"checked {age_minutes}m ago"
-            state_note = (
-                "" if snapshot.state.value == "ready" else f" · {snapshot.state.value}"
-            )
-            return " · ".join(parts) + f" · {checked}{state_note}"
+            return capacity_settings_text(self, provider_id, wall_clock=wall_clock)
 
         def jr_plane_owns_usage_menu_item(self) -> bool:
             return True
@@ -708,110 +677,70 @@ else:
             return provider_id == "claude"
 
         def _report_reconnect_outcome(self, state) -> None:
-            from .provider_usage_feedback import report_reconnect_outcome
-
-            report_reconnect_outcome(self, state, log=_legacy.log_status_bar)
+            report_reconnect_outcome(self, state, legacy=_legacy)
 
         def _celebrate_quota_resets(self, events) -> None:
-            from .provider_usage_feedback import celebrate_quota_resets
+            celebrate_quota_resets(self, events, legacy=_legacy)
 
-            celebrate_quota_resets(
-                self,
-                events,
-                log=_legacy.log_status_bar,
-                signal_kind=getattr(
-                    _legacy.signals_module, "SIGNAL_QUOTA", None
-                ),
+        def _persist_reset_delivery_state(self) -> None:
+            state = getattr(self, "_sidepulse_reset_delivery_state", ResetDeliveryState())
+            disposition = self._persistence_writer.submit(
+                "provider-reset-events",
+                lambda: save_reset_delivery_state(state),
+                replace_pending=True,
             )
+            if disposition.value.startswith("refused"):
+                self._provider_usage_log("reset delivery state write not queued")
+
+        def _deliver_pending_reset_events(self) -> None:
+            from .provider_reset_settings_action import deliver_pending_reset_events
+
+            deliver_pending_reset_events(self, legacy=_legacy)
+
+        def _schedule_reset_delivery_retry(self, now: float) -> None:
+            state = getattr(self, "_sidepulse_reset_delivery_state", ResetDeliveryState())
+            delay = next_reset_retry_delay(state, now=now)
+            timer = getattr(self, "_sidepulse_reset_delivery_timer", None)
+            if delay is None:
+                if timer is not None:
+                    timer.invalidate()
+                self._sidepulse_reset_delivery_timer = None
+                return
+            if timer is not None:
+                return
+            self._sidepulse_reset_delivery_timer = self._schedule_capacity_timer(
+                max(0.05, delay),
+                "retryPendingResetDeliveries:",
+            )
+
+        @_legacy.objc.IBAction
+        def retryPendingResetDeliveries_(self, timer) -> None:
+            if timer is not getattr(self, "_sidepulse_reset_delivery_timer", None):
+                return
+            self._sidepulse_reset_delivery_timer = None
+            self._deliver_pending_reset_events()
 
         def _alert_connection_loss(self, previous_state, state) -> None:
-            from .provider_usage_feedback import alert_connection_loss
-
-            alert_connection_loss(
-                self,
-                previous_state,
-                state,
-                log=_legacy.log_status_bar,
-                signal_kind=getattr(
-                    _legacy.signals_module, "SIGNAL_NOTIFICATION", None
-                ),
-            )
+            alert_connection_loss(self, previous_state, state, legacy=_legacy)
 
         def _active_usage_providers(self) -> frozenset[str]:
             """Providers with a MAIN session actually working right now --
             they own the menu-bar glance while they run."""
-            snapshot = getattr(self, "last_snapshot", None)
-            if snapshot is None:
-                return frozenset()
-            busy = {
-                _legacy.AgentMode.WORKING,
-                _legacy.AgentMode.TOOL_RUNNING,
-                _legacy.AgentMode.LONG_TASK_PROGRESS,
-            }
-            return frozenset(
-                status.provider
-                for status in snapshot.statuses
-                if not status.is_subagent and status.mode in busy
-            )
+            from .provider_usage_status_projection import active_usage_providers
 
-        def _append_quota_to_status_title(
-            self, *, wall_clock: Callable[[], float] = time.time
-        ) -> None:
-            settings = self._usage_menu_settings()
-            if settings is None or not settings.menu_display.show_menu_bar_percent:
-                return
-            item = getattr(self, "status_item", None)
-            button = item.button() if item is not None else None
-            if button is None:
-                return
-            glance = menu_bar_quota_glance(
-                self.provider_usage_state,
-                hidden_providers=settings.hidden_menu_providers(),
-                hidden_instances=settings.hidden_menu_instances(),
-                active_providers=self._active_usage_providers(),
-                now=float(wall_clock()),
-            )
-            if glance is None:
-                return
-            title = str(button.title() or "")
-            if glance.text in title:
-                return
-            prefix = f"{title} · " if title.strip() else " "
-            full = f"{prefix}{glance.text}"
-            button.setTitle_(full)
-            # At-a-glance pace: the percent turns amber when this lane is
-            # being spent too fast and red when it will run dry before
-            # (or already ran out at) its reset. Colorless means fine.
-            color_name = {
-                "fast": "systemOrangeColor",
-                "critical": "systemRedColor",
-                "out": "systemRedColor",
-            }.get(glance.verdict or "")
-            if color_name is None:
-                return
-            try:
-                from AppKit import (
-                    NSColor,
-                    NSFontAttributeName,
-                    NSForegroundColorAttributeName,
-                    NSMutableAttributedString,
-                )
+            return active_usage_providers(self, _legacy)
 
-                styled = NSMutableAttributedString.alloc().initWithString_attributes_(
-                    full,
-                    {
-                        NSForegroundColorAttributeName: NSColor.labelColor(),
-                        NSFontAttributeName: button.font(),
-                    },
-                )
-                styled.addAttribute_value_range_(
-                    NSForegroundColorAttributeName,
-                    getattr(NSColor, color_name)(),
-                    (len(prefix), len(glance.text)),
-                )
-                button.setAttributedTitle_(styled)
-            except Exception:
-                pass
+        def _active_usage_instances(self) -> frozenset[tuple[str, str]]:
+            """Exact active account identities when session provenance matches."""
+
+            from .provider_usage_status_projection import active_usage_instances
+
+            return active_usage_instances(self, _legacy)
+
+        def _append_quota_to_status_title(self, *, wall_clock: Callable[[], float] = time.time) -> None:
+            from .provider_usage_status_projection import append_quota_to_status_title
+
+            append_quota_to_status_title(self, wall_clock=wall_clock)
 
         def open_session(self, status, action: str | None, *, remember: bool) -> None:
             _BaseStatusBarController.open_session(
@@ -825,10 +754,13 @@ else:
         def openProviderUsageCenter_(self, _sender) -> None:
             from .provider_usage_window import ProviderUsageWindowController
 
+            settings = self._usage_menu_settings()
             controller = getattr(self, "_sidepulse_provider_usage_window", None)
             if controller is None:
                 controller = ProviderUsageWindowController(action_target=self)
                 self._sidepulse_provider_usage_window = controller
+            if settings is not None:
+                controller.set_privacy_mode(settings.menu_display.privacy_mode)
             controller.show(self.provider_usage_state)
 
         @_legacy.objc.IBAction
@@ -869,33 +801,48 @@ else:
             self._select_update_channel(BETA_CHANNEL)
 
         def applicationDidFinishLaunching_(self, notification):
-            if (
-                getattr(self, "_runtime_started", False)
-                or getattr(self, "_runtime_termination_started", False)
-            ):
+            if getattr(self, "_runtime_started", False) or getattr(self, "_runtime_termination_started", False):
                 return None
             self._sidepulse_sparkle_updater = start_sparkle_updater()
             result = _BaseStatusBarController.applicationDidFinishLaunching_(
                 self,
                 notification,
             )
-            self._sidepulse_seen_reset_events = load_seen_reset_events()
+            from .optional_integration_runtime import (
+                start_optional_integration_runtime,
+            )
+
+            self._sidepulse_optional_integration_runtime = start_optional_integration_runtime(self)
+            self._sidepulse_reset_delivery_state = load_reset_delivery_state()
+            self._deliver_pending_reset_events()
             # Seed the edge baseline from the persisted store: a reset
             # that passes while the app is down (or restarting) is still
             # an edge against the last persisted reading. An empty
             # launch baseline made the first publish blind.
             from .provider_usage_store import load_provider_usage_state
 
-            self._sidepulse_provider_usage_edge_baseline = (
-                load_provider_usage_state()
-            )
+            self._sidepulse_provider_usage_edge_baseline = load_provider_usage_state()
             self._request_provider_usage(force=True)
             return result
 
         @_legacy.objc.IBAction
         def refresh_(self, sender):
+            self._deliver_pending_reset_events()
             self._request_provider_usage(force=False)
-            return _BaseStatusBarController.refresh_(self, sender)
+            result = _BaseStatusBarController.refresh_(self, sender)
+            runtime = getattr(self, "_sidepulse_optional_integration_runtime", None)
+            snapshot = getattr(self, "last_snapshot", None)
+            if runtime is not None and snapshot is not None:
+                signal = (
+                    "quota_exhausted"
+                    if self.screen_bar_quota_ember_level() >= 1.0
+                    else None
+                )
+                runtime.publish_creator_output(
+                    self.display_aggregate_mode(snapshot),
+                    signal=signal,
+                )
+            return result
 
         def why_panel_body(
             self,
@@ -907,28 +854,35 @@ else:
                 self,
                 why_context=why_context,
             )
-            lines = ["Native provider usage"]
-            projection = project_usage_menu(
-                self.provider_usage_state,
-                now=float(wall_clock()),
+            from .provider_usage_status_projection import provider_usage_why_panel_body
+
+            return provider_usage_why_panel_body(
+                self,
+                body,
+                wall_clock=wall_clock,
             )
-            lines.append(projection.title)
-            for row in projection.rows:
-                lines.append(f"  {row.title}")
-                if row.action_label:
-                    lines.append(f"    Action: {row.action_label}")
-            return f"{body}\n\n" + "\n".join(lines)
 
         def applicationWillTerminate_(self, notification):
             if getattr(self, "_runtime_termination_started", False):
                 return None
+            from .deck_controller import stop_deck_runtime_reconfiguration
+
+            stop_deck_runtime_reconfiguration(self)
             service = getattr(self, "_sidepulse_provider_usage_service", None)
             if service is not None:
                 service.close()
+            optional_runtime = getattr(
+                self,
+                "_sidepulse_optional_integration_runtime",
+                None,
+            )
+            if optional_runtime is not None:
+                optional_runtime.close()
             return _BaseStatusBarController.applicationWillTerminate_(
                 self,
                 notification,
             )
+
 
 def install_provider_usage_status_bar():
     """Install the final provider controller and root-menu wrapper once."""

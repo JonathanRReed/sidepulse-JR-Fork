@@ -156,7 +156,7 @@ def credential_needs_sign_in(raw: object) -> bool:
     valid `refreshToken` present. Claude Code mints access tokens on demand
     rather than caching them.
 
-    JR Bar treats this as an action for Claude Code itself. It never
+    JR-Bar treats this as an action for Claude Code itself. It never
     consumes the refresh token or changes Claude Code's Keychain item.
     This predicate only answers "is the stored access token usable as-is".
     """

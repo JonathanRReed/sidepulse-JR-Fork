@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate and validate JR Bar's signed Sparkle appcast and channel metadata."""
+"""Generate and validate JR-Bar's signed Sparkle appcast and channel metadata."""
 
 from __future__ import annotations
 
@@ -342,7 +342,7 @@ def _validate_keychain_public_key(
             f"generate_keys public-key lookup failed with exit code {result.returncode}"
         )
     if result.stdout.strip() != EXPECTED_PUBLIC_KEY:
-        raise SparkleChannelError("Keychain account does not contain JR Bar's pinned Sparkle key")
+        raise SparkleChannelError("Keychain account does not contain JR-Bar's pinned Sparkle key")
 
 
 def _copy_verified(source: Path, destination: Path, *, label: str) -> None:

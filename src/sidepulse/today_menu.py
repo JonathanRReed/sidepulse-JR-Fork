@@ -135,6 +135,8 @@ class TodayFeed:
             latitude = getattr(settings, "weather_latitude", None)
             longitude = getattr(settings, "weather_longitude", None)
             if latitude is None or longitude is None:
+                if not getattr(settings, "weather_ip_geolocation_enabled", False):
+                    return ("Set a weather location in Settings",)
                 latitude, longitude = weather_watch.ip_location()
             alerts = weather_watch.active_alerts(latitude, longitude)
         except Exception:

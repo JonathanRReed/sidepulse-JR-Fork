@@ -61,6 +61,30 @@ PURE_PRODUCTION_MODULES = {
     "webhook_delivery.py",
 }
 
+
+def test_usage_heatmap_appkit_host_cannot_acquire_usage_data() -> None:
+    source = (SRC / "usage_heatmap_view.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported_modules = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    } | {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+
+    assert not imported_modules & {
+        "sqlite3",
+        "subprocess",
+        "urllib",
+        "urllib.request",
+        "sidepulse.usage_stats",
+        "usage_stats",
+    }
+
 # The audited retained controller surface was captured on 2026-08-29 from the
 # current 591-method class body. This snapshot is the contract anchor for a
 # shrink-only ratchet: removal is allowed, new retained business behavior is not.
