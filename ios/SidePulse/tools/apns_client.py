@@ -35,7 +35,7 @@ class APNsConfig:
     environment: str = "sandbox"
 
     @classmethod
-    def from_env(cls) -> "APNsConfig":
+    def from_env(cls) -> APNsConfig:
         missing = [
             name
             for name in ("APNS_TEAM_ID", "APNS_KEY_ID", "APNS_AUTH_KEY", "APNS_BUNDLE_ID")
@@ -120,7 +120,7 @@ class APNsClient:
             limits=httpx.Limits(max_connections=1000, max_keepalive_connections=250),
         )
 
-    async def __aenter__(self) -> "APNsClient":
+    async def __aenter__(self) -> APNsClient:
         return self
 
     async def __aexit__(self, *_: object) -> None:

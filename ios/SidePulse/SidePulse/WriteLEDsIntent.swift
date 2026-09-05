@@ -3,7 +3,8 @@ import Foundation
 
 @available(iOS 16.0, *)
 struct WriteLEDsIntent: AppIntent {
-    static var title: LocalizedStringResource = "Write \(ProductIdentity.displayName) LEDS.LED"
+    // App Intents requires a build-time literal for extracted title metadata.
+    static var title: LocalizedStringResource = "Write JR-Bar LEDS.LED"
     static var description = IntentDescription("Writes the supplied LED program to LEDS.LED on the selected USB drive.")
     static var openAppWhenRun = false
 

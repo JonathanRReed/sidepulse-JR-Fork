@@ -2,7 +2,7 @@ import Foundation
 import UIKit
 
 enum ProductIdentity {
-    static let displayName = "JR Bar"
+    static let displayName = "JR-Bar"
 }
 
 enum PhoneGlanceLoadState: Equatable {
@@ -16,7 +16,7 @@ enum PhoneGlanceLoadState: Equatable {
     var statusMessage: String {
         switch self {
         case .unconfigured:
-            return "Computer glance is not configured"
+            return "Computer glance needs setup"
         case .idle:
             return "Computer glance is ready to check"
         case .loading:
@@ -78,11 +78,12 @@ final class AppModel: ObservableObject {
     }
 
     private let phoneGlanceStateStore: PhoneGlanceStateStore
-    private let readPhoneGlanceSecret: () -> PhoneGlanceSecretReadResult
-    private let writePhoneGlanceSecret: (String) -> Bool
+    private let readPhoneGlanceCredentials: () -> PhoneGlanceCredentialsReadResult
+    private let writePhoneGlanceCredentials: (ProtectedPhoneGlanceCredentials) -> Bool
     private let fetchPhoneGlance: (
         PhoneGlanceEndpoint,
         Data,
+        String,
         Int64?
     ) async throws -> VerifiedPhoneGlance
     private var lastVerifiedPhoneGlance: VerifiedPhoneGlance?
@@ -90,27 +91,29 @@ final class AppModel: ObservableObject {
 
     init(
         phoneGlanceStateStore: PhoneGlanceStateStore = PhoneGlanceStateStore(),
-        readPhoneGlanceSecret: @escaping () -> PhoneGlanceSecretReadResult = {
-            KeychainStore.shared.readString(for: .phoneGlanceSecret)
+        readPhoneGlanceCredentials: @escaping () -> PhoneGlanceCredentialsReadResult = {
+            KeychainStore.shared.readPhoneGlanceCredentials()
         },
-        writePhoneGlanceSecret: @escaping (String) -> Bool = {
-            KeychainStore.shared.set($0, for: .phoneGlanceSecret)
+        writePhoneGlanceCredentials: @escaping (ProtectedPhoneGlanceCredentials) -> Bool = {
+            KeychainStore.shared.setPhoneGlanceCredentials($0)
         },
         fetchPhoneGlance: @escaping (
             PhoneGlanceEndpoint,
             Data,
+            String,
             Int64?
-        ) async throws -> VerifiedPhoneGlance = { endpoint, secret, lastSequence in
+        ) async throws -> VerifiedPhoneGlance = { endpoint, secret, accessToken, lastSequence in
             try await PhoneGlanceClient.fetch(
                 endpoint: endpoint,
                 secret: secret,
+                accessToken: accessToken,
                 lastSequence: lastSequence
             )
         }
     ) {
         self.phoneGlanceStateStore = phoneGlanceStateStore
-        self.readPhoneGlanceSecret = readPhoneGlanceSecret
-        self.writePhoneGlanceSecret = writePhoneGlanceSecret
+        self.readPhoneGlanceCredentials = readPhoneGlanceCredentials
+        self.writePhoneGlanceCredentials = writePhoneGlanceCredentials
         self.fetchPhoneGlance = fetchPhoneGlance
         let keychain = KeychainStore.shared
         keychain.migrateLegacySecrets()
@@ -126,13 +129,13 @@ final class AppModel: ObservableObject {
         if let endpoint = phoneGlanceStateStore.loadEndpoint() {
             self.phoneGlanceHost = endpoint.host
             self.phoneGlancePort = String(endpoint.port)
-            switch readPhoneGlanceSecret() {
-            case .value(let secret) where !secret.isEmpty:
+            switch readPhoneGlanceCredentials() {
+            case .value:
                 self.phoneGlanceLoadState = .idle
-            case .missing, .value:
-                self.phoneGlanceLoadState = .unconfigured
             case .unavailable:
                 self.phoneGlanceLoadState = .unavailable
+            case .missing:
+                self.phoneGlanceLoadState = .unconfigured
             }
         } else {
             self.phoneGlanceHost = ""
@@ -150,17 +153,21 @@ final class AppModel: ObservableObject {
     func savePhoneGlanceConfiguration(
         host: String,
         port: String,
-        secret: String
+        secret: String,
+        accessToken: String
     ) -> PhoneGlanceConfigurationSaveResult {
         let trimmedPort = port.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let parsedPort = Int(trimmedPort),
               let endpoint = try? PhoneGlanceEndpoint(host: host, port: parsedPort),
-              !secret.isEmpty else {
+              let credentials = try? ProtectedPhoneGlanceCredentials(
+                secret: secret,
+                accessToken: accessToken
+              ) else {
             phoneGlanceLoadState = lastVerifiedPhoneGlance.map(PhoneGlanceLoadState.stale) ?? .unconfigured
             return .validationFailure
         }
 
-        guard writePhoneGlanceSecret(secret) else {
+        guard writePhoneGlanceCredentials(credentials) else {
             phoneGlanceLoadState = lastVerifiedPhoneGlance.map(PhoneGlanceLoadState.stale) ?? .unavailable
             return .keychainStorageFailure
         }
@@ -179,11 +186,11 @@ final class AppModel: ObservableObject {
             phoneGlanceLoadState = lastVerifiedPhoneGlance.map(PhoneGlanceLoadState.stale) ?? .unconfigured
             return
         }
-        let secret: String
-        switch readPhoneGlanceSecret() {
-        case .value(let storedSecret) where !storedSecret.isEmpty:
-            secret = storedSecret
-        case .missing, .value:
+        let credentials: ProtectedPhoneGlanceCredentials
+        switch readPhoneGlanceCredentials() {
+        case .value(let storedCredentials):
+            credentials = storedCredentials
+        case .missing:
             phoneGlanceLoadState = lastVerifiedPhoneGlance.map(PhoneGlanceLoadState.stale) ?? .unconfigured
             return
         case .unavailable:
@@ -196,7 +203,12 @@ final class AppModel: ObservableObject {
         defer { isRefreshingPhoneGlance = false }
 
         do {
-            let verified = try await fetchPhoneGlance(endpoint, Data(secret.utf8), nil)
+            let verified = try await fetchPhoneGlance(
+                endpoint,
+                Data(credentials.secret.utf8),
+                credentials.accessToken,
+                nil
+            )
             guard verified.sequence > (phoneGlanceStateStore.lastAcceptedSequence(for: verified.sourceID) ?? 0) else {
                 throw PhoneGlanceError.invalidResponse
             }

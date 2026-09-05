@@ -616,6 +616,7 @@ private struct SettingsView: View {
     @State private var phoneGlanceHostDraft = ""
     @State private var phoneGlancePortDraft = ""
     @State private var phoneGlanceSecretDraft = ""
+    @State private var phoneGlanceAccessTokenDraft = ""
     @State private var phoneGlanceConfigurationMessage: String?
     let requestPushToken: () -> Void
     let showFolderPicker: () -> Void
@@ -649,7 +650,7 @@ private struct SettingsView: View {
             }
 
             Section("Computer Glance") {
-                Text("View a signed, minimized, read-only status feed from your Mac on the same local network. The local HTTP transport is not encrypted.")
+                Text("View a signed, minimized, read-only status feed from your Mac over HTTPS on the same local network.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
@@ -669,7 +670,12 @@ private struct SettingsView: View {
                         saveComputerGlanceConfiguration()
                     }
 
-                Text("Enter the shared secret again when saving a changed Mac address or port. It is stored only in the iOS Keychain.")
+                SecureField("Computer Glance access token", text: $phoneGlanceAccessTokenDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .textContentType(.password)
+
+                Text("Enter two different credentials. The access token must be 24 to 4096 printable ASCII characters with no spaces. Both are stored only in the iOS Keychain.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
@@ -821,21 +827,22 @@ private struct SettingsView: View {
             return false
         }
 
-        guard !phoneGlanceSecretDraft.isEmpty else {
-            phoneGlanceConfigurationMessage = "Enter the Computer Glance shared secret before saving these settings."
+        guard !phoneGlanceSecretDraft.isEmpty, !phoneGlanceAccessTokenDraft.isEmpty else {
+            phoneGlanceConfigurationMessage = "Enter the Computer Glance signing secret and access token before saving."
             return false
         }
 
         switch model.savePhoneGlanceConfiguration(
             host: phoneGlanceHostDraft,
             port: phoneGlancePortDraft,
-            secret: phoneGlanceSecretDraft
+            secret: phoneGlanceSecretDraft,
+            accessToken: phoneGlanceAccessTokenDraft
         ) {
         case .validationFailure:
-            phoneGlanceConfigurationMessage = "Use a private IP address, a port from 1 to 65535, and a nonempty shared secret, then save again."
+            phoneGlanceConfigurationMessage = "Use a private IP address, a port from 1 to 65535, and two different valid credentials. The access token must be 24 to 4096 printable ASCII characters without spaces."
             return false
         case .keychainStorageFailure:
-            phoneGlanceConfigurationMessage = "The protected Computer Glance secret could not be saved. Unlock the device if needed, then save again."
+            phoneGlanceConfigurationMessage = "The protected Computer Glance credentials could not be saved. Unlock the device if needed, then save again."
             return false
         case .saved:
             break
@@ -844,15 +851,16 @@ private struct SettingsView: View {
         phoneGlanceHostDraft = model.phoneGlanceHost
         phoneGlancePortDraft = model.phoneGlancePort
         phoneGlanceSecretDraft = ""
+        phoneGlanceAccessTokenDraft = ""
         phoneGlanceConfigurationMessage = nil
         return true
     }
 
     private func testComputerGlance() {
-        if !phoneGlanceSecretDraft.isEmpty {
+        if !phoneGlanceSecretDraft.isEmpty || !phoneGlanceAccessTokenDraft.isEmpty {
             guard saveComputerGlanceConfiguration() else { return }
         } else if phoneGlanceHostDraft != model.phoneGlanceHost || phoneGlancePortDraft != model.phoneGlancePort {
-            phoneGlanceConfigurationMessage = "Enter the shared secret before testing changed Mac address or port settings."
+            phoneGlanceConfigurationMessage = "Enter both Computer Glance credentials before testing changed settings."
             return
         }
 
@@ -869,7 +877,7 @@ private struct PhoneGlanceSettingsStatus: View {
     var body: some View {
         switch loadState {
         case .unconfigured:
-            Label("Computer Glance is not configured", systemImage: "exclamationmark.circle")
+            Label("Computer Glance needs setup", systemImage: "exclamationmark.circle")
                 .foregroundStyle(.orange)
         case .idle:
             Label("Computer Glance settings are saved", systemImage: "checkmark.circle")

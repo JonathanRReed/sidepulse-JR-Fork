@@ -19,8 +19,8 @@ struct PhoneGlanceEndpoint: Equatable, Sendable {
         }
 
         let authority = authorityHost.contains(":") ? "[\(authorityHost)]" : authorityHost
-        guard let url = URL(string: "http://\(authority):\(port)/glance.json"),
-              url.scheme == "http",
+        guard let url = URL(string: "https://\(authority):\(port)/glance.json"),
+              url.scheme == "https",
               url.host == host,
               url.port == port,
               url.path == "/glance.json",
@@ -91,6 +91,25 @@ struct PhoneGlanceEndpoint: Equatable, Sendable {
         return bytes.allSatisfy { byte in
             isAlphanumeric(byte) || byte == 45 || byte == 46 || byte == 95
         }
+    }
+}
+
+enum PhoneGlanceCredential {
+    static func isValidSecret(_ value: Data) -> Bool {
+        (1...4_096).contains(value.count)
+    }
+
+    static func isValid(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        guard (24...4_096).contains(bytes.count) else { return false }
+        return bytes.allSatisfy { (0x21...0x7e).contains($0) }
+    }
+
+    static func pairIsValid(secret: String, accessToken: String) -> Bool {
+        let secretData = Data(secret.utf8)
+        return isValidSecret(secretData)
+            && isValid(accessToken)
+            && secretData != Data(accessToken.utf8)
     }
 }
 

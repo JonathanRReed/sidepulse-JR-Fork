@@ -1,6 +1,6 @@
-# JR Bar for iOS
+# JR-Bar for iOS
 
-JR Bar is a push inbox that can optionally write LED programs to `LEDS.LED`
+JR-Bar is a push inbox that can optionally write LED programs to `LEDS.LED`
 on a SidePulse Dot USB drive attached to an iPhone or iPad.
 
 The app supports:
@@ -43,32 +43,44 @@ On the Mac, choose its current private IP address and start the glance listener:
 
 ```sh
 export SIDEPULSE_PHONE_GLANCE_SECRET="choose-a-separate-glance-secret"
-sidepulse glance --bind-address 192.168.1.20 --port 8738
+export SIDEPULSE_PHONE_GLANCE_ACCESS_TOKEN="choose-an-independent-access-token"
+sidepulse glance --bind-address 192.168.1.20 --port 8738 \
+  --tls-cert /path/to/mac-glance.crt \
+  --tls-key /path/to/mac-glance.key
 ```
 
 Replace `192.168.1.20` with the Mac's actual RFC 1918 or link-local IP literal.
-The command refuses hostnames, loopback, wildcard, and public addresses. Keep
-`SIDEPULSE_PHONE_GLANCE_SECRET` in the Mac environment. Do not put it in the
-command arguments, a screenshot, source control, or a log. Enter the same
-secret in **Settings > Computer Glance** on the iPhone or iPad, where it is
-stored in the iOS Keychain.
+The command refuses hostnames, loopback, wildcard, and public addresses. The TLS
+certificate must come from a private certificate authority that the iPhone or
+iPad trusts, and its subject alternative names must include that exact IP
+address. Install and enable trust for the private CA through your normal device
+management process before testing. A self-signed leaf certificate will fail.
+
+Keep both environment values out of command arguments, screenshots, source
+control, and logs. The access token must contain 24 to 4096 printable ASCII
+characters with no whitespace. It must differ from the signing secret. Enter
+both values in **Settings > Computer Glance** on the iPhone or iPad. The app
+stores them in the iOS Keychain.
 
 The Mac and iPhone or iPad must be on the same local network. The feed is
-signed, minimized, and read-only, but its private-LAN HTTP transport is not
-encrypted. Do not treat it as confidential and do not expose the listener
-beyond the local network.
+signed, minimized, read-only, and available only over HTTPS. The iOS client uses
+the system trust store and hostname verification. It does not accept untrusted
+certificates, custom pins, redirects, or plaintext fallback. Do not expose the
+listener beyond the local network.
 
-JR Bar requests one Computer Glance refresh only when it becomes active or when
+JR-Bar requests one Computer Glance refresh only when it becomes active or when
 you choose **Refresh Computer Glance** or **Test Computer Glance**. It does not
 poll in the background. If the card is unavailable, confirm that the Mac
-listener is running, the private IP and port are correct, both devices share a
-local network, and the secrets match, then use the manual refresh or test
-control again. A stale card keeps the last verified status visible until a later
-manual refresh succeeds.
+listener is running, the private IP and port are correct, the certificate has a
+matching IP subject alternative name, the private CA is trusted, both devices
+share a local network, and both credentials match. Then use the manual refresh
+or test control again. An older app installation with only the signing secret
+saved reports that setup is needed until you save both credentials. A stale card
+keeps the last verified status visible until a later manual refresh succeeds.
 
 ## Background pushes
 
-JR Bar handles silent pushes in
+JR-Bar handles silent pushes in
 `application(_:didReceiveRemoteNotification:fetchCompletionHandler:)`. Silent
 delivery is still controlled by iOS: Background App Refresh must be enabled, the
 app must not be force-quit, and delivery can be delayed. Visible alert pushes

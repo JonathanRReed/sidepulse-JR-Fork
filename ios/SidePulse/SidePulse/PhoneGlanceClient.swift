@@ -4,22 +4,30 @@ enum PhoneGlanceClient {
     static func fetch(
         endpoint: PhoneGlanceEndpoint,
         secret: Data,
+        accessToken: String,
         lastSequence: Int64?,
-        now: () -> Date = { Date() }
+        now: () -> Date = { Date() },
+        configuration: URLSessionConfiguration? = nil
     ) async throws -> VerifiedPhoneGlance {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 5
-        configuration.timeoutIntervalForResource = 5
-        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        configuration.urlCache = nil
-        configuration.httpCookieStorage = nil
-        configuration.httpShouldSetCookies = false
+        guard endpoint.url.scheme == "https",
+              PhoneGlanceCredential.isValidSecret(secret),
+              PhoneGlanceCredential.isValid(accessToken),
+              secret != Data(accessToken.utf8) else {
+            throw PhoneGlanceError.invalidEndpoint
+        }
+        let sessionConfiguration = configuration ?? URLSessionConfiguration.ephemeral
+        sessionConfiguration.timeoutIntervalForRequest = 5
+        sessionConfiguration.timeoutIntervalForResource = 5
+        sessionConfiguration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        sessionConfiguration.urlCache = nil
+        sessionConfiguration.httpCookieStorage = nil
+        sessionConfiguration.httpShouldSetCookies = false
 
         let delegate = BoundedPhoneGlanceDelegate()
         let delegateQueue = OperationQueue()
         delegateQueue.maxConcurrentOperationCount = 1
         let session = URLSession(
-            configuration: configuration,
+            configuration: sessionConfiguration,
             delegate: delegate,
             delegateQueue: delegateQueue
         )
@@ -33,6 +41,7 @@ enum PhoneGlanceClient {
         request.httpMethod = "GET"
         request.httpBody = nil
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
         let data = try await delegate.load(request: request, using: session)
         let verificationTime = now()
