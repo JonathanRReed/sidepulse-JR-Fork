@@ -11,4 +11,4 @@ pyobjc-framework-EventKit==12.2.1
 keyring==25.7.0
 rleveldb==1.0.0
 ruamel.yaml==0.19.1
-hidapi==0.14.0
+hidapi==0.14.0.post4

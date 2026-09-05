@@ -41,7 +41,7 @@ dependencies = [
     "rleveldb==1.0.0; sys_platform == 'darwin'",
     # Preserve comments and formatting while editing Hermes YAML config.
     "ruamel.yaml==0.19.1",
-    "hidapi==0.14.0; sys_platform == 'darwin'",
+    "hidapi==0.14.0.post4; sys_platform == 'darwin'",
 ]
 
 [project.urls]

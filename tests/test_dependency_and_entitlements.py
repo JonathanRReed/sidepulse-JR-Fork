@@ -36,8 +36,8 @@ def test_creator_micro_backend_is_in_the_signed_release() -> None:
     document = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     release_input = (ROOT / "requirements" / "release.in").read_text(encoding="utf-8")
 
-    assert any(requirement.startswith("hidapi==0.14.0;") for requirement in document["project"]["dependencies"])
-    assert "hidapi==0.14.0" in release_input.splitlines()
+    assert any(requirement.startswith("hidapi==0.14.0.post4;") for requirement in document["project"]["dependencies"])
+    assert "hidapi==0.14.0.post4" in release_input.splitlines()
 
 
 def test_no_isolation_build_backend_is_installed_by_the_dev_extra() -> None:

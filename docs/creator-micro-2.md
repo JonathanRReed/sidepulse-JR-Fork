@@ -115,7 +115,7 @@ Real-device key presses, visible lighting, broader write-limit coverage, and
 sole-controller recovery remain unverified. Bluetooth LE was the observed
 transport for the successful keymap roundtrip.
 
-`hidapi==0.14.0` is BSD-3-Clause licensed. JR-Bar preserves that attribution
+`hidapi==0.14.0.post4` is BSD-3-Clause licensed. JR-Bar preserves that attribution
 and links to the [upstream license](https://github.com/libusb/hidapi/blob/master/LICENSE.txt).
 The signed macOS release includes its macOS arm64 CPython 3.12 wheel in the
 hash-bound binary-only dependency lock. The module still imports it lazily, so
